@@ -12,7 +12,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "GuardianHQ",
-            path: "Sources/GuardianHQ"
+            path: "Sources/GuardianHQ",
+            resources: [
+                .copy("Resources/AppIcon.icns")
+            ]
         ),
     ]
 )

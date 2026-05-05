@@ -7,7 +7,8 @@ enum MissionType: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-struct MissionSpace: Identifiable, Codable, Equatable {
+/// A placeholder device slot on the mission roster (assign real hardware later).
+struct RosterDevice: Identifiable, Codable, Equatable {
     let id: UUID
     var name: String
     var roleType: String
@@ -31,15 +32,155 @@ struct RouteCoordinate: Codable, Equatable {
     }
 }
 
+enum AltitudeUnit: String, Codable, CaseIterable, Identifiable {
+    case m
+    case km
+
+    var id: String { rawValue }
+}
+
+enum AltitudeReference: String, Codable, CaseIterable, Identifiable {
+    case agl = "AGL"
+    case msl = "MSL"
+    case asl = "ASL"
+
+    var id: String { rawValue }
+}
+
 struct RouteAltitude: Codable, Equatable {
     var value: Double
-    var unit: String
-    var reference: String
+    var unit: AltitudeUnit
+    var reference: AltitudeReference
 
-    init(value: Double = 0, unit: String = "m", reference: String = "AGL") {
+    init(value: Double = 0, unit: AltitudeUnit = .m, reference: AltitudeReference = .agl) {
         self.value = value
         self.unit = unit
         self.reference = reference
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case value, unit, reference
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        value = try container.decodeIfPresent(Double.self, forKey: .value) ?? 0
+
+        if let decodedUnit = try? container.decode(AltitudeUnit.self, forKey: .unit) {
+            unit = decodedUnit
+        } else {
+            let rawUnit = (try? container.decode(String.self, forKey: .unit))?.lowercased()
+            unit = AltitudeUnit(rawValue: rawUnit ?? "") ?? .m
+        }
+
+        if let decodedReference = try? container.decode(AltitudeReference.self, forKey: .reference) {
+            reference = decodedReference
+        } else {
+            let rawReference = (try? container.decode(String.self, forKey: .reference))?.uppercased()
+            reference = AltitudeReference(rawValue: rawReference ?? "") ?? .agl
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(value, forKey: .value)
+        try container.encode(unit, forKey: .unit)
+        try container.encode(reference, forKey: .reference)
+    }
+}
+
+enum TransitionMode: String, Codable, CaseIterable, Identifiable {
+    case straight
+    case zigZag = "zig-zag"
+
+    var id: String { rawValue }
+}
+
+enum SpeedUnit: String, Codable, CaseIterable, Identifiable {
+    case metersPerSecond = "m/s"
+    case kilometersPerHour = "km/h"
+
+    var id: String { rawValue }
+}
+
+enum DelayUnit: String, Codable, CaseIterable, Identifiable {
+    case secs
+    case mins
+    case hrs
+
+    var id: String { rawValue }
+}
+
+enum HeadingPreset: String, Codable, CaseIterable, Identifiable {
+    case followPath
+    case perimeterOutward
+    case perimeterInward
+    case north
+    case east
+    case south
+    case west
+
+    var id: String { rawValue }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = (try? container.decode(String.self)) ?? ""
+        switch raw {
+        case "auto":
+            self = .followPath
+        case "followPath":
+            self = .followPath
+        case "perimeterOutward":
+            self = .perimeterOutward
+        case "perimeterInward":
+            self = .perimeterInward
+        case "north":
+            self = .north
+        case "east":
+            self = .east
+        case "south":
+            self = .south
+        case "west":
+            self = .west
+        default:
+            self = .followPath
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
+enum CameraMode: String, Codable, CaseIterable, Identifiable {
+    case followHeading
+    case perimeterOutward
+    case perimeterInward
+    case manualBearing
+
+    var id: String { rawValue }
+}
+
+enum TransitionCameraMode: String, Codable, CaseIterable, Identifiable {
+    case holdCurrent
+    case faceNextWaypoint
+    case perimeterOutward
+    case perimeterInward
+    case manualBearing
+
+    var id: String { rawValue }
+}
+
+struct RouteCamera: Codable, Equatable {
+    var mode: CameraMode
+    var bearing: Double
+    var fovDeg: Double
+
+    init(mode: CameraMode = .followHeading, bearing: Double = 0, fovDeg: Double = 60) {
+        self.mode = mode
+        self.bearing = bearing
+        self.fovDeg = fovDeg
     }
 }
 
@@ -69,12 +210,58 @@ struct RouteHome: Codable, Equatable {
 }
 
 struct RouteTransition: Codable, Equatable {
-    var mode: String
+    var mode: TransitionMode
     var targetSpeed: Double
+    var speedUnit: SpeedUnit
+    var cameraMode: TransitionCameraMode
+    var cameraBearing: Double
 
-    init(mode: String = "straight", targetSpeed: Double = 5) {
+    init(
+        mode: TransitionMode = .straight,
+        targetSpeed: Double = 5,
+        speedUnit: SpeedUnit = .metersPerSecond,
+        cameraMode: TransitionCameraMode = .holdCurrent,
+        cameraBearing: Double = 0
+    ) {
         self.mode = mode
         self.targetSpeed = targetSpeed
+        self.speedUnit = speedUnit
+        self.cameraMode = cameraMode
+        self.cameraBearing = cameraBearing
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case mode, targetSpeed, speedUnit, cameraMode, cameraBearing
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        if let decodedMode = try? container.decode(TransitionMode.self, forKey: .mode) {
+            mode = decodedMode
+        } else {
+            let rawMode = (try? container.decode(String.self, forKey: .mode))?.lowercased()
+            mode = TransitionMode(rawValue: rawMode ?? "") ?? .straight
+        }
+
+        targetSpeed = try container.decodeIfPresent(Double.self, forKey: .targetSpeed) ?? 5
+        speedUnit = (try? container.decode(SpeedUnit.self, forKey: .speedUnit)) ?? .metersPerSecond
+        if let decodedCameraMode = try? container.decode(TransitionCameraMode.self, forKey: .cameraMode) {
+            cameraMode = decodedCameraMode
+        } else {
+            let rawCameraMode = (try? container.decode(String.self, forKey: .cameraMode)) ?? ""
+            cameraMode = TransitionCameraMode(rawValue: rawCameraMode) ?? .holdCurrent
+        }
+        cameraBearing = try container.decodeIfPresent(Double.self, forKey: .cameraBearing) ?? 0
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(mode, forKey: .mode)
+        try container.encode(targetSpeed, forKey: .targetSpeed)
+        try container.encode(speedUnit, forKey: .speedUnit)
+        try container.encode(cameraMode, forKey: .cameraMode)
+        try container.encode(cameraBearing, forKey: .cameraBearing)
     }
 }
 
@@ -83,8 +270,11 @@ struct RouteWaypoint: Identifiable, Codable, Equatable {
     var coord: RouteCoordinate
     var altitude: RouteAltitude
     var heading: Double
+    var headingPreset: HeadingPreset?
     var delaySec: Double
+    var delayUnit: DelayUnit
     var action: String
+    var camera: RouteCamera
     var transition: RouteTransition
 
     init(
@@ -92,17 +282,69 @@ struct RouteWaypoint: Identifiable, Codable, Equatable {
         coord: RouteCoordinate = RouteCoordinate(),
         altitude: RouteAltitude = RouteAltitude(),
         heading: Double = 0,
+        headingPreset: HeadingPreset? = nil,
         delaySec: Double = 0,
-        action: String = "",
+        delayUnit: DelayUnit = .secs,
+        action: String = "none",
+        camera: RouteCamera = RouteCamera(),
         transition: RouteTransition = RouteTransition()
     ) {
         self.id = id
         self.coord = coord
         self.altitude = altitude
         self.heading = heading
+        self.headingPreset = headingPreset
         self.delaySec = delaySec
+        self.delayUnit = delayUnit
         self.action = action
+        self.camera = camera
         self.transition = transition
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, coord, altitude, heading, headingPreset, delaySec, delayUnit, action, camera, transition
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        coord = try container.decodeIfPresent(RouteCoordinate.self, forKey: .coord) ?? RouteCoordinate()
+        altitude = try container.decodeIfPresent(RouteAltitude.self, forKey: .altitude) ?? RouteAltitude()
+        heading = try container.decodeIfPresent(Double.self, forKey: .heading) ?? 0
+        headingPreset = try container.decodeIfPresent(HeadingPreset.self, forKey: .headingPreset)
+        delaySec = try container.decodeIfPresent(Double.self, forKey: .delaySec) ?? 0
+        if let decodedDelay = try? container.decode(DelayUnit.self, forKey: .delayUnit) {
+            delayUnit = decodedDelay
+        } else {
+            let rawDelay = (try? container.decode(String.self, forKey: .delayUnit))?.lowercased()
+            switch rawDelay {
+            case "s", "sec", "secs", "second", "seconds":
+                delayUnit = .secs
+            case "m", "min", "mins", "minute", "minutes":
+                delayUnit = .mins
+            case "h", "hr", "hrs", "hour", "hours":
+                delayUnit = .hrs
+            default:
+                delayUnit = .secs
+            }
+        }
+        action = try container.decodeIfPresent(String.self, forKey: .action) ?? "none"
+        camera = try container.decodeIfPresent(RouteCamera.self, forKey: .camera) ?? RouteCamera()
+        transition = try container.decodeIfPresent(RouteTransition.self, forKey: .transition) ?? RouteTransition()
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(coord, forKey: .coord)
+        try container.encode(altitude, forKey: .altitude)
+        try container.encode(heading, forKey: .heading)
+        try container.encodeIfPresent(headingPreset, forKey: .headingPreset)
+        try container.encode(delaySec, forKey: .delaySec)
+        try container.encode(delayUnit, forKey: .delayUnit)
+        try container.encode(action, forKey: .action)
+        try container.encode(camera, forKey: .camera)
+        try container.encode(transition, forKey: .transition)
     }
 }
 
@@ -114,7 +356,13 @@ struct RoutePath: Identifiable, Codable, Equatable {
     var loopMode: String
     var repeatCount: Int
     var scheduleRefs: [String]
-    var spaceBindings: [UUID]
+    /// Device slots assigned to this path (IDs into `Mission.rosterDevices`).
+    var rosterDeviceIds: [UUID]
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, enabled, waypoints, loopMode, repeatCount, scheduleRefs
+        case rosterDeviceIds = "spaceBindings"
+    }
 
     init(
         id: UUID = UUID(),
@@ -124,7 +372,7 @@ struct RoutePath: Identifiable, Codable, Equatable {
         loopMode: String = "none",
         repeatCount: Int = 1,
         scheduleRefs: [String] = [],
-        spaceBindings: [UUID] = []
+        rosterDeviceIds: [UUID] = []
     ) {
         self.id = id
         self.name = name
@@ -133,7 +381,7 @@ struct RoutePath: Identifiable, Codable, Equatable {
         self.loopMode = loopMode
         self.repeatCount = repeatCount
         self.scheduleRefs = scheduleRefs
-        self.spaceBindings = spaceBindings
+        self.rosterDeviceIds = rosterDeviceIds
     }
 }
 
@@ -173,9 +421,8 @@ struct Mission: Identifiable, Codable {
     var type: MissionType
     var count: Int
     var duration: Int
-    var schedule: [String]
     var deviceIDs: [String]
-    var spaces: [MissionSpace]
+    var rosterDevices: [RosterDevice]
     var routeMacro: RouteMacro
     let createdAt: Date
 
@@ -186,9 +433,8 @@ struct Mission: Identifiable, Codable {
         type: MissionType,
         count: Int = 0,
         duration: Int = 0,
-        schedule: [String] = [],
         deviceIDs: [String] = [],
-        spaces: [MissionSpace] = [],
+        rosterDevices: [RosterDevice] = [],
         routeMacro: RouteMacro = RouteMacro(),
         createdAt: Date = Date()
     ) {
@@ -198,15 +444,15 @@ struct Mission: Identifiable, Codable {
         self.type = type
         self.count = count
         self.duration = duration
-        self.schedule = schedule
         self.deviceIDs = deviceIDs
-        self.spaces = spaces
+        self.rosterDevices = rosterDevices
         self.routeMacro = routeMacro
         self.createdAt = createdAt
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, description, type, count, duration, schedule, deviceIDs, spaces, routeMacro, createdAt
+        case id, name, description, type, count, duration, schedule, deviceIDs, routeMacro, createdAt
+        case rosterDevices = "spaces"
         case mapRegion, routePlan // legacy
     }
 
@@ -218,9 +464,9 @@ struct Mission: Identifiable, Codable {
         type = try container.decodeIfPresent(MissionType.self, forKey: .type) ?? .mobile
         count = try container.decodeIfPresent(Int.self, forKey: .count) ?? 0
         duration = try container.decodeIfPresent(Int.self, forKey: .duration) ?? 0
-        schedule = try container.decodeIfPresent([String].self, forKey: .schedule) ?? []
+        _ = try? container.decodeIfPresent([String].self, forKey: .schedule)
         deviceIDs = try container.decodeIfPresent([String].self, forKey: .deviceIDs) ?? []
-        spaces = try container.decodeIfPresent([MissionSpace].self, forKey: .spaces) ?? []
+        rosterDevices = try container.decodeIfPresent([RosterDevice].self, forKey: .rosterDevices) ?? []
         if let decodedRouteMacro = try container.decodeIfPresent(RouteMacro.self, forKey: .routeMacro) {
             routeMacro = decodedRouteMacro
         } else {
@@ -246,9 +492,8 @@ struct Mission: Identifiable, Codable {
         try container.encode(type, forKey: .type)
         try container.encode(count, forKey: .count)
         try container.encode(duration, forKey: .duration)
-        try container.encode(schedule, forKey: .schedule)
         try container.encode(deviceIDs, forKey: .deviceIDs)
-        try container.encode(spaces, forKey: .spaces)
+        try container.encode(rosterDevices, forKey: .rosterDevices)
         try container.encode(routeMacro, forKey: .routeMacro)
         try container.encode(createdAt, forKey: .createdAt)
     }

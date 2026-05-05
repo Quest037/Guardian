@@ -1,0 +1,17 @@
+---
+description: Regenerate macOS app icon assets after logo changes
+alwaysApply: true
+---
+
+# Logo Icon Regeneration
+
+- Canonical source logo is `Resources/logo.png`.
+- If `Resources/logo.png` is added, replaced, renamed, or edited, run:
+  - `scripts/make_app_icon.sh`
+- If the user asks to "update logo", "regenerate app icon", "run logo script", or equivalent, run:
+  - `scripts/make_app_icon.sh`
+- Run the command from project root: `cd /Users/calwest/Documents/Guardian && scripts/make_app_icon.sh`
+- After running, confirm the generated outputs exist:
+  - `build/icons/AppIcon.iconset`
+  - `build/icons/AppIcon.icns`
+- If the script fails, report the error and fix the script or input assumptions before finishing.

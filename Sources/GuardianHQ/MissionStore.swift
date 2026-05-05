@@ -28,6 +28,11 @@ final class MissionStore: ObservableObject {
         save()
     }
 
+    func deleteMission(id: UUID) {
+        missions.removeAll { $0.id == id }
+        save()
+    }
+
     private func load() {
         do {
             let data = try Data(contentsOf: fileURL)

@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import CoreLocation
 
 struct MissionsView: View {
     enum DisplayMode {
@@ -71,9 +72,10 @@ struct MissionsView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.blue)
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
-            .background(Color(red: 0.14, green: 0.14, blue: 0.15))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+            .background(Color(red: 0.12, green: 0.12, blue: 0.13))
 
             if sortedMissions.isEmpty {
                 VStack {
@@ -86,21 +88,21 @@ struct MissionsView: View {
                     Spacer()
                 }
             } else if displayMode == .list {
-                List(sortedMissions) { mission in
-                    Button {
-                        selectedMissionID = mission.id
-                    } label: {
-                        MissionRow(mission: mission)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        ForEach(sortedMissions) { mission in
+                            Button {
+                                selectedMissionID = mission.id
+                            } label: {
+                                MissionRow(mission: mission)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .cursorOnHover()
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .cursorOnHover()
-                    .listRowBackground(Color(red: 0.12, green: 0.12, blue: 0.13))
+                    .padding(16)
                 }
-                .listStyle(.inset)
-                .padding(.horizontal, 16)
-                .scrollContentBackground(.hidden)
                 .background(Color(red: 0.07, green: 0.07, blue: 0.08))
             } else {
                 ScrollView {
@@ -130,6 +132,11 @@ struct MissionsView: View {
         MissionWorkspaceView(
             mission: mission,
             onBack: { selectedMissionID = nil },
+            onDelete: { missionToDelete in
+                store.deleteMission(id: missionToDelete.id)
+                selectedMissionID = nil
+                toastCenter.show("Mission deleted", style: .success)
+            },
             onSave: { updatedMission in
                 store.updateMission(updatedMission)
                 toastCenter.show("Mission saved", style: .success)
@@ -155,25 +162,36 @@ private struct MissionWorkspaceView: View {
     @State private var editingPathIndex: Int?
     @State private var selectedWaypointIndex: Int?
     @State private var mapStyle: MapTileStyle = .standard
+    @State private var mapRecenterNonce = 0
     @State private var setHomeFromMap = false
     @State private var showingDeleteHomeConfirm = false
     @State private var pendingDeletePathIndex: Int?
-    @State private var newSpaceName = ""
-    @State private var newSpaceRoleType = ""
-    @State private var newSpacePositionHint = ""
+    @State private var pendingCloseLoopPathIndex: Int?
+    @State private var showingDeleteMissionConfirm = false
+    @State private var pathRosterDrafts: [UUID: PathRosterDraft] = [:]
+    @State private var showingBulkWaypointEditor = false
+    @State private var bulkEditPathIndex: Int?
+    @State private var bulkWaypointDraft = RouteWaypoint()
+    @State private var focusedHeadingFieldKey: String?
+    @State private var focusedWaypointCameraFieldKey: String?
+    @State private var focusedTransitionCameraFieldKey: String?
+    @State private var suppressNextMapClick = false
 
     let onBack: () -> Void
+    let onDelete: (Mission) -> Void
     let onSave: (Mission) -> Void
     let onToast: (String, ToastStyle) -> Void
 
     init(
         mission: Mission,
         onBack: @escaping () -> Void,
+        onDelete: @escaping (Mission) -> Void,
         onSave: @escaping (Mission) -> Void,
         onToast: @escaping (String, ToastStyle) -> Void
     ) {
         _draft = State(initialValue: mission)
         self.onBack = onBack
+        self.onDelete = onDelete
         self.onSave = onSave
         self.onToast = onToast
     }
@@ -196,14 +214,36 @@ private struct MissionWorkspaceView: View {
                     onBack()
                 } label: {
                     Image(systemName: "arrow.left")
+                        .appIconGlyph()
                 }
                 .buttonStyle(.bordered)
+                .uniformIconButton()
 
-                Button("Save Mission") {
+                Button {
+                    if editingPathIndex != nil {
+                        onToast("Finish path editing before saving mission", .info)
+                        return
+                    }
                     onSave(draft)
+                } label: {
+                    Image(systemName: "externaldrive.fill")
+                        .appIconGlyph()
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.blue)
+                .help("Save Mission")
+                .uniformIconButton()
+
+                Button {
+                    showingDeleteMissionConfirm = true
+                } label: {
+                    Image(systemName: "trash")
+                        .appIconGlyph()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .help("Delete Mission")
+                .uniformIconButton()
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -232,6 +272,34 @@ private struct MissionWorkspaceView: View {
             }
         }
         .background(Color(red: 0.07, green: 0.07, blue: 0.08))
+        .onChange(of: editingPathIndex) { _ in
+            clearPreviewFocusState()
+        }
+        .onChange(of: selectedPathIndex) { _ in
+            clearPreviewFocusState()
+        }
+        .onChange(of: activeTab) { tab in
+            if tab != .route {
+                clearPreviewFocusState()
+            }
+        }
+        .alert("Delete Mission?", isPresented: $showingDeleteMissionConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) {
+                onDelete(draft)
+            }
+        } message: {
+            Text("This will permanently remove this mission.")
+        }
+        .sheet(isPresented: $showingBulkWaypointEditor, onDismiss: {
+            bulkEditPathIndex = nil
+        }) {
+            if let pathIndex = bulkEditPathIndex, draft.routeMacro.paths.indices.contains(pathIndex) {
+                bulkWaypointEditorSheet(pathIndex: pathIndex)
+            } else {
+                EmptyView()
+            }
+        }
     }
 
     private var detailsTab: some View {
@@ -260,55 +328,182 @@ private struct MissionWorkspaceView: View {
 
     private var rosterTab: some View {
         Group {
-            card("Mission Device Spaces") {
-                Text("Create slots/spaces now; assign actual drones later in Mission Control.")
+            VStack(alignment: .leading, spacing: 14) {
+                card("Roster") {
+                    Text("Devices per path")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                    Text(
+                        "Each route path can carry one or more expected devices. Use labels and roles for planning; "
+                            + "you will bind real drones or payloads later in Mission Control."
+                    )
+                    .font(.system(size: 12))
                     .foregroundStyle(.gray)
-                HStack {
-                    TextField("Space Name", text: $newSpaceName).textFieldStyle(.roundedBorder)
-                    TextField("Role Type", text: $newSpaceRoleType).textFieldStyle(.roundedBorder)
-                    TextField("Position Hint", text: $newSpacePositionHint).textFieldStyle(.roundedBorder)
-                    Button("Add Space") { addSpace() }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.blue)
-                        .disabled(newSpaceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
-            }
 
-            card("Configured Spaces") {
-                if draft.spaces.isEmpty {
-                    Text("No spaces yet. Add a space for each expected device position.")
-                        .foregroundStyle(.gray)
+                if draft.routeMacro.paths.isEmpty {
+                    card("Paths") {
+                        Text("No paths yet. Add paths on the Route tab, then assign devices to each path here.")
+                            .foregroundStyle(.gray)
+                    }
                 } else {
-                    ForEach(draft.spaces) { space in
-                        HStack {
-                            Text(space.name).foregroundStyle(.white)
-                            Spacer()
-                            Text(space.roleType).foregroundStyle(.gray)
-                            Text(space.positionHint).foregroundStyle(.gray)
-                            Button {
-                                draft.spaces.removeAll { $0.id == space.id }
-                            } label: {
-                                Image(systemName: "trash")
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .tint(.red)
-                        }
+                    ForEach(Array(draft.routeMacro.paths.enumerated()), id: \.element.id) { pathIndex, _ in
+                        pathRosterCard(pathIndex: pathIndex)
                     }
                 }
             }
         }
     }
 
+    private func pathRosterCard(pathIndex: Int) -> some View {
+        let path = draft.routeMacro.paths[pathIndex]
+        let pathId = path.id
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline) {
+                TextField(
+                    "Path name",
+                    text: Binding(
+                        get: { draft.routeMacro.paths[pathIndex].name },
+                        set: { draft.routeMacro.paths[pathIndex].name = $0 }
+                    )
+                )
+                .textFieldStyle(.plain)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+
+                Spacer(minLength: 8)
+
+                Text("\(path.waypoints.count) waypoints")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.gray)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(red: 0.10, green: 0.10, blue: 0.11))
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Devices on this path")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.gray)
+
+                if path.rosterDeviceIds.isEmpty {
+                    Text("None yet — add one below.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.gray.opacity(0.9))
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(path.rosterDeviceIds, id: \.self) { deviceId in
+                            if let device = draft.rosterDevices.first(where: { $0.id == deviceId }) {
+                                HStack(alignment: .center) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(device.name)
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundStyle(.white)
+                                        Text(deviceSubtitle(device))
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(.gray)
+                                    }
+                                    Spacer(minLength: 8)
+                                    Button {
+                                        removeRosterDeviceFromPath(pathIndex: pathIndex, deviceId: deviceId)
+                                    } label: {
+                                        Image(systemName: "trash")
+                                            .appIconGlyph()
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(.red)
+                                    .controlSize(.small)
+                                    .uniformIconButton(width: 30, height: 26)
+                                }
+                                .padding(.vertical, 4)
+                            }
+                        }
+                    }
+                }
+
+                Divider().overlay(Color.white.opacity(0.08))
+
+                Text("Add device")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.gray)
+
+                HStack(spacing: 8) {
+                    TextField(
+                        "Device label",
+                        text: rosterDraftFieldBinding(pathId: pathId, keyPath: \.name)
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    TextField(
+                        "Role",
+                        text: rosterDraftFieldBinding(pathId: pathId, keyPath: \.role)
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    TextField(
+                        "Notes",
+                        text: rosterDraftFieldBinding(pathId: pathId, keyPath: \.hint)
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    Button("Add") {
+                        addRosterDeviceToPath(pathIndex: pathIndex)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(red: 0.10, green: 0.10, blue: 0.11))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private func deviceSubtitle(_ device: RosterDevice) -> String {
+        let role = device.roleType.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hint = device.positionHint.trimmingCharacters(in: .whitespacesAndNewlines)
+        if role.isEmpty, hint.isEmpty { return "—" }
+        if role.isEmpty { return hint }
+        if hint.isEmpty { return role }
+        return "\(role) · \(hint)"
+    }
+
+    private func rosterDraftFieldBinding(pathId: UUID, keyPath: WritableKeyPath<PathRosterDraft, String>) -> Binding<String> {
+        Binding(
+            get: { (pathRosterDrafts[pathId] ?? PathRosterDraft())[keyPath: keyPath] },
+            set: { newValue in
+                var draftRow = pathRosterDrafts[pathId] ?? PathRosterDraft()
+                draftRow[keyPath: keyPath] = newValue
+                pathRosterDrafts[pathId] = draftRow
+            }
+        )
+    }
+
     private var routeTab: some View {
-        ZStack(alignment: .trailing) {
+        ZStack {
             VStack(spacing: 0) {
-                ZStack(alignment: .topTrailing) {
+                HStack(spacing: 0) {
                     OSMMapView(
                         home: draft.routeMacro.home,
-                        allPathCoords: allPathCoords,
+                        allPathsCoords: allPathsCoords,
                         selectedPathWaypoints: selectedPath?.waypoints ?? [],
-                        mapStyle: mapStyle
+                        selectedWaypointIndex: selectedWaypointIndex,
+                        mapStyle: mapStyle,
+                        recenterNonce: mapRecenterNonce,
+                        headingPreview: headingPreview,
+                        cameraPreview: cameraPreview,
+                        preserveView: editingPathIndex != nil,
+                        isEditingPath: editingPathIndex != nil
                     ) { lat, lon in
+                        if suppressNextMapClick {
+                            suppressNextMapClick = false
+                            return
+                        }
                         if setHomeFromMap {
                             var home = draft.routeMacro.home ?? RouteHome()
                             home.coord.lat = lat
@@ -323,34 +518,94 @@ private struct MissionWorkspaceView: View {
                               draft.routeMacro.paths.indices.contains(pathIndex) else { return }
 
                         draft.routeMacro.paths[pathIndex].waypoints.append(
-                            RouteWaypoint(coord: RouteCoordinate(lat: lat, lon: lon))
+                            RouteWaypoint(
+                                coord: RouteCoordinate(lat: lat, lon: lon),
+                                headingPreset: .followPath
+                            )
                         )
+                        refreshAutoHeadings(for: pathIndex)
                         selectedPathIndex = pathIndex
                         selectedWaypointIndex = draft.routeMacro.paths[pathIndex].waypoints.count - 1
                         onToast("Waypoint added", .success)
                     } onWaypointClick: { idx in
                         selectedWaypointIndex = idx
+                    } onWaypointMoved: { idx, lat, lon in
+                        guard let pathIndex = editingPathIndex,
+                              draft.routeMacro.paths.indices.contains(pathIndex),
+                              draft.routeMacro.paths[pathIndex].waypoints.indices.contains(idx) else { return }
+                        draft.routeMacro.paths[pathIndex].waypoints[idx].coord.lat = lat
+                        draft.routeMacro.paths[pathIndex].waypoints[idx].coord.lon = lon
+                        refreshAutoHeadings(for: pathIndex)
+                    } onWaypointDelete: { idx in
+                        guard let pathIndex = editingPathIndex,
+                              draft.routeMacro.paths.indices.contains(pathIndex),
+                              draft.routeMacro.paths[pathIndex].waypoints.indices.contains(idx) else { return }
+                        draft.routeMacro.paths[pathIndex].waypoints.remove(at: idx)
+                        refreshAutoHeadings(for: pathIndex)
+                        if let selectedWaypointIndex, selectedWaypointIndex == idx {
+                            self.selectedWaypointIndex = nil
+                        }
+                    } onPathInsert: { idx, lat, lon in
+                        guard let pathIndex = editingPathIndex,
+                              draft.routeMacro.paths.indices.contains(pathIndex) else { return }
+                        suppressNextMapClick = true
+                        let waypoint = RouteWaypoint(
+                            coord: RouteCoordinate(lat: lat, lon: lon),
+                            headingPreset: .followPath
+                        )
+                        let safeInsert = max(0, min(idx, draft.routeMacro.paths[pathIndex].waypoints.count))
+                        draft.routeMacro.paths[pathIndex].waypoints.insert(waypoint, at: safeInsert)
+                        refreshAutoHeadings(for: pathIndex)
+                        selectedPathIndex = pathIndex
+                        selectedWaypointIndex = safeInsert
+                        onToast("Waypoint inserted", .success)
                     }
                     .frame(maxWidth: .infinity)
                     .frame(height: 500)
-
-                    Button {
-                        mapStyle = mapStyle == .standard ? .satellite : .standard
-                    } label: {
-                        Image(systemName: mapStyle == .standard ? "map" : "globe.americas.fill")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 30, height: 30)
-                            .background(Color.black.opacity(0.5))
-                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                    .overlay(alignment: .topLeading) {
+                        VStack(spacing: 0) {
+                            Button {
+                                mapStyle = mapStyle == .standard ? .satellite : .standard
+                            } label: {
+                                Image(systemName: mapStyle == .standard ? "map" : "globe.americas.fill")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(.black)
+                                    .frame(width: 33, height: 33)
+                            }
+                            .buttonStyle(.plain)
+                            .background(Color.white)
                             .overlay(
-                                RoundedRectangle(cornerRadius: 7)
-                                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                                Rectangle()
+                                    .fill(Color.black.opacity(0.12))
+                                    .frame(height: 1),
+                                alignment: .bottom
                             )
+
+                            Button {
+                                mapRecenterNonce += 1
+                            } label: {
+                                Image(systemName: "arrow.uturn.backward")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(.black)
+                                    .frame(width: 33, height: 33)
+                            }
+                            .buttonStyle(.plain)
+                            .background(Color.white)
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(Color.black.opacity(0.16), lineWidth: 1)
+                        )
+                        .padding(.top, 78)
+                        .padding(.leading, 10)
                     }
-                    .buttonStyle(.plain)
-                    .padding(.trailing, 12)
-                    .padding(.top, 10)
+
+                    if let pathIndex = editingPathIndex,
+                       draft.routeMacro.paths.indices.contains(pathIndex) {
+                        waypointSidebar(pathIndex: pathIndex)
+                            .frame(width: 390, height: 500)
+                    }
                 }
 
                 ScrollView {
@@ -368,24 +623,6 @@ private struct MissionWorkspaceView: View {
                                 Spacer(minLength: 0)
 
                                 HStack(spacing: 12) {
-                                    if setHomeFromMap {
-                                        Button {
-                                            setHomeFromMap = false
-                                            onToast("Home map-pick canceled", .info)
-                                        } label: {
-                                            Image(systemName: "pencil")
-                                        }
-                                        .buttonStyle(.borderedProminent)
-                                        .tint(.blue)
-                                    } else {
-                                        Button {
-                                            setHomeFromMap = true
-                                            onToast("Click map to save home", .info)
-                                        } label: {
-                                            Image(systemName: "pencil")
-                                        }
-                                        .buttonStyle(.bordered)
-                                    }
 
                                     Toggle(
                                         "Dockable",
@@ -401,24 +638,51 @@ private struct MissionWorkspaceView: View {
                                         )
                                     )
                                     .toggleStyle(.switch)
+                                    
+                                    if setHomeFromMap {
+                                        Button {
+                                            setHomeFromMap = false
+                                            onToast("Home map-pick canceled", .info)
+                                        } label: {
+                                            Image(systemName: "pencil")
+                                                .appIconGlyph()
+                                        }
+                                        .buttonStyle(.borderedProminent)
+                                        .tint(.blue)
+                                        .uniformIconButton()
+                                    } else {
+                                        Button {
+                                            setHomeFromMap = true
+                                            onToast("Click map to save home", .info)
+                                        } label: {
+                                            Image(systemName: "pencil")
+                                                .appIconGlyph()
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .uniformIconButton()
+                                    }
 
                                     if draft.routeMacro.home == nil {
                                         Button {
                                             showingDeleteHomeConfirm = true
                                         } label: {
                                             Image(systemName: "trash")
+                                                .appIconGlyph()
                                         }
                                         .buttonStyle(.bordered)
                                         .tint(.red)
                                         .disabled(true)
+                                        .uniformIconButton()
                                     } else {
                                         Button {
                                             showingDeleteHomeConfirm = true
                                         } label: {
                                             Image(systemName: "trash")
+                                                .appIconGlyph()
                                         }
                                         .buttonStyle(.borderedProminent)
                                         .tint(.red)
+                                        .uniformIconButton()
                                     }
                                 }
                             }
@@ -438,29 +702,53 @@ private struct MissionWorkspaceView: View {
                                 let nextNum = draft.routeMacro.paths.count + 1
                                 draft.routeMacro.paths.append(RoutePath(name: "Path \(nextNum)"))
                                 selectedPathIndex = draft.routeMacro.paths.count - 1
+                                editingPathIndex = nil
+                                selectedWaypointIndex = nil
                             } label: {
                                 Image(systemName: "plus")
+                                    .appIconGlyph()
                             }
                             .buttonStyle(.bordered)
+                            .uniformIconButton()
                         }) {
                             if draft.routeMacro.paths.isEmpty {
                                 Text("No paths yet").foregroundStyle(.gray)
                             } else {
                                 ForEach(Array(draft.routeMacro.paths.enumerated()), id: \.offset) { index, path in
                                     HStack {
-                                        Text(path.name).foregroundStyle(.white)
+                                        TextField(
+                                            "Path Name",
+                                            text: Binding(
+                                                get: { path.name },
+                                                set: { newValue in
+                                                    draft.routeMacro.paths[index].name = newValue
+                                                }
+                                            )
+                                        )
+                                        .textFieldStyle(.plain)
+                                        .foregroundStyle(.white)
+
                                         Text("• \(path.waypoints.count) wp").foregroundStyle(.gray)
+                                        Text("• \(distanceLabel(for: path))").foregroundStyle(.gray)
+                                        Text("• \(durationLabel(for: path))").foregroundStyle(.gray)
                                         Spacer()
 
                                         if editingPathIndex == index {
                                             Button {
-                                                editingPathIndex = nil
-                                                onToast("Path edit mode disabled", .info)
+                                                if shouldOfferCloseLoop(path) {
+                                                    pendingCloseLoopPathIndex = index
+                                                } else {
+                                                    editingPathIndex = nil
+                                                    selectedWaypointIndex = nil
+                                                    onToast("Path edit mode disabled", .info)
+                                                }
                                             } label: {
                                                 Image(systemName: "pencil")
+                                                    .appIconGlyph()
                                             }
                                             .buttonStyle(.borderedProminent)
                                             .tint(.blue)
+                                            .uniformIconButton()
                                         } else {
                                             Button {
                                                 editingPathIndex = index
@@ -468,17 +756,21 @@ private struct MissionWorkspaceView: View {
                                                 onToast("Path edit mode enabled. Click map to add waypoints.", .info)
                                             } label: {
                                                 Image(systemName: "pencil")
+                                                    .appIconGlyph()
                                             }
                                             .buttonStyle(.bordered)
+                                            .uniformIconButton()
                                         }
 
                                         Button {
                                             pendingDeletePathIndex = index
                                         } label: {
                                             Image(systemName: "trash")
+                                                .appIconGlyph()
                                         }
                                         .buttonStyle(.borderedProminent)
                                         .tint(.red)
+                                        .uniformIconButton()
                                     }
                                     .contentShape(Rectangle())
                                     .onTapGesture { selectedPathIndex = index }
@@ -495,7 +787,10 @@ private struct MissionWorkspaceView: View {
                                 if let idx = pendingDeletePathIndex,
                                    draft.routeMacro.paths.indices.contains(idx) {
                                     draft.routeMacro.paths.remove(at: idx)
-                                    if editingPathIndex == idx { editingPathIndex = nil }
+                                    if editingPathIndex == idx {
+                                        editingPathIndex = nil
+                                        selectedWaypointIndex = nil
+                                    }
                                     if selectedPathIndex >= draft.routeMacro.paths.count {
                                         selectedPathIndex = max(0, draft.routeMacro.paths.count - 1)
                                     }
@@ -505,35 +800,35 @@ private struct MissionWorkspaceView: View {
                         } message: {
                             Text("This will remove the path and all its waypoints.")
                         }
-
-                        card("Schedule") {
-                            TextField(
-                                "Comma-separated schedule entries",
-                                text: Binding(
-                                    get: { draft.schedule.joined(separator: ", ") },
-                                    set: { newValue in
-                                        draft.schedule = newValue
-                                            .split(separator: ",")
-                                            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                                            .filter { !$0.isEmpty }
-                                    }
-                                )
-                            )
-                            .textFieldStyle(.roundedBorder)
+                        .alert("Close loop for this path?", isPresented: Binding(
+                            get: { pendingCloseLoopPathIndex != nil },
+                            set: { if !$0 { pendingCloseLoopPathIndex = nil } }
+                        )) {
+                            Button("No", role: .destructive) {
+                                editingPathIndex = nil
+                                selectedWaypointIndex = nil
+                                pendingCloseLoopPathIndex = nil
+                                onToast("Path edit mode disabled", .info)
+                            }
+                            Button("Close Loop") {
+                                if let idx = pendingCloseLoopPathIndex,
+                                   draft.routeMacro.paths.indices.contains(idx) {
+                                    closeLoop(for: idx)
+                                    editingPathIndex = nil
+                                    selectedWaypointIndex = nil
+                                    onToast("Loop closed", .success)
+                                }
+                                pendingCloseLoopPathIndex = nil
+                            }
+                        } message: {
+                            Text("Add the start waypoint to the end and mark this path as looped?")
                         }
+
                     }
                     .padding(.horizontal, 24)
                     .padding(.vertical, 18)
                     .frame(maxWidth: .infinity)
                 }
-            }
-
-            if let idx = selectedWaypointIndex,
-               let selectedPath,
-               idx < selectedPath.waypoints.count {
-                waypointOverlay(idx: idx)
-                    .transition(.move(edge: .trailing))
-                    .padding(.trailing, 12)
             }
         }
     }
@@ -543,8 +838,8 @@ private struct MissionWorkspaceView: View {
         return min(max(selectedPathIndex, 0), draft.routeMacro.paths.count - 1)
     }
 
-    private var allPathCoords: [RouteCoordinate] {
-        draft.routeMacro.paths.flatMap { $0.waypoints.map(\.coord) }
+    private var allPathsCoords: [[RouteCoordinate]] {
+        draft.routeMacro.paths.map { $0.waypoints.map(\.coord) }
     }
 
     private var selectedPath: RoutePath? {
@@ -557,103 +852,1192 @@ private struct MissionWorkspaceView: View {
         return String(format: "%.6f, %.6f", home.coord.lat, home.coord.lon)
     }
 
-    @ViewBuilder
-    private func waypointOverlay(idx: Int) -> some View {
-        if let selectedPath, idx < selectedPath.waypoints.count {
-            let waypoint = selectedPath.waypoints[idx]
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Text("Waypoint \(idx + 1)")
-                        .font(.headline)
-                        .foregroundStyle(.white)
-                    Spacer()
-                    Button {
-                        selectedWaypointIndex = nil
-                    } label: {
-                        Image(systemName: "xmark")
-                    }
-                }
+    private var headingPreview: HeadingPreview? {
+        guard let fieldKey = focusedHeadingFieldKey else { return nil }
+        let tokens = fieldKey.split(separator: "-")
+        guard tokens.count == 4,
+              tokens[0] == "p",
+              tokens[2] == "w",
+              let pathIndex = Int(tokens[1]),
+              let waypointIndex = Int(tokens[3]),
+              draft.routeMacro.paths.indices.contains(pathIndex),
+              draft.routeMacro.paths[pathIndex].waypoints.indices.contains(waypointIndex) else { return nil }
+        let waypoint = draft.routeMacro.paths[pathIndex].waypoints[waypointIndex]
+        return HeadingPreview(
+            lat: waypoint.coord.lat,
+            lon: waypoint.coord.lon,
+            heading: normalizeHeading(waypoint.heading)
+        )
+    }
 
-                Group {
-                    TextField(
-                        "Latitude",
-                        value: Binding(
-                            get: { waypoint.coord.lat },
-                            set: { draft.routeMacro.paths[validPathIndex].waypoints[idx].coord.lat = $0 }
-                        ),
-                        format: .number
-                    )
-                    TextField(
-                        "Longitude",
-                        value: Binding(
-                            get: { waypoint.coord.lon },
-                            set: { draft.routeMacro.paths[validPathIndex].waypoints[idx].coord.lon = $0 }
-                        ),
-                        format: .number
-                    )
-                    TextField(
-                        "Altitude",
-                        value: Binding(
-                            get: { waypoint.altitude.value },
-                            set: { draft.routeMacro.paths[validPathIndex].waypoints[idx].altitude.value = $0 }
-                        ),
-                        format: .number
-                    )
-                    TextField(
-                        "Heading",
-                        value: Binding(
-                            get: { waypoint.heading },
-                            set: { draft.routeMacro.paths[validPathIndex].waypoints[idx].heading = $0 }
-                        ),
-                        format: .number
-                    )
-                    TextField(
-                        "Delay (s)",
-                        value: Binding(
-                            get: { waypoint.delaySec },
-                            set: { draft.routeMacro.paths[validPathIndex].waypoints[idx].delaySec = $0 }
-                        ),
-                        format: .number
-                    )
-                    TextField(
-                        "Action",
-                        text: Binding(
-                            get: { waypoint.action },
-                            set: { draft.routeMacro.paths[validPathIndex].waypoints[idx].action = $0 }
-                        )
-                    )
-                }
-                .textFieldStyle(.roundedBorder)
+    private var cameraPreview: CameraPreview? {
+        if let fieldKey = focusedWaypointCameraFieldKey {
+            let tokens = fieldKey.split(separator: "-")
+            guard tokens.count == 4,
+                  tokens[0] == "p",
+                  tokens[2] == "w",
+                  let pathIndex = Int(tokens[1]),
+                  let waypointIndex = Int(tokens[3]),
+                  draft.routeMacro.paths.indices.contains(pathIndex),
+                  draft.routeMacro.paths[pathIndex].waypoints.indices.contains(waypointIndex) else { return nil }
+            let waypoint = draft.routeMacro.paths[pathIndex].waypoints[waypointIndex]
+            return CameraPreview(
+                lat: waypoint.coord.lat,
+                lon: waypoint.coord.lon,
+                bearing: normalizeHeading(waypoint.camera.bearing),
+                fovDeg: clamp(waypoint.camera.fovDeg, min: 5, max: 170)
+            )
+        }
 
-                Button("Remove Waypoint", role: .destructive) {
-                    draft.routeMacro.paths[validPathIndex].waypoints.remove(at: idx)
-                    selectedWaypointIndex = nil
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
+        if let fieldKey = focusedTransitionCameraFieldKey {
+            let tokens = fieldKey.split(separator: "-")
+            guard tokens.count == 4,
+                  tokens[0] == "p",
+                  tokens[2] == "w",
+                  let pathIndex = Int(tokens[1]),
+                  let waypointIndex = Int(tokens[3]),
+                  draft.routeMacro.paths.indices.contains(pathIndex),
+                  draft.routeMacro.paths[pathIndex].waypoints.indices.contains(waypointIndex),
+                  let anchor = transitionAnchorCoordinate(pathIndex: pathIndex, waypointIndex: waypointIndex) else { return nil }
+            let waypoint = draft.routeMacro.paths[pathIndex].waypoints[waypointIndex]
+            return CameraPreview(
+                lat: anchor.lat,
+                lon: anchor.lon,
+                bearing: normalizeHeading(waypoint.transition.cameraBearing),
+                fovDeg: clamp(waypoint.camera.fovDeg, min: 5, max: 170)
+            )
+        }
+
+        return nil
+    }
+
+    private func distanceLabel(for path: RoutePath) -> String {
+        guard path.waypoints.count > 1 else { return "0 m" }
+        var totalMeters: Double = 0
+        for idx in 1..<path.waypoints.count {
+            let a = path.waypoints[idx - 1].coord
+            let b = path.waypoints[idx].coord
+            totalMeters += CLLocation(
+                latitude: a.lat,
+                longitude: a.lon
+            ).distance(from: CLLocation(latitude: b.lat, longitude: b.lon))
+        }
+        if totalMeters < 1000 {
+            return "\(Int(totalMeters.rounded())) m"
+        }
+        return String(format: "%.2f km", totalMeters / 1000)
+    }
+
+    private func durationLabel(for path: RoutePath) -> String {
+        let totalDelaySeconds = path.waypoints.reduce(0.0) { partial, waypoint in
+            partial + delaySeconds(for: waypoint)
+        }
+
+        guard path.waypoints.count > 1 else {
+            return formatDuration(totalDelaySeconds)
+        }
+
+        var transitSeconds = 0.0
+        for idx in 1..<path.waypoints.count {
+            let start = path.waypoints[idx - 1]
+            let end = path.waypoints[idx]
+            let legDistanceMeters = CLLocation(
+                latitude: start.coord.lat,
+                longitude: start.coord.lon
+            ).distance(from: CLLocation(latitude: end.coord.lat, longitude: end.coord.lon))
+            let speedMetersPerSecond = metersPerSecond(
+                value: start.transition.targetSpeed,
+                unit: start.transition.speedUnit
+            )
+            if speedMetersPerSecond > 0 {
+                transitSeconds += legDistanceMeters / speedMetersPerSecond
             }
-            .padding(14)
-            .frame(width: 340)
-            .background(Color(red: 0.12, green: 0.12, blue: 0.13))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+
+        return formatDuration(totalDelaySeconds + transitSeconds)
+    }
+
+    private func delaySeconds(for waypoint: RouteWaypoint) -> Double {
+        switch waypoint.delayUnit {
+        case .secs:
+            return waypoint.delaySec
+        case .mins:
+            return waypoint.delaySec * 60
+        case .hrs:
+            return waypoint.delaySec * 3600
         }
     }
 
-    private func addSpace() {
-        let name = newSpaceName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let role = newSpaceRoleType.trimmingCharacters(in: .whitespacesAndNewlines)
-        let position = newSpacePositionHint.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return }
-        draft.spaces.append(
-            MissionSpace(
-                name: name,
-                roleType: role.isEmpty ? "general" : role,
-                positionHint: position
-            )
+    private func metersPerSecond(value: Double, unit: SpeedUnit) -> Double {
+        switch unit {
+        case .metersPerSecond:
+            return value
+        case .kilometersPerHour:
+            return value / 3.6
+        }
+    }
+
+    private func formatDuration(_ seconds: Double) -> String {
+        let rounded = Int(seconds.rounded())
+        let hours = rounded / 3600
+        let minutes = (rounded % 3600) / 60
+        let remainingSeconds = rounded % 60
+
+        if hours > 0 {
+            return String(format: "%dh %02dm", hours, minutes)
+        }
+        if minutes > 0 {
+            return String(format: "%dm %02ds", minutes, remainingSeconds)
+        }
+        return "\(remainingSeconds)s"
+    }
+
+    private func shouldOfferCloseLoop(_ path: RoutePath) -> Bool {
+        guard path.waypoints.count > 2 else { return false }
+        guard let first = path.waypoints.first, let last = path.waypoints.last else { return false }
+        let distance = CLLocation(latitude: first.coord.lat, longitude: first.coord.lon)
+            .distance(from: CLLocation(latitude: last.coord.lat, longitude: last.coord.lon))
+        return distance > 2
+    }
+
+    private func closeLoop(for index: Int) {
+        guard draft.routeMacro.paths.indices.contains(index) else { return }
+        guard let first = draft.routeMacro.paths[index].waypoints.first else { return }
+        let closingWaypoint = RouteWaypoint(
+            coord: first.coord,
+            altitude: first.altitude,
+            heading: first.heading,
+            delaySec: 0,
+            action: "none",
+            camera: first.camera
         )
-        newSpaceName = ""
-        newSpaceRoleType = ""
-        newSpacePositionHint = ""
+        draft.routeMacro.paths[index].waypoints.append(closingWaypoint)
+        draft.routeMacro.paths[index].loopMode = "loop"
+        refreshAutoHeadings(for: index)
+    }
+
+    private func waypointSidebar(pathIndex: Int) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Waypoints")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white)
+                    Text("\(draft.routeMacro.paths[pathIndex].waypoints.count)")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.gray)
+                    Spacer()
+                    Button {
+                        openBulkWaypointEditor(pathIndex: pathIndex)
+                    } label: {
+                        Image(systemName: "gearshape")
+                            .appIconGlyph()
+                    }
+                    .buttonStyle(.bordered)
+                    .help("Bulk edit all waypoints")
+                    .uniformIconButton()
+                    Button {
+                        finishEditingPathFromSidebar(pathIndex: pathIndex)
+                    } label: {
+                        Image(systemName: "checkmark")
+                            .appIconGlyph()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .help("Finish path editing")
+                    .uniformIconButton()
+                    
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color.black.opacity(0.2))
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(Array(draft.routeMacro.paths[pathIndex].waypoints.enumerated()), id: \.element.id) { idx, _ in
+                            waypointEditorRow(pathIndex: pathIndex, idx: idx)
+                                .id("wp-\(idx)")
+                                .onTapGesture {
+                                    selectedWaypointIndex = idx
+                                }
+                        }
+                    }
+                    .padding(12)
+                }
+                .onChange(of: selectedWaypointIndex) { idx in
+                    clearPreviewFocusState()
+                    guard let idx else { return }
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        proxy.scrollTo("wp-\(idx)", anchor: .center)
+                    }
+                }
+                .onChange(of: draft.routeMacro.paths[pathIndex].waypoints.count) { _ in
+                    guard let idx = selectedWaypointIndex else { return }
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        proxy.scrollTo("wp-\(idx)", anchor: .center)
+                    }
+                }
+            }
+        }
+        .background(Color(red: 0.10, green: 0.10, blue: 0.11))
+        .overlay(
+            Rectangle()
+                .fill(Color.white.opacity(0.08))
+                .frame(width: 1),
+            alignment: .leading
+        )
+    }
+
+    private func waypointEditorRow(pathIndex: Int, idx: Int) -> some View {
+        let waypoint = draft.routeMacro.paths[pathIndex].waypoints[idx]
+        let isSelected = selectedWaypointIndex == idx
+        let headingKey = headingFieldKey(pathIndex: pathIndex, waypointIndex: idx)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Waypoint \(idx + 1)")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white)
+                Spacer()
+                if isSelected {
+                    Text("Selected")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.blue)
+                }
+            }
+
+            HStack(spacing: 8) {
+                Text("Altitude")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.gray)
+                    .frame(width: 78, alignment: .leading)
+                numericInput(
+                    value: Binding(
+                        get: { waypoint.altitude.value },
+                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].altitude.value = clamp($0, min: 0, max: 100_000) }
+                    ),
+                    step: 1,
+                    min: 0,
+                    max: 100_000
+                )
+                .frame(width: 86)
+                Picker(
+                    "Alt Unit",
+                    selection: Binding(
+                        get: { waypoint.altitude.unit },
+                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].altitude.unit = $0 }
+                    )
+                ) {
+                    ForEach(AltitudeUnit.allCases) { unit in
+                        Text(unit.rawValue.uppercased()).tag(unit)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 80)
+
+                Picker(
+                    "Alt Ref",
+                    selection: Binding(
+                        get: { waypoint.altitude.reference },
+                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].altitude.reference = $0 }
+                    )
+                ) {
+                    ForEach(AltitudeReference.allCases) { reference in
+                        Text(reference.rawValue).tag(reference)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 96)
+            }
+
+            HStack(spacing: 8) {
+                Text("Heading")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.gray)
+                    .frame(width: 78, alignment: .leading)
+                Picker(
+                    "Preset",
+                    selection: Binding<HeadingPreset?>(
+                        get: { waypoint.headingPreset },
+                        set: { preset in
+                            draft.routeMacro.paths[pathIndex].waypoints[idx].headingPreset = preset
+                            applyHeadingPreset(pathIndex: pathIndex, waypointIndex: idx)
+                        }
+                    )
+                ) {
+                    Text("Manual").tag(HeadingPreset?.none)
+                    Text("Follow Path").tag(HeadingPreset?.some(.followPath))
+                    if pathIsLooped(pathIndex) {
+                        Text("Perimeter Outward").tag(HeadingPreset?.some(.perimeterOutward))
+                        Text("Perimeter Inward").tag(HeadingPreset?.some(.perimeterInward))
+                    }
+                    Text("North").tag(HeadingPreset?.some(.north))
+                    Text("East").tag(HeadingPreset?.some(.east))
+                    Text("South").tag(HeadingPreset?.some(.south))
+                    Text("West").tag(HeadingPreset?.some(.west))
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 104)
+
+                numericInput(
+                    value: Binding(
+                        get: { waypoint.heading },
+                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].heading = clamp(normalizeHeading($0), min: 0, max: 359.999) }
+                    ),
+                    step: 1,
+                    min: 0,
+                    max: 359.999,
+                    onFocusChange: { isFocused in
+                        if isFocused {
+                            focusedHeadingFieldKey = headingKey
+                        } else if focusedHeadingFieldKey == headingKey {
+                            focusedHeadingFieldKey = nil
+                        }
+                    }
+                )
+                .frame(maxWidth: .infinity)
+                .disabled(waypoint.headingPreset != nil)
+            }
+
+            HStack(spacing: 8) {
+                Text("Delay")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.gray)
+                    .frame(width: 78, alignment: .leading)
+                numericInput(
+                    value: Binding(
+                        get: { waypoint.delaySec },
+                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].delaySec = clamp($0, min: 0, max: 100_000) }
+                    ),
+                    step: 1,
+                    min: 0,
+                    max: 100_000
+                )
+                .frame(width: 96)
+                Picker(
+                    "Delay Unit",
+                    selection: Binding(
+                        get: { waypoint.delayUnit },
+                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].delayUnit = $0 }
+                    )
+                ) {
+                    ForEach(DelayUnit.allCases) { unit in
+                        Text(unit.rawValue).tag(unit)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 72)
+                Spacer()
+            }
+
+            HStack(spacing: 8) {
+                Text("Action")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.gray)
+                    .frame(width: 78, alignment: .leading)
+                Picker(
+                    "Action",
+                    selection: Binding(
+                        get: {
+                            WaypointActionOption(rawValue: waypoint.action) ?? .none
+                        },
+                        set: { option in
+                            draft.routeMacro.paths[pathIndex].waypoints[idx].action = option.rawValue
+                        }
+                    )
+                ) {
+                    ForEach(WaypointActionOption.allCases) { option in
+                        Text(option.rawValue).tag(option)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(maxWidth: .infinity)
+            }
+
+            HStack(spacing: 8) {
+                Text("Camera")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.gray)
+                    .frame(width: 78, alignment: .leading)
+                Picker(
+                    "Camera Mode",
+                    selection: Binding(
+                        get: { waypoint.camera.mode },
+                        set: { mode in
+                            draft.routeMacro.paths[pathIndex].waypoints[idx].camera.mode = mode
+                            applyCameraMode(pathIndex: pathIndex, waypointIndex: idx)
+                        }
+                    )
+                ) {
+                    Text("Follow Heading").tag(CameraMode.followHeading)
+                    if pathIsLooped(pathIndex) {
+                        Text("Perimeter Outward").tag(CameraMode.perimeterOutward)
+                        Text("Perimeter Inward").tag(CameraMode.perimeterInward)
+                    }
+                    Text("Manual Bearing").tag(CameraMode.manualBearing)
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 132)
+
+                numericInput(
+                    value: Binding(
+                        get: { waypoint.camera.bearing },
+                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].camera.bearing = clamp(normalizeHeading($0), min: 0, max: 359.999) }
+                    ),
+                    step: 1,
+                    min: 0,
+                    max: 359.999,
+                    onFocusChange: { focused in
+                        let key = waypointCameraFieldKey(pathIndex: pathIndex, waypointIndex: idx)
+                        if focused {
+                            focusedWaypointCameraFieldKey = key
+                            focusedTransitionCameraFieldKey = nil
+                        } else if focusedWaypointCameraFieldKey == key {
+                            focusedWaypointCameraFieldKey = nil
+                        }
+                    }
+                )
+                .frame(width: 88)
+                .disabled(waypoint.camera.mode != .manualBearing)
+                Spacer()
+            }
+
+            HStack {
+                Text("Transition (to next waypoint)")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.gray.opacity(0.9))
+                Spacer()
+            }
+            .padding(.top, 4)
+
+            HStack(spacing: 8) {
+                Text("Transition")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.gray)
+                    .frame(width: 78, alignment: .leading)
+                Picker(
+                    "Mode",
+                    selection: Binding(
+                        get: { waypoint.transition.mode },
+                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].transition.mode = $0 }
+                    )
+                ) {
+                    ForEach(TransitionMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 102)
+                numericInput(
+                    value: Binding(
+                        get: { waypoint.transition.targetSpeed },
+                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].transition.targetSpeed = clamp($0, min: 0, max: 200) }
+                    ),
+                    step: 1,
+                    min: 0,
+                    max: 200
+                )
+                .frame(width: 86)
+                Picker(
+                    "Speed Unit",
+                    selection: Binding(
+                        get: { waypoint.transition.speedUnit },
+                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].transition.speedUnit = $0 }
+                    )
+                ) {
+                    ForEach(SpeedUnit.allCases) { unit in
+                        Text(unit.rawValue).tag(unit)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 82)
+            }
+
+            HStack(spacing: 8) {
+                Text("Cam During")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.gray)
+                    .frame(width: 78, alignment: .leading)
+                Picker(
+                    "Transition Camera Mode",
+                    selection: Binding(
+                        get: { waypoint.transition.cameraMode },
+                        set: { mode in
+                            draft.routeMacro.paths[pathIndex].waypoints[idx].transition.cameraMode = mode
+                            applyTransitionCameraMode(pathIndex: pathIndex, waypointIndex: idx)
+                        }
+                    )
+                ) {
+                    Text("Hold Current").tag(TransitionCameraMode.holdCurrent)
+                    Text("Face Next Waypoint").tag(TransitionCameraMode.faceNextWaypoint)
+                    if pathIsLooped(pathIndex) {
+                        Text("Perimeter Outward").tag(TransitionCameraMode.perimeterOutward)
+                        Text("Perimeter Inward").tag(TransitionCameraMode.perimeterInward)
+                    }
+                    Text("Manual Bearing").tag(TransitionCameraMode.manualBearing)
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 170)
+
+                numericInput(
+                    value: Binding(
+                        get: { waypoint.transition.cameraBearing },
+                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].transition.cameraBearing = clamp(normalizeHeading($0), min: 0, max: 359.999) }
+                    ),
+                    step: 1,
+                    min: 0,
+                    max: 359.999,
+                    onFocusChange: { focused in
+                        let key = transitionCameraFieldKey(pathIndex: pathIndex, waypointIndex: idx)
+                        if focused {
+                            focusedTransitionCameraFieldKey = key
+                            focusedWaypointCameraFieldKey = nil
+                        } else if focusedTransitionCameraFieldKey == key {
+                            focusedTransitionCameraFieldKey = nil
+                        }
+                    }
+                )
+                .frame(width: 88)
+                .disabled(waypoint.transition.cameraMode != .manualBearing)
+                Spacer()
+            }
+
+            HStack {
+                Spacer()
+                Button {
+                    draft.routeMacro.paths[pathIndex].waypoints.remove(at: idx)
+                    refreshAutoHeadings(for: pathIndex)
+                    if selectedWaypointIndex == idx {
+                        selectedWaypointIndex = nil
+                    }
+                } label: {
+                    Image(systemName: "trash")
+                        .appIconGlyph()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .uniformIconButton()
+            }
+        }
+        .onAppear {
+            if waypoint.headingPreset != nil {
+                applyHeadingPreset(pathIndex: pathIndex, waypointIndex: idx)
+            }
+            applyCameraMode(pathIndex: pathIndex, waypointIndex: idx)
+            applyTransitionCameraMode(pathIndex: pathIndex, waypointIndex: idx)
+        }
+        .textFieldStyle(.roundedBorder)
+        .padding(10)
+        .background(isSelected ? Color.blue.opacity(0.12) : Color.white.opacity(0.03))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isSelected ? Color.blue.opacity(0.55) : Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private func headingFieldKey(pathIndex: Int, waypointIndex: Int) -> String {
+        "p-\(pathIndex)-w-\(waypointIndex)"
+    }
+
+    private func waypointCameraFieldKey(pathIndex: Int, waypointIndex: Int) -> String {
+        "p-\(pathIndex)-w-\(waypointIndex)"
+    }
+
+    private func transitionCameraFieldKey(pathIndex: Int, waypointIndex: Int) -> String {
+        "p-\(pathIndex)-w-\(waypointIndex)"
+    }
+
+    private func applyHeadingPreset(pathIndex: Int, waypointIndex: Int) {
+        guard draft.routeMacro.paths.indices.contains(pathIndex),
+              draft.routeMacro.paths[pathIndex].waypoints.indices.contains(waypointIndex) else { return }
+        guard let preset = draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].headingPreset else { return }
+        switch preset {
+        case .followPath:
+            if let followHeading = followPathHeading(pathIndex: pathIndex, waypointIndex: waypointIndex) {
+                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].heading = followHeading
+            }
+        case .perimeterOutward:
+            if let outwardHeading = perimeterHeading(pathIndex: pathIndex, waypointIndex: waypointIndex, outward: true) {
+                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].heading = outwardHeading
+            }
+        case .perimeterInward:
+            if let inwardHeading = perimeterHeading(pathIndex: pathIndex, waypointIndex: waypointIndex, outward: false) {
+                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].heading = inwardHeading
+            }
+        case .north:
+            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].heading = 0
+        case .east:
+            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].heading = 90
+        case .south:
+            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].heading = 180
+        case .west:
+            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].heading = 270
+        }
+    }
+
+    private func refreshAutoHeadings(for pathIndex: Int) {
+        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return }
+        let waypointCount = draft.routeMacro.paths[pathIndex].waypoints.count
+        guard waypointCount > 0 else { return }
+        for waypointIndex in 0..<waypointCount {
+            if draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].headingPreset != nil {
+                applyHeadingPreset(pathIndex: pathIndex, waypointIndex: waypointIndex)
+            }
+        }
+        refreshCameraModes(for: pathIndex)
+        refreshTransitionCameraModes(for: pathIndex)
+    }
+
+    private func applyCameraMode(pathIndex: Int, waypointIndex: Int) {
+        guard draft.routeMacro.paths.indices.contains(pathIndex),
+              draft.routeMacro.paths[pathIndex].waypoints.indices.contains(waypointIndex) else { return }
+
+        let mode = draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].camera.mode
+        switch mode {
+        case .followHeading:
+            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].camera.bearing =
+                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].heading
+        case .perimeterOutward:
+            if let heading = perimeterHeading(pathIndex: pathIndex, waypointIndex: waypointIndex, outward: true) {
+                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].camera.bearing = heading
+            }
+        case .perimeterInward:
+            if let heading = perimeterHeading(pathIndex: pathIndex, waypointIndex: waypointIndex, outward: false) {
+                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].camera.bearing = heading
+            }
+        case .manualBearing:
+            break
+        }
+
+        applyTransitionCameraMode(pathIndex: pathIndex, waypointIndex: waypointIndex)
+    }
+
+    private func refreshCameraModes(for pathIndex: Int) {
+        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return }
+        let waypointCount = draft.routeMacro.paths[pathIndex].waypoints.count
+        guard waypointCount > 0 else { return }
+        for waypointIndex in 0..<waypointCount {
+            applyCameraMode(pathIndex: pathIndex, waypointIndex: waypointIndex)
+        }
+    }
+
+    private func applyTransitionCameraMode(pathIndex: Int, waypointIndex: Int) {
+        guard draft.routeMacro.paths.indices.contains(pathIndex),
+              draft.routeMacro.paths[pathIndex].waypoints.indices.contains(waypointIndex) else { return }
+
+        let cameraMode = draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].transition.cameraMode
+        switch cameraMode {
+        case .holdCurrent:
+            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].transition.cameraBearing =
+                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].camera.bearing
+        case .faceNextWaypoint:
+            if let heading = followPathHeading(pathIndex: pathIndex, waypointIndex: waypointIndex) {
+                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].transition.cameraBearing = heading
+            }
+        case .perimeterOutward:
+            if let heading = perimeterHeading(pathIndex: pathIndex, waypointIndex: waypointIndex, outward: true) {
+                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].transition.cameraBearing = heading
+            }
+        case .perimeterInward:
+            if let heading = perimeterHeading(pathIndex: pathIndex, waypointIndex: waypointIndex, outward: false) {
+                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].transition.cameraBearing = heading
+            }
+        case .manualBearing:
+            break
+        }
+    }
+
+    private func refreshTransitionCameraModes(for pathIndex: Int) {
+        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return }
+        let waypointCount = draft.routeMacro.paths[pathIndex].waypoints.count
+        guard waypointCount > 0 else { return }
+        for waypointIndex in 0..<waypointCount {
+            applyTransitionCameraMode(pathIndex: pathIndex, waypointIndex: waypointIndex)
+        }
+    }
+
+    private func pathIsLooped(_ pathIndex: Int) -> Bool {
+        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return false }
+        let path = draft.routeMacro.paths[pathIndex]
+        if path.loopMode == "loop" { return true }
+        guard path.waypoints.count > 2,
+              let first = path.waypoints.first,
+              let last = path.waypoints.last else { return false }
+        return CLLocation(latitude: first.coord.lat, longitude: first.coord.lon)
+            .distance(from: CLLocation(latitude: last.coord.lat, longitude: last.coord.lon)) <= 2
+    }
+
+    private func nextWaypointCoordinate(pathIndex: Int, waypointIndex: Int) -> RouteCoordinate? {
+        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return nil }
+        let waypoints = draft.routeMacro.paths[pathIndex].waypoints
+        guard waypoints.indices.contains(waypointIndex) else { return nil }
+        if waypoints.indices.contains(waypointIndex + 1) {
+            return waypoints[waypointIndex + 1].coord
+        }
+        if pathIsLooped(pathIndex), let first = waypoints.first {
+            return first.coord
+        }
+        return nil
+    }
+
+    private func transitionAnchorCoordinate(pathIndex: Int, waypointIndex: Int) -> RouteCoordinate? {
+        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return nil }
+        let waypoints = draft.routeMacro.paths[pathIndex].waypoints
+        guard waypoints.indices.contains(waypointIndex),
+              let nextCoord = nextWaypointCoordinate(pathIndex: pathIndex, waypointIndex: waypointIndex) else { return nil }
+        let current = waypoints[waypointIndex].coord
+        return RouteCoordinate(
+            lat: (current.lat + nextCoord.lat) / 2,
+            lon: (current.lon + nextCoord.lon) / 2
+        )
+    }
+
+    private func followPathHeading(pathIndex: Int, waypointIndex: Int) -> Double? {
+        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return nil }
+        let path = draft.routeMacro.paths[pathIndex]
+        guard path.waypoints.indices.contains(waypointIndex) else { return nil }
+
+        if path.waypoints.indices.contains(waypointIndex + 1) {
+            let from = path.waypoints[waypointIndex].coord
+            let to = path.waypoints[waypointIndex + 1].coord
+            return bearingDegrees(from: from, to: to)
+        }
+        if waypointIndex > 0 && path.waypoints.indices.contains(waypointIndex - 1) {
+            let from = path.waypoints[waypointIndex - 1].coord
+            let to = path.waypoints[waypointIndex].coord
+            return bearingDegrees(from: from, to: to)
+        }
+        return nil
+    }
+
+    private func perimeterHeading(pathIndex: Int, waypointIndex: Int, outward: Bool) -> Double? {
+        guard pathIsLooped(pathIndex) else {
+            return followPathHeading(pathIndex: pathIndex, waypointIndex: waypointIndex)
+        }
+        let waypoints = draft.routeMacro.paths[pathIndex].waypoints
+        guard waypoints.count > 2, waypoints.indices.contains(waypointIndex) else { return nil }
+
+        let prevIndex = (waypointIndex - 1 + waypoints.count) % waypoints.count
+        let nextIndex = (waypointIndex + 1) % waypoints.count
+        let prevCoord = waypoints[prevIndex].coord
+        let nextCoord = waypoints[nextIndex].coord
+        let tangent = bearingDegrees(from: prevCoord, to: nextCoord)
+
+        let winding = polygonWinding(waypoints.map(\.coord))
+        let isCCW = winding > 0
+        let outwardOffset: Double = isCCW ? 90 : -90
+        let inwardOffset: Double = -outwardOffset
+        return normalizeHeading(tangent + (outward ? outwardOffset : inwardOffset))
+    }
+
+    private func polygonWinding(_ coords: [RouteCoordinate]) -> Double {
+        guard coords.count > 2 else { return 0 }
+        var area2 = 0.0
+        for i in 0..<coords.count {
+            let j = (i + 1) % coords.count
+            area2 += (coords[i].lon * coords[j].lat) - (coords[j].lon * coords[i].lat)
+        }
+        return area2
+    }
+
+    private func bearingDegrees(from: RouteCoordinate, to: RouteCoordinate) -> Double {
+        let lat1 = from.lat * .pi / 180
+        let lat2 = to.lat * .pi / 180
+        let dLon = (to.lon - from.lon) * .pi / 180
+        let y = sin(dLon) * cos(lat2)
+        let x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
+        let radians = atan2(y, x)
+        return normalizeHeading(radians * 180 / .pi)
+    }
+
+    private func normalizeHeading(_ heading: Double) -> Double {
+        let mod = heading.truncatingRemainder(dividingBy: 360)
+        return mod >= 0 ? mod : (mod + 360)
+    }
+
+    private func clamp(_ value: Double, min: Double, max: Double) -> Double {
+        Swift.max(min, Swift.min(max, value))
+    }
+
+    private func clearPreviewFocusState() {
+        focusedHeadingFieldKey = nil
+        focusedWaypointCameraFieldKey = nil
+        focusedTransitionCameraFieldKey = nil
+    }
+
+    private func openBulkWaypointEditor(pathIndex: Int) {
+        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return }
+        guard !draft.routeMacro.paths[pathIndex].waypoints.isEmpty else {
+            onToast("No waypoints to edit", .info)
+            return
+        }
+        bulkWaypointDraft = draft.routeMacro.paths[pathIndex].waypoints[0]
+        bulkEditPathIndex = pathIndex
+        clearPreviewFocusState()
+        showingBulkWaypointEditor = true
+    }
+
+    private func finishEditingPathFromSidebar(pathIndex: Int) {
+        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return }
+        let path = draft.routeMacro.paths[pathIndex]
+        if shouldOfferCloseLoop(path) {
+            pendingCloseLoopPathIndex = pathIndex
+            return
+        }
+        editingPathIndex = nil
+        selectedWaypointIndex = nil
+        clearPreviewFocusState()
+        onToast("Path edit mode disabled", .info)
+    }
+
+    private func applyBulkWaypointValues(pathIndex: Int) {
+        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return }
+        guard !draft.routeMacro.paths[pathIndex].waypoints.isEmpty else {
+            onToast("No waypoints to update", .info)
+            return
+        }
+
+        for waypointIndex in draft.routeMacro.paths[pathIndex].waypoints.indices {
+            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].altitude = bulkWaypointDraft.altitude
+            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].headingPreset = bulkWaypointDraft.headingPreset
+            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].heading =
+                clamp(normalizeHeading(bulkWaypointDraft.heading), min: 0, max: 359.999)
+            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].delaySec =
+                clamp(bulkWaypointDraft.delaySec, min: 0, max: 100_000)
+            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].delayUnit = bulkWaypointDraft.delayUnit
+            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].action = bulkWaypointDraft.action
+            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].camera = bulkWaypointDraft.camera
+            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].transition = bulkWaypointDraft.transition
+        }
+
+        refreshAutoHeadings(for: pathIndex)
+        showingBulkWaypointEditor = false
+        onToast("Applied bulk waypoint settings", .success)
+    }
+
+    private func numericInput(
+        value: Binding<Double>,
+        step: Double,
+        min: Double,
+        max: Double,
+        onFocusChange: ((Bool) -> Void)? = nil
+    ) -> some View {
+        StrictNumberField(
+            value: value,
+            step: step,
+            min: min,
+            max: max,
+            onFocusChange: onFocusChange
+        )
+    }
+
+    private func addRosterDeviceToPath(pathIndex: Int) {
+        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return }
+        let pathId = draft.routeMacro.paths[pathIndex].id
+        let fields = pathRosterDrafts[pathId] ?? PathRosterDraft()
+        let name = fields.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            onToast("Enter a device label", .info)
+            return
+        }
+        let role = fields.role.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hint = fields.hint.trimmingCharacters(in: .whitespacesAndNewlines)
+        let device = RosterDevice(
+            name: name,
+            roleType: role.isEmpty ? "device" : role,
+            positionHint: hint
+        )
+        draft.rosterDevices.append(device)
+        draft.routeMacro.paths[pathIndex].rosterDeviceIds.append(device.id)
+        pathRosterDrafts[pathId] = PathRosterDraft()
+        onToast("Device added to path", .success)
+    }
+
+    private func removeRosterDeviceFromPath(pathIndex: Int, deviceId: UUID) {
+        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return }
+        draft.routeMacro.paths[pathIndex].rosterDeviceIds.removeAll { $0 == deviceId }
+        let stillReferenced = draft.routeMacro.paths.contains { $0.rosterDeviceIds.contains(deviceId) }
+        if !stillReferenced {
+            draft.rosterDevices.removeAll { $0.id == deviceId }
+        }
+    }
+
+    private func bulkWaypointEditorSheet(pathIndex: Int) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("Bulk Edit Waypoints")
+                    .font(.system(size: 17, weight: .semibold))
+                Spacer()
+                Button("Cancel") {
+                    showingBulkWaypointEditor = false
+                }
+                .buttonStyle(.bordered)
+                Button("Apply") {
+                    applyBulkWaypointValues(pathIndex: pathIndex)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+            }
+            .controlSize(.small)
+            .padding(.bottom, 4)
+
+            ScrollView {
+                Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 10) {
+                    GridRow {
+                        bulkRowLabel("Altitude")
+                        numericInput(
+                            value: Binding(
+                                get: { bulkWaypointDraft.altitude.value },
+                                set: { bulkWaypointDraft.altitude.value = clamp($0, min: 0, max: 100_000) }
+                            ),
+                            step: 1,
+                            min: 0,
+                            max: 100_000
+                        )
+                        .frame(maxWidth: .infinity)
+                        Picker(
+                            "Alt Unit",
+                            selection: Binding(
+                                get: { bulkWaypointDraft.altitude.unit },
+                                set: { bulkWaypointDraft.altitude.unit = $0 }
+                            )
+                        ) {
+                            ForEach(AltitudeUnit.allCases) { unit in
+                                Text(unit.rawValue).tag(unit)
+                            }
+                        }
+                        .labelsHidden()
+                        
+                        Picker(
+                            "Alt Ref",
+                            selection: Binding(
+                                get: { bulkWaypointDraft.altitude.reference },
+                                set: { bulkWaypointDraft.altitude.reference = $0 }
+                            )
+                        ) {
+                            ForEach(AltitudeReference.allCases) { reference in
+                                Text(reference.rawValue).tag(reference)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                    }
+
+                    GridRow {
+                        bulkRowLabel("Heading")
+                        Picker(
+                            "Preset",
+                            selection: Binding<HeadingPreset?>(
+                                get: { bulkWaypointDraft.headingPreset },
+                                set: { bulkWaypointDraft.headingPreset = $0 }
+                            )
+                        ) {
+                            Text("Manual").tag(HeadingPreset?.none)
+                            Text("Follow Path").tag(HeadingPreset?.some(.followPath))
+                            if pathIsLooped(pathIndex) {
+                                Text("Perimeter Outward").tag(HeadingPreset?.some(.perimeterOutward))
+                                Text("Perimeter Inward").tag(HeadingPreset?.some(.perimeterInward))
+                            }
+                            Text("North").tag(HeadingPreset?.some(.north))
+                            Text("East").tag(HeadingPreset?.some(.east))
+                            Text("South").tag(HeadingPreset?.some(.south))
+                            Text("West").tag(HeadingPreset?.some(.west))
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .frame(maxWidth: .infinity)
+                        numericInput(
+                            value: Binding(
+                                get: { bulkWaypointDraft.heading },
+                                set: { bulkWaypointDraft.heading = clamp(normalizeHeading($0), min: 0, max: 359.999) }
+                            ),
+                            step: 1,
+                            min: 0,
+                            max: 359.999
+                        )
+                        .disabled(bulkWaypointDraft.headingPreset != nil)
+                        Color.clear
+                    }
+
+                    GridRow {
+                        bulkRowLabel("Delay")
+                        numericInput(
+                            value: Binding(
+                                get: { bulkWaypointDraft.delaySec },
+                                set: { bulkWaypointDraft.delaySec = clamp($0, min: 0, max: 100_000) }
+                            ),
+                            step: 1,
+                            min: 0,
+                            max: 100_000
+                        )
+                        Picker(
+                            "Delay Unit",
+                            selection: Binding(
+                                get: { bulkWaypointDraft.delayUnit },
+                                set: { bulkWaypointDraft.delayUnit = $0 }
+                            )
+                        ) {
+                            ForEach(DelayUnit.allCases) { unit in
+                                Text(unit.rawValue).tag(unit)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        Color.clear
+                    }
+
+                    GridRow {
+                        bulkRowLabel("Action")
+                        Picker(
+                            "Action",
+                            selection: Binding(
+                                get: { WaypointActionOption(rawValue: bulkWaypointDraft.action) ?? .none },
+                                set: { bulkWaypointDraft.action = $0.rawValue }
+                            )
+                        ) {
+                            ForEach(WaypointActionOption.allCases) { option in
+                                Text(option.rawValue).tag(option)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        Color.clear
+                        Color.clear
+                    }
+
+                    GridRow {
+                        bulkRowLabel("Camera")
+                        Picker(
+                            "Camera Mode",
+                            selection: Binding(
+                                get: { bulkWaypointDraft.camera.mode },
+                                set: { bulkWaypointDraft.camera.mode = $0 }
+                            )
+                        ) {
+                            Text("Follow Heading").tag(CameraMode.followHeading)
+                            if pathIsLooped(pathIndex) {
+                                Text("Perimeter Outward").tag(CameraMode.perimeterOutward)
+                                Text("Perimeter Inward").tag(CameraMode.perimeterInward)
+                            }
+                            Text("Manual Bearing").tag(CameraMode.manualBearing)
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        numericInput(
+                            value: Binding(
+                                get: { bulkWaypointDraft.camera.bearing },
+                                set: { bulkWaypointDraft.camera.bearing = clamp(normalizeHeading($0), min: 0, max: 359.999) }
+                            ),
+                            step: 1,
+                            min: 0,
+                            max: 359.999
+                        )
+                        .disabled(bulkWaypointDraft.camera.mode != .manualBearing)
+                        Color.clear
+                    }
+
+                    GridRow {
+                        Text("Transition (to next waypoint)")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.gray.opacity(0.9))
+                            .gridCellColumns(4)
+                    }
+
+                    GridRow {
+                        bulkRowLabel("Transition")
+                        Picker(
+                            "Mode",
+                            selection: Binding(
+                                get: { bulkWaypointDraft.transition.mode },
+                                set: { bulkWaypointDraft.transition.mode = $0 }
+                            )
+                        ) {
+                            ForEach(TransitionMode.allCases) { mode in
+                                Text(mode.rawValue).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        numericInput(
+                            value: Binding(
+                                get: { bulkWaypointDraft.transition.targetSpeed },
+                                set: { bulkWaypointDraft.transition.targetSpeed = clamp($0, min: 0, max: 200) }
+                            ),
+                            step: 1,
+                            min: 0,
+                            max: 200
+                        )
+                        Picker(
+                            "Speed Unit",
+                            selection: Binding(
+                                get: { bulkWaypointDraft.transition.speedUnit },
+                                set: { bulkWaypointDraft.transition.speedUnit = $0 }
+                            )
+                        ) {
+                            ForEach(SpeedUnit.allCases) { unit in
+                                Text(unit.rawValue).tag(unit)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                    }
+
+                    GridRow {
+                        bulkRowLabel("Cam During")
+                        Picker(
+                            "Transition Camera Mode",
+                            selection: Binding(
+                                get: { bulkWaypointDraft.transition.cameraMode },
+                                set: { bulkWaypointDraft.transition.cameraMode = $0 }
+                            )
+                        ) {
+                            Text("Hold Current").tag(TransitionCameraMode.holdCurrent)
+                            Text("Face Next Waypoint").tag(TransitionCameraMode.faceNextWaypoint)
+                            if pathIsLooped(pathIndex) {
+                                Text("Perimeter Outward").tag(TransitionCameraMode.perimeterOutward)
+                                Text("Perimeter Inward").tag(TransitionCameraMode.perimeterInward)
+                            }
+                            Text("Manual Bearing").tag(TransitionCameraMode.manualBearing)
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        numericInput(
+                            value: Binding(
+                                get: { bulkWaypointDraft.transition.cameraBearing },
+                                set: { bulkWaypointDraft.transition.cameraBearing = clamp(normalizeHeading($0), min: 0, max: 359.999) }
+                            ),
+                            step: 1,
+                            min: 0,
+                            max: 359.999
+                        )
+                        .disabled(bulkWaypointDraft.transition.cameraMode != .manualBearing)
+                        Color.clear
+                    }
+                }
+                .textFieldStyle(.roundedBorder)
+            }
+            .padding(.top, 4)
+        }
+        .padding(16)
+        .frame(minWidth: 700, minHeight: 520)
+        .background(Color(red: 0.10, green: 0.10, blue: 0.11))
+    }
+
+    private func bulkRowLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.gray)
+            .frame(width: 132, alignment: .leading)
     }
 
     private func card<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
@@ -680,6 +2064,12 @@ private struct MissionWorkspaceView: View {
         .background(Color(red: 0.12, green: 0.12, blue: 0.13))
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
+
+    private struct PathRosterDraft: Equatable {
+        var name: String = ""
+        var role: String = ""
+        var hint: String = ""
+    }
 }
 
 private struct MissionRow: View {
@@ -698,11 +2088,14 @@ private struct MissionRow: View {
             }
             Text(mission.description.isEmpty ? "No description" : mission.description)
                 .foregroundStyle(.gray)
-            Text("Count: \(mission.count)  Duration: \(mission.duration)  Schedules: \(mission.schedule.count)")
+            Text("Count: \(mission.count)  Duration: \(mission.duration)")
                 .font(.system(size: 12))
                 .foregroundStyle(.gray)
         }
-        .padding(.vertical, 6)
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -728,8 +2121,6 @@ private struct MissionCard: View {
                 .foregroundStyle(.gray)
             Text("Duration: \(mission.duration)")
                 .foregroundStyle(.gray)
-            Text("Schedules: \(mission.schedule.count)")
-                .foregroundStyle(.gray)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -746,6 +2137,7 @@ private struct AddMissionSheet: View {
     @State private var name = ""
     @State private var description = ""
     @State private var type: MissionType = .mobile
+    @State private var descriptionEditorHeight: CGFloat = 96
 
     private var canSave: Bool {
         !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -759,8 +2151,13 @@ private struct AddMissionSheet: View {
             TextField("Name", text: $name)
                 .textFieldStyle(.roundedBorder)
 
-            TextField("Description", text: $description)
-                .textFieldStyle(.roundedBorder)
+            AutoGrowingTextEditor(
+                text: $description,
+                measuredHeight: $descriptionEditorHeight,
+                placeholder: "Description",
+                minHeight: 96,
+                maxHeight: 220
+            )
 
             Picker("Type", selection: $type) {
                 Text("mobile").tag(MissionType.mobile)
@@ -795,6 +2192,67 @@ private struct AddMissionSheet: View {
     }
 }
 
+private struct AutoGrowingTextEditor: View {
+    @Binding var text: String
+    @Binding var measuredHeight: CGFloat
+    let placeholder: String
+    let minHeight: CGFloat
+    let maxHeight: CGFloat
+
+    private var clampedHeight: CGFloat {
+        min(max(max(measuredHeight, minHeight), minHeight), maxHeight)
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if text.isEmpty {
+                Text(placeholder)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 8)
+            }
+            TextEditor(text: $text)
+                .font(.system(size: 14))
+                .frame(height: clampedHeight)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(NSColor.textBackgroundColor))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+                .background(
+                    Text(text.isEmpty ? " " : text + "\n")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.clear)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(
+                            GeometryReader { proxy in
+                                Color.clear.preference(
+                                    key: AutoGrowingEditorHeightKey.self,
+                                    value: proxy.size.height
+                                )
+                            }
+                        )
+                        .hidden()
+                )
+                .onPreferenceChange(AutoGrowingEditorHeightKey.self) { nextHeight in
+                    measuredHeight = nextHeight
+                }
+        }
+    }
+}
+
+private struct AutoGrowingEditorHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 96
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 private struct PointerOnHoverModifier: ViewModifier {
     @State private var hovering = false
 
@@ -808,6 +2266,167 @@ private struct PointerOnHoverModifier: ViewModifier {
                 NSCursor.pop()
             }
         }
+    }
+}
+
+private enum WaypointActionOption: String, CaseIterable, Identifiable {
+    case none
+
+    var id: String { rawValue }
+}
+
+private struct StrictNumberField: NSViewRepresentable {
+    @Binding var value: Double
+    let step: Double
+    let min: Double
+    let max: Double
+    var onFocusChange: ((Bool) -> Void)?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(value: $value, step: step, min: min, max: max, onFocusChange: onFocusChange)
+    }
+
+    func makeNSView(context: Context) -> ArrowStepTextField {
+        let textField = ArrowStepTextField(frame: .zero)
+        textField.isBordered = true
+        textField.isBezeled = true
+        textField.bezelStyle = .roundedBezel
+        textField.focusRingType = .default
+        textField.font = NSFont.systemFont(ofSize: 15, weight: .medium)
+        textField.delegate = context.coordinator
+        textField.stringValue = context.coordinator.string(from: value)
+        textField.onFocusChange = { isFocused in
+            context.coordinator.onFocusChange?(isFocused)
+        }
+        return textField
+    }
+
+    func updateNSView(_ nsView: ArrowStepTextField, context: Context) {
+        context.coordinator.step = step
+        context.coordinator.min = min
+        context.coordinator.max = max
+        context.coordinator.onFocusChange = onFocusChange
+        let expected = context.coordinator.string(from: value)
+        if nsView.stringValue != expected {
+            nsView.stringValue = expected
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var value: Binding<Double>
+        var step: Double
+        var min: Double
+        var max: Double
+        var onFocusChange: ((Bool) -> Void)?
+
+        init(value: Binding<Double>, step: Double, min: Double, max: Double, onFocusChange: ((Bool) -> Void)?) {
+            self.value = value
+            self.step = step
+            self.min = min
+            self.max = max
+            self.onFocusChange = onFocusChange
+        }
+
+        func controlTextDidBeginEditing(_ obj: Notification) {
+            onFocusChange?(true)
+        }
+
+        func controlTextDidEndEditing(_ obj: Notification) {
+            onFocusChange?(false)
+            if let textField = obj.object as? NSTextField {
+                textField.stringValue = string(from: value.wrappedValue)
+            }
+        }
+
+        func controlTextDidChange(_ obj: Notification) {
+            guard let textField = obj.object as? NSTextField else { return }
+            let sanitized = sanitize(textField.stringValue)
+            if textField.stringValue != sanitized {
+                textField.stringValue = sanitized
+            }
+            guard !sanitized.isEmpty, sanitized != ".", let parsed = Double(sanitized) else { return }
+            value.wrappedValue = clamped(parsed)
+        }
+
+        func adjustFromLiveValue(_ liveText: String, delta: Double) -> Double {
+            let sanitized = sanitize(liveText)
+            let base = (sanitized.isEmpty || sanitized == ".") ? value.wrappedValue : (Double(sanitized) ?? value.wrappedValue)
+            let next = clamped(base + delta)
+            value.wrappedValue = next
+            return next
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            let delta: Double
+            switch commandSelector {
+            case #selector(NSResponder.moveUp(_:)):
+                delta = step
+            case #selector(NSResponder.moveDown(_:)):
+                delta = -step
+            default:
+                return false
+            }
+
+            let next = adjustFromLiveValue(textView.string, delta: delta)
+            let formatted = string(from: next)
+            textView.string = formatted
+            if let field = control as? NSTextField {
+                field.stringValue = formatted
+            }
+            return true
+        }
+
+        func clamped(_ number: Double) -> Double {
+            Swift.max(min, Swift.min(max, number))
+        }
+
+        func sanitize(_ input: String) -> String {
+            var result = ""
+            var seenDot = false
+            for char in input {
+                if char >= "0" && char <= "9" {
+                    result.append(char)
+                } else if char == "." && !seenDot {
+                    seenDot = true
+                    result.append(char)
+                }
+            }
+            if result.first == "." {
+                result = "0" + result
+            }
+            return result
+        }
+
+        func string(from number: Double) -> String {
+            if number.rounded() == number {
+                return String(Int(number))
+            }
+            let formatter = NumberFormatter()
+            formatter.minimumFractionDigits = 0
+            formatter.maximumFractionDigits = 8
+            formatter.decimalSeparator = "."
+            return formatter.string(from: NSNumber(value: number)) ?? String(number)
+        }
+    }
+}
+
+private final class ArrowStepTextField: NSTextField {
+    var onFocusChange: ((Bool) -> Void)?
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became {
+            onFocusChange?(true)
+        }
+        return became
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned {
+            onFocusChange?(false)
+        }
+        return resigned
     }
 }
 

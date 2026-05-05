@@ -27,6 +27,7 @@ enum AppSection: String, CaseIterable, Identifiable {
 struct GuardianHQApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var selection: AppSection = .dashboard
+    @State private var showingSplash = true
     @StateObject private var toastCenter = ToastCenter()
 
     init() {
@@ -35,10 +36,23 @@ struct GuardianHQApp: App {
 
     var body: some Scene {
         WindowGroup("Guardian HQ") {
-            RootView(selection: $selection)
-                .preferredColorScheme(.dark)
-                .withToasts()
-                .environmentObject(toastCenter)
+            Group {
+                if showingSplash {
+                    TacticalSplashView()
+                } else {
+                    RootView(selection: $selection)
+                        .withToasts()
+                        .environmentObject(toastCenter)
+                }
+            }
+            .preferredColorScheme(.dark)
+            .task {
+                guard showingSplash else { return }
+                try? await Task.sleep(nanoseconds: 1_800_000_000)
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    showingSplash = false
+                }
+            }
         }
         .windowResizability(.contentSize)
         .defaultSize(width: 1320, height: 860)
@@ -48,7 +62,19 @@ struct GuardianHQApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        if let logo = AppIconLoader.loadLogoIcon() {
+            NSApp.applicationIconImage = logo
+        }
         NSApp.activate(ignoringOtherApps: true)
         NSApp.windows.first?.makeKeyAndOrderFront(nil)
+    }
+}
+
+private enum AppIconLoader {
+    static func loadLogoIcon() -> NSImage? {
+        guard let bundledURL = Bundle.module.url(forResource: "AppIcon", withExtension: "icns") else {
+            return nil
+        }
+        return NSImage(contentsOf: bundledURL)
     }
 }

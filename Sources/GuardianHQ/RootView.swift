@@ -81,11 +81,60 @@ struct RootView: View {
     private var content: some View {
         Group {
             switch selection {
+            case .dashboard:
+                DashboardView(missionStore: missionStore)
             case .missions:
                 MissionsView(store: missionStore)
             default:
                 Color.clear
             }
         }
+    }
+}
+
+private struct DashboardView: View {
+    @ObservedObject var missionStore: MissionStore
+
+    private var totalMissionRuns: Int {
+        0
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 16) {
+                    dashboardStatCard(
+                        title: "Missions",
+                        value: "\(missionStore.missions.count)",
+                        subtitle: "Templates available"
+                    )
+                    dashboardStatCard(
+                        title: "Mission Runs",
+                        value: "\(totalMissionRuns)",
+                        subtitle: "Active in control"
+                    )
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func dashboardStatCard(title: String, value: String, subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.gray)
+            Text(value)
+                .font(.system(size: 32, weight: .heavy))
+                .foregroundStyle(.white)
+            Text(subtitle)
+                .font(.system(size: 12))
+                .foregroundStyle(.gray)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, minHeight: 120, alignment: .leading)
+        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 }

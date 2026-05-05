@@ -6,19 +6,37 @@ enum AppSection: String, CaseIterable, Identifiable {
     case devices = "Devices"
     case missions = "Missions"
     case missionControl = "Mission Control"
+    case settings = "Settings"
 
     var id: String { rawValue }
+
+    var systemImage: String {
+        switch self {
+        case .dashboard:
+            return "square.grid.2x2"
+        case .devices:
+            return "dot.radiowaves.left.and.right"
+        case .missions:
+            return "map"
+        case .missionControl:
+            return "slider.horizontal.3"
+        case .settings:
+            return "gearshape.fill"
+        }
+    }
 
     var subtitle: String {
         switch self {
         case .dashboard:
             return "HQ mission and fleet overview."
         case .devices:
-            return "Manage connected devices."
+            return "Fleet hardware and link status."
         case .missions:
             return "Create and manage mission plans."
         case .missionControl:
             return "Operate active missions in real time."
+        case .settings:
+            return "MAVSDK, link, and app preferences."
         }
     }
 }

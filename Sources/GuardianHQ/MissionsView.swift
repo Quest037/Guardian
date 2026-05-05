@@ -176,6 +176,7 @@ private struct MissionWorkspaceView: View {
     @State private var focusedWaypointCameraFieldKey: String?
     @State private var focusedTransitionCameraFieldKey: String?
     @State private var suppressNextMapClick = false
+    @State private var detailsDescriptionEditorHeight: CGFloat = 96
 
     let onBack: () -> Void
     let onDelete: (Mission) -> Void
@@ -307,21 +308,18 @@ private struct MissionWorkspaceView: View {
             card("Edit Mission") {
                 TextField("Name", text: $draft.name)
                     .textFieldStyle(.roundedBorder)
-                TextField("Description", text: $draft.description)
-                    .textFieldStyle(.roundedBorder)
+                AutoGrowingTextEditor(
+                    text: $draft.description,
+                    measuredHeight: $detailsDescriptionEditorHeight,
+                    placeholder: "Description",
+                    minHeight: 96,
+                    maxHeight: 220
+                )
                 Picker("Type", selection: $draft.type) {
                     Text("mobile").tag(MissionType.mobile)
                     Text("static").tag(MissionType.staticType)
                 }
                 .pickerStyle(.segmented)
-            }
-
-            card("Mission Runtime") {
-                HStack {
-                    Stepper("Count: \(draft.count)", value: $draft.count, in: 0...10_000)
-                    Spacer()
-                    Stepper("Duration: \(draft.duration)", value: $draft.duration, in: 0...100_000)
-                }
             }
         }
     }

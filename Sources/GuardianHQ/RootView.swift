@@ -2,17 +2,31 @@ import SwiftUI
 
 struct RootView: View {
     @Binding var selection: AppSection
+    @EnvironmentObject private var toastCenter: ToastCenter
     @StateObject private var missionStore = MissionStore()
+    @StateObject private var missionControlStore = MissionControlStore()
+    @StateObject private var fleetLinkService = FleetLinkService()
+    @StateObject private var generalSettingsStore = GeneralSettingsStore()
+    @State private var settingsPane: SettingsPane = .general
+    @State private var isSidebarCollapsed = false
 
     private let bgMain = Color(red: 0.07, green: 0.07, blue: 0.08)
     private let bgRail = Color(red: 0.12, green: 0.12, blue: 0.13)
     private let bgTop = Color(red: 0.14, green: 0.14, blue: 0.15)
     private let bgActive = Color(red: 0.20, green: 0.20, blue: 0.21)
 
+    private var sidebarWidth: CGFloat {
+        isSidebarCollapsed ? 72 : 260
+    }
+
+    private var appVersionLabel: String {
+        "v\(AppMetadata.releaseVersion)"
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             sidebar
-                .frame(width: 260)
+                .frame(width: sidebarWidth)
                 .background(bgRail)
 
             VStack(spacing: 0) {
@@ -31,23 +45,52 @@ struct RootView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Guardian")
-                .font(.system(size: 22, weight: .bold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 16)
-                .padding(.top, 20)
-                .padding(.bottom, 12)
+            HStack {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isSidebarCollapsed.toggle()
+                    }
+                } label: {
+                    Image(systemName: "line.3.horizontal")
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.bordered)
+                .tint(.gray.opacity(0.35))
+
+                if !isSidebarCollapsed {
+                    Text("Guardian")
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundStyle(.white)
+                        .transition(.opacity.combined(with: .move(edge: .leading)))
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 16)
+            .padding(.bottom, 8)
 
             ForEach(AppSection.allCases) { section in
                 Button {
                     selection = section
                 } label: {
-                    HStack {
-                        Text(section.rawValue)
-                            .font(.system(size: 14, weight: section == selection ? .semibold : .regular))
-                        Spacer(minLength: 0)
+                    Group {
+                        if isSidebarCollapsed {
+                            Image(systemName: section.systemImage)
+                                .font(.system(size: 16, weight: .semibold))
+                                .frame(maxWidth: .infinity, alignment: .center)
+                        } else {
+                            HStack {
+                                Image(systemName: section.systemImage)
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .frame(width: 18, height: 18)
+                            Text(section.rawValue)
+                                .font(.system(size: 14, weight: section == selection ? .semibold : .regular))
+                                Spacer(minLength: 0)
+                            }
+                        }
                     }
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, isSidebarCollapsed ? 8 : 14)
                     .padding(.vertical, 10)
                     .frame(maxWidth: .infinity)
                     .background(section == selection ? bgActive : Color.clear)
@@ -58,19 +101,82 @@ struct RootView: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 10)
                 .frame(maxWidth: .infinity)
+                .help(section.rawValue)
             }
 
             Spacer()
+
+            VStack(alignment: isSidebarCollapsed ? .center : .leading, spacing: 4) {
+                Text(isSidebarCollapsed ? AppMetadata.releaseVersion : appVersionLabel)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.gray)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .frame(maxWidth: .infinity, alignment: isSidebarCollapsed ? .center : .leading)
+            .padding(.horizontal, 12)
+            .padding(.bottom, 14)
         }
     }
 
     private var topBar: some View {
-        HStack {
+        HStack(spacing: 16) {
             Text(selection.rawValue)
                 .font(.system(size: 15, weight: .bold))
                 .foregroundStyle(.white)
                 .padding(.leading, 16)
             Spacer()
+
+            HStack(spacing: 8) {
+                Text("Server")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.gray)
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { fleetLinkService.isRunning },
+                        set: { engaged in
+                            if engaged {
+                                let ok = fleetLinkService.startServer()
+                                if !ok {
+                                    let message = fleetLinkService.lastError ?? "Could not start mavsdk_server."
+                                    toastCenter.show(message, style: .error, duration: 3.5)
+                                    settingsPane = .mavsdkServer
+                                    selection = .settings
+                                }
+                            } else {
+                                fleetLinkService.stopServer()
+                            }
+                        }
+                    )
+                )
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .controlSize(.small)
+            }
+
+            HStack(spacing: 8) {
+                Text("Simulate")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.gray)
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { fleetLinkService.isSimulateEnabled },
+                        set: { fleetLinkService.setSimulateEnabled($0) }
+                    )
+                )
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .controlSize(.small)
+                .disabled(!fleetLinkService.isRunning)
+                .help(
+                    fleetLinkService.isRunning
+                        ? "Simulate"
+                        : "Turn on Server to use Simulate."
+                )
+            }
+
             Text("Dark Mode")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.gray)
@@ -82,11 +188,25 @@ struct RootView: View {
         Group {
             switch selection {
             case .dashboard:
-                DashboardView(missionStore: missionStore)
+                DashboardView(
+                    missionStore: missionStore,
+                    missionControlStore: missionControlStore
+                )
             case .missions:
                 MissionsView(store: missionStore)
-            default:
-                Color.clear
+            case .missionControl:
+                MissionControlView(
+                    missionStore: missionStore,
+                    controlStore: missionControlStore
+                )
+            case .devices:
+                DevicesView(fleetLink: fleetLinkService)
+            case .settings:
+                SettingsView(
+                    selectedPane: $settingsPane,
+                    fleetLink: fleetLinkService,
+                    generalSettings: generalSettingsStore
+                )
             }
         }
     }
@@ -94,9 +214,10 @@ struct RootView: View {
 
 private struct DashboardView: View {
     @ObservedObject var missionStore: MissionStore
+    @ObservedObject var missionControlStore: MissionControlStore
 
-    private var totalMissionRuns: Int {
-        0
+    private var activeMissionRuns: Int {
+        missionControlStore.runs.filter { $0.status == .running }.count
     }
 
     var body: some View {
@@ -110,7 +231,7 @@ private struct DashboardView: View {
                     )
                     dashboardStatCard(
                         title: "Mission Runs",
-                        value: "\(totalMissionRuns)",
+                        value: "\(activeMissionRuns)",
                         subtitle: "Active in control"
                     )
                 }

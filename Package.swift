@@ -14,7 +14,9 @@ let package = Package(
             name: "GuardianHQ",
             path: "Sources/GuardianHQ",
             resources: [
-                .copy("Resources/AppIcon.icns")
+                .copy("Resources/AppIcon.icns"),
+                .copy("Resources/mavsdk_server"),
+                .copy("Resources/MavsdkBridge"),
             ]
         ),
     ]

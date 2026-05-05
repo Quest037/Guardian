@@ -59,7 +59,7 @@ struct ToastHost: ViewModifier {
     @EnvironmentObject private var toastCenter: ToastCenter
 
     func body(content: Content) -> some View {
-        ZStack(alignment: .bottomTrailing) {
+        ZStack(alignment: .bottomLeading) {
             content
 
             if let toast = toastCenter.current {
@@ -78,9 +78,9 @@ struct ToastHost: ViewModifier {
                         .stroke(Color.white.opacity(0.16), lineWidth: 1)
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 10))
-                .padding(.trailing, 18)
-                .padding(.bottom, 16)
-                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .padding(.leading, 18)
+                .padding(.bottom, 20)
+                .transition(.move(edge: .leading).combined(with: .opacity))
             }
         }
     }

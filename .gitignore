@@ -5,6 +5,9 @@ __pycache__/
 .venv/
 venv/
 
+# Bundled MAVSDK Server (run `make` or ./scripts/fetch_mavsdk_server.sh)
+Sources/GuardianHQ/Resources/mavsdk_server
+
 # Swift / Xcode / SPM artifacts
 .build/
 .swiftpm/

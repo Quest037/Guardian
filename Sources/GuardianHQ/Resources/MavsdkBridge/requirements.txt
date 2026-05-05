@@ -1,0 +1,4 @@
+# Match your mavsdk_server major (see scripts/fetch_mavsdk_server.sh; v3.17.x server).
+# PyPI has no mavsdk 2.12 — 2.x stops at 2.8.x, then 3.x. Install once:
+#   make bridge-deps
+mavsdk>=3.10.0,<4

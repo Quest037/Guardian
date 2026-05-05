@@ -1,0 +1,10 @@
+[project]
+name = "guardian"
+version = "0.1.0"
+description = "Mac-first desktop app foundation with cross-OS architecture."
+requires-python = ">=3.9"
+
+[tool.guardian]
+app_name = "Guardian"
+initial_target = "macOS"
+cross_os_target = ["macOS", "Linux", "Windows"]

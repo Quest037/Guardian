@@ -27,6 +27,7 @@ enum AppSection: String, CaseIterable, Identifiable {
 struct GuardianHQApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var selection: AppSection = .dashboard
+    @StateObject private var toastCenter = ToastCenter()
 
     init() {
         NSWindow.allowsAutomaticWindowTabbing = false
@@ -36,6 +37,8 @@ struct GuardianHQApp: App {
         WindowGroup("Guardian HQ") {
             RootView(selection: $selection)
                 .preferredColorScheme(.dark)
+                .withToasts()
+                .environmentObject(toastCenter)
         }
         .windowResizability(.contentSize)
         .defaultSize(width: 1320, height: 860)

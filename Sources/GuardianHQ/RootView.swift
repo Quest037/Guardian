@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RootView: View {
     @Binding var selection: AppSection
+    @StateObject private var missionStore = MissionStore()
 
     private let bgMain = Color(red: 0.07, green: 0.07, blue: 0.08)
     private let bgRail = Color(red: 0.12, green: 0.12, blue: 0.13)
@@ -21,7 +22,6 @@ struct RootView: View {
 
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .padding(24)
                     .background(bgMain)
             }
         }
@@ -42,17 +42,22 @@ struct RootView: View {
                 Button {
                     selection = section
                 } label: {
-                    Text(section.rawValue)
-                        .font(.system(size: 14, weight: section == selection ? .semibold : .regular))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .background(section == selection ? bgActive : Color.clear)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    HStack {
+                        Text(section.rawValue)
+                            .font(.system(size: 14, weight: section == selection ? .semibold : .regular))
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .frame(maxWidth: .infinity)
+                    .background(section == selection ? bgActive : Color.clear)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.white)
                 .padding(.horizontal, 10)
+                .frame(maxWidth: .infinity)
             }
 
             Spacer()
@@ -61,7 +66,7 @@ struct RootView: View {
 
     private var topBar: some View {
         HStack {
-            Text("Guardian HQ")
+            Text(selection.rawValue)
                 .font(.system(size: 15, weight: .bold))
                 .foregroundStyle(.white)
                 .padding(.leading, 16)
@@ -74,13 +79,13 @@ struct RootView: View {
     }
 
     private var content: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(selection.rawValue)
-                .font(.system(size: 40, weight: .bold))
-                .foregroundStyle(.white)
-            Text(selection.subtitle)
-                .font(.system(size: 16))
-                .foregroundStyle(.gray)
+        Group {
+            switch selection {
+            case .missions:
+                MissionsView(store: missionStore)
+            default:
+                Color.clear
+            }
         }
     }
 }

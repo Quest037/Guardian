@@ -4,3 +4,13 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+
+# Swift / Xcode / SPM artifacts
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Local scratch scaffold folder (not part of app source)
+GuardianMacApp/

@@ -1,0 +1,15 @@
+---
+description: Enforce semantic button colors across the app
+alwaysApply: true
+---
+
+# Button Semantic Colors
+
+- Save / Confirm / Complete / Yes actions must be blue.
+- Delete / Cancel / Remove / No actions must be red.
+- Edit actions must use the `pencil` icon and appear before Delete actions.
+- Delete actions must use the `trash` icon and appear after Edit actions.
+- Action icon set is standardized app-wide and must stay consistent across all views.
+- Ordering and color semantics are app-wide conventions, not per-screen preferences.
+- Apply these semantics consistently in all new UI work and while touching existing screens.
+- Prefer shared styling helpers when practical, but do not block shipping on full refactors.

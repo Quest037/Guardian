@@ -1,0 +1,2 @@
+Guardian keeps this file so the ArduPilotSitl resource folder exists in git and SwiftPM can bundle it.
+Populate the rest of this directory by running: ./scripts/fetch_ardupilot_sitl.sh (or: make sitl-runtime).

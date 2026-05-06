@@ -7,6 +7,7 @@ struct RootView: View {
     @StateObject private var missionControlStore = MissionControlStore()
     @StateObject private var fleetLinkService = FleetLinkService()
     @StateObject private var generalSettingsStore = GeneralSettingsStore()
+    @StateObject private var sitlService = SitlService()
     @State private var settingsPane: SettingsPane = .general
     @State private var isSidebarCollapsed = false
 
@@ -41,6 +42,15 @@ struct RootView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(bgMain)
+        .onAppear {
+            sitlService.attachFleetLink(fleetLinkService)
+        }
+        .onChange(of: fleetLinkService.isRunning) { running in
+            if !running { sitlService.stopAll() }
+        }
+        .onChange(of: fleetLinkService.isSimulateEnabled) { sim in
+            if !sim { sitlService.stopAll() }
+        }
     }
 
     private var sidebar: some View {
@@ -190,7 +200,9 @@ struct RootView: View {
             case .dashboard:
                 DashboardView(
                     missionStore: missionStore,
-                    missionControlStore: missionControlStore
+                    missionControlStore: missionControlStore,
+                    fleetLink: fleetLinkService,
+                    sitl: sitlService
                 )
             case .missions:
                 MissionsView(store: missionStore)
@@ -200,7 +212,11 @@ struct RootView: View {
                     controlStore: missionControlStore
                 )
             case .devices:
-                DevicesView(fleetLink: fleetLinkService)
+                DevicesView(
+                    fleetLink: fleetLinkService,
+                    sitl: sitlService,
+                    generalSettings: generalSettingsStore
+                )
             case .settings:
                 SettingsView(
                     selectedPane: $settingsPane,
@@ -215,9 +231,21 @@ struct RootView: View {
 private struct DashboardView: View {
     @ObservedObject var missionStore: MissionStore
     @ObservedObject var missionControlStore: MissionControlStore
+    @ObservedObject var fleetLink: FleetLinkService
+    @ObservedObject var sitl: SitlService
 
     private var activeMissionRuns: Int {
         missionControlStore.runs.filter { $0.status == .running }.count
+    }
+
+    private var simInstanceRowCount: Int {
+        sitl.instances.count
+    }
+
+    /// Same cardinality as `fleetGridEntries` on Devices (live MAVLink row when connected, plus every SITL row).
+    private var vehiclesTotalCount: Int {
+        let liveVehicleCount = fleetLink.bridgePhase == .live ? 1 : 0
+        return liveVehicleCount + simInstanceRowCount
     }
 
     var body: some View {
@@ -227,12 +255,20 @@ private struct DashboardView: View {
                     dashboardStatCard(
                         title: "Missions",
                         value: "\(missionStore.missions.count)",
-                        subtitle: "Templates available"
                     )
                     dashboardStatCard(
-                        title: "Mission Runs",
+                        title: "Live Missions",
                         value: "\(activeMissionRuns)",
-                        subtitle: "Active in control"
+                    )
+                }
+                HStack(spacing: 16) {
+                    dashboardStatCard(
+                        title: "Vehicles",
+                        value: "\(vehiclesTotalCount)",
+                    )
+                    dashboardStatCard(
+                        title: "Vehicles (sims)",
+                        value: "\(simInstanceRowCount)",
                     )
                 }
             }
@@ -241,7 +277,7 @@ private struct DashboardView: View {
         }
     }
 
-    private func dashboardStatCard(title: String, value: String, subtitle: String) -> some View {
+    private func dashboardStatCard(title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
@@ -249,9 +285,6 @@ private struct DashboardView: View {
             Text(value)
                 .font(.system(size: 32, weight: .heavy))
                 .foregroundStyle(.white)
-            Text(subtitle)
-                .font(.system(size: 12))
-                .foregroundStyle(.gray)
         }
         .padding(16)
         .frame(maxWidth: .infinity, minHeight: 120, alignment: .leading)

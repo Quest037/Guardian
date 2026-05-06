@@ -1,8 +1,10 @@
+import AppKit
 import SwiftUI
 
 /// MAVSDK Server and MAVLink ingress — lives under Settings → MAVSDK Server.
 struct MavsdkServerSettingsView: View {
     @ObservedObject var fleetLink: FleetLinkService
+    @EnvironmentObject private var toastCenter: ToastCenter
 
     @State private var draft: FleetLinkConfiguration = .defaults
     @State private var extraURLsText = ""
@@ -125,6 +127,11 @@ struct MavsdkServerSettingsView: View {
                     .font(.system(size: 15, weight: .bold))
                     .foregroundStyle(.white)
                 Spacer()
+                Button("Copy") { copyServerLogToPasteboard() }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.gray)
+                    .disabled(fleetLink.logLines.isEmpty)
+                    .help("Copy all log lines to the clipboard")
                 Button("Clear") { fleetLink.clearLog() }
                     .buttonStyle(.borderless)
                     .foregroundStyle(.gray)
@@ -161,5 +168,13 @@ struct MavsdkServerSettingsView: View {
             .split(whereSeparator: \.isNewline)
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+
+    private func copyServerLogToPasteboard() {
+        let text = fleetLink.logLines.joined(separator: "\n")
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+        toastCenter.show("Server log copied to clipboard.", style: .success, duration: 2.0)
     }
 }

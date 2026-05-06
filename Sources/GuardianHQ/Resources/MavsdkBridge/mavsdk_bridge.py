@@ -47,6 +47,38 @@ async def _run(host: str, port: int) -> None:
 
     _emit({"type": "bridge_ready", "host": host, "port": port})
 
+    async def detect_and_emit_vehicle_stack() -> None:
+        """Best-effort ArduPilot vs PX4 from MAVSDK Info (vendor / product strings)."""
+        stack = "unknown"
+        try:
+            iden = await asyncio.wait_for(drone.info.get_identification(), timeout=10.0)
+            vendor = (getattr(iden, "vendor_name", None) or "").lower()
+            product = (getattr(iden, "product_name", None) or "").lower()
+            blob = f"{vendor} {product}"
+            if any(k in blob for k in ("ardupilot", "arducopter", "arduplane", "ardurover", "ardusub", "arduboat", "apm")):
+                stack = "ardupilot"
+            elif "px4" in blob or "pixhawk" in blob:
+                stack = "px4"
+        except asyncio.TimeoutError:
+            pass
+        except Exception:
+            pass
+        if stack == "unknown":
+            try:
+                prod = await asyncio.wait_for(drone.info.get_product(), timeout=4.0)
+                vendor = (getattr(prod, "vendor_name", None) or "").lower()
+                product = (getattr(prod, "product_name", None) or "").lower()
+                blob = f"{vendor} {product}"
+                if any(k in blob for k in ("ardupilot", "arducopter", "arduplane", "ardurover", "ardusub", "arduboat", "apm")):
+                    stack = "ardupilot"
+                elif "px4" in blob or "pixhawk" in blob:
+                    stack = "px4"
+            except Exception:
+                pass
+        _emit({"type": "vehicle_stack", "stack": stack})
+
+    asyncio.create_task(detect_and_emit_vehicle_stack())
+
     async def watch_armed():
         try:
             async for armed in drone.telemetry.armed():

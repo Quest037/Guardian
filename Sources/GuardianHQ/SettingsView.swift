@@ -55,10 +55,7 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    Text(
-                        "Used for built-in SITL when you spawn a simulated vehicle without choosing a stack. "
-                        + "Per-vehicle overrides will be available when Mission Control launches sim instances."
-                    )
+                    Text("Default flight controller stack for simulated vehicles.")
                     .font(.system(size: 12))
                     .foregroundStyle(.gray)
                     .fixedSize(horizontal: false, vertical: true)

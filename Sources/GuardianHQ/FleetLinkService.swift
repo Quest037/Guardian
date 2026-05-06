@@ -94,7 +94,8 @@ final class FleetLinkService: ObservableObject {
             self.appendLog("mavsdk_server exited (code \(code)).")
         }
         do {
-            try runner.start(configuration: configuration)
+            let mavsdkConfig = Self.mavsdkConfigurationIncludingDefaultPx4SihUdpouts(configuration)
+            try runner.start(configuration: mavsdkConfig)
             self.runner = runner
             isRunning = true
             appendLog("Started mavsdk_server (gRPC \(configuration.grpcPort), \(configuration.primaryMavlinkConnectionURL)).")
@@ -117,8 +118,51 @@ final class FleetLinkService: ObservableObject {
         runner.stop()
     }
 
+    /// PX4 SIH GCS MAVLink listens on UDP `18570 + instance` (see `SitlLaunchRecipe.px4SihGcsUdpPort`).
+    /// `mavsdk_server` must have matching `udpout://…` args or the Python bridge never sees a vehicle while ArduPilot
+    /// (MAVProxy → primary `udpin` port) does. Merge defaults **without persisting** so hardware + sim stay complementary.
+    private static func mavsdkConfigurationIncludingDefaultPx4SihUdpouts(_ base: FleetLinkConfiguration) -> FleetLinkConfiguration {
+        var c = base
+        let maxInstances = 16
+        for i in 0..<maxInstances {
+            let url = "udpout://127.0.0.1:\(SitlLaunchRecipe.px4SihGcsUdpPort(instance: i))"
+            let already = c.additionalMavlinkConnectionURLs.contains {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines) == url
+            }
+            if !already {
+                c.additionalMavlinkConnectionURLs.append(url)
+            }
+        }
+        return c
+    }
+
     func clearLog() {
         logLines.removeAll(keepingCapacity: true)
+    }
+
+    /// Appends a line to the same log as `mavsdk_server` (used by SITL child processes).
+    func appendSimulationLog(_ line: String) {
+        appendLog(line)
+    }
+
+    /// While **Simulate** is on, drop cached “first vehicle” state when every SITL process has stopped.
+    /// MAVSDK does not always tear down the discovered system when `px4` exits, which left stale telemetry
+    /// and a phantom Live row after the sim card disappeared.
+    func clearStaleVehicleStateWhenNoSitlAlive() {
+        guard isSimulateEnabled else { return }
+        telemetry = nil
+        if bridgePhase == .live {
+            bridgePhase = .awaitingVehicle
+            appendLog("Simulation vehicle ended — reconnecting telemetry bridge for the next MAVLink system.")
+        }
+        restartPythonBridgeForFreshMavsdkDiscovery()
+    }
+
+    /// Stops and restarts `mavsdk_bridge.py` so `drone.connect()` runs again (avoids stale first-vehicle state after SITL exit).
+    private func restartPythonBridgeForFreshMavsdkDiscovery() {
+        guard isRunning, bridgeRunner != nil else { return }
+        stopPythonBridge()
+        schedulePythonBridgeStart()
     }
 
     private func schedulePythonBridgeStart() {
@@ -195,12 +239,18 @@ final class FleetLinkService: ObservableObject {
         switch env.type {
         case "bridge_listening":
             bridgePhase = .awaitingVehicle
+            snap.autopilotStack = .unknown
             appendLog(
                 "Bridge connected to MAVSDK (gRPC \(env.host ?? "?"):\(env.port.map(String.init) ?? "?")) — waiting for a MAVLink system on the link."
             )
         case "bridge_ready":
             bridgePhase = .live
             appendLog("Bridge ready — vehicle discovered (gRPC \(env.host ?? "?"):\(env.port.map(String.init) ?? "?")).")
+        case "vehicle_stack":
+            if let raw = env.stack?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+               let parsed = FleetAutopilotStack(rawValue: raw) {
+                snap.autopilotStack = parsed
+            }
         case "armed":
             if let armed = env.armed {
                 snap.isArmed = armed
@@ -252,6 +302,8 @@ final class FleetLinkService: ObservableObject {
 
 private struct BridgeEnvelope: Decodable {
     let type: String
+    /// `vehicle_stack` — `ardupilot` / `px4` / `unknown`
+    let stack: String?
     let armed: Bool?
     /// Decoded from `flight_mode` via snake_case conversion.
     let flightMode: String?

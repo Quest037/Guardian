@@ -8,6 +8,8 @@ struct FleetTelemetrySnapshot: Equatable {
     var longitudeDeg: Double?
     var relativeAltM: Double?
     var lastUpdate: Date
+    /// Best-effort from MAVSDK `info.get_identification()` (`vehicle_stack` bridge events).
+    var autopilotStack: FleetAutopilotStack
 
     static let empty = FleetTelemetrySnapshot(
         isArmed: false,
@@ -15,6 +17,7 @@ struct FleetTelemetrySnapshot: Equatable {
         latitudeDeg: nil,
         longitudeDeg: nil,
         relativeAltM: nil,
-        lastUpdate: Date()
+        lastUpdate: Date(),
+        autopilotStack: .unknown
     )
 }

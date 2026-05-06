@@ -1,0 +1,4 @@
+Guardian keeps this folder so SwiftPM can bundle Px4SitlBundle resources.
+Populate bin/ (full directory: px4, px4-alias.sh, px4-* symlinks) and etc/ by running from the Guardian repo:
+  PX4_AUTOPILOT_ROOT=/path/to/PX4-Autopilot ./scripts/sync_px4_sitl_bundle.sh
+(or: make px4-sitl-runtime)

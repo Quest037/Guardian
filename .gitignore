@@ -8,6 +8,15 @@ venv/
 # Bundled MAVSDK Server (run `make` or ./scripts/fetch_mavsdk_server.sh)
 Sources/GuardianHQ/Resources/mavsdk_server
 
+# ArduPilot upstream tree (run ./scripts/fetch_ardupilot_sitl.sh or make sitl-runtime).
+# Keep the tracked marker file only.
+Sources/GuardianHQ/Resources/ArduPilotSitl/*
+!Sources/GuardianHQ/Resources/ArduPilotSitl/_GUARDIAN_DO_NOT_DELETE.txt
+
+# PX4 SITL runtime (bin/px4 + etc/ — run ./scripts/sync_px4_sitl_bundle.sh or make px4-sitl-runtime).
+Sources/GuardianHQ/Resources/Px4SitlBundle/*
+!Sources/GuardianHQ/Resources/Px4SitlBundle/_GUARDIAN_DO_NOT_DELETE.txt
+
 # Swift / Xcode / SPM artifacts
 .build/
 .swiftpm/

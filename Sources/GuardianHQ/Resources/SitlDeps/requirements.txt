@@ -1,0 +1,7 @@
+# Python packages used by ArduPilot Tools/autotest/sim_vehicle.py (via pysim/util.py).
+# Install once: make sitl-deps
+pexpect>=4.8.0
+# ArduPilot waf embed step requires empy (import name is `em`).
+empy==3.3.4
+# MAVProxy on macOS imports `gnureadline` (MAVProxy.modules.lib.rline); without it MAVProxy exits immediately.
+gnureadline>=8.0

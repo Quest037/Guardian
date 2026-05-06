@@ -17,6 +17,10 @@ let package = Package(
                 .copy("Resources/AppIcon.icns"),
                 .copy("Resources/mavsdk_server"),
                 .copy("Resources/MavsdkBridge"),
+                .copy("Resources/SitlDeps"),
+                .copy("Resources/ArduPilotSitl"),
+                .copy("Resources/Px4SitlBundle"),
+                .copy("Resources/SimulationDevices"),
             ]
         ),
     ]

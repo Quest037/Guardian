@@ -3,7 +3,7 @@ import AppKit
 
 enum AppSection: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"
-    case devices = "Devices"
+    case devices = "Vehicles"
     case missions = "Missions"
     case missionControl = "Mission Control"
     case settings = "Settings"
@@ -30,7 +30,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .dashboard:
             return "HQ mission and fleet overview."
         case .devices:
-            return "Fleet hardware and link status."
+            return "Live and simulated vehicles on the link."
         case .missions:
             return "Create and manage mission plans."
         case .missionControl:

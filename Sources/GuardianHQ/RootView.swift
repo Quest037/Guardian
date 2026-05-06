@@ -205,11 +205,14 @@ struct RootView: View {
                     sitl: sitlService
                 )
             case .missions:
-                MissionsView(store: missionStore)
+                MissionsView(store: missionStore, generalSettings: generalSettingsStore)
             case .missionControl:
                 MissionControlView(
                     missionStore: missionStore,
-                    controlStore: missionControlStore
+                    controlStore: missionControlStore,
+                    fleetLink: fleetLinkService,
+                    sitl: sitlService,
+                    generalSettings: generalSettingsStore
                 )
             case .devices:
                 DevicesView(

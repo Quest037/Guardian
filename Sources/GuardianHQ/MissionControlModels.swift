@@ -24,23 +24,27 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
     var rosterDeviceId: UUID
     var slotName: String
     var attachedDevice: String
+    /// `FleetMissionVehicleToken.storageKey` when bound to the Vehicles list; `nil` if unassigned or legacy text-only.
+    var attachedFleetVehicleToken: String?
 
     init(
         id: UUID = UUID(),
         pathId: UUID? = nil,
         rosterDeviceId: UUID,
         slotName: String,
-        attachedDevice: String = ""
+        attachedDevice: String = "",
+        attachedFleetVehicleToken: String? = nil
     ) {
         self.id = id
         self.pathId = pathId
         self.rosterDeviceId = rosterDeviceId
         self.slotName = slotName
         self.attachedDevice = attachedDevice
+        self.attachedFleetVehicleToken = attachedFleetVehicleToken
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, pathId, rosterDeviceId, slotName, attachedDevice
+        case id, pathId, rosterDeviceId, slotName, attachedDevice, attachedFleetVehicleToken
     }
 
     init(from decoder: Decoder) throws {
@@ -50,6 +54,7 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         rosterDeviceId = try c.decode(UUID.self, forKey: .rosterDeviceId)
         slotName = try c.decode(String.self, forKey: .slotName)
         attachedDevice = try c.decodeIfPresent(String.self, forKey: .attachedDevice) ?? ""
+        attachedFleetVehicleToken = try c.decodeIfPresent(String.self, forKey: .attachedFleetVehicleToken)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -59,6 +64,13 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         try c.encode(rosterDeviceId, forKey: .rosterDeviceId)
         try c.encode(slotName, forKey: .slotName)
         try c.encode(attachedDevice, forKey: .attachedDevice)
+        try c.encodeIfPresent(attachedFleetVehicleToken, forKey: .attachedFleetVehicleToken)
+    }
+
+    /// Roster slot is ready to start when tied to a fleet vehicle or legacy free-text device.
+    var hasFleetOrLegacyAssignment: Bool {
+        if let t = attachedFleetVehicleToken, !t.isEmpty { return true }
+        return !attachedDevice.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 
@@ -73,6 +85,9 @@ struct MissionRun: Identifiable, Codable, Equatable {
     var assignments: [MissionRunAssignment]
     let createdAt: Date
     var startedAt: Date?
+    var completedAt: Date?
+    /// When true, the run finishes the current cycle gracefully, then stops (no further loop / continuous scheduling).
+    var pendingGracefulCycleStop: Bool
 
     init(
         id: UUID = UUID(),
@@ -84,7 +99,9 @@ struct MissionRun: Identifiable, Codable, Equatable {
         loopIntervalMinutes: Int = 15,
         assignments: [MissionRunAssignment] = [],
         createdAt: Date = Date(),
-        startedAt: Date? = nil
+        startedAt: Date? = nil,
+        completedAt: Date? = nil,
+        pendingGracefulCycleStop: Bool = false
     ) {
         self.id = id
         self.missionId = missionId
@@ -96,5 +113,44 @@ struct MissionRun: Identifiable, Codable, Equatable {
         self.assignments = assignments
         self.createdAt = createdAt
         self.startedAt = startedAt
+        self.completedAt = completedAt
+        self.pendingGracefulCycleStop = pendingGracefulCycleStop
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, missionId, missionName, status, scheduleMode, oneOffStartAt, loopIntervalMinutes
+        case assignments, createdAt, startedAt, completedAt, pendingGracefulCycleStop
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        missionId = try c.decode(UUID.self, forKey: .missionId)
+        missionName = try c.decode(String.self, forKey: .missionName)
+        status = try c.decode(MissionRunStatus.self, forKey: .status)
+        scheduleMode = try c.decode(MissionRunScheduleMode.self, forKey: .scheduleMode)
+        oneOffStartAt = try c.decode(Date.self, forKey: .oneOffStartAt)
+        loopIntervalMinutes = try c.decode(Int.self, forKey: .loopIntervalMinutes)
+        assignments = try c.decode([MissionRunAssignment].self, forKey: .assignments)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        startedAt = try c.decodeIfPresent(Date.self, forKey: .startedAt)
+        completedAt = try c.decodeIfPresent(Date.self, forKey: .completedAt)
+        pendingGracefulCycleStop = try c.decodeIfPresent(Bool.self, forKey: .pendingGracefulCycleStop) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(missionId, forKey: .missionId)
+        try c.encode(missionName, forKey: .missionName)
+        try c.encode(status, forKey: .status)
+        try c.encode(scheduleMode, forKey: .scheduleMode)
+        try c.encode(oneOffStartAt, forKey: .oneOffStartAt)
+        try c.encode(loopIntervalMinutes, forKey: .loopIntervalMinutes)
+        try c.encode(assignments, forKey: .assignments)
+        try c.encode(createdAt, forKey: .createdAt)
+        try c.encodeIfPresent(startedAt, forKey: .startedAt)
+        try c.encodeIfPresent(completedAt, forKey: .completedAt)
+        try c.encode(pendingGracefulCycleStop, forKey: .pendingGracefulCycleStop)
     }
 }

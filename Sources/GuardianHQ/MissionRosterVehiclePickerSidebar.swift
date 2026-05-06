@@ -1,0 +1,127 @@
+import SwiftUI
+
+/// Slide-in panel listing fleet vehicles (same chrome as `SimulationVehiclePickerSidebar`).
+struct MissionRosterVehiclePickerSidebar: View {
+    let vehicles: [MissionPickableFleetVehicle]
+    let rowIsEnabled: (MissionPickableFleetVehicle) -> Bool
+    let rowDisabledReason: (MissionPickableFleetVehicle) -> String?
+    let onSelect: (MissionPickableFleetVehicle) -> Void
+    let onClose: () -> Void
+
+    private let bgHeader = Color(red: 0.10, green: 0.10, blue: 0.11)
+    private let cardBg = Color(red: 0.12, green: 0.12, blue: 0.13)
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .center, spacing: 12) {
+                Text("Assign vehicle")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Button {
+                    onClose()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 18, weight: .medium))
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
+                .help("Close")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .background(bgHeader)
+
+            if vehicles.isEmpty {
+                Spacer()
+                Text("No vehicles in the fleet. Add a live link or spawn a sim from Vehicles.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.gray)
+                    .multilineTextAlignment(.center)
+                    .padding(24)
+                Spacer()
+            } else {
+                ScrollView {
+                    VStack(spacing: 10) {
+                        ForEach(vehicles) { vehicle in
+                            vehicleRow(vehicle)
+                        }
+                    }
+                    .padding(16)
+                }
+            }
+        }
+    }
+
+    private func vehicleRow(_ vehicle: MissionPickableFleetVehicle) -> some View {
+        let enabled = rowIsEnabled(vehicle)
+        let reason = rowDisabledReason(vehicle)
+        return Button {
+            if enabled {
+                onSelect(vehicle)
+            }
+        } label: {
+            HStack(spacing: 14) {
+                vehicleThumbnail(vehicle)
+                    .frame(width: 72, height: 56)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .opacity(enabled ? 1 : 0.45)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(vehicle.title)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(enabled ? .white : .gray)
+                        .multilineTextAlignment(.leading)
+                    HStack(alignment: .center, spacing: 8) {
+                        FleetLiveSimBadge(isSimulation: vehicle.isSimulation)
+                        Text(vehicle.detailLine)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.gray)
+                            .lineLimit(2)
+                    }
+                    if !enabled, let reason, !reason.isEmpty {
+                        Text(reason)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.orange.opacity(0.95))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.gray.opacity(enabled ? 0.8 : 0.35))
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(cardBg)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+
+    @ViewBuilder
+    private func vehicleThumbnail(_ vehicle: MissionPickableFleetVehicle) -> some View {
+        if let names = vehicle.simulationImageBasenames, !names.isEmpty {
+            SimulationDeviceThumbnail(imageBasenames: names)
+        } else {
+            ZStack {
+                LinearGradient(
+                    colors: [Color(red: 0.14, green: 0.18, blue: 0.22), Color(red: 0.08, green: 0.10, blue: 0.14)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(.system(size: 28, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.35))
+            }
+        }
+    }
+}

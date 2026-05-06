@@ -1,7 +1,7 @@
 import SwiftUI
 import WebKit
 
-enum MapTileStyle: String, CaseIterable, Identifiable {
+enum MapTileStyle: String, CaseIterable, Identifiable, Codable {
     case standard
     case satellite
     var id: String { rawValue }

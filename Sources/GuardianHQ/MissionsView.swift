@@ -15,6 +15,7 @@ struct MissionsView: View {
     }
 
     @ObservedObject var store: MissionStore
+    @ObservedObject var generalSettings: GeneralSettingsStore
     @EnvironmentObject private var toastCenter: ToastCenter
     @State private var showingAddMission = false
     @State private var displayMode: DisplayMode = .list
@@ -131,6 +132,7 @@ struct MissionsView: View {
     private func missionWorkspace(_ mission: Mission) -> some View {
         MissionWorkspaceView(
             mission: mission,
+            defaultMapTileStyle: generalSettings.defaultMapTileStyle,
             onBack: { selectedMissionID = nil },
             onDelete: { missionToDelete in
                 store.deleteMission(id: missionToDelete.id)
@@ -161,7 +163,7 @@ private struct MissionWorkspaceView: View {
     @State private var selectedPathIndex = 0
     @State private var editingPathIndex: Int?
     @State private var selectedWaypointIndex: Int?
-    @State private var mapStyle: MapTileStyle = .standard
+    @State private var mapStyle: MapTileStyle
     @State private var mapRecenterNonce = 0
     @State private var setHomeFromMap = false
     @State private var showingDeleteHomeConfirm = false
@@ -185,12 +187,14 @@ private struct MissionWorkspaceView: View {
 
     init(
         mission: Mission,
+        defaultMapTileStyle: MapTileStyle,
         onBack: @escaping () -> Void,
         onDelete: @escaping (Mission) -> Void,
         onSave: @escaping (Mission) -> Void,
         onToast: @escaping (String, ToastStyle) -> Void
     ) {
         _draft = State(initialValue: mission)
+        _mapStyle = State(initialValue: defaultMapTileStyle)
         self.onBack = onBack
         self.onDelete = onDelete
         self.onSave = onSave

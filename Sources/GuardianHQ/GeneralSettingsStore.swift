@@ -14,16 +14,29 @@ final class GeneralSettingsStore: ObservableObject {
         }
     }
 
+    /// Default basemap for mission route editing and Mission Control live overview (toggle still available in-app).
+    @Published var defaultMapTileStyle: MapTileStyle {
+        didSet {
+            guard defaultMapTileStyle != oldValue else { return }
+            save()
+        }
+    }
+
     init(userDefaults: UserDefaults = .standard) {
         if let loaded = Self.load(from: userDefaults) {
             defaultSimulationPlatform = loaded.defaultSimulationPlatform
+            defaultMapTileStyle = loaded.defaultMapTileStyle ?? .standard
         } else {
             defaultSimulationPlatform = .ardupilot
+            defaultMapTileStyle = .standard
         }
     }
 
     private func save(userDefaults: UserDefaults = .standard) {
-        let snapshot = Snapshot(defaultSimulationPlatform: defaultSimulationPlatform)
+        let snapshot = Snapshot(
+            defaultSimulationPlatform: defaultSimulationPlatform,
+            defaultMapTileStyle: defaultMapTileStyle
+        )
         if let data = try? JSONEncoder().encode(snapshot) {
             userDefaults.set(data, forKey: Self.defaultsKey)
         }
@@ -36,5 +49,7 @@ final class GeneralSettingsStore: ObservableObject {
 
     private struct Snapshot: Codable {
         var defaultSimulationPlatform: SimulationPlatform
+        /// Omitted in older saves; treated as `.standard`.
+        var defaultMapTileStyle: MapTileStyle?
     }
 }

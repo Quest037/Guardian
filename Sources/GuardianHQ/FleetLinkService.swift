@@ -29,6 +29,8 @@ final class FleetLinkService: ObservableObject {
     @Published private(set) var bridgePhase: TelemetryBridgePhase = .inactive
     /// Best-effort live state for the first vehicle the bridge sees (SITL / hardware).
     @Published private(set) var telemetry: FleetTelemetrySnapshot?
+    /// Full merged hub snapshot from every `mavsdk_bridge.py` stream (see `FleetHubVehicleTelemetry`).
+    @Published private(set) var hubTelemetry: FleetHubVehicleTelemetry?
     /// Top-bar “Simulate” switch — only meaningful while the server is running; cleared when the server stops.
     @Published private(set) var isSimulateEnabled = false
 
@@ -76,6 +78,7 @@ final class FleetLinkService: ObservableObject {
         guard !isRunning else { return true }
         lastError = nil
         telemetry = nil
+        hubTelemetry = nil
         bridgePhase = .inactive
 
         let runner = MavsdkServerRunner()
@@ -91,6 +94,7 @@ final class FleetLinkService: ObservableObject {
             self.isSimulateEnabled = false
             self.bridgePhase = .inactive
             self.telemetry = nil
+            self.hubTelemetry = nil
             self.appendLog("mavsdk_server exited (code \(code)).")
         }
         do {
@@ -151,6 +155,7 @@ final class FleetLinkService: ObservableObject {
     func clearStaleVehicleStateWhenNoSitlAlive() {
         guard isSimulateEnabled else { return }
         telemetry = nil
+        hubTelemetry = nil
         if bridgePhase == .live {
             bridgePhase = .awaitingVehicle
             appendLog("Simulation vehicle ended — reconnecting telemetry bridge for the next MAVLink system.")
@@ -196,6 +201,7 @@ final class FleetLinkService: ObservableObject {
             self.bridgePhase = .inactive
             self.appendLog("mavsdk_bridge.py exited (code \(code)).")
             self.telemetry = nil
+            self.hubTelemetry = nil
         }
 
         do {
@@ -220,6 +226,7 @@ final class FleetLinkService: ObservableObject {
         guard let bridge = bridgeRunner else {
             bridgePhase = .inactive
             telemetry = nil
+            hubTelemetry = nil
             return
         }
         appendLog("Stopping mavsdk_bridge.py…")
@@ -231,49 +238,34 @@ final class FleetLinkService: ObservableObject {
         guard let data = line.data(using: .utf8) else { return }
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        guard let env = try? decoder.decode(BridgeEnvelope.self, from: data) else { return }
+        guard let env = try? decoder.decode(BridgeHubEnvelope.self, from: data) else { return }
 
-        var snap = telemetry ?? FleetTelemetrySnapshot.empty
-        snap.lastUpdate = Date()
+        var hub = hubTelemetry ?? .empty
 
         switch env.type {
         case "bridge_listening":
             bridgePhase = .awaitingVehicle
-            snap.autopilotStack = .unknown
+            hub.autopilotStack = .unknown
             appendLog(
                 "Bridge connected to MAVSDK (gRPC \(env.host ?? "?"):\(env.port.map(String.init) ?? "?")) — waiting for a MAVLink system on the link."
             )
         case "bridge_ready":
             bridgePhase = .live
             appendLog("Bridge ready — vehicle discovered (gRPC \(env.host ?? "?"):\(env.port.map(String.init) ?? "?")).")
-        case "vehicle_stack":
-            if let raw = env.stack?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-               let parsed = FleetAutopilotStack(rawValue: raw) {
-                snap.autopilotStack = parsed
-            }
-        case "armed":
-            if let armed = env.armed {
-                snap.isArmed = armed
-            }
-        case "flight_mode":
-            if let mode = env.flightMode {
-                snap.flightMode = mode
-            }
-        case "position":
-            snap.latitudeDeg = env.latDeg
-            snap.longitudeDeg = env.lonDeg
-            snap.relativeAltM = env.relAltM
         case "bridge_error":
             let msg = env.message ?? "unknown"
             appendLog("bridge error: \(msg)")
             if msg.contains("missing_mavsdk_python_package") {
                 lastError = "Live telemetry couldn’t start. The optional components for this machine may be missing—check the server log or documentation for your build."
             }
+            return
         default:
-            break
+            hub.merge(env)
         }
 
-        telemetry = snap
+        hub.lastUpdate = Date()
+        hubTelemetry = hub
+        telemetry = hub.telemetrySnapshot()
     }
 
     private func appendLog(_ line: String) {
@@ -298,19 +290,3 @@ final class FleetLinkService: ObservableObject {
     }
 }
 
-// MARK: - Bridge JSON (from mavsdk_bridge.py)
-
-private struct BridgeEnvelope: Decodable {
-    let type: String
-    /// `vehicle_stack` — `ardupilot` / `px4` / `unknown`
-    let stack: String?
-    let armed: Bool?
-    /// Decoded from `flight_mode` via snake_case conversion.
-    let flightMode: String?
-    let latDeg: Double?
-    let lonDeg: Double?
-    let relAltM: Double?
-    let message: String?
-    let host: String?
-    let port: Int?
-}

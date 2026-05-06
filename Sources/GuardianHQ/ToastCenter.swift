@@ -8,7 +8,7 @@ enum ToastStyle {
     var background: Color {
         switch self {
         case .success:
-            return Color.green.opacity(0.22)
+            return GuardianSemanticColors.successBackground
         case .info:
             return Color.blue.opacity(0.22)
         case .error:

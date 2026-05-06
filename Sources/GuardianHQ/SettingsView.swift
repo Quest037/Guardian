@@ -61,6 +61,22 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 }
 
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Default map view")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                    Picker("Default map view", selection: $generalSettings.defaultMapTileStyle) {
+                        Text("Standard").tag(MapTileStyle.standard)
+                        Text("Satellite").tag(MapTileStyle.satellite)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    Text("Starting basemap for Missions (route editor) and Mission Control live overview. You can still switch per map.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.gray)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 Divider()
                     .opacity(0.35)
 

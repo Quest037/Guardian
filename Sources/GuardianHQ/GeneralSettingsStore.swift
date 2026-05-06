@@ -1,6 +1,22 @@
 import Combine
 import Foundation
 
+enum LogRetentionProfile: String, Codable, CaseIterable, Identifiable {
+    case short
+    case `default`
+    case long
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .short: return "Short"
+        case .default: return "Default"
+        case .long: return "Long"
+        }
+    }
+}
+
 /// Persisted app-wide preferences (General settings).
 @MainActor
 final class GeneralSettingsStore: ObservableObject {
@@ -22,20 +38,31 @@ final class GeneralSettingsStore: ObservableObject {
         }
     }
 
+    /// Log retention for visible in-app logs.
+    @Published var logRetentionProfile: LogRetentionProfile {
+        didSet {
+            guard logRetentionProfile != oldValue else { return }
+            save()
+        }
+    }
+
     init(userDefaults: UserDefaults = .standard) {
         if let loaded = Self.load(from: userDefaults) {
             defaultSimulationPlatform = loaded.defaultSimulationPlatform
             defaultMapTileStyle = loaded.defaultMapTileStyle ?? .standard
+            logRetentionProfile = loaded.logRetentionProfile ?? .default
         } else {
             defaultSimulationPlatform = .ardupilot
             defaultMapTileStyle = .standard
+            logRetentionProfile = .default
         }
     }
 
     private func save(userDefaults: UserDefaults = .standard) {
         let snapshot = Snapshot(
             defaultSimulationPlatform: defaultSimulationPlatform,
-            defaultMapTileStyle: defaultMapTileStyle
+            defaultMapTileStyle: defaultMapTileStyle,
+            logRetentionProfile: logRetentionProfile
         )
         if let data = try? JSONEncoder().encode(snapshot) {
             userDefaults.set(data, forKey: Self.defaultsKey)
@@ -51,5 +78,7 @@ final class GeneralSettingsStore: ObservableObject {
         var defaultSimulationPlatform: SimulationPlatform
         /// Omitted in older saves; treated as `.standard`.
         var defaultMapTileStyle: MapTileStyle?
+        /// Omitted in older saves; treated as `.default`.
+        var logRetentionProfile: LogRetentionProfile?
     }
 }

@@ -37,9 +37,7 @@ struct MissionControlView: View {
 
     var body: some View {
         Group {
-            if !fleetLink.isRunning {
-                serverOfflineMessage
-            } else if let run = selectedRun {
+            if let run = selectedRun {
                 MissionRunDetailView(
                     run: run,
                     missionStore: missionStore,
@@ -70,18 +68,6 @@ struct MissionControlView: View {
                 }
             )
         }
-    }
-
-    private var serverOfflineMessage: some View {
-        centeredEmptyStateBlock(
-            systemImage: "antenna.radiowaves.left.and.right.slash",
-            title: "Server isn’t running",
-            subtitle: {
-                Text("Turn on ")
-                    + Text("Server").fontWeight(.semibold)
-                    + Text(" in the top bar to bring up MAVSDK and listen for vehicles.")
-            }
-        )
     }
 
     /// Same layout as Vehicles (`DevicesView.centeredEmptyStateBlock`): icon 44pt medium gray, title 20pt semibold white, subtitle 14pt gray, max 480pt, padding 32, centered in the pane.
@@ -751,7 +737,7 @@ private struct MissionRunDetailView: View {
                         rosterSubtitle: "—",
                         vehicleID: nil,
                         simulationImageBasenames: nil,
-                        hub: fleetLink.hubTelemetry
+                        vehicleModel: fleetLink.primaryVehicleOperationalModel()
                     )
                 } else {
                     ForEach(run.assignments) { assignment in
@@ -764,14 +750,15 @@ private struct MissionRunDetailView: View {
                             rosterSubtitle: rosterRoleSubtitle(device),
                             vehicleID: vehicleID,
                             simulationImageBasenames: simulationImageBasenamesForAssignment(assignment, sitl: sitl),
-                            hub: vehicleID.flatMap(fleetLink.hubTelemetry(forVehicleID:))
+                            vehicleModel: vehicleID.map { fleetLink.vehicleOperationalModel(forVehicleID: $0) }
+                                ?? FleetVehicleOperationalModel(hub: nil, lifecycleStatus: nil)
                         )
                     }
                 }
             }
             .padding(.vertical, 2)
         }
-        .frame(height: 140)
+        .frame(height: 175)
     }
 
     private var missionLiveLogPlaceholder: some View {
@@ -1054,10 +1041,10 @@ private struct MissionLiveVehicleHealthCard: View {
     let rosterSubtitle: String
     let vehicleID: String?
     let simulationImageBasenames: [String]?
-    let hub: FleetHubVehicleTelemetry?
+    let vehicleModel: FleetVehicleOperationalModel
 
     private let cardFill = Color(red: 0.10, green: 0.10, blue: 0.11)
-    private let cardStroke = Color.white.opacity(0.06)
+    private let cardStrokeNeutral = Color.white.opacity(0.06)
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -1086,24 +1073,15 @@ private struct MissionLiveVehicleHealthCard: View {
                         .help("Bridge vehicle key: \(vehicleID)")
                 }
 
-                if let hub {
+                if vehicleModel.telemetryAgeS != nil {
                     Divider().opacity(0.22)
-                    batteryAndGpsRows(hub)
-                    healthChipsRow(hub)
-                    if hub.healthAllOk == true {
-                        Text("All OK")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(GuardianSemanticColors.successForeground)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(GuardianSemanticColors.successBackground)
-                            .clipShape(Capsule())
-                    }
+                    Spacer(minLength: 0)
+                    batteryGpsMovementRow
                 } else {
+                    Spacer(minLength: 0)
                     Text("No telemetry")
-                        .font(.system(size: 10))
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.gray.opacity(0.8))
-                        .padding(.top, 2)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1116,12 +1094,12 @@ private struct MissionLiveVehicleHealthCard: View {
                 .padding(.trailing, 6)
                 .accessibilityLabel("Vehicle actions, coming soon")
         }
-        .frame(width: 216, height: 140)
+        .frame(width: 216, height: 175)
         .background(cardFill)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(cardStroke, lineWidth: 1)
+                .strokeBorder(lifecycleBorderColor, lineWidth: 1.6)
         )
     }
 
@@ -1161,60 +1139,52 @@ private struct MissionLiveVehicleHealthCard: View {
         )
     }
 
-    private func batteryAndGpsRows(_ hub: FleetHubVehicleTelemetry) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                Image(systemName: "battery.100")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(batteryIconTint(percent: hub.batteryRemainingPercent))
-                if let p = hub.batteryRemainingPercent {
-                    Text("\(Int(round(p)))%")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.92))
-                } else {
-                    Text("—")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.gray)
+    private var batteryGpsMovementRow: some View {
+        HStack(alignment: .bottom, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .bottom, spacing: 6) {
+                    Image(systemName: batterySymbol)
+                        .font(.system(size: 30, weight: .bold))
+                        .foregroundStyle(batteryIconTint(percent: vehicleModel.battery.percent0to100))
+                        .help(batteryHoverText)
+                    Text(batteryPercentText)
+                        .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.94))
+                        .lineLimit(1)
                 }
-                if let v = hub.batteryVoltageV {
-                    Text(String(format: "%.1f V", v))
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.gray)
-                }
-                Spacer(minLength: 0)
-            }
-            HStack(spacing: 6) {
-                Image(systemName: "location.fill")
-                    .font(.system(size: 10, weight: .semibold))
+                Text(vehicleModel.battery.trendText)
+                    .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.gray)
-                if let n = hub.gpsNumSatellites {
-                    Text("\(n)")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.92))
-                } else {
-                    Text("—")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.gray)
-                }
-                if let fix = hub.gpsFixType, !fix.isEmpty {
-                    Text(shortGpsFix(fix))
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.gray)
-                }
-                Spacer(minLength: 0)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Text(vehicleModel.battery.etaText)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.gray)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Rectangle()
+                .fill(Color.white.opacity(0.12))
+                .frame(width: 1, height: 58)
+
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(vehicleModel.gps.titleText)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .lineLimit(1)
+                Text(vehicleModel.movement.titleText)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.gray)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
     }
 
-    /// Red below 10%, yellow from 10% up to (but not including) 80%, green at 80% and above. Unknown / out-of-range → neutral gray.
-    private func normalizedBatteryPercent(_ raw: Double?) -> Double? {
-        guard let raw, raw.isFinite else { return nil }
-        if raw < 0 || raw > 100 { return nil }
-        return raw
-    }
-
     private func batteryIconTint(percent: Double?) -> Color {
-        guard let p = normalizedBatteryPercent(percent) else {
+        guard let p = percent else {
             return Color.gray.opacity(0.55)
         }
         if p < 10 {
@@ -1226,50 +1196,31 @@ private struct MissionLiveVehicleHealthCard: View {
         return GuardianSemanticColors.successForeground
     }
 
-    private func healthChipsRow(_ hub: FleetHubVehicleTelemetry) -> some View {
-        HStack(spacing: 4) {
-            healthChip("G", hub.healthGyrometerCalibrationOk, help: "Gyro calibration")
-            healthChip("A", hub.healthAccelerometerCalibrationOk, help: "Accelerometer calibration")
-            healthChip("M", hub.healthMagnetometerCalibrationOk, help: "Magnetometer calibration")
-            healthChip("L", hub.healthLocalPositionOk, help: "Local position")
-            healthChip("W", hub.healthGlobalPositionOk, help: "Global position")
-            healthChip("H", hub.healthHomePositionOk, help: "Home position")
-            healthChip("R", hub.healthArmable, help: "Armable")
+    private var batteryPercentText: String {
+        guard let p = vehicleModel.battery.percent0to100 else { return "—" }
+        return "\(Int(round(p)))%"
+    }
+
+    private var batterySymbol: String {
+        if vehicleModel.battery.isCharging {
+            return "battery.100.bolt"
         }
-        .padding(.top, 2)
+        return "battery.100"
     }
 
-    private func healthChip(_ label: String, _ ok: Bool?, help: String) -> some View {
-        Text(label)
-            .font(.system(size: 8, weight: .heavy))
-            .foregroundStyle(healthChipForeground(ok))
-            .frame(width: 18, height: 18)
-            .background(healthChipBackground(ok))
-            .clipShape(Circle())
-            .help(help)
+    private var batteryHoverText: String {
+        let pct = batteryPercentText
+        let v = vehicleModel.battery.voltageV.map { String(format: "%.1f V", $0) } ?? "—"
+        let a = vehicleModel.battery.currentA.map { String(format: "%.1f A", $0) } ?? "—"
+        let eta = vehicleModel.battery.etaText
+        return "Battery \(pct), \(v), \(a), \(eta)"
     }
 
-    private func healthChipForeground(_ ok: Bool?) -> Color {
-        guard let ok else { return .white.opacity(0.38) }
-        return ok ? GuardianSemanticColors.successForeground : Color.red.opacity(0.9)
-    }
-
-    private func healthChipBackground(_ ok: Bool?) -> Color {
-        guard let ok else { return Color.white.opacity(0.08) }
-        return ok ? GuardianSemanticColors.successBackground : Color.red.opacity(0.18)
-    }
-
-    private func shortGpsFix(_ raw: String) -> String {
-        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let u = t.uppercased()
-        if u.contains("NO_FIX") || u.contains("NO GPS") { return "—" }
-        if u.contains("FIX_3D") || u.contains("3D_FIX") { return "3D" }
-        if u.contains("FIX_2D") || u.contains("2D_FIX") { return "2D" }
-        if u.contains("RTK") { return "RTK" }
-        if t.count > 8 {
-            return String(t.suffix(6))
+    private var lifecycleBorderColor: Color {
+        if let lifecycleStatus = vehicleModel.lifecycleStatus {
+            return lifecycleStatus.color.uiColor.opacity(0.72)
         }
-        return t
+        return cardStrokeNeutral
     }
 
     private func displayVehicleID(_ raw: String) -> String {

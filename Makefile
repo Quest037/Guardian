@@ -1,5 +1,5 @@
 # Default: ensure bundled mavsdk_server exists, then build.
-.PHONY: build bridge-deps sitl-runtime sitl-deps sitl-patch-waf sync-simulation-devices px4_sitl_default px4-sitl-runtime
+.PHONY: build bridge-deps sitl-runtime sitl-deps sitl-patch-waf sitl-prewarm sync-simulation-devices px4_sitl_default px4-sitl-runtime
 
 # PX4 is not built from this repo; this target exists so `make px4_sitl_default` here explains what to run instead of "No rule".
 px4_sitl_default:
@@ -36,6 +36,12 @@ sync-simulation-devices:
 # One-time: Python modules for sim_vehicle / waf / MAVProxy (pexpect, empy, gnureadline, etc.).
 sitl-deps:
 	pip3 install -r Sources/GuardianHQ/Resources/SitlDeps/requirements.txt
+
+# One-command prewarm:
+# - ArduPilot: fetch runtime + prebuild copter/plane/rover/sub under build/sitl.
+# - PX4 (optional): if PX4_AUTOPILOT_ROOT is set, build/sync bundled Px4SitlBundle too.
+sitl-prewarm:
+	./scripts/prewarm_sitl.sh $(PX4_AUTOPILOT_ROOT)
 
 # Full local build including simulation files (run sitl-runtime before first SITL spawn).
 .PHONY: build-with-sitl

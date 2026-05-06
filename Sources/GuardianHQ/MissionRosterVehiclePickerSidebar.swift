@@ -64,35 +64,43 @@ struct MissionRosterVehiclePickerSidebar: View {
                 onSelect(vehicle)
             }
         } label: {
-            HStack(spacing: 14) {
-                vehicleThumbnail(vehicle)
-                    .frame(width: 72, height: 56)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .opacity(enabled ? 1 : 0.45)
+            VStack(alignment: .leading, spacing: 10) {
+                ZStack(alignment: .topTrailing) {
+                    HStack(spacing: 14) {
+                        vehicleThumbnail(vehicle)
+                            .frame(width: 72, height: 56)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .opacity(enabled ? 1 : 0.45)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(vehicle.title)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(enabled ? .white : .gray)
-                        .multilineTextAlignment(.leading)
-                    HStack(alignment: .center, spacing: 8) {
-                        FleetLiveSimBadge(isSimulation: vehicle.isSimulation)
-                        Text(vehicle.detailLine)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.gray)
-                            .lineLimit(2)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(vehicle.title)
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(enabled ? .white : .gray)
+                                .multilineTextAlignment(.leading)
+                            Text(vehicle.lifecycleStatus.mediumLabel)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(vehicle.lifecycleStatus.color.uiColor.opacity(enabled ? 0.95 : 0.55))
+                                .lineLimit(1)
+                            Text("Vehicle ID: \(vehicle.vehicleIDText)")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.gray)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
                     }
-                    if !enabled, let reason, !reason.isEmpty {
-                        Text(reason)
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.orange.opacity(0.95))
-                            .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 8) {
+                        FleetAutopilotStackBadge(stack: vehicle.autopilotStack)
+                        FleetLiveSimBadge(isSimulation: vehicle.isSimulation)
                     }
                 }
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.gray.opacity(enabled ? 0.8 : 0.35))
+
+                if !enabled, let reason, !reason.isEmpty {
+                    Text(reason)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.orange.opacity(0.95))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -100,7 +108,7 @@ struct MissionRosterVehiclePickerSidebar: View {
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay(
                 RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+                    .strokeBorder(vehicle.lifecycleStatus.color.uiColor.opacity(enabled ? 0.7 : 0.25), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)

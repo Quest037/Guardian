@@ -15,8 +15,10 @@ struct FleetVehicleGridCard: View {
     let simulationImageBasenames: [String]?
     let isSimulation: Bool
     let liveTelemetry: FleetTelemetrySnapshot?
+    let simTelemetry: FleetHubVehicleTelemetry?
     let sitlAlive: Bool?
     let sitlExitCode: Int32?
+    let lifecycleStatus: VehicleLifecycleStatus?
     let onInfo: (() -> Void)?
     let onStopSim: (() -> Void)?
     let onDismissSim: (() -> Void)?
@@ -30,26 +32,12 @@ struct FleetVehicleGridCard: View {
                     .clipped()
 
                 HStack(alignment: .top, spacing: 0) {
-                    Text(autopilotStack.displayName)
-                        .font(.system(size: 9, weight: .heavy))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(autopilotStack.badgeBackground)
-                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                    FleetAutopilotStackBadge(stack: autopilotStack)
 
                     Spacer(minLength: 0)
 
                     if isSimulation {
-                        Text("Sim")
-                            .font(.system(size: 10, weight: .heavy))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 5)
-                            .background(Color.orange)
-                            .clipShape(RoundedRectangle(cornerRadius: 5))
+                        FleetLiveSimBadge(isSimulation: true)
                     }
                 }
                 .padding(8)
@@ -82,7 +70,13 @@ struct FleetVehicleGridCard: View {
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+                .fill(statusColor.opacity(0.08))
+                .allowsHitTesting(false)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(statusColor.opacity(0.55), lineWidth: 1)
+                .allowsHitTesting(false)
         )
     }
 
@@ -145,44 +139,49 @@ struct FleetVehicleGridCard: View {
 
     @ViewBuilder
     private var liveStatusRow: some View {
-        if let onInfo {
-            HStack(spacing: 8) {
-                Button("Info", action: onInfo)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+        VStack(alignment: .leading, spacing: 8) {
+            statusBadge
+            if let lifecycleStatus {
+                Text(lifecycleStatus.sentence)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.gray.opacity(0.9))
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(.top, 2)
+            if let onInfo {
+                HStack(spacing: 8) {
+                    Button("Info", action: onInfo)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
+            }
         }
+        .padding(.top, 2)
     }
 
     @ViewBuilder
     private var simStatusRow: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let alive = sitlAlive {
-                if alive {
-                    Text("Running")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.green.opacity(0.95))
-                    if let vehicleId, !vehicleId.isEmpty {
-                        Text("Vehicle ID: \(vehicleId)")
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.gray)
-                    }
-                    if let systemId {
-                        Text("System ID: \(systemId)")
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.gray)
-                    }
-                    if let sessionUUID, !sessionUUID.isEmpty {
-                        Text("Session UUID: \(sessionUUID)")
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.gray.opacity(0.75))
-                    }
-                } else if let code = sitlExitCode {
-                    Text("Exited (code \(code))")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.orange)
-                }
+            statusBadge
+            if let lifecycleStatus {
+                Text(lifecycleStatus.sentence)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.gray.opacity(0.9))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let vehicleId, !vehicleId.isEmpty {
+                Text("Vehicle ID: \(vehicleId)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.gray)
+            }
+            if let systemId {
+                Text("System ID: \(systemId)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.gray)
+            }
+            if let sessionUUID, !sessionUUID.isEmpty {
+                Text("Session UUID: \(sessionUUID)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.gray.opacity(0.75))
             }
             HStack(spacing: 8) {
                 if let onInfo {
@@ -202,5 +201,36 @@ struct FleetVehicleGridCard: View {
             }
         }
         .padding(.top, 2)
+    }
+
+    @ViewBuilder
+    private var statusBadge: some View {
+        if let lifecycleStatus {
+            Text(lifecycleStatus.mediumLabel)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(lifecycleStatus.color.uiColor.opacity(0.95))
+        } else if simTelemetryIsLive {
+            Text("Telemetry live")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.green.opacity(0.95))
+        } else {
+            Text("Link connecting")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.yellow.opacity(0.95))
+        }
+    }
+
+    private var simTelemetryIsLive: Bool {
+        guard let t = simTelemetry else { return false }
+        return t.latitudeDeg != nil
+            || t.longitudeDeg != nil
+            || t.batteryRemainingPercent != nil
+            || !t.flightMode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || t.healthArmable != nil
+            || t.gpsNumSatellites != nil
+    }
+
+    private var statusColor: Color {
+        lifecycleStatus?.color.uiColor ?? Color.white.opacity(0.12)
     }
 }

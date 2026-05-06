@@ -1,16 +1,39 @@
 import SwiftUI
 
+enum FleetBadgeStyle {
+    static let font = Font.system(size: 9, weight: .heavy)
+    static let horizontalPadding: CGFloat = 9
+    static let verticalPadding: CGFloat = 5
+    static let cornerRadius: CGFloat = 5
+}
+
 /// **Live** (green) vs **Sim** (orange) — same treatment in fleet grid, assign sidebar, and mission roster cards.
 struct FleetLiveSimBadge: View {
     let isSimulation: Bool
 
     var body: some View {
         Text(isSimulation ? "Sim" : "Live")
-            .font(.system(size: 10, weight: .heavy))
+            .font(FleetBadgeStyle.font)
             .foregroundStyle(.white)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
+            .padding(.horizontal, FleetBadgeStyle.horizontalPadding)
+            .padding(.vertical, FleetBadgeStyle.verticalPadding)
             .background(isSimulation ? Color.orange : Color.green)
-            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .clipShape(RoundedRectangle(cornerRadius: FleetBadgeStyle.cornerRadius))
+    }
+}
+
+struct FleetAutopilotStackBadge: View {
+    let stack: FleetAutopilotStack
+
+    var body: some View {
+        Text(stack.displayName)
+            .font(FleetBadgeStyle.font)
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .minimumScaleFactor(0.75)
+            .padding(.horizontal, FleetBadgeStyle.horizontalPadding)
+            .padding(.vertical, FleetBadgeStyle.verticalPadding)
+            .background(stack.badgeBackground)
+            .clipShape(RoundedRectangle(cornerRadius: FleetBadgeStyle.cornerRadius))
     }
 }

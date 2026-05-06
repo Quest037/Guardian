@@ -15,13 +15,7 @@ struct DevicesView: View {
     private let bgMain = Color(red: 0.07, green: 0.07, blue: 0.08)
 
     var body: some View {
-        Group {
-            if fleetLink.isRunning {
-                devicesContent
-            } else {
-                serverOfflineMessage
-            }
-        }
+        devicesContent
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(bgMain)
         .onChange(of: sitl.lastError) { newValue in
@@ -46,18 +40,6 @@ struct DevicesView: View {
                     infoSheetVehicleTitle = nil
                     infoSheetVehicleID = nil
                 }
-            }
-        )
-    }
-
-    private var serverOfflineMessage: some View {
-        centeredEmptyStateBlock(
-            systemImage: "antenna.radiowaves.left.and.right.slash",
-            title: "Server isn’t running",
-            subtitle: {
-                Text("Turn on ")
-                    + Text("Server").fontWeight(.semibold)
-                    + Text(" in the top bar to bring up MAVSDK and listen for vehicles.")
             }
         )
     }
@@ -202,6 +184,8 @@ struct DevicesView: View {
             ForEach(fleetGridEntries, id: \.id) { entry in
                 switch entry {
                 case .live(let snapshot):
+                    let liveStatus = primaryLiveVehicleID.flatMap { fleetLink.vehicleStatus(forVehicleID: $0) }
+                        ?? VehicleLifecycleStatus(stage: .live)
                     FleetVehicleGridCard(
                         title: "Live vehicle",
                         domain: .aerial,
@@ -212,8 +196,10 @@ struct DevicesView: View {
                         simulationImageBasenames: nil,
                         isSimulation: false,
                         liveTelemetry: snapshot,
+                        simTelemetry: nil,
                         sitlAlive: nil,
                         sitlExitCode: nil,
+                        lifecycleStatus: liveStatus,
                         onInfo: {
                             infoSheetVehicleTitle = "Live vehicle telemetry"
                             infoSheetVehicleID = primaryLiveVehicleID
@@ -224,6 +210,13 @@ struct DevicesView: View {
                 case .sim(let inst):
                     let systemID = inst.stackInstanceIndex + 1
                     let resolvedVehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
+                    let simHubTelemetry = fleetLink.hubTelemetry(forVehicleID: resolvedVehicleID)
+                    let status = statusForSim(
+                        resolvedVehicleID: resolvedVehicleID,
+                        systemID: systemID,
+                        instance: inst,
+                        telemetry: simHubTelemetry
+                    )
                     FleetVehicleGridCard(
                         title: inst.preset.displayName,
                         domain: inst.preset.vehicleDomain,
@@ -234,8 +227,10 @@ struct DevicesView: View {
                         simulationImageBasenames: inst.preset.simulationDeviceImageBasenames,
                         isSimulation: true,
                         liveTelemetry: nil,
+                        simTelemetry: simHubTelemetry,
                         sitlAlive: inst.isAlive,
                         sitlExitCode: inst.lastExitCode,
+                        lifecycleStatus: status,
                         onInfo: {
                             infoSheetVehicleTitle = "\(inst.preset.displayName) telemetry"
                             infoSheetVehicleID = resolvedVehicleID
@@ -262,9 +257,15 @@ struct DevicesView: View {
 
     private var fleetGridEntries: [FleetGridEntry] {
         var rows: [FleetGridEntry] = []
-        // First MAVLink system the bridge binds to (hardware or any SITL stack). Sim rows track local processes.
-        if fleetLink.bridgePhase == .live {
-            rows.append(.live(fleetLink.telemetry ?? .empty))
+        let simVehicleIDs = Set(
+            sitl.instances.map { "sysid:\($0.stackInstanceIndex + 1)" }
+        )
+        let liveHardwareVehicleIDs = fleetLink.telemetryByVehicleID.keys
+            .filter { !simVehicleIDs.contains($0) }
+            .sorted()
+        if let firstHardwareVehicleID = liveHardwareVehicleIDs.first,
+           let snapshot = fleetLink.telemetryByVehicleID[firstHardwareVehicleID] {
+            rows.append(.live(snapshot))
         }
         for inst in sitl.instances {
             rows.append(.sim(inst))
@@ -308,8 +309,7 @@ struct DevicesView: View {
         case .connecting, .inactive:
             break
         }
-        if fleetLink.isRunning { return .orange }
-        return .gray
+        return .orange
     }
 
     private var bridgeHeaderTitleTwoWords: String {
@@ -321,8 +321,7 @@ struct DevicesView: View {
         case .connecting, .inactive:
             break
         }
-        if fleetLink.isRunning { return "Connecting telemetry" }
-        return "Link offline"
+        return "Connecting telemetry"
     }
 
     private var bridgeStatusAccessibilityHint: String {
@@ -334,10 +333,31 @@ struct DevicesView: View {
         case .connecting, .inactive:
             break
         }
-        if fleetLink.isRunning {
-            return "Bridge is starting."
+        return "Vehicle sessions are starting."
+    }
+
+    private func statusForSim(
+        resolvedVehicleID: String,
+        systemID: Int,
+        instance: SitlRunningInstance,
+        telemetry: FleetHubVehicleTelemetry?
+    ) -> VehicleLifecycleStatus {
+        if let code = instance.lastExitCode, !instance.isAlive {
+            return VehicleLifecycleStatus(
+                stage: .failed,
+                sentenceOverride: "The simulator exited with code \(code), so telemetry is unavailable until this vehicle is restarted."
+            )
         }
-        return "Server off."
+        if let explicit = fleetLink.vehicleStatus(forVehicleID: resolvedVehicleID) {
+            return explicit
+        }
+        if telemetry != nil {
+            return VehicleLifecycleStatus(stage: .live)
+        }
+        if instance.isAlive {
+            return VehicleLifecycleStatus(stage: .connecting)
+        }
+        return VehicleLifecycleStatus(stage: .stopped)
     }
 
 }

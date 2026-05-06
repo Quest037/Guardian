@@ -2,7 +2,6 @@ import SwiftUI
 
 struct SettingsView: View {
     @Binding var selectedPane: SettingsPane
-    @ObservedObject var fleetLink: FleetLinkService
     @ObservedObject var generalSettings: GeneralSettingsStore
 
     private let bgBar = Color(red: 0.12, green: 0.12, blue: 0.13)
@@ -28,8 +27,6 @@ struct SettingsView: View {
                 switch selectedPane {
                 case .general:
                     generalPane
-                case .mavsdkServer:
-                    MavsdkServerSettingsView(fleetLink: fleetLink)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -72,6 +69,23 @@ struct SettingsView: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     Text("Starting basemap for Missions (route editor) and Mission Control live overview. You can still switch per map.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.gray)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Logs")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                    Picker("Log length", selection: $generalSettings.logRetentionProfile) {
+                        ForEach(LogRetentionProfile.allCases) { profile in
+                            Text(profile.displayName).tag(profile)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    Text("How many log lines stay visible in Logs. Long keeps more history in memory.")
                         .font(.system(size: 12))
                         .foregroundStyle(.gray)
                         .fixedSize(horizontal: false, vertical: true)

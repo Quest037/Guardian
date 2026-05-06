@@ -86,10 +86,31 @@ enum ArduPilotSitlLocator {
 }
 
 enum SitlLaunchRecipe {
-    /// Optional env override first (developer), else bundled Resources/ArduPilotSitl in the app.
+    /// Per-app-run writable ArduPilot runtime root. Keeps SITL logs/state out of bundled resources.
+    private static let ardupilotRuntimeSessionRoot: String = {
+        let fm = FileManager.default
+        let tempBase = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("guardian-ardupilot-runtime", isDirectory: true)
+            .appendingPathComponent("pid-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+        try? fm.createDirectory(at: tempBase, withIntermediateDirectories: true, attributes: nil)
+        return tempBase.path
+    }()
+
+    /// Per-app-run writable PX4 runtime root. Keeps PX4 state out of bundled resources so each app launch starts clean.
+    private static let px4RuntimeSessionRoot: String = {
+        let fm = FileManager.default
+        let tempBase = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("guardian-px4-runtime", isDirectory: true)
+            .appendingPathComponent("pid-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+        try? fm.createDirectory(at: tempBase, withIntermediateDirectories: true, attributes: nil)
+        return tempBase.path
+    }()
+
+    /// Bundled Resources/ArduPilotSitl first, then optional developer override.
+    /// This keeps release/Xcode runs using the prewarmed bundled runtime by default.
     static func ardupilotRootPath() -> String? {
-        if let dev = ArduPilotSitlLocator.developerCheckoutPath() { return dev }
         if let bundled = ArduPilotSitlLocator.bundleRootPath() { return bundled }
+        if let dev = ArduPilotSitlLocator.developerCheckoutPath() { return dev }
         return nil
     }
 
@@ -153,6 +174,16 @@ enum SitlLaunchRecipe {
 
         let (vehicle, frame) = preset.ardupilotSimVehicleKind()
         var args: [String] = [script, "-v", vehicle, "-I", "\(instance)"]
+        if shouldUseNoRebuildForArduPilot(root: root, vehicle: vehicle) {
+            args.append("--no-rebuild")
+        }
+        let runDir = (ardupilotRuntimeSessionRoot as NSString).appendingPathComponent("instance-\(instance)")
+        try FileManager.default.createDirectory(
+            atPath: runDir,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        args.append(contentsOf: ["--use-dir", runDir])
         if let frame {
             args.append(contentsOf: ["-f", frame])
         }
@@ -162,6 +193,30 @@ enum SitlLaunchRecipe {
         env["PYTHONUNBUFFERED"] = "1"
         env["PATH"] = Self.augmentedPATH(existing: env["PATH"] ?? "")
         return SitlProcessSpec(executable: python, arguments: args, currentDirectoryURL: cwd, environment: env)
+    }
+
+    /// Use prewarmed binaries when available; otherwise let sim_vehicle perform its normal build fallback.
+    private static func shouldUseNoRebuildForArduPilot(root: String, vehicle: String) -> Bool {
+        let binaryName: String
+        switch vehicle {
+        case "ArduCopter":
+            binaryName = "arducopter"
+        case "ArduPlane":
+            binaryName = "arduplane"
+        case "Rover", "ArduBoat":
+            binaryName = "ardurover"
+        case "ArduSub":
+            binaryName = "ardusub"
+        default:
+            return false
+        }
+        let binaryPath = (root as NSString).appendingPathComponent("build/sitl/bin/\(binaryName)")
+        return FileManager.default.isExecutableFile(atPath: binaryPath)
+    }
+
+    /// Default MAVProxy UDP output base for ArduPilot SITL (`14550 + 10 * instance`).
+    static func ardupilotMavproxyOutPort(instance: Int) -> Int {
+        14_550 + (10 * instance)
     }
 
     /// Prepends common locations for `mavproxy.py` (pip / Homebrew) so `sim_vehicle` can find MAVProxy.
@@ -226,6 +281,12 @@ enum SitlLaunchRecipe {
         18_570 + instance
     }
 
+    /// PX4 `px4-rc.mavlink` offboard/API remote UDP port (`14540 + px4_instance`).
+    /// This is unique per instance and suitable for per-vehicle MAVSDK ingestion.
+    static func px4OffboardRemotePort(instance: Int) -> Int {
+        14_540 + min(instance, 9)
+    }
+
     /// Resolves `build/<target>/{bin/px4, etc, rootfs}` under a PX4-Autopilot checkout, **or** a flat bundle root (`bin`, `etc` directly under `root`).
     static func px4ResolvedBuildLayout(root: String) -> (build: String, px4Binary: String, etc: String, rootfsBase: String)? {
         let fm = FileManager.default
@@ -256,7 +317,10 @@ enum SitlLaunchRecipe {
             throw SitlError.missingPx4SitlBuild
         }
 
-        let instanceRootfs = (layout.rootfsBase as NSString).appendingPathComponent("\(instance)")
+        // Runtime state must be outside bundled resources (logs/dataman/params/locks), otherwise stale
+        // instance state in DerivedData can poison "first PX4 sim" on subsequent app runs.
+        let runtimeRootfsBase = (px4RuntimeSessionRoot as NSString).appendingPathComponent("rootfs")
+        let instanceRootfs = (runtimeRootfsBase as NSString).appendingPathComponent("\(instance)")
         try FileManager.default.createDirectory(
             atPath: instanceRootfs,
             withIntermediateDirectories: true,

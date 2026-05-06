@@ -1,4 +1,5 @@
 import Combine
+import Darwin
 import Foundation
 
 /// One spawned SITL process tracked in the UI.
@@ -21,17 +22,14 @@ final class SitlService: ObservableObject {
     weak var fleetLink: FleetLinkService?
 
     private var runners: [UUID: SitlProcessRunner] = [:]
-    private var nextArduPilotInstance: Int = 0
-    private var nextPx4Instance: Int = 0
+    private var nextSimulationInstance: Int = 0
 
     func attachFleetLink(_ link: FleetLinkService) {
         fleetLink = link
     }
 
-    /// After any SITL inventory change, clear MAVSDK’s stale “first vehicle” snapshot when nothing is alive and Simulate is on.
     private func reconcileFleetLinkVehicleCacheAfterSitlChange() {
-        guard let link = fleetLink, link.isSimulateEnabled else { return }
-        link.setTrackedSystemIDs(activeSystemIDs())
+        guard let link = fleetLink else { return }
         let anyAlive = instances.contains { $0.isAlive }
         if !anyAlive {
             link.clearStaleVehicleStateWhenNoSitlAlive()
@@ -46,6 +44,19 @@ final class SitlService: ObservableObject {
         )
     }
 
+    private func reserveNextSimulationInstance(maxScan: Int = 256) -> Int? {
+        var candidate = max(0, nextSimulationInstance)
+        let occupied = Set(instances.map(\.stackInstanceIndex))
+        for _ in 0..<maxScan {
+            if !occupied.contains(candidate) {
+                nextSimulationInstance = candidate + 1
+                return candidate
+            }
+            candidate += 1
+        }
+        return nil
+    }
+
     func stopAll() {
         for id in runners.keys {
             if let runner = runners.removeValue(forKey: id) {
@@ -56,7 +67,7 @@ final class SitlService: ObservableObject {
         }
         instances.removeAll()
         lastError = nil
-        fleetLink?.setTrackedSystemIDs([])
+        fleetLink?.stopAllVehicleSessions()
         reconcileFleetLinkVehicleCacheAfterSitlChange()
     }
 
@@ -71,8 +82,9 @@ final class SitlService: ObservableObject {
             runner.onTerminated = nil
             runner.stop()
         }
+        let systemID = instances[idx].stackInstanceIndex + 1
+        fleetLink?.unregisterSimulatedVehicle(systemID: systemID)
         instances.removeAll { $0.id == id }
-        fleetLink?.setTrackedSystemIDs(activeSystemIDs())
         reconcileFleetLinkVehicleCacheAfterSitlChange()
     }
 
@@ -81,11 +93,11 @@ final class SitlService: ObservableObject {
         instances.removeAll { $0.id == id && !$0.isAlive }
     }
 
-    /// Spawns SITL when **Simulate** is on and the link server is running.
+    /// Spawns SITL when **Simulate** is on.
     func spawn(preset: SimulationVehiclePreset, platform: SimulationPlatform) {
         lastError = nil
-        guard let link = fleetLink, link.isRunning, link.isSimulateEnabled else {
-            lastError = "Turn on Server and Simulate before spawning SITL."
+        guard let link = fleetLink, link.isSimulateEnabled else {
+            lastError = "Turn on Simulate before spawning SITL."
             return
         }
 
@@ -103,8 +115,10 @@ final class SitlService: ObservableObject {
             return
         }
 
-        let instance = nextArduPilotInstance
-        nextArduPilotInstance += 1
+        guard let instance = reserveNextSimulationInstance() else {
+            lastError = "No available simulation instance slot found."
+            return
+        }
 
         let id = UUID()
         let spec: SitlProcessSpec
@@ -112,34 +126,29 @@ final class SitlService: ObservableObject {
             spec = try SitlLaunchRecipe.arduPilotSpec(root: root, preset: preset, instance: instance)
         } catch {
             lastError = error.localizedDescription
-            nextArduPilotInstance -= 1
             return
         }
 
         if !SitlLaunchRecipe.pythonHasPexpectForSitl() {
             lastError =
                 "Python module 'pexpect' is missing (ArduPilot sim_vehicle needs it). From the Guardian repo run: make sitl-deps"
-            nextArduPilotInstance -= 1
             return
         }
 
         if !SitlLaunchRecipe.pythonHasEmpyForSitl() {
             lastError =
                 "Python package 'empy' is missing (ArduPilot waf needs it: import em). Run: make sitl-deps — or: pip3 install empy==3.3.4"
-            nextArduPilotInstance -= 1
             return
         }
 
         if !SitlLaunchRecipe.mavproxyLikelyAvailable(environment: spec.environment) {
             lastError = "MAVProxy is not on PATH (looked for mavproxy.py). Install with: pip3 install MAVProxy — then retry."
-            nextArduPilotInstance -= 1
             return
         }
 
         if !SitlLaunchRecipe.pythonHasGnureadlineForMavproxy() {
             lastError =
                 "Python module 'gnureadline' is missing (MAVProxy needs it on macOS). Run: make sitl-deps — or: pip3 install gnureadline"
-            nextArduPilotInstance -= 1
             return
         }
 
@@ -147,6 +156,7 @@ final class SitlService: ObservableObject {
         runner.onLogLine = { [weak link] line in
             guard let link else { return }
             link.appendSimulationLog(line)
+            link.updateSimulationLifecycleFromSitlLog(systemID: instance + 1, line: line)
         }
         runner.onTerminated = { [weak self, weak link] code in
             guard let self else { return }
@@ -157,6 +167,7 @@ final class SitlService: ObservableObject {
                 row.lastExitCode = code
                 self.instances[idx] = row
             }
+            link?.unregisterSimulatedVehicle(systemID: instance + 1)
             link?.appendSimulationLog(
                 "SITL exited [platform=ArduPilot instance=\(instance) mavlink_sysid=\(instance + 1) session=\(id.uuidString)] code=\(code)"
             )
@@ -166,6 +177,7 @@ final class SitlService: ObservableObject {
         do {
             try runner.start(spec: spec)
             runners[id] = runner
+            let mavsdkIngressPort = SitlLaunchRecipe.ardupilotMavproxyOutPort(instance: instance)
             instances.append(
                 SitlRunningInstance(
                     id: id,
@@ -176,13 +188,15 @@ final class SitlService: ObservableObject {
                     lastExitCode: nil
                 )
             )
-            link.setTrackedSystemIDs(activeSystemIDs())
+            link.registerSimulatedVehicle(
+                systemID: instance + 1,
+                mavlinkConnectionURL: "udpin://0.0.0.0:\(mavsdkIngressPort)"
+            )
             link.appendSimulationLog(
-                "Started ArduPilot SITL [vehicle=\(preset.displayName) instance=\(instance) mavlink_sysid=\(instance + 1) session=\(id.uuidString)] primary_link=14550"
+                "Started ArduPilot SITL [vehicle=\(preset.displayName) instance=\(instance) mavlink_sysid=\(instance + 1) session=\(id.uuidString)] primary_link=\(mavsdkIngressPort)"
             )
         } catch {
             lastError = error.localizedDescription
-            nextArduPilotInstance -= 1
             runner.onLogLine = nil
             runner.onTerminated = nil
         }
@@ -194,8 +208,10 @@ final class SitlService: ObservableObject {
             return
         }
 
-        let instance = nextPx4Instance
-        nextPx4Instance += 1
+        guard let instance = reserveNextAvailablePx4Instance() else {
+            lastError = "No available PX4 SITL instance slot found (ports busy). Stop existing PX4 sims and retry."
+            return
+        }
 
         let id = UUID()
         let spec: SitlProcessSpec
@@ -203,16 +219,17 @@ final class SitlService: ObservableObject {
             spec = try SitlLaunchRecipe.px4Spec(root: root, preset: preset, instance: instance)
         } catch {
             lastError = error.localizedDescription
-            nextPx4Instance -= 1
             return
         }
 
-        let mavlinkPort = SitlLaunchRecipe.px4SihGcsUdpPort(instance: instance)
+        let gcsUdpPort = SitlLaunchRecipe.px4SihGcsUdpPort(instance: instance)
+        let mavsdkIngressPort = SitlLaunchRecipe.px4OffboardRemotePort(instance: instance)
 
         let runner = SitlProcessRunner()
         runner.onLogLine = { [weak link] line in
             guard let link else { return }
             link.appendSimulationLog(line)
+            link.updateSimulationLifecycleFromSitlLog(systemID: instance + 1, line: line)
         }
         runner.onTerminated = { [weak self, weak link] code in
             guard let self else { return }
@@ -223,6 +240,7 @@ final class SitlService: ObservableObject {
                 row.lastExitCode = code
                 self.instances[idx] = row
             }
+            link?.unregisterSimulatedVehicle(systemID: instance + 1)
             link?.appendSimulationLog(
                 "SITL exited [platform=PX4 instance=\(instance) mavlink_sysid=\(instance + 1) session=\(id.uuidString)] code=\(code)"
             )
@@ -242,15 +260,52 @@ final class SitlService: ObservableObject {
                     lastExitCode: nil
                 )
             )
-            link.setTrackedSystemIDs(activeSystemIDs())
+            link.registerSimulatedVehicle(
+                systemID: instance + 1,
+                mavlinkConnectionURL: "udpin://0.0.0.0:\(mavsdkIngressPort)"
+            )
             link.appendSimulationLog(
-                "Started PX4 SITL [sim=SIH vehicle=\(preset.displayName) model=\(preset.px4SitlSimModel()) instance=\(instance) mavlink_sysid=\(instance + 1) session=\(id.uuidString)] gcs_udp=\(mavlinkPort) mavsdk_udpout=auto"
+                "Started PX4 SITL [sim=SIH vehicle=\(preset.displayName) model=\(preset.px4SitlSimModel()) instance=\(instance) mavlink_sysid=\(instance + 1) session=\(id.uuidString)] gcs_udp=\(gcsUdpPort) mavsdk_udpin=\(mavsdkIngressPort)"
             )
         } catch {
             lastError = error.localizedDescription
-            nextPx4Instance -= 1
             runner.onLogLine = nil
             runner.onTerminated = nil
         }
+    }
+
+    /// Finds the next PX4 instance whose GCS UDP port is not currently occupied.
+    private func reserveNextAvailablePx4Instance(maxScan: Int = 64) -> Int? {
+        var candidate = max(0, nextSimulationInstance)
+        let occupiedByGuardian = Set(instances.map(\.stackInstanceIndex))
+        for _ in 0..<maxScan {
+            let gcsPort = SitlLaunchRecipe.px4SihGcsUdpPort(instance: candidate)
+            if !occupiedByGuardian.contains(candidate), isUdpPortBindable(gcsPort) {
+                nextSimulationInstance = candidate + 1
+                return candidate
+            }
+            candidate += 1
+        }
+        return nil
+    }
+
+    /// True when we can bind to the UDP port now (best-effort conflict probe).
+    private func isUdpPortBindable(_ port: Int) -> Bool {
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        if fd < 0 { return false }
+        defer { close(fd) }
+
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.stride)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(UInt16(port).bigEndian)
+        addr.sin_addr = in_addr(s_addr: INADDR_ANY.bigEndian)
+
+        let ok = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
+                bind(fd, saPtr, socklen_t(MemoryLayout<sockaddr_in>.stride)) == 0
+            }
+        }
+        return ok
     }
 }

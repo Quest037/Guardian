@@ -37,6 +37,7 @@ Then **Product → Run** (⌘R). Xcode uses the same SwiftPM target.
 
 - **ArduPilot SITL bundle:** `make sitl-runtime` — Python for `sim_vehicle`: `make sitl-deps`
 - **PX4 SITL runtime slice** (`bin/px4` + `etc/`): build PX4 elsewhere, then `PX4_AUTOPILOT_ROOT=/path/to/PX4-Autopilot make px4-sitl-runtime`
+- **Prewarm both SITL stacks:** `make sitl-prewarm` (ArduPilot full prebuild), or include PX4 too: `PX4_AUTOPILOT_ROOT=/path/to/PX4-Autopilot make sitl-prewarm`
 - **MAVSDK-Python bridge:** `make bridge-deps`
 
 ## Adding another autopilot “stack” later

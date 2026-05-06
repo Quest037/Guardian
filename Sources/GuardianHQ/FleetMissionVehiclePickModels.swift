@@ -36,6 +36,9 @@ struct MissionPickableFleetVehicle: Identifiable {
     let title: String
     /// Autopilot / stack detail (no “live” or “sim” — those are badges in the sidebar).
     let detailLine: String
+    let vehicleIDText: String
+    let lifecycleStatus: VehicleLifecycleStatus
+    let autopilotStack: FleetAutopilotStack
     let domain: VehicleDomain
     let simulationImageBasenames: [String]?
     let isSimulation: Bool
@@ -47,13 +50,23 @@ func buildMissionPickableVehicles(
     sitl: SitlService
 ) -> [MissionPickableFleetVehicle] {
     var rows: [MissionPickableFleetVehicle] = []
-    if fleetLink.bridgePhase == .live {
-        let snap = fleetLink.telemetry ?? .empty
+    let simVehicleIDs = Set(
+        sitl.instances.map { "sysid:\($0.stackInstanceIndex + 1)" }
+    )
+    let liveHardwareVehicleIDs = fleetLink.telemetryByVehicleID.keys
+        .filter { !simVehicleIDs.contains($0) }
+        .sorted()
+    if let firstHardwareVehicleID = liveHardwareVehicleIDs.first,
+       let snap = fleetLink.telemetryByVehicleID[firstHardwareVehicleID] {
+        let idText = firstHardwareVehicleID.replacingOccurrences(of: "sysid:", with: "")
         rows.append(
             MissionPickableFleetVehicle(
                 token: .live,
                 title: "Live vehicle",
                 detailLine: "\(snap.autopilotStack.displayName) · \(snap.flightMode)",
+                vehicleIDText: idText,
+                lifecycleStatus: .init(stage: .live),
+                autopilotStack: snap.autopilotStack,
                 domain: .aerial,
                 simulationImageBasenames: nil,
                 isSimulation: false
@@ -61,11 +74,18 @@ func buildMissionPickableVehicles(
         )
     }
     for inst in sitl.instances {
+        let systemID = inst.stackInstanceIndex + 1
+        let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
+        let lifecycle = fleetLink.vehicleStatus(forVehicleID: vehicleID)
+            ?? (inst.isAlive ? .init(stage: .awaitingTelemetry) : .init(stage: .stopped))
         rows.append(
             MissionPickableFleetVehicle(
                 token: .sitl(inst.id),
                 title: inst.preset.displayName,
                 detailLine: inst.platform.displayName,
+                vehicleIDText: "\(systemID)",
+                lifecycleStatus: lifecycle,
+                autopilotStack: FleetAutopilotStack(simulationPlatform: inst.platform),
                 domain: inst.preset.vehicleDomain,
                 simulationImageBasenames: inst.preset.simulationDeviceImageBasenames,
                 isSimulation: true
@@ -86,8 +106,7 @@ func resolvedRosterVehicleLabel(
     {
         switch token {
         case .live:
-            if fleetLink.bridgePhase == .live {
-                let snap = fleetLink.telemetry ?? .empty
+            if let snap = fleetLink.telemetry {
                 return "Live vehicle · \(snap.flightMode)"
             }
             return assignment.attachedDevice.isEmpty ? "Live vehicle (unavailable)" : assignment.attachedDevice

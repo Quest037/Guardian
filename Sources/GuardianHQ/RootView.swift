@@ -1,8 +1,8 @@
 import SwiftUI
+import AppKit
 
 struct RootView: View {
     @Binding var selection: AppSection
-    @EnvironmentObject private var toastCenter: ToastCenter
     @StateObject private var missionStore = MissionStore()
     @StateObject private var missionControlStore = MissionControlStore()
     @StateObject private var fleetLinkService = FleetLinkService()
@@ -44,12 +44,13 @@ struct RootView: View {
         .background(bgMain)
         .onAppear {
             sitlService.attachFleetLink(fleetLinkService)
-        }
-        .onChange(of: fleetLinkService.isRunning) { running in
-            if !running { sitlService.stopAll() }
+            fleetLinkService.applyLogRetentionProfile(generalSettingsStore.logRetentionProfile)
         }
         .onChange(of: fleetLinkService.isSimulateEnabled) { sim in
             if !sim { sitlService.stopAll() }
+        }
+        .onChange(of: generalSettingsStore.logRetentionProfile) { profile in
+            fleetLinkService.applyLogRetentionProfile(profile)
         }
     }
 
@@ -138,34 +139,6 @@ struct RootView: View {
             Spacer()
 
             HStack(spacing: 8) {
-                Text("Server")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.gray)
-                Toggle(
-                    "",
-                    isOn: Binding(
-                        get: { fleetLinkService.isRunning },
-                        set: { engaged in
-                            if engaged {
-                                let ok = fleetLinkService.startServer()
-                                if !ok {
-                                    let message = fleetLinkService.lastError ?? "Could not start mavsdk_server."
-                                    toastCenter.show(message, style: .error, duration: 3.5)
-                                    settingsPane = .mavsdkServer
-                                    selection = .settings
-                                }
-                            } else {
-                                fleetLinkService.stopServer()
-                            }
-                        }
-                    )
-                )
-                .toggleStyle(.switch)
-                .labelsHidden()
-                .controlSize(.small)
-            }
-
-            HStack(spacing: 8) {
                 Text("Simulate")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.gray)
@@ -179,12 +152,7 @@ struct RootView: View {
                 .toggleStyle(.switch)
                 .labelsHidden()
                 .controlSize(.small)
-                .disabled(!fleetLinkService.isRunning)
-                .help(
-                    fleetLinkService.isRunning
-                        ? "Simulate"
-                        : "Turn on Server to use Simulate."
-                )
+                .help("Simulate")
             }
 
             Text("Dark Mode")
@@ -223,9 +191,10 @@ struct RootView: View {
             case .settings:
                 SettingsView(
                     selectedPane: $settingsPane,
-                    fleetLink: fleetLinkService,
                     generalSettings: generalSettingsStore
                 )
+            case .logs:
+                LogsView(fleetLink: fleetLinkService)
             }
         }
     }
@@ -247,7 +216,7 @@ private struct DashboardView: View {
 
     /// Same cardinality as `fleetGridEntries` on Devices (live MAVLink row when connected, plus every SITL row).
     private var vehiclesTotalCount: Int {
-        let liveVehicleCount = fleetLink.bridgePhase == .live ? 1 : 0
+        let liveVehicleCount = fleetLink.telemetryByVehicleID.count
         return liveVehicleCount + simInstanceRowCount
     }
 
@@ -293,5 +262,138 @@ private struct DashboardView: View {
         .frame(maxWidth: .infinity, minHeight: 120, alignment: .leading)
         .background(Color(red: 0.12, green: 0.12, blue: 0.13))
         .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+private struct LogsView: View {
+    @ObservedObject var fleetLink: FleetLinkService
+    @State private var selectedVehicleIDs: Set<String> = []
+    @State private var vehiclesAccordionExpanded = true
+    @State private var levelsAccordionExpanded = false
+    @State private var sessionsAccordionExpanded = false
+
+    var body: some View {
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Filters")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        DisclosureGroup(
+                            isExpanded: $vehiclesAccordionExpanded,
+                            content: {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    ForEach(fleetLink.vehicleLogIDs(), id: \.self) { vehicleID in
+                                        Toggle(
+                                            vehicleID.replacingOccurrences(of: "sysid:", with: "System "),
+                                            isOn: Binding(
+                                                get: { selectedVehicleIDs.contains(vehicleID) },
+                                                set: { enabled in
+                                                    if enabled {
+                                                        selectedVehicleIDs.insert(vehicleID)
+                                                    } else {
+                                                        selectedVehicleIDs.remove(vehicleID)
+                                                    }
+                                                }
+                                            )
+                                        )
+                                        .toggleStyle(.checkbox)
+                                        .foregroundStyle(.gray)
+                                    }
+                                }
+                                .padding(.top, 6)
+                            },
+                            label: {
+                                Text("Vehicles")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(.white)
+                            }
+                        )
+
+                        DisclosureGroup(
+                            isExpanded: $levelsAccordionExpanded,
+                            content: {
+                                Text("Coming soon")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.gray)
+                                    .padding(.top, 6)
+                            },
+                            label: {
+                                Text("Levels")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(.white)
+                            }
+                        )
+
+                        DisclosureGroup(
+                            isExpanded: $sessionsAccordionExpanded,
+                            content: {
+                                Text("Coming soon")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.gray)
+                                    .padding(.top, 6)
+                            },
+                            label: {
+                                Text("Sessions")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(.white)
+                            }
+                        )
+                        .padding(.bottom, 2)
+                    }
+                    .padding(.trailing, 6)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            .padding(14)
+            .frame(width: 260)
+            .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Logs")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white)
+                    Spacer()
+                    Button("Copy Logs") {
+                        copyFilteredLogsToPasteboard()
+                    }
+                    .buttonStyle(.bordered)
+                    Button("Clear") {
+                        fleetLink.clearLog()
+                        selectedVehicleIDs.removeAll()
+                    }
+                    .buttonStyle(.bordered)
+                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(filteredLogs.enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.gray)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .padding(24)
+    }
+
+    private var filteredLogs: [String] {
+        fleetLink.combinedLogs(filteredVehicleIDs: selectedVehicleIDs)
+    }
+
+    private func copyFilteredLogsToPasteboard() {
+        let joined = filteredLogs.joined(separator: "\n")
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(joined, forType: .string)
     }
 }

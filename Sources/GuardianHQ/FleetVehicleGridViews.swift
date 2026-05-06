@@ -8,12 +8,16 @@ struct FleetVehicleGridCard: View {
     let title: String
     let domain: VehicleDomain
     let autopilotStack: FleetAutopilotStack
+    let vehicleId: String?
+    let systemId: Int?
+    let sessionUUID: String?
     /// Bundled `SimulationDevices` PNG basenames to try (without `.png`), or `nil` for the generic live placeholder.
     let simulationImageBasenames: [String]?
     let isSimulation: Bool
     let liveTelemetry: FleetTelemetrySnapshot?
     let sitlAlive: Bool?
     let sitlExitCode: Int32?
+    let onInfo: (() -> Void)?
     let onStopSim: (() -> Void)?
     let onDismissSim: (() -> Void)?
 
@@ -68,6 +72,8 @@ struct FleetVehicleGridCard: View {
 
                 if isSimulation {
                     simStatusRow
+                } else {
+                    liveStatusRow
                 }
             }
             .padding(12)
@@ -138,6 +144,18 @@ struct FleetVehicleGridCard: View {
     }
 
     @ViewBuilder
+    private var liveStatusRow: some View {
+        if let onInfo {
+            HStack(spacing: 8) {
+                Button("Info", action: onInfo)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    @ViewBuilder
     private var simStatusRow: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let alive = sitlAlive {
@@ -145,6 +163,21 @@ struct FleetVehicleGridCard: View {
                     Text("Running")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.green.opacity(0.95))
+                    if let vehicleId, !vehicleId.isEmpty {
+                        Text("Vehicle ID: \(vehicleId)")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.gray)
+                    }
+                    if let systemId {
+                        Text("System ID: \(systemId)")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.gray)
+                    }
+                    if let sessionUUID, !sessionUUID.isEmpty {
+                        Text("Session UUID: \(sessionUUID)")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.gray.opacity(0.75))
+                    }
                 } else if let code = sitlExitCode {
                     Text("Exited (code \(code))")
                         .font(.system(size: 11, weight: .semibold))
@@ -152,6 +185,11 @@ struct FleetVehicleGridCard: View {
                 }
             }
             HStack(spacing: 8) {
+                if let onInfo {
+                    Button("Info", action: onInfo)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
                 if sitlAlive == true, let stop = onStopSim {
                     Button("Stop", action: stop)
                         .buttonStyle(.bordered)

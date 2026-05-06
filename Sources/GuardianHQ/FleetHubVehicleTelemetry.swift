@@ -340,6 +340,8 @@ struct FleetHubVehicleTelemetry: Equatable {
 
 struct BridgeHubEnvelope: Decodable {
     let type: String
+    var vehicleId: String?
+    var systemId: Int?
     var stack: String?
     var armed: Bool?
     var flightMode: String?
@@ -497,7 +499,7 @@ struct BridgeHubEnvelope: Decodable {
     var flightSwVersionType: String?
 
     private enum CodingKeys: String, CodingKey {
-        case type, stack, armed, flightMode, latDeg, lonDeg, relAltM, absAltM, message, host, port
+        case type, vehicleId, systemId, stack, armed, flightMode, latDeg, lonDeg, relAltM, absAltM, message, host, port
         case batteryId, batteryTempDegc, batteryVoltageV, batteryCurrentA, batteryCapacityConsumedAh
         case batteryRemainingPct, batteryTimeRemainingS
         case gpsNumSatellites, gpsFixType
@@ -533,6 +535,8 @@ struct BridgeHubEnvelope: Decodable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         type = try c.decode(String.self, forKey: .type)
+        vehicleId = try c.decodeIfPresent(String.self, forKey: .vehicleId)
+        systemId = try c.decodeIfPresent(Int.self, forKey: .systemId)
         stack = try c.decodeIfPresent(String.self, forKey: .stack)
         armed = try c.decodeIfPresent(Bool.self, forKey: .armed)
         flightMode = try c.decodeIfPresent(String.self, forKey: .flightMode)

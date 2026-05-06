@@ -2,22 +2,36 @@
 """
 Guardian MAVSDK sidecar: gRPC to an already-running mavsdk_server; JSON lines on stdout.
 
-Usage: python3 mavsdk_bridge.py [host] [port]
-Env: GUARDIAN_MAVSDK_GRPC_HOST, GUARDIAN_MAVSDK_GRPC_PORT (defaults 127.0.0.1:50051)
+Usage: python3 mavsdk_bridge.py [host] [port] [connect_url] [system_ids_csv]
+Env:
+  GUARDIAN_MAVSDK_GRPC_HOST, GUARDIAN_MAVSDK_GRPC_PORT (defaults 127.0.0.1:50051)
+  GUARDIAN_MAVSDK_CONNECT_URL (optional MAVLink URL passed to System.connect)
+  GUARDIAN_MAVSDK_MAX_SYSTEMS (default 32)
+  GUARDIAN_MAVSDK_SYSTEM_IDS (optional CSV list of MAVLink system IDs, e.g. "1,2,7")
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import math
 import os
 import sys
 import traceback
 
+MAX_SYSTEMS_DEFAULT = 32
+
 
 def _emit(obj: dict) -> None:
     print(json.dumps(obj, separators=(",", ":"), allow_nan=False), flush=True)
+
+
+def _emit_vehicle(vehicle_id: str, system_id: int, obj: dict) -> None:
+    payload = dict(obj)
+    payload["vehicle_id"] = vehicle_id
+    payload["system_id"] = system_id
+    _emit(payload)
 
 
 def _err(msg: str) -> None:
@@ -46,27 +60,93 @@ def _i(v):
         return None
 
 
-async def _run(host: str, port: int) -> None:
+def _parse_system_ids_csv(raw: str | None) -> list[int]:
+    if raw is None:
+        return []
+    parts = [p.strip() for p in str(raw).split(",")]
+    ids = []
+    for p in parts:
+        if not p:
+            continue
+        val = _i(p)
+        if val is None:
+            continue
+        if 1 <= val <= 255:
+            ids.append(val)
+    return sorted(set(ids))
+
+
+async def _stdin_command_loop(queue: asyncio.Queue[dict]) -> None:
+    reader = asyncio.StreamReader()
+    protocol = asyncio.StreamReaderProtocol(reader)
+    loop = asyncio.get_running_loop()
+    await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+    while True:
+        line = await reader.readline()
+        if not line:
+            await asyncio.sleep(0.2)
+            continue
+        text = line.decode("utf-8", errors="ignore").strip()
+        if not text:
+            continue
+        try:
+            cmd = json.loads(text)
+        except Exception:
+            _emit({"type": "bridge_error", "message": "bad_command_json"})
+            continue
+        if isinstance(cmd, dict):
+            await queue.put(cmd)
+
+
+async def _run_system(host: str, port: int, system_id: int, connect_url: str | None) -> None:
+    from mavsdk import System
+
+    vehicle_id = f"sysid:{system_id}"
+    # MAVSDK-Python constructor kwargs vary across major versions.
     try:
-        from mavsdk import System
-    except ImportError:
-        _err(
-            "mavsdk Python package not found. Run: pip3 install -r requirements.txt "
-            "(in this directory) or: make bridge-deps"
+        sig = inspect.signature(System)
+        params = set(sig.parameters.keys())
+    except Exception:
+        params = set()
+
+    ctor_kwargs = {}
+    if "mavsdk_server_address" in params:
+        ctor_kwargs["mavsdk_server_address"] = host
+    if "port" in params:
+        ctor_kwargs["port"] = port
+    if "sysid" in params:
+        ctor_kwargs["sysid"] = system_id
+    elif "system_id" in params:
+        ctor_kwargs["system_id"] = system_id
+    else:
+        _emit_vehicle(
+            vehicle_id,
+            system_id,
+            {"type": "bridge_error", "message": "system_selector_unavailable:python_mavsdk_ctor_has_no_sysid"},
         )
-        _emit({"type": "bridge_error", "message": "missing_mavsdk_python_package"})
-        sys.exit(1)
 
-    drone = System(mavsdk_server_address=host, port=port)
-    _emit({"type": "bridge_listening", "host": host, "port": port})
     try:
-        await drone.connect()
+        drone = System(**ctor_kwargs)
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
-        _err(f"connect failed: {e}\n{traceback.format_exc()}")
-        _emit({"type": "bridge_error", "message": str(e)})
-        sys.exit(2)
+        _emit_vehicle(vehicle_id, system_id, {"type": "bridge_error", "message": f"system_ctor:{e}"})
+        return
 
-    _emit({"type": "bridge_ready", "host": host, "port": port})
+    async def wait_connected(timeout_s: float = 30.0) -> bool:
+        async def _wait() -> bool:
+            async for state in drone.core.connection_state():
+                if bool(getattr(state, "is_connected", False)):
+                    return True
+            return False
+
+        try:
+            return await asyncio.wait_for(_wait(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            return False
+        except Exception as e:
+            _emit_vehicle(vehicle_id, system_id, {"type": "bridge_error", "message": f"connection_state:{e}"})
+            return False
 
     async def detect_and_emit_vehicle_stack() -> None:
         stack = "unknown"
@@ -75,23 +155,10 @@ async def _run(host: str, port: int) -> None:
             vendor = (getattr(iden, "vendor_name", None) or "").lower()
             product = (getattr(iden, "product_name", None) or "").lower()
             blob = f"{vendor} {product}"
-            if any(
-                k in blob
-                for k in (
-                    "ardupilot",
-                    "arducopter",
-                    "arduplane",
-                    "ardurover",
-                    "ardusub",
-                    "arduboat",
-                    "apm",
-                )
-            ):
+            if any(k in blob for k in ("ardupilot", "arducopter", "arduplane", "ardurover", "ardusub", "arduboat", "apm")):
                 stack = "ardupilot"
             elif "px4" in blob or "pixhawk" in blob:
                 stack = "px4"
-        except asyncio.TimeoutError:
-            pass
         except Exception:
             pass
         if stack == "unknown":
@@ -100,29 +167,20 @@ async def _run(host: str, port: int) -> None:
                 vendor = (getattr(prod, "vendor_name", None) or "").lower()
                 product = (getattr(prod, "product_name", None) or "").lower()
                 blob = f"{vendor} {product}"
-                if any(
-                    k in blob
-                    for k in (
-                        "ardupilot",
-                        "arducopter",
-                        "arduplane",
-                        "ardurover",
-                        "ardusub",
-                        "arduboat",
-                        "apm",
-                    )
-                ):
+                if any(k in blob for k in ("ardupilot", "arducopter", "arduplane", "ardurover", "ardusub", "arduboat", "apm")):
                     stack = "ardupilot"
                 elif "px4" in blob or "pixhawk" in blob:
                     stack = "px4"
             except Exception:
                 pass
-        _emit({"type": "vehicle_stack", "stack": stack})
+        _emit_vehicle(vehicle_id, system_id, {"type": "vehicle_stack", "stack": stack})
 
     async def detect_and_emit_version() -> None:
         try:
             ver = await asyncio.wait_for(drone.info.get_version(), timeout=12.0)
-            _emit(
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
                 {
                     "type": "vehicle_version",
                     "flight_sw_major": _i(getattr(ver, "flight_sw_major", None)),
@@ -130,52 +188,52 @@ async def _run(host: str, port: int) -> None:
                     "flight_sw_patch": _i(getattr(ver, "flight_sw_patch", None)),
                     "flight_sw_git_hash": getattr(ver, "flight_sw_git_hash", None) or None,
                     "os_sw_git_hash": getattr(ver, "os_sw_git_hash", None) or None,
-                    "flight_sw_version_type": str(
-                        getattr(ver, "flight_sw_version_type", "") or ""
-                    ),
-                }
+                    "flight_sw_version_type": str(getattr(ver, "flight_sw_version_type", "") or ""),
+                },
             )
         except Exception:
             pass
 
-    asyncio.create_task(detect_and_emit_vehicle_stack())
-    asyncio.create_task(detect_and_emit_version())
-
     def _watch(name: str, subscribe_coro_factory):
         async def _inner() -> None:
             try:
-                async for sample in subscribe_coro_factory():
+                stream = subscribe_coro_factory() if callable(subscribe_coro_factory) else subscribe_coro_factory
+                async for sample in stream:
                     try:
                         await _dispatch_sample(name, sample)
                     except Exception as e:
-                        _emit({"type": "bridge_error", "message": f"{name}_emit:{e}"})
+                        _emit_vehicle(vehicle_id, system_id, {"type": "bridge_error", "message": f"{name}_emit:{e}"})
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                _emit({"type": "bridge_error", "message": f"{name}_stream:{e}"})
+                _emit_vehicle(vehicle_id, system_id, {"type": "bridge_error", "message": f"{name}_stream:{e}"})
 
         return _inner()
 
     async def _dispatch_sample(kind: str, sample) -> None:
         if kind == "armed":
-            _emit({"type": "armed", "armed": bool(sample)})
+            _emit_vehicle(vehicle_id, system_id, {"type": "armed", "armed": bool(sample)})
             return
         if kind == "flight_mode":
-            _emit({"type": "flight_mode", "flight_mode": str(sample)})
+            _emit_vehicle(vehicle_id, system_id, {"type": "flight_mode", "flight_mode": str(sample)})
             return
         if kind == "position":
-            _emit(
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
                 {
                     "type": "position",
                     "lat_deg": _f(sample.latitude_deg),
                     "lon_deg": _f(sample.longitude_deg),
                     "rel_alt_m": _f(sample.relative_altitude_m),
                     "abs_alt_m": _f(sample.absolute_altitude_m),
-                }
+                },
             )
             return
         if kind == "battery":
-            _emit(
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
                 {
                     "type": "battery",
                     "battery_id": _i(getattr(sample, "id", None)),
@@ -185,21 +243,25 @@ async def _run(host: str, port: int) -> None:
                     "battery_capacity_consumed_ah": _f(sample.capacity_consumed_ah),
                     "battery_remaining_pct": _f(sample.remaining_percent),
                     "battery_time_remaining_s": _f(sample.time_remaining_s),
-                }
+                },
             )
             return
         if kind == "gps_info":
             fix = getattr(sample, "fix_type", None)
-            _emit(
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
                 {
                     "type": "gps_info",
                     "gps_num_satellites": _i(sample.num_satellites),
                     "gps_fix_type": str(fix) if fix is not None else None,
-                }
+                },
             )
             return
         if kind == "health":
-            _emit(
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
                 {
                     "type": "health",
                     "health_gyrometer_calibration_ok": sample.is_gyrometer_calibration_ok,
@@ -209,41 +271,47 @@ async def _run(host: str, port: int) -> None:
                     "health_global_position_ok": sample.is_global_position_ok,
                     "health_home_position_ok": sample.is_home_position_ok,
                     "health_armable": sample.is_armable,
-                }
+                },
             )
             return
         if kind == "health_all_ok":
-            _emit({"type": "health_all_ok", "health_all_ok": bool(sample)})
+            _emit_vehicle(vehicle_id, system_id, {"type": "health_all_ok", "health_all_ok": bool(sample)})
             return
         if kind == "in_air":
-            _emit({"type": "in_air", "in_air": bool(sample)})
+            _emit_vehicle(vehicle_id, system_id, {"type": "in_air", "in_air": bool(sample)})
             return
         if kind == "landed_state":
-            _emit({"type": "landed_state", "landed_state": str(sample)})
+            _emit_vehicle(vehicle_id, system_id, {"type": "landed_state", "landed_state": str(sample)})
             return
         if kind == "rc_status":
-            _emit(
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
                 {
                     "type": "rc_status",
                     "rc_was_available_once": sample.was_available_once,
                     "rc_is_available": sample.is_available,
                     "rc_signal_strength_pct": _f(sample.signal_strength_percent),
-                }
+                },
             )
             return
         if kind == "attitude_euler":
-            _emit(
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
                 {
                     "type": "attitude_euler",
                     "roll_deg": _f(sample.roll_deg),
                     "pitch_deg": _f(sample.pitch_deg),
                     "yaw_deg": _f(sample.yaw_deg),
                     "attitude_timestamp_us": _i(getattr(sample, "timestamp_us", None)),
-                }
+                },
             )
             return
         if kind == "attitude_quaternion":
-            _emit(
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
                 {
                     "type": "attitude_quaternion",
                     "quat_w": _f(sample.w),
@@ -251,31 +319,32 @@ async def _run(host: str, port: int) -> None:
                     "quat_y": _f(sample.y),
                     "quat_z": _f(sample.z),
                     "quat_timestamp_us": _i(getattr(sample, "timestamp_us", None)),
-                }
+                },
             )
             return
         if kind == "attitude_angular_velocity_body":
-            _emit(
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
                 {
                     "type": "attitude_angular_velocity_body",
                     "ang_vel_roll_rad_s": _f(sample.roll_rad_s),
                     "ang_vel_pitch_rad_s": _f(sample.pitch_rad_s),
                     "ang_vel_yaw_rad_s": _f(sample.yaw_rad_s),
-                }
+                },
             )
             return
         if kind == "velocity_ned":
-            _emit(
-                {
-                    "type": "velocity_ned",
-                    "north_m_s": _f(sample.north_m_s),
-                    "east_m_s": _f(sample.east_m_s),
-                    "down_m_s": _f(sample.down_m_s),
-                }
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
+                {"type": "velocity_ned", "north_m_s": _f(sample.north_m_s), "east_m_s": _f(sample.east_m_s), "down_m_s": _f(sample.down_m_s)},
             )
             return
         if kind == "altitude":
-            _emit(
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
                 {
                     "type": "altitude",
                     "alt_monotonic_m": _f(sample.altitude_monotonic_m),
@@ -284,34 +353,36 @@ async def _run(host: str, port: int) -> None:
                     "alt_relative_m": _f(sample.altitude_relative_m),
                     "alt_terrain_m": _f(sample.altitude_terrain_m),
                     "alt_bottom_clearance_m": _f(sample.bottom_clearance_m),
-                }
+                },
             )
             return
         if kind == "home":
-            _emit(
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
                 {
                     "type": "home",
                     "home_lat_deg": _f(sample.latitude_deg),
                     "home_lon_deg": _f(sample.longitude_deg),
                     "home_abs_alt_m": _f(sample.absolute_altitude_m),
                     "home_rel_alt_m": _f(sample.relative_altitude_m),
-                }
+                },
             )
             return
         if kind == "status_text":
             stype = getattr(sample, "type", None)
-            _emit(
-                {
-                    "type": "status_text",
-                    "status_severity": str(stype) if stype is not None else None,
-                    "status_text": getattr(sample, "text", None),
-                }
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
+                {"type": "status_text", "status_severity": str(stype) if stype is not None else None, "status_text": getattr(sample, "text", None)},
             )
             return
         if kind == "position_velocity_ned":
             pos = sample.position
             vel = sample.velocity
-            _emit(
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
                 {
                     "type": "position_velocity_ned",
                     "pos_vel_north_m": _f(pos.north_m),
@@ -320,15 +391,17 @@ async def _run(host: str, port: int) -> None:
                     "pos_vel_vn_m_s": _f(vel.north_m_s),
                     "pos_vel_ve_m_s": _f(vel.east_m_s),
                     "pos_vel_vd_m_s": _f(vel.down_m_s),
-                }
+                },
             )
             return
         if kind == "heading":
-            _emit({"type": "heading", "heading_deg": _f(sample.heading_deg)})
+            _emit_vehicle(vehicle_id, system_id, {"type": "heading", "heading_deg": _f(sample.heading_deg)})
             return
         if kind == "distance_sensor":
             ori = sample.orientation
-            _emit(
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
                 {
                     "type": "distance_sensor",
                     "dist_min_m": _f(sample.minimum_distance_m),
@@ -337,24 +410,23 @@ async def _run(host: str, port: int) -> None:
                     "dist_orient_roll_deg": _f(getattr(ori, "roll_deg", None)),
                     "dist_orient_pitch_deg": _f(getattr(ori, "pitch_deg", None)),
                     "dist_orient_yaw_deg": _f(getattr(ori, "yaw_deg", None)),
-                }
+                },
             )
             return
         if kind == "wind":
-            _emit(
-                {
-                    "type": "wind",
-                    "wind_x_ned_m_s": _f(sample.wind_x_ned_m_s),
-                    "wind_y_ned_m_s": _f(sample.wind_y_ned_m_s),
-                    "wind_z_ned_m_s": _f(sample.wind_z_ned_m_s),
-                }
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
+                {"type": "wind", "wind_x_ned_m_s": _f(sample.wind_x_ned_m_s), "wind_y_ned_m_s": _f(sample.wind_y_ned_m_s), "wind_z_ned_m_s": _f(sample.wind_z_ned_m_s)},
             )
             return
         if kind == "imu":
             a = sample.acceleration_frd
             g = sample.angular_velocity_frd
             m = sample.magnetic_field_frd
-            _emit(
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
                 {
                     "type": "imu",
                     "imu_acc_fwd": _f(a.forward_m_s2),
@@ -368,21 +440,20 @@ async def _run(host: str, port: int) -> None:
                     "imu_mag_down": _f(m.down_gauss),
                     "imu_temp_degc": _f(sample.temperature_degc),
                     "imu_timestamp_us": _i(sample.timestamp_us),
-                }
+                },
             )
             return
         if kind == "scaled_pressure":
-            _emit(
-                {
-                    "type": "scaled_pressure",
-                    "press_abs_hpa": _f(sample.absolute_pressure_hpa),
-                    "press_diff_hpa": _f(sample.differential_pressure_hpa),
-                    "press_temp_degc": _f(sample.temperature_deg),
-                }
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
+                {"type": "scaled_pressure", "press_abs_hpa": _f(sample.absolute_pressure_hpa), "press_diff_hpa": _f(sample.differential_pressure_hpa), "press_temp_degc": _f(sample.temperature_deg)},
             )
             return
         if kind == "fixedwing_metrics":
-            _emit(
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
                 {
                     "type": "fixedwing_metrics",
                     "fw_airspeed_m_s": _f(sample.airspeed_m_s),
@@ -391,17 +462,19 @@ async def _run(host: str, port: int) -> None:
                     "fw_gspeed_m_s": _f(sample.groundspeed_m_s),
                     "fw_heading_deg": _f(sample.heading_deg),
                     "fw_abs_alt_m": _f(sample.absolute_altitude_m),
-                }
+                },
             )
             return
         if kind == "vtol_state":
-            _emit({"type": "vtol_state", "vtol_state": str(sample)})
+            _emit_vehicle(vehicle_id, system_id, {"type": "vtol_state", "vtol_state": str(sample)})
             return
         if kind == "odometry":
             q = sample.q
             pb = sample.position_body
             vb = sample.velocity_body
-            _emit(
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
                 {
                     "type": "odometry",
                     "odom_usec": _i(sample.time_usec),
@@ -417,11 +490,13 @@ async def _run(host: str, port: int) -> None:
                     "odom_vx": _f(vb.x_m_s),
                     "odom_vy": _f(vb.y_m_s),
                     "odom_vz": _f(vb.z_m_s),
-                }
+                },
             )
             return
         if kind == "raw_gps":
-            _emit(
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
                 {
                     "type": "raw_gps",
                     "raw_gps_timestamp_us": _i(sample.timestamp_us),
@@ -438,55 +513,205 @@ async def _run(host: str, port: int) -> None:
                     "raw_gps_vel_unc_m_s": _f(sample.velocity_uncertainty_m_s),
                     "raw_gps_hdg_unc_deg": _f(sample.heading_uncertainty_deg),
                     "raw_gps_yaw_deg": _f(sample.yaw_deg),
-                }
+                },
             )
             return
         if kind == "unix_epoch_time":
-            _emit({"type": "unix_epoch_time", "unix_epoch_us": _i(sample)})
+            _emit_vehicle(vehicle_id, system_id, {"type": "unix_epoch_time", "unix_epoch_us": _i(sample)})
             return
 
-    await asyncio.gather(
-        _watch("armed", drone.telemetry.armed),
-        _watch("flight_mode", drone.telemetry.flight_mode),
-        _watch("position", drone.telemetry.position),
-        _watch("battery", drone.telemetry.battery),
-        _watch("gps_info", drone.telemetry.gps_info),
-        _watch("health", drone.telemetry.health),
-        _watch("health_all_ok", drone.telemetry.health_all_ok),
-        _watch("in_air", drone.telemetry.in_air),
-        _watch("landed_state", drone.telemetry.landed_state),
-        _watch("rc_status", drone.telemetry.rc_status),
-        _watch("attitude_euler", drone.telemetry.attitude_euler),
-        _watch("attitude_quaternion", drone.telemetry.attitude_quaternion),
-        _watch(
-            "attitude_angular_velocity_body",
-            drone.telemetry.attitude_angular_velocity_body,
-        ),
-        _watch("velocity_ned", drone.telemetry.velocity_ned),
-        _watch("altitude", drone.telemetry.altitude),
-        _watch("home", drone.telemetry.home),
-        _watch("status_text", drone.telemetry.status_text),
-        _watch("position_velocity_ned", drone.telemetry.position_velocity_ned),
-        _watch("heading", drone.telemetry.heading),
-        _watch("distance_sensor", drone.telemetry.distance_sensor),
-        _watch("wind", drone.telemetry.wind),
-        _watch("imu", drone.telemetry.imu),
-        _watch("scaled_pressure", drone.telemetry.scaled_pressure),
-        _watch("fixedwing_metrics", drone.telemetry.fixedwing_metrics),
-        _watch("vtol_state", drone.telemetry.vtol_state),
-        _watch("odometry", drone.telemetry.odometry),
-        _watch("raw_gps", drone.telemetry.raw_gps),
-        _watch("unix_epoch_time", drone.telemetry.unix_epoch_time),
-    )
+    watch_specs = [
+        ("armed", "armed"),
+        ("flight_mode", "flight_mode"),
+        ("position", "position"),
+        ("battery", "battery"),
+        ("gps_info", "gps_info"),
+        ("health", "health"),
+        ("health_all_ok", "health_all_ok"),
+        ("in_air", "in_air"),
+        ("landed_state", "landed_state"),
+        ("rc_status", "rc_status"),
+        ("attitude_euler", "attitude_euler"),
+        ("attitude_quaternion", "attitude_quaternion"),
+        ("attitude_angular_velocity_body", "attitude_angular_velocity_body"),
+        ("velocity_ned", "velocity_ned"),
+        ("altitude", "altitude"),
+        ("home", "home"),
+        ("status_text", "status_text"),
+        ("position_velocity_ned", "position_velocity_ned"),
+        ("heading", "heading"),
+        ("distance_sensor", "distance_sensor"),
+        ("wind", "wind"),
+        ("imu", "imu"),
+        ("scaled_pressure", "scaled_pressure"),
+        ("fixedwing_metrics", "fixedwing_metrics"),
+        ("vtol_state", "vtol_state"),
+        ("odometry", "odometry"),
+        ("raw_gps", "raw_gps"),
+        ("unix_epoch_time", "unix_epoch_time"),
+    ]
+
+    while True:
+        try:
+            # We connect to an already running mavsdk_server (host/port provided in ctor),
+            # so this call should only initialize the gRPC client/plugins. Passing
+            # system_address here can attempt to (re)configure links at the Python client
+            # layer and has caused false timeouts in practice.
+            await asyncio.wait_for(drone.connect(), timeout=20.0)
+        except asyncio.TimeoutError:
+            _emit_vehicle(
+                vehicle_id,
+                system_id,
+                {
+                    "type": "bridge_error",
+                    "message": "connect_rpc_timeout:mavsdk_connect_call_did_not_complete;transport_may_still_be_live",
+                },
+            )
+            await asyncio.sleep(1.0)
+            continue
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            _emit_vehicle(vehicle_id, system_id, {"type": "bridge_error", "message": f"connect:{e}"})
+            await asyncio.sleep(1.0)
+            continue
+
+        if not await wait_connected():
+            _emit_vehicle(vehicle_id, system_id, {"type": "bridge_error", "message": "connect_timeout:no_vehicle_discovered"})
+            await asyncio.sleep(1.0)
+            continue
+
+        _emit_vehicle(vehicle_id, system_id, {"type": "bridge_ready", "host": host, "port": port})
+        asyncio.create_task(detect_and_emit_vehicle_stack())
+        asyncio.create_task(detect_and_emit_version())
+
+        watchers = []
+        for kind, attr_name in watch_specs:
+            subscribe = getattr(drone.telemetry, attr_name, None)
+            if subscribe is None:
+                _emit_vehicle(vehicle_id, system_id, {"type": "bridge_error", "message": f"missing_stream:{kind}"})
+                continue
+            watchers.append(_watch(kind, subscribe))
+
+        if not watchers:
+            _emit_vehicle(vehicle_id, system_id, {"type": "bridge_error", "message": "no_supported_streams"})
+            await asyncio.sleep(1.0)
+            continue
+
+        try:
+            await asyncio.gather(*watchers)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            _emit_vehicle(vehicle_id, system_id, {"type": "bridge_error", "message": f"watchers:{e}"})
+            await asyncio.sleep(1.0)
+
+
+async def _run(host: str, port: int, connect_url: str | None, system_ids: list[int]) -> None:
+    try:
+        from mavsdk import System  # noqa: F401
+    except ImportError:
+        _err(
+            "mavsdk Python package not found. Run: pip3 install -r requirements.txt "
+            "(in this directory) or: make bridge-deps"
+        )
+        _emit({"type": "bridge_error", "message": "missing_mavsdk_python_package"})
+        sys.exit(1)
+
+    boot = {"type": "bridge_listening", "host": host, "port": port}
+    if connect_url:
+        boot["connect_url"] = connect_url
+    if system_ids:
+        boot["system_ids"] = system_ids
+    _emit(boot)
+
+    desired_ids = set(system_ids)
+    if not desired_ids:
+        default_max = _i(os.environ.get("GUARDIAN_MAVSDK_MAX_SYSTEMS"))
+        if default_max:
+            default_max = max(1, min(default_max, 255))
+            desired_ids = set(range(1, default_max + 1))
+
+    command_queue: asyncio.Queue[dict] = asyncio.Queue()
+    command_task = asyncio.create_task(_stdin_command_loop(command_queue))
+    workers: dict[int, asyncio.Task] = {}
+
+    def _start_worker(sid: int) -> None:
+        if sid in workers and not workers[sid].done():
+            return
+        workers[sid] = asyncio.create_task(_run_system(host, port, sid, connect_url))
+
+    async def _reconcile() -> None:
+        # Remove workers no longer desired.
+        for sid in list(workers.keys()):
+            if sid not in desired_ids:
+                workers[sid].cancel()
+                del workers[sid]
+        # Ensure desired workers exist.
+        for sid in sorted(desired_ids):
+            _start_worker(sid)
+
+    await _reconcile()
+
+    try:
+        while True:
+            # Surface worker crashes and recreate while still desired.
+            for sid, task in list(workers.items()):
+                if not task.done():
+                    continue
+                del workers[sid]
+                try:
+                    result = task.result()
+                    if isinstance(result, asyncio.CancelledError):
+                        raise result
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    _emit({"type": "bridge_error", "message": f"system_task_exception:sysid:{sid}:{e}"})
+                if sid in desired_ids:
+                    _start_worker(sid)
+
+            try:
+                cmd = await asyncio.wait_for(command_queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+
+            ctype = str(cmd.get("type", "")).strip().lower()
+            if ctype == "set_system_ids":
+                ids_raw = cmd.get("system_ids", [])
+                if isinstance(ids_raw, list):
+                    parsed = []
+                    for item in ids_raw:
+                        val = _i(item)
+                        if val is not None and 1 <= val <= 255:
+                            parsed.append(val)
+                    desired_ids = set(parsed)
+                    _emit({"type": "bridge_system_ids_updated", "system_ids": sorted(desired_ids)})
+                    await _reconcile()
+            elif ctype:
+                _emit({"type": "bridge_error", "message": f"unknown_command:{ctype}"})
+    finally:
+        command_task.cancel()
+        for t in workers.values():
+            t.cancel()
 
 
 def main() -> None:
     host = os.environ.get("GUARDIAN_MAVSDK_GRPC_HOST", "127.0.0.1")
     port_s = os.environ.get("GUARDIAN_MAVSDK_GRPC_PORT", "50051")
+    connect_url = os.environ.get("GUARDIAN_MAVSDK_CONNECT_URL")
+    system_ids_csv = os.environ.get("GUARDIAN_MAVSDK_SYSTEM_IDS")
     if len(sys.argv) >= 2:
         host = sys.argv[1]
     if len(sys.argv) >= 3:
         port_s = sys.argv[2]
+    if len(sys.argv) >= 4:
+        connect_url = sys.argv[3]
+    if len(sys.argv) >= 5:
+        system_ids_csv = sys.argv[4]
+    if connect_url is not None:
+        connect_url = connect_url.strip() or None
+    system_ids = _parse_system_ids_csv(system_ids_csv)
     try:
         port = int(port_s)
     except ValueError:
@@ -494,10 +719,14 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        asyncio.run(_run(host, port))
+        asyncio.run(_run(host, port, connect_url, system_ids))
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        _err(f"bridge runtime failed: {e}\n{traceback.format_exc()}")
+        _emit({"type": "bridge_error", "message": f"runtime:{e}"})
 
 
 if __name__ == "__main__":
     main()
+

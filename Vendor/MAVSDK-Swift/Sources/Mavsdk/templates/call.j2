@@ -1,0 +1,48 @@
+
+/**
+ {{ method_description }}
+
+ {% if params|length == 1 -%}
+ - Parameter {{ params[0].name.lower_camel_case }}:{{ params[0].description.rstrip() }}
+ {% elif params|length > 1 -%}
+ - Parameters:
+    {%- for param in params %}
+    - {{ param.name.lower_camel_case }}:{{ param.description.rstrip() }}
+    {%- endfor %}
+ {% endif %}
+ */
+public func {{ name.lower_camel_case }}({% for param in params %}{{ param.name.lower_camel_case }}: {{ param.type_info.name }}{{ ", " if not loop.last }}{% endfor %}) -> Completable {
+    return Completable.create { completable in
+        {% if params|length > 0 %}var{% else %}let{% endif %} request = {{ package.upper_camel_case.replace('_', '').replace('.', '_') }}_{{ name.upper_camel_case }}Request()
+
+        {% for param in params %}
+            {% if param.type_info.is_primitive %}
+        request.{{ param.name.lower_camel_case }} = {{ param.name.lower_camel_case }}
+            {% elif param.type_info.is_repeated %}
+        {{ param.name.lower_camel_case }}.forEach({ elem in request.{{ param.name.lower_camel_case }}.append(elem.rpc{{ param.type_info.inner_name }}) })
+            {% else %}
+        request.{{ param.name.lower_camel_case }} = {{ param.name.lower_camel_case }}.rpc{{ param.type_info.name }}
+            {% endif %}
+        {% endfor %}
+
+        do {
+            {% if has_result %}
+            let response = self.service.{{ name.lower_camel_case }}(request)
+
+            let result = try response.response.wait().{{ plugin_name.lower_camel_case }}Result
+            if (result.result == {{ package.upper_camel_case.replace('_', '').replace('.', '_') }}_{{ plugin_name.upper_camel_case }}Result.Result.success) {
+                completable(.completed)
+            } else {
+                completable(.error({{ plugin_name.upper_camel_case }}Error(code: {{ plugin_name.upper_camel_case }}Result.Result.translateFromRpc(result.result), description: result.resultStr)))
+            }
+            {% else %}
+            let _ = try self.service.{{ name.lower_camel_case }}(request)
+            completable(.completed)
+            {% endif %}
+        } catch {
+            completable(.error(error))
+        }
+
+        return Disposables.create()
+    }
+}

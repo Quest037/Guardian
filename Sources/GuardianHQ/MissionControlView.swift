@@ -749,6 +749,7 @@ private struct MissionRunDetailView: View {
                     MissionLiveVehicleHealthCard(
                         slotTitle: "—",
                         rosterSubtitle: "—",
+                        vehicleID: nil,
                         simulationImageBasenames: nil,
                         hub: fleetLink.hubTelemetry
                     )
@@ -757,11 +758,13 @@ private struct MissionRunDetailView: View {
                         let device = resolvedMission.flatMap { m in
                             m.rosterDevices.first { $0.id == assignment.rosterDeviceId }
                         }
+                        let vehicleID = telemetryVehicleID(for: assignment)
                         MissionLiveVehicleHealthCard(
                             slotTitle: assignment.slotName,
                             rosterSubtitle: rosterRoleSubtitle(device),
+                            vehicleID: vehicleID,
                             simulationImageBasenames: simulationImageBasenamesForAssignment(assignment, sitl: sitl),
-                            hub: fleetLink.hubTelemetry
+                            hub: vehicleID.flatMap(fleetLink.hubTelemetry(forVehicleID:))
                         )
                     }
                 }
@@ -1024,6 +1027,24 @@ private struct MissionRunDetailView: View {
         return nil
     }
 
+    /// Bridge vehicle stream key for a roster assignment (`sysid:<id>` for SITL).
+    private func telemetryVehicleID(for assignment: MissionRunAssignment) -> String? {
+        guard let key = assignment.attachedFleetVehicleToken,
+              let token = FleetMissionVehicleToken(storageKey: key)
+        else { return nil }
+        switch token {
+        case .sitl(let uuid):
+            guard let inst = sitl.instances.first(where: { $0.id == uuid }) else { return nil }
+            // SITL instance indices are expected as MAVLink system ids `instance + 1`,
+            // but we resolve through the bridge runtime map in case key format changes.
+            let expectedSystemID = inst.stackInstanceIndex + 1
+            return fleetLink.vehicleID(forSystemID: expectedSystemID) ?? "sysid:\(expectedSystemID)"
+        case .live:
+            return nil
+        }
+    }
+
+
 }
 
 /// One vehicle column in Mission Control: vehicle-type thumbnail + slot title / roster role subtitle, battery/GPS, MAVSDK health. Top-trailing reserved for a future cog menu.
@@ -1031,6 +1052,7 @@ private struct MissionLiveVehicleHealthCard: View {
     let slotTitle: String
     /// Same text as roster slot subtitle (`roleType` · position hint, or "—").
     let rosterSubtitle: String
+    let vehicleID: String?
     let simulationImageBasenames: [String]?
     let hub: FleetHubVehicleTelemetry?
 
@@ -1055,6 +1077,13 @@ private struct MissionLiveVehicleHealthCard: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 0)
+                }
+                if let vehicleID {
+                    Text(displayVehicleID(vehicleID))
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.gray.opacity(0.75))
+                        .lineLimit(1)
+                        .help("Bridge vehicle key: \(vehicleID)")
                 }
 
                 if let hub {
@@ -1241,6 +1270,13 @@ private struct MissionLiveVehicleHealthCard: View {
             return String(t.suffix(6))
         }
         return t
+    }
+
+    private func displayVehicleID(_ raw: String) -> String {
+        if raw.hasPrefix("sysid:") {
+            return String(raw.dropFirst("sysid:".count))
+        }
+        return raw
     }
 }
 

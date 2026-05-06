@@ -1,0 +1,62 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - "main"
+    tags:
+      - "*"
+  pull_request:
+    branches:
+      - "*"
+
+jobs:
+  build:
+    name: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: recursive
+      - name: build
+        run: swift build
+  generate-from-proto:
+    name: generate from protos
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: recursive
+      - name: install tools
+        run: pip3 install protoc-gen-mavsdk && brew install protobuf || brew link --overwrite protobuf
+      - name: generate from protos
+        run: bash Sources/Mavsdk/tools/generate_from_protos.bash
+      - name: check for diff
+        run: git diff --exit-code
+  generate-docs:
+    name: generate documentation
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: recursive
+      - name: install tools
+        run: gem install jazzy && pip3 install --user s3cmd python-magic
+      - name: generate docs
+        run: bash Sources/Mavsdk/tools/generate_docs.sh
+      - name: deploy docs (if main)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        if: github.ref == 'refs/heads/main'
+        run: |
+          export PATH=$PATH:$(python3 -m site --user-base)/bin
+          s3cmd --acl-public --add-header="Cache-Control:public, max-age=0" put --recursive docs/swift_output/* s3://mavsdk-swift-docs/main/;
+      - name: deploy docs (if tag)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        if: startsWith(github.ref, 'refs/tags/')
+        run:
+          export PATH=$PATH:$(python3 -m site --user-base)/bin
+          s3cmd --acl-public --add-header="Cache-Control:public, max-age=0" put --recursive docs/swift_output/* s3://mavsdk-swift-docs/${GITHUB_REF#refs/tags/}/;

@@ -1,0 +1,66 @@
+import Foundation
+import RxSwift
+import GRPC
+import NIO
+
+/**
+ {{ class_description }}
+ */
+public class {{ plugin_name.upper_camel_case }} {
+    private let service: {{ package.upper_camel_case.replace('_', '').replace('.', '_') }}_{{ plugin_name.upper_camel_case }}ServiceClient
+    private let scheduler: SchedulerType
+    private let clientEventLoopGroup: EventLoopGroup
+
+    /**
+     Initializes a new `{{ plugin_name.upper_camel_case }}` plugin.
+
+     Normally never created manually, but used from the `Drone` helper class instead.
+
+     - Parameters:
+        - address: The address of the `MavsdkServer` instance to connect to
+        - port: The port of the `MavsdkServer` instance to connect to
+        - scheduler: The scheduler to be used by `Observable`s
+     */
+    public convenience init(address: String = "localhost",
+                            port: Int32 = 50051,
+                            scheduler: SchedulerType = ConcurrentDispatchQueueScheduler(qos: .background)) {
+        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 2)
+        let channel = ClientConnection.insecure(group: eventLoopGroup).connect(host: address, port: Int(port))
+        let service = {{ package.upper_camel_case.replace('_', '').replace('.', '_') }}_{{ plugin_name.upper_camel_case }}ServiceClient(channel: channel)
+
+        self.init(service: service, scheduler: scheduler, eventLoopGroup: eventLoopGroup)
+    }
+
+    init(service: {{ package.upper_camel_case.replace('_', '').replace('.', '_') }}_{{ plugin_name.upper_camel_case }}ServiceClient, scheduler: SchedulerType, eventLoopGroup: EventLoopGroup) {
+        self.service = service
+        self.scheduler = scheduler
+        self.clientEventLoopGroup = eventLoopGroup
+    }
+
+    public struct Runtime{{ plugin_name.upper_camel_case }}Error: Error {
+        public let description: String
+
+        init(_ description: String) {
+            self.description = description
+        }
+    }
+
+    {% if has_result %}
+    public struct {{ plugin_name.upper_camel_case }}Error: Error {
+        public let code: {{ plugin_name.upper_camel_case }}.{{ plugin_name.upper_camel_case }}Result.Result
+        public let description: String
+    }
+    {% endif %}
+
+{%- for enum in enums %}
+{{ indent(enum, 1) }}
+{%- endfor %}
+
+{% for struct in structs %}
+{{ indent(struct, 1) }}
+{% endfor %}
+
+{%- for method in methods %}
+{{ indent(method, 1) }}
+{%- endfor %}
+}

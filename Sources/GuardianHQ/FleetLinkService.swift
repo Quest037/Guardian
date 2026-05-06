@@ -1,6 +1,8 @@
 import AppKit
 import Combine
 import Foundation
+import Mavsdk
+import RxSwift
 
 /// Phase of the Python MAVSDK bridge relative to the vehicle on the wire.
 enum TelemetryBridgePhase: Equatable {
@@ -31,11 +33,21 @@ final class FleetLinkService: ObservableObject {
     @Published private(set) var telemetry: FleetTelemetrySnapshot?
     /// Full merged hub snapshot from every `mavsdk_bridge.py` stream (see `FleetHubVehicleTelemetry`).
     @Published private(set) var hubTelemetry: FleetHubVehicleTelemetry?
+    /// Multi-vehicle hub snapshots keyed by bridge `vehicle_id` (e.g. `sysid:1`).
+    @Published private(set) var hubTelemetryByVehicleID: [String: FleetHubVehicleTelemetry] = [:]
+    /// Compact per-vehicle snapshots keyed by bridge `vehicle_id`.
+    @Published private(set) var telemetryByVehicleID: [String: FleetTelemetrySnapshot] = [:]
+    /// Runtime bridge routing map from MAVLink system id to bridge vehicle stream key.
+    @Published private(set) var vehicleIDBySystemID: [Int: String] = [:]
     /// Top-bar “Simulate” switch — only meaningful while the server is running; cleared when the server stops.
     @Published private(set) var isSimulateEnabled = false
 
     private var runner: MavsdkServerRunner?
     private var bridgeRunner: MavsdkBridgeRunner?
+    private var telemetryActivationLoggedVehicleIDs: Set<String> = []
+    private var trackedSystemIDs: Set<Int> = []
+    private var nativeDrone: Drone?
+    private var nativeTelemetryDisposeBag = DisposeBag()
     /// Held for removal on teardown; `nonisolated(unsafe)` so `deinit` can unregister without Sendable issues.
     nonisolated(unsafe) private var terminateObserver: NSObjectProtocol?
 
@@ -72,6 +84,20 @@ final class FleetLinkService: ObservableObject {
         isSimulateEnabled = enabled
     }
 
+    /// Vehicle-owned telemetry model: subscriptions follow active vehicle system IDs.
+    func setTrackedSystemIDs(_ ids: Set<Int>) {
+        let normalized = Set(ids.filter { $0 > 0 && $0 < 256 })
+        guard normalized != trackedSystemIDs else { return }
+        trackedSystemIDs = normalized
+        guard isRunning else { return }
+        appendLog("[bridge] tracked system IDs updated: \(normalized.sorted())")
+        if let bridgeRunner {
+            bridgeRunner.updateSystemIDs(normalized.sorted())
+        } else {
+            schedulePythonBridgeStart()
+        }
+    }
+
     /// Starts `mavsdk_server` if not already running. Returns `false` if launch failed (see `lastError`).
     @discardableResult
     func startServer() -> Bool {
@@ -79,6 +105,11 @@ final class FleetLinkService: ObservableObject {
         lastError = nil
         telemetry = nil
         hubTelemetry = nil
+        telemetryByVehicleID.removeAll(keepingCapacity: true)
+        hubTelemetryByVehicleID.removeAll(keepingCapacity: true)
+        vehicleIDBySystemID.removeAll(keepingCapacity: true)
+        telemetryActivationLoggedVehicleIDs.removeAll(keepingCapacity: true)
+        trackedSystemIDs.removeAll(keepingCapacity: true)
         bridgePhase = .inactive
 
         let runner = MavsdkServerRunner()
@@ -95,6 +126,11 @@ final class FleetLinkService: ObservableObject {
             self.bridgePhase = .inactive
             self.telemetry = nil
             self.hubTelemetry = nil
+            self.telemetryByVehicleID.removeAll(keepingCapacity: true)
+            self.hubTelemetryByVehicleID.removeAll(keepingCapacity: true)
+            self.vehicleIDBySystemID.removeAll(keepingCapacity: true)
+            self.telemetryActivationLoggedVehicleIDs.removeAll(keepingCapacity: true)
+            self.trackedSystemIDs.removeAll(keepingCapacity: true)
             self.appendLog("mavsdk_server exited (code \(code)).")
         }
         do {
@@ -156,6 +192,10 @@ final class FleetLinkService: ObservableObject {
         guard isSimulateEnabled else { return }
         telemetry = nil
         hubTelemetry = nil
+        telemetryByVehicleID.removeAll(keepingCapacity: true)
+        hubTelemetryByVehicleID.removeAll(keepingCapacity: true)
+        vehicleIDBySystemID.removeAll(keepingCapacity: true)
+        telemetryActivationLoggedVehicleIDs.removeAll(keepingCapacity: true)
         if bridgePhase == .live {
             bridgePhase = .awaitingVehicle
             appendLog("Simulation vehicle ended — reconnecting telemetry bridge for the next MAVLink system.")
@@ -179,59 +219,146 @@ final class FleetLinkService: ObservableObject {
     }
 
     private func startPythonBridge() {
-        guard isRunning, bridgeRunner == nil else { return }
-        guard let scriptDir = MavsdkBridgeLocator.bridgeDirectoryURL() else {
-            appendLog("MavsdkBridge bundle missing — rebuild the app.")
-            lastError = "MavsdkBridge resources not found."
-            return
-        }
+        guard isRunning, nativeDrone == nil else { return }
+        bridgePhase = .connecting
+        appendLog("Starting native MAVSDK-Swift telemetry client.")
+        nativeTelemetryDisposeBag = DisposeBag()
 
-        let bridge = MavsdkBridgeRunner()
-        bridge.onStdoutLine = { [weak self] line in
-            guard let self else { return }
-            self.handleBridgeStdoutLine(line)
-        }
-        bridge.onStderrLine = { [weak self] line in
-            guard let self else { return }
-            self.appendLog("[bridge] \(line)")
-        }
-        bridge.onTerminated = { [weak self] code in
-            guard let self else { return }
-            self.bridgeRunner = nil
-            self.bridgePhase = .inactive
-            self.appendLog("mavsdk_bridge.py exited (code \(code)).")
-            self.telemetry = nil
-            self.hubTelemetry = nil
-        }
-
-        do {
-            try bridge.start(
-                grpcHost: "127.0.0.1",
-                grpcPort: configuration.grpcPort,
-                scriptDirectory: scriptDir
+        let drone = Drone()
+        nativeDrone = drone
+        drone.connect(mavsdkServerAddress: "127.0.0.1", mavsdkServerPort: Int32(configuration.grpcPort))
+            .subscribe(
+                onCompleted: { [weak self] in
+                    guard let self else { return }
+                    self.appendLog("Native MAVSDK-Swift client attached to mavsdk_server.")
+                    self.bridgePhase = .awaitingVehicle
+                },
+                onError: { [weak self] error in
+                    guard let self else { return }
+                    self.appendLog("[native] connect error: \(error.localizedDescription)")
+                    self.lastError = "Native telemetry client failed to connect: \(error.localizedDescription)"
+                    self.bridgePhase = .inactive
+                }
             )
-            bridgeRunner = bridge
-            bridgePhase = .connecting
-            appendLog("Started mavsdk_bridge.py (MAVSDK-Python).")
-        } catch {
-            lastError = error.localizedDescription
-            appendLog("Could not start bridge: \(error.localizedDescription)")
-            bridge.onStdoutLine = nil
-            bridge.onStderrLine = nil
-            bridge.onTerminated = nil
-        }
+            .disposed(by: nativeTelemetryDisposeBag)
+
+        drone.core.connectionState
+            .subscribe(
+                onNext: { [weak self] state in
+                    guard let self else { return }
+                    self.bridgePhase = state.isConnected ? .live : .awaitingVehicle
+                },
+                onError: { [weak self] error in
+                    self?.appendLog("[native] core.connectionState stream error: \(error.localizedDescription)")
+                }
+            )
+            .disposed(by: nativeTelemetryDisposeBag)
+
+        let vehicleID = trackedSystemIDs.sorted().first.map { "sysid:\($0)" } ?? "sysid:1"
+        let systemID = trackedSystemIDs.sorted().first ?? 1
+        vehicleIDBySystemID[systemID] = vehicleID
+
+        drone.telemetry.position
+            .subscribe(onNext: { [weak self] pos in
+                self?.applyNativeTelemetry(vehicleID: vehicleID, systemID: systemID) { hub in
+                    hub.latitudeDeg = pos.latitudeDeg
+                    hub.longitudeDeg = pos.longitudeDeg
+                    hub.absoluteAltM = Double(pos.absoluteAltitudeM)
+                    hub.relativeAltM = Double(pos.relativeAltitudeM)
+                }
+            }, onError: { [weak self] error in
+                self?.appendLog("[native] position stream error: \(error.localizedDescription)")
+            })
+            .disposed(by: nativeTelemetryDisposeBag)
+
+        drone.telemetry.battery
+            .subscribe(onNext: { [weak self] b in
+                self?.applyNativeTelemetry(vehicleID: vehicleID, systemID: systemID) { hub in
+                    hub.batteryId = b.id
+                    hub.batteryVoltageV = Double(b.voltageV)
+                    hub.batteryRemainingPercent = Double(b.remainingPercent)
+                }
+            }, onError: { [weak self] error in
+                self?.appendLog("[native] battery stream error: \(error.localizedDescription)")
+            })
+            .disposed(by: nativeTelemetryDisposeBag)
+
+        drone.telemetry.flightMode
+            .subscribe(onNext: { [weak self] mode in
+                self?.applyNativeTelemetry(vehicleID: vehicleID, systemID: systemID) { hub in
+                    hub.flightMode = String(describing: mode)
+                }
+            }, onError: { [weak self] error in
+                self?.appendLog("[native] flightMode stream error: \(error.localizedDescription)")
+            })
+            .disposed(by: nativeTelemetryDisposeBag)
+
+        drone.telemetry.armed
+            .subscribe(onNext: { [weak self] armed in
+                self?.applyNativeTelemetry(vehicleID: vehicleID, systemID: systemID) { hub in
+                    hub.isArmed = armed
+                }
+            }, onError: { [weak self] error in
+                self?.appendLog("[native] armed stream error: \(error.localizedDescription)")
+            })
+            .disposed(by: nativeTelemetryDisposeBag)
+
+        drone.telemetry.gpsInfo
+            .subscribe(onNext: { [weak self] g in
+                self?.applyNativeTelemetry(vehicleID: vehicleID, systemID: systemID) { hub in
+                    hub.gpsNumSatellites = g.numSatellites
+                    hub.gpsFixType = String(describing: g.fixType)
+                }
+            }, onError: { [weak self] error in
+                self?.appendLog("[native] gpsInfo stream error: \(error.localizedDescription)")
+            })
+            .disposed(by: nativeTelemetryDisposeBag)
+
+        drone.telemetry.health
+            .subscribe(onNext: { [weak self] h in
+                self?.applyNativeTelemetry(vehicleID: vehicleID, systemID: systemID) { hub in
+                    hub.healthGyrometerCalibrationOk = h.isGyrometerCalibrationOk
+                    hub.healthAccelerometerCalibrationOk = h.isAccelerometerCalibrationOk
+                    hub.healthMagnetometerCalibrationOk = h.isMagnetometerCalibrationOk
+                    hub.healthLocalPositionOk = h.isLocalPositionOk
+                    hub.healthGlobalPositionOk = h.isGlobalPositionOk
+                    hub.healthHomePositionOk = h.isHomePositionOk
+                    hub.healthArmable = h.isArmable
+                }
+            }, onError: { [weak self] error in
+                self?.appendLog("[native] health stream error: \(error.localizedDescription)")
+            })
+            .disposed(by: nativeTelemetryDisposeBag)
     }
 
     private func stopPythonBridge() {
-        guard let bridge = bridgeRunner else {
-            bridgePhase = .inactive
-            telemetry = nil
-            hubTelemetry = nil
-            return
+        bridgeRunner = nil
+        nativeTelemetryDisposeBag = DisposeBag()
+        nativeDrone?.disconnect()
+        nativeDrone = nil
+        bridgePhase = .inactive
+        telemetry = nil
+        hubTelemetry = nil
+        telemetryByVehicleID.removeAll(keepingCapacity: true)
+        hubTelemetryByVehicleID.removeAll(keepingCapacity: true)
+        vehicleIDBySystemID.removeAll(keepingCapacity: true)
+        telemetryActivationLoggedVehicleIDs.removeAll(keepingCapacity: true)
+    }
+
+    private func applyNativeTelemetry(vehicleID: String, systemID: Int, mutate: (inout FleetHubVehicleTelemetry) -> Void) {
+        var hub = hubTelemetryByVehicleID[vehicleID] ?? .empty
+        mutate(&hub)
+        hub.lastUpdate = Date()
+        hubTelemetryByVehicleID[vehicleID] = hub
+        telemetryByVehicleID[vehicleID] = hub.telemetrySnapshot()
+        vehicleIDBySystemID[systemID] = vehicleID
+        if !telemetryActivationLoggedVehicleIDs.contains(vehicleID),
+           (hub.latitudeDeg != nil || hub.batteryRemainingPercent != nil || hub.gpsNumSatellites != nil || hub.healthArmable != nil) {
+            telemetryActivationLoggedVehicleIDs.insert(vehicleID)
+            appendLog("[native] telemetry active [vehicle_id=\(vehicleID) system_id=\(systemID)]")
         }
-        appendLog("Stopping mavsdk_bridge.py…")
-        bridge.stop()
-        // Keep `bridgeRunner` until `onTerminated` runs so the process isn’t orphaned.
+        hubTelemetry = hub
+        telemetry = hub.telemetrySnapshot()
     }
 
     private func handleBridgeStdoutLine(_ line: String) {
@@ -240,32 +367,72 @@ final class FleetLinkService: ObservableObject {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         guard let env = try? decoder.decode(BridgeHubEnvelope.self, from: data) else { return }
 
-        var hub = hubTelemetry ?? .empty
+        let vehicleID = env.vehicleId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedVehicleID = (vehicleID?.isEmpty == false) ? vehicleID! : "sysid:unknown"
+        if let sid = env.systemId {
+            vehicleIDBySystemID[sid] = resolvedVehicleID
+        }
+        var hub = hubTelemetryByVehicleID[resolvedVehicleID] ?? .empty
 
         switch env.type {
         case "bridge_listening":
             bridgePhase = .awaitingVehicle
-            hub.autopilotStack = .unknown
             appendLog(
                 "Bridge connected to MAVSDK (gRPC \(env.host ?? "?"):\(env.port.map(String.init) ?? "?")) — waiting for a MAVLink system on the link."
             )
+            return
         case "bridge_ready":
             bridgePhase = .live
-            appendLog("Bridge ready — vehicle discovered (gRPC \(env.host ?? "?"):\(env.port.map(String.init) ?? "?")).")
+            if env.systemId != nil {
+                appendLog(
+                    "[bridge] discovered vehicle stream [vehicle_id=\(resolvedVehicleID) system_id=\(env.systemId ?? -1)] grpc=\(env.host ?? "?"):\(env.port.map(String.init) ?? "?")"
+                )
+            }
+            return
         case "bridge_error":
             let msg = env.message ?? "unknown"
-            appendLog("bridge error: \(msg)")
+            if msg.contains("connect_rpc_timeout:mavsdk_connect_call_did_not_complete") {
+                appendLog("[bridge] warning [vehicle_id=\(resolvedVehicleID) system_id=\(env.systemId ?? -1)] \(msg)")
+            } else {
+                appendLog("[bridge] error [vehicle_id=\(resolvedVehicleID) system_id=\(env.systemId ?? -1)] \(msg)")
+            }
             if msg.contains("missing_mavsdk_python_package") {
                 lastError = "Live telemetry couldn’t start. The optional components for this machine may be missing—check the server log or documentation for your build."
+            } else if msg.contains("system_selector_unavailable:python_mavsdk_ctor_has_no_sysid") {
+                lastError = "Live telemetry could not bind each MAVLink system separately. Update bridge dependencies (`make bridge-deps`) so MAVSDK-Python supports per-system selection."
             }
+            return
+        case "bridge_system_ids_updated":
+            appendLog("[bridge] active system IDs updated.")
             return
         default:
             hub.merge(env)
         }
 
         hub.lastUpdate = Date()
+        hubTelemetryByVehicleID[resolvedVehicleID] = hub
+        telemetryByVehicleID[resolvedVehicleID] = hub.telemetrySnapshot()
+        if !telemetryActivationLoggedVehicleIDs.contains(resolvedVehicleID),
+           (hub.latitudeDeg != nil || hub.batteryRemainingPercent != nil || hub.gpsNumSatellites != nil || hub.healthArmable != nil) {
+            telemetryActivationLoggedVehicleIDs.insert(resolvedVehicleID)
+            appendLog(
+                "[bridge] telemetry active [vehicle_id=\(resolvedVehicleID) system_id=\(env.systemId ?? -1)] event=\(env.type)"
+            )
+        }
+
+        // Backward-compat fields used in older UI: mirror the most recently updated vehicle.
         hubTelemetry = hub
         telemetry = hub.telemetrySnapshot()
+    }
+
+    /// Resolves one vehicle stream from the keyed telemetry hub.
+    func hubTelemetry(forVehicleID vehicleID: String) -> FleetHubVehicleTelemetry? {
+        hubTelemetryByVehicleID[vehicleID]
+    }
+
+    /// Resolves the active bridge stream key for a MAVLink system id, if discovered.
+    func vehicleID(forSystemID systemID: Int) -> String? {
+        vehicleIDBySystemID[systemID]
     }
 
     private func appendLog(_ line: String) {

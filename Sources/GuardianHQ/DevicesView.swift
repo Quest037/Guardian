@@ -9,6 +9,8 @@ struct DevicesView: View {
 
     @State private var isAddSimSidebarPresented = false
     @State private var sidebarSpawnPlatform: SimulationPlatform = .ardupilot
+    @State private var infoSheetVehicleTitle: String?
+    @State private var infoSheetVehicleID: String?
 
     private let bgMain = Color(red: 0.07, green: 0.07, blue: 0.08)
 
@@ -27,6 +29,25 @@ struct DevicesView: View {
                 toastCenter.show(newValue, style: .error, duration: 4.5)
             }
         }
+        .sheet(isPresented: infoSheetIsPresented) {
+            VehicleTelemetryInfoSheet(
+                title: infoSheetVehicleTitle ?? "Vehicle telemetry",
+                vehicleID: infoSheetVehicleID,
+                hub: infoSheetVehicleID.flatMap(fleetLink.hubTelemetry(forVehicleID:)) ?? fleetLink.hubTelemetry
+            )
+        }
+    }
+
+    private var infoSheetIsPresented: Binding<Bool> {
+        Binding(
+            get: { infoSheetVehicleTitle != nil },
+            set: { showing in
+                if !showing {
+                    infoSheetVehicleTitle = nil
+                    infoSheetVehicleID = nil
+                }
+            }
+        )
     }
 
     private var serverOfflineMessage: some View {
@@ -185,24 +206,40 @@ struct DevicesView: View {
                         title: "Live vehicle",
                         domain: .aerial,
                         autopilotStack: snapshot.autopilotStack,
+                        vehicleId: primaryLiveVehicleIDDisplayText,
+                        systemId: nil,
+                        sessionUUID: nil,
                         simulationImageBasenames: nil,
                         isSimulation: false,
                         liveTelemetry: snapshot,
                         sitlAlive: nil,
                         sitlExitCode: nil,
+                        onInfo: {
+                            infoSheetVehicleTitle = "Live vehicle telemetry"
+                            infoSheetVehicleID = primaryLiveVehicleID
+                        },
                         onStopSim: nil,
                         onDismissSim: nil
                     )
                 case .sim(let inst):
+                    let systemID = inst.stackInstanceIndex + 1
+                    let resolvedVehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
                     FleetVehicleGridCard(
                         title: inst.preset.displayName,
                         domain: inst.preset.vehicleDomain,
                         autopilotStack: FleetAutopilotStack(simulationPlatform: inst.platform),
+                        vehicleId: String(systemID),
+                        systemId: systemID,
+                        sessionUUID: inst.id.uuidString,
                         simulationImageBasenames: inst.preset.simulationDeviceImageBasenames,
                         isSimulation: true,
                         liveTelemetry: nil,
                         sitlAlive: inst.isAlive,
                         sitlExitCode: inst.lastExitCode,
+                        onInfo: {
+                            infoSheetVehicleTitle = "\(inst.preset.displayName) telemetry"
+                            infoSheetVehicleID = resolvedVehicleID
+                        },
                         onStopSim: { sitl.stop(id: inst.id) },
                         onDismissSim: { sitl.dismiss(id: inst.id) }
                     )
@@ -233,6 +270,18 @@ struct DevicesView: View {
             rows.append(.sim(inst))
         }
         return rows
+    }
+
+    private var primaryLiveVehicleID: String? {
+        fleetLink.hubTelemetryByVehicleID.keys.sorted().first
+    }
+
+    private var primaryLiveVehicleIDDisplayText: String? {
+        guard let key = primaryLiveVehicleID else { return nil }
+        if key.hasPrefix("sysid:") {
+            return String(key.dropFirst("sysid:".count))
+        }
+        return key
     }
 
     /// Dot + two-word status on the same row as the "Vehicles" title (no subtitle).
@@ -291,6 +340,67 @@ struct DevicesView: View {
         return "Server off."
     }
 
+}
+
+private struct VehicleTelemetryInfoSheet: View {
+    let title: String
+    let vehicleID: String?
+    let hub: FleetHubVehicleTelemetry?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(title)
+                    .font(.title3.bold())
+                    .foregroundStyle(.white)
+                Spacer()
+                Button("Close") { dismiss() }
+                    .buttonStyle(.bordered)
+            }
+            if let vehicleID {
+                Text("Vehicle stream: \(vehicleID)")
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.gray)
+            }
+            Divider().opacity(0.2)
+            ScrollView {
+                if let hub {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(telemetryRows(from: hub), id: \.0) { row in
+                            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                Text(row.0)
+                                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(.gray)
+                                    .frame(width: 240, alignment: .leading)
+                                Text(row.1)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundStyle(.white.opacity(0.95))
+                                Spacer(minLength: 0)
+                            }
+                        }
+                    }
+                } else {
+                    Text("No telemetry available for this vehicle stream.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.gray)
+                }
+            }
+        }
+        .padding(18)
+        .frame(minWidth: 760, minHeight: 520)
+        .background(Color(red: 0.08, green: 0.08, blue: 0.09))
+    }
+
+    private func telemetryRows(from hub: FleetHubVehicleTelemetry) -> [(String, String)] {
+        Mirror(reflecting: hub).children.compactMap { child in
+            guard let label = child.label else { return nil }
+            let value = String(describing: child.value)
+            if value == "nil" { return nil }
+            return (label, value)
+        }
+        .sorted { $0.0 < $1.0 }
+    }
 }
 
 #Preview("Offline") {

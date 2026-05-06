@@ -31,10 +31,19 @@ final class SitlService: ObservableObject {
     /// After any SITL inventory change, clear MAVSDK’s stale “first vehicle” snapshot when nothing is alive and Simulate is on.
     private func reconcileFleetLinkVehicleCacheAfterSitlChange() {
         guard let link = fleetLink, link.isSimulateEnabled else { return }
+        link.setTrackedSystemIDs(activeSystemIDs())
         let anyAlive = instances.contains { $0.isAlive }
         if !anyAlive {
             link.clearStaleVehicleStateWhenNoSitlAlive()
         }
+    }
+
+    private func activeSystemIDs() -> Set<Int> {
+        Set(
+            instances
+                .filter { $0.isAlive }
+                .map { $0.stackInstanceIndex + 1 }
+        )
     }
 
     func stopAll() {
@@ -47,6 +56,7 @@ final class SitlService: ObservableObject {
         }
         instances.removeAll()
         lastError = nil
+        fleetLink?.setTrackedSystemIDs([])
         reconcileFleetLinkVehicleCacheAfterSitlChange()
     }
 
@@ -62,6 +72,7 @@ final class SitlService: ObservableObject {
             runner.stop()
         }
         instances.removeAll { $0.id == id }
+        fleetLink?.setTrackedSystemIDs(activeSystemIDs())
         reconcileFleetLinkVehicleCacheAfterSitlChange()
     }
 
@@ -146,7 +157,9 @@ final class SitlService: ObservableObject {
                 row.lastExitCode = code
                 self.instances[idx] = row
             }
-            link?.appendSimulationLog("SITL instance \(id.uuidString.prefix(8))… exited (code \(code)).")
+            link?.appendSimulationLog(
+                "SITL exited [platform=ArduPilot instance=\(instance) mavlink_sysid=\(instance + 1) session=\(id.uuidString)] code=\(code)"
+            )
             self.reconcileFleetLinkVehicleCacheAfterSitlChange()
         }
 
@@ -163,8 +176,9 @@ final class SitlService: ObservableObject {
                     lastExitCode: nil
                 )
             )
+            link.setTrackedSystemIDs(activeSystemIDs())
             link.appendSimulationLog(
-                "Started ArduPilot SITL (\(preset.displayName), instance \(instance)); MAVLink should reach your primary link port (e.g. 14550)."
+                "Started ArduPilot SITL [vehicle=\(preset.displayName) instance=\(instance) mavlink_sysid=\(instance + 1) session=\(id.uuidString)] primary_link=14550"
             )
         } catch {
             lastError = error.localizedDescription
@@ -209,7 +223,9 @@ final class SitlService: ObservableObject {
                 row.lastExitCode = code
                 self.instances[idx] = row
             }
-            link?.appendSimulationLog("SITL instance \(id.uuidString.prefix(8))… exited (code \(code)).")
+            link?.appendSimulationLog(
+                "SITL exited [platform=PX4 instance=\(instance) mavlink_sysid=\(instance + 1) session=\(id.uuidString)] code=\(code)"
+            )
             self.reconcileFleetLinkVehicleCacheAfterSitlChange()
         }
 
@@ -226,8 +242,9 @@ final class SitlService: ObservableObject {
                     lastExitCode: nil
                 )
             )
+            link.setTrackedSystemIDs(activeSystemIDs())
             link.appendSimulationLog(
-                "Started PX4 SITL (SIH, \(preset.displayName), PX4_SIM_MODEL=\(preset.px4SitlSimModel()), instance \(instance); GCS MAVLink UDP \(mavlinkPort) — mavsdk_server is started with matching udpout URLs automatically)."
+                "Started PX4 SITL [sim=SIH vehicle=\(preset.displayName) model=\(preset.px4SitlSimModel()) instance=\(instance) mavlink_sysid=\(instance + 1) session=\(id.uuidString)] gcs_udp=\(mavlinkPort) mavsdk_udpout=auto"
             )
         } catch {
             lastError = error.localizedDescription

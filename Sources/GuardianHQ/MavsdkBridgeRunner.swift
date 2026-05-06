@@ -6,6 +6,7 @@ final class MavsdkBridgeRunner {
     private var process: Process?
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
+    private var stdinPipe: Pipe?
     private var lineBuffer = ""
     private var didTeardown = false
 
@@ -13,7 +14,7 @@ final class MavsdkBridgeRunner {
     var onStderrLine: ((String) -> Void)?
     var onTerminated: ((Int32) -> Void)?
 
-    func start(grpcHost: String, grpcPort: Int, scriptDirectory: URL) throws {
+    func start(grpcHost: String, grpcPort: Int, connectURL: String?, systemIDs: [Int], scriptDirectory: URL) throws {
         guard process == nil else { return }
         didTeardown = false
 
@@ -29,14 +30,25 @@ final class MavsdkBridgeRunner {
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: python)
-        proc.arguments = [script.path, grpcHost, "\(grpcPort)"]
+        var args = [script.path, grpcHost, "\(grpcPort)"]
+        if let connectURL {
+            let trimmed = connectURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                args.append(trimmed)
+            }
+        }
+        if !systemIDs.isEmpty {
+            args.append(systemIDs.map(String.init).joined(separator: ","))
+        }
+        proc.arguments = args
         proc.currentDirectoryURL = scriptDirectory
 
+        let input = Pipe()
         let out = Pipe()
         let err = Pipe()
         proc.standardOutput = out
         proc.standardError = err
-        proc.standardInput = FileHandle.nullDevice
+        proc.standardInput = input
 
         proc.terminationHandler = { [weak self] finished in
             Task { @MainActor in
@@ -46,6 +58,7 @@ final class MavsdkBridgeRunner {
 
         try proc.run()
         process = proc
+        stdinPipe = input
         stdoutPipe = out
         stderrPipe = err
 
@@ -79,6 +92,23 @@ final class MavsdkBridgeRunner {
         }
     }
 
+    func updateSystemIDs(_ systemIDs: [Int]) {
+        guard let input = stdinPipe else { return }
+        let normalized = Array(Set(systemIDs.filter { $0 > 0 && $0 < 256 })).sorted()
+        let payload: [String: Any] = [
+            "type": "set_system_ids",
+            "system_ids": normalized,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []) else { return }
+        var framed = data
+        framed.append(0x0A) // newline-delimited JSON
+        do {
+            try input.fileHandleForWriting.write(contentsOf: framed)
+        } catch {
+            // Ignore broken pipe; termination handler will clean up process state.
+        }
+    }
+
     private func consumeStdoutChunk(_ chunk: String) {
         lineBuffer.append(chunk)
         while let nl = lineBuffer.firstIndex(of: "\n") {
@@ -108,6 +138,8 @@ final class MavsdkBridgeRunner {
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         try? stdoutPipe?.fileHandleForReading.close()
         try? stderrPipe?.fileHandleForReading.close()
+        try? stdinPipe?.fileHandleForWriting.close()
+        stdinPipe = nil
         stdoutPipe = nil
         stderrPipe = nil
         process?.terminationHandler = nil

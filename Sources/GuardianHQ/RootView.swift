@@ -7,7 +7,9 @@ struct RootView: View {
     @ObservedObject var sitlService: SitlService
     @StateObject private var missionStore = MissionStore()
     @StateObject private var missionControlStore = MissionControlStore()
+    @StateObject private var liveDriveStore = LiveDriveStore()
     @StateObject private var generalSettingsStore = GeneralSettingsStore()
+    @StateObject private var manualControlSettings = ManualControlSettingsStore()
     @State private var settingsPane: SettingsPane = .general
     @State private var isSidebarCollapsed = false
 
@@ -208,10 +210,19 @@ struct RootView: View {
                     generalSettings: generalSettingsStore,
                     missionControlStore: missionControlStore
                 )
+            case .liveDrive:
+                LiveDriveView(
+                    store: liveDriveStore,
+                    fleetLink: fleetLinkService,
+                    sitl: sitlService,
+                    missionControlStore: missionControlStore,
+                    manualControlSettings: manualControlSettings
+                )
             case .settings:
                 SettingsView(
                     selectedPane: $settingsPane,
-                    generalSettings: generalSettingsStore
+                    generalSettings: generalSettingsStore,
+                    manualControlSettings: manualControlSettings
                 )
             case .logs:
                 LogsView(fleetLink: fleetLinkService)
@@ -307,7 +318,7 @@ private struct LogsView: View {
                                 VStack(alignment: .leading, spacing: 6) {
                                     ForEach(fleetLink.vehicleLogIDs(), id: \.self) { vehicleID in
                                         Toggle(
-                                            vehicleID.replacingOccurrences(of: "sysid:", with: "System "),
+                                            fleetLink.displayShortID(forVehicleID: vehicleID),
                                             isOn: Binding(
                                                 get: { selectedVehicleIDs.contains(vehicleID) },
                                                 set: { enabled in

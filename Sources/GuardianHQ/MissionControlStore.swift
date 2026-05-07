@@ -1591,9 +1591,12 @@ final class MissionControlStore: ObservableObject {
         switch command {
         case .arm: return "arm"
         case .disarm: return "disarm"
+        case .holdPosition: return "hold"
         case .gotoCoordinate: return "goto"
         case .uploadAndStartMission(let items): return "upload+start mission (\(items.count) item(s))"
         case .returnToLaunch: return "return to launch"
+        case .land: return "land"
+        case .manualControl(let manual): return "manual \(manual.intent.rawValue)"
         }
     }
 
@@ -1727,7 +1730,8 @@ final class MissionControlStore: ObservableObject {
     func runSingleVehicleArmProbe(
         vehicleID: String,
         fleetLink: FleetLinkService,
-        sitl: SitlService
+        sitl: SitlService,
+        leaveArmed: Bool = false
     ) async -> SingleVehicleArmProbeResult {
         if let blocked = armProbeReadinessBlocker(vehicleID: vehicleID, fleetLink: fleetLink) {
             return blocked
@@ -1753,12 +1757,22 @@ final class MissionControlStore: ObservableObject {
 
         switch outcome {
         case .succeeded:
-            return SingleVehicleArmProbeResult(
+            let result = SingleVehicleArmProbeResult(
                 passed: true,
                 armedDuringProbe: true,
                 detail: "Arm succeeded.",
                 remediationAdvice: nil
             )
+            if !leaveArmed {
+                _ = fleetLink.executeVehicleCommand(
+                    vehicleID: vehicleID,
+                    command: .disarm,
+                    source: "missionControl.preflightAutoDisarm",
+                    category: .paladin,
+                    onPaladinCommandOutcome: nil
+                )
+            }
+            return result
         case .failed(let reason):
             let advice = ArmFailureAdvisor.advice(
                 for: ArmFailureRemediationContext(

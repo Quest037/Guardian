@@ -87,4 +87,18 @@ enum SimulationVehiclePreset: String, Codable, CaseIterable, Identifiable {
             return .marine
         }
     }
+
+    /// Maps the SITL preset to the granular ``FleetVehicleType`` used for ``FleetVehicleModel.displayShortID``.
+    var fleetVehicleType: FleetVehicleType {
+        switch self {
+        case .uavMultirotor: return .uavCopter
+        case .uavFixedWing: return .uavFixedWing
+        case .uavVTOL: return .uavVTOL
+        case .ugvWheeled: return .ugvWheeled
+        case .ugvTracked: return .ugvTracked
+        case .ugvLegged: return .ugvLegged
+        case .usv: return .usv
+        case .uuv: return .uuv
+        }
+    }
 }

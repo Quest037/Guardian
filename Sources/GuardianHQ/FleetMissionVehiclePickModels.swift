@@ -36,7 +36,10 @@ struct MissionPickableFleetVehicle: Identifiable {
     let title: String
     /// Autopilot / stack detail (no “live” or “sim” — those are badges in the sidebar).
     let detailLine: String
+    /// Numeric system ID rendered as text (e.g. `"1"`) — kept for legacy comparisons / log filter joins.
     let vehicleIDText: String
+    /// Canonical short ID shown to operators (e.g. `UAV-C:1`). Sourced from ``FleetVehicleModel.displayShortID``.
+    let vehicleShortID: String
     let lifecycleStatus: VehicleLifecycleStatus
     let autopilotStack: FleetAutopilotStack
     let domain: VehicleDomain
@@ -66,6 +69,7 @@ func buildMissionPickableVehicles(
                 title: "Live vehicle",
                 detailLine: "\(snap.autopilotStack.displayName) · \(snap.flightMode)",
                 vehicleIDText: idText,
+                vehicleShortID: model.displayShortID,
                 lifecycleStatus: model.collections.lifecycleStatus,
                 autopilotStack: snap.autopilotStack,
                 domain: .aerial,
@@ -79,12 +83,15 @@ func buildMissionPickableVehicles(
         let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
         let lifecycle = fleetLink.vehicleStatus(forVehicleID: vehicleID)
             ?? (inst.isAlive ? .init(stage: .awaitingTelemetry) : .init(stage: .stopped))
+        let resolvedShortID = fleetLink.vehicleModel(forVehicleID: vehicleID)?.displayShortID
+            ?? "\(inst.preset.fleetVehicleType.classCode):\(systemID)"
         rows.append(
             MissionPickableFleetVehicle(
                 token: .sitl(inst.id),
                 title: inst.preset.displayName,
                 detailLine: inst.platform.displayName,
                 vehicleIDText: "\(systemID)",
+                vehicleShortID: resolvedShortID,
                 lifecycleStatus: lifecycle,
                 autopilotStack: FleetAutopilotStack(simulationPlatform: inst.platform),
                 domain: inst.preset.vehicleDomain,

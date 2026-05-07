@@ -4,6 +4,7 @@ import AppKit
 enum AppSection: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"
     case devices = "Vehicles"
+    case liveDrive = "Live Drive"
     case logs = "Logs"
     case missions = "Missions"
     case missionControl = "Mission Control"
@@ -17,6 +18,8 @@ enum AppSection: String, CaseIterable, Identifiable {
             return "square.grid.2x2"
         case .devices:
             return "dot.radiowaves.left.and.right"
+        case .liveDrive:
+            return "steeringwheel"
         case .missions:
             return "map"
         case .logs:
@@ -34,6 +37,8 @@ enum AppSection: String, CaseIterable, Identifiable {
             return "HQ mission and fleet overview."
         case .devices:
             return "Live and simulated vehicles on the link."
+        case .liveDrive:
+            return "Direct vehicle control and manual driving."
         case .missions:
             return "Create and manage mission plans."
         case .logs:

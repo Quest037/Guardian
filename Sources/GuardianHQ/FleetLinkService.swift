@@ -12,6 +12,16 @@ enum TelemetryBridgePhase: Equatable {
     case live
 }
 
+/// Lightweight `Error`-conforming wrapper for parameter-read/write failures
+/// surfaced to callers of `getVehicleIntParameter` / `setVehicleIntParameter`.
+/// Wraps an already-formatted human-readable string so call sites can simply
+/// `print(error)` or `error.message` without unpacking MAVSDK error types.
+struct FleetLinkParameterError: Error, CustomStringConvertible {
+    let message: String
+    var description: String { message }
+    var localizedDescription: String { message }
+}
+
 @MainActor
 final class FleetLinkService: ObservableObject {
     private static let defaultsKey = "fleetLink.configuration.v1"
@@ -111,10 +121,87 @@ final class FleetLinkService: ObservableObject {
         isSimulateEnabled = enabled
     }
 
+    /// Read an integer autopilot parameter for a connected vehicle.
+    func getVehicleIntParameter(
+        vehicleID: String,
+        name: String,
+        source: String,
+        onResult: @escaping @MainActor (Result<Int32, FleetLinkParameterError>) -> Void
+    ) {
+        guard let session = sessionsByVehicleID[vehicleID] else {
+            onResult(.failure(FleetLinkParameterError(message: "No MAVSDK session for vehicle.")))
+            return
+        }
+        session.drone.param.getParamInt(name: name)
+            .observe(on: MainScheduler.asyncInstance)
+            .subscribe(
+                onSuccess: { [weak self] value in
+                    Task { @MainActor [weak self] in
+                        self?.appendVehicleLog(
+                            "Param read [source=\(source)] \(name)=\(value)",
+                            vehicleID: vehicleID
+                        )
+                        onResult(.success(value))
+                    }
+                },
+                onFailure: { [weak self] error in
+                    Task { @MainActor [weak self] in
+                        let detail = self?.mavsdkPublicErrorDescription(error) ?? error.localizedDescription
+                        self?.appendVehicleLog(
+                            "Param read failed [source=\(source)] \(name): \(detail)",
+                            vehicleID: vehicleID
+                        )
+                        onResult(.failure(FleetLinkParameterError(message: detail)))
+                    }
+                }
+            )
+            .disposed(by: session.bag)
+    }
+
+    /// Set an integer autopilot parameter for a connected vehicle.
+    func setVehicleIntParameter(
+        vehicleID: String,
+        name: String,
+        value: Int32,
+        source: String,
+        onResult: (@MainActor (Result<Void, FleetLinkParameterError>) -> Void)? = nil
+    ) {
+        guard let session = sessionsByVehicleID[vehicleID] else {
+            onResult?(.failure(FleetLinkParameterError(message: "No MAVSDK session for vehicle.")))
+            return
+        }
+        session.drone.param.setParamInt(name: name, value: value)
+            .observe(on: MainScheduler.asyncInstance)
+            .subscribe(
+                onCompleted: { [weak self] in
+                    Task { @MainActor [weak self] in
+                        self?.appendVehicleLog(
+                            "Param set [source=\(source)] \(name)=\(value)",
+                            vehicleID: vehicleID
+                        )
+                        onResult?(.success(()))
+                    }
+                },
+                onError: { [weak self] error in
+                    Task { @MainActor [weak self] in
+                        let detail = self?.mavsdkPublicErrorDescription(error) ?? error.localizedDescription
+                        self?.appendVehicleLog(
+                            "Param set failed [source=\(source)] \(name)=\(value): \(detail)",
+                            vehicleID: vehicleID
+                        )
+                        onResult?(.failure(FleetLinkParameterError(message: detail)))
+                    }
+                }
+            )
+            .disposed(by: session.bag)
+    }
+
     func registerSimulatedVehicle(
         systemID: Int,
         mavlinkConnectionURL: String,
-        autopilotStack: FleetAutopilotStack? = nil
+        autopilotStack: FleetAutopilotStack? = nil,
+        vehicleType: FleetVehicleType = .unknown,
+        spawnDefaults: SimSpawnDefaults? = nil
     ) {
         let vehicleID = "sysid:\(systemID)"
         if sessionsByVehicleID[vehicleID] != nil {
@@ -135,7 +222,12 @@ final class FleetLinkService: ObservableObject {
         sessionsByVehicleID[vehicleID] = session
         vehicleIDBySystemID[systemID] = vehicleID
         vehicleStatusByVehicleID[vehicleID] = VehicleLifecycleStatus(stage: .starting)
-        ensureVehicleModel(vehicleID: vehicleID, systemID: systemID, initialStatus: .init(stage: .starting))
+        ensureVehicleModel(
+            vehicleID: vehicleID,
+            systemID: systemID,
+            vehicleType: vehicleType,
+            initialStatus: .init(stage: .starting)
+        )
         if let autopilotStack {
             if var model = vehicleModelsByVehicleID[vehicleID] {
                 model.applyTelemetryMutation { hub in
@@ -145,6 +237,17 @@ final class FleetLinkService: ObservableObject {
                 hubTelemetryByVehicleID[vehicleID] = model.data.telemetry
                 telemetryByVehicleID[vehicleID] = model.collections.telemetrySnapshot
             }
+        }
+        if let defaults = spawnDefaults, var model = vehicleModelsByVehicleID[vehicleID] {
+            model.applyTelemetryMutation { hub in
+                hub.headingDeg = defaults.headingDeg
+                hub.batteryRemainingPercent = defaults.batteryPercent
+                hub.batteryVoltageV = defaults.batteryVoltageV
+                hub.batteryCurrentA = defaults.batteryCurrentA
+            }
+            vehicleModelsByVehicleID[vehicleID] = model
+            hubTelemetryByVehicleID[vehicleID] = model.data.telemetry
+            telemetryByVehicleID[vehicleID] = model.collections.telemetrySnapshot
         }
         logLinesByVehicleID[vehicleID] = []
         simulatedFleetVehicleIDs.insert(vehicleID)
@@ -281,8 +384,12 @@ final class FleetLinkService: ObservableObject {
             completion = session.drone.action.arm()
         case .disarm:
             completion = session.drone.action.disarm()
+        case .holdPosition:
+            completion = session.drone.action.hold()
         case .returnToLaunch:
             completion = session.drone.action.returnToLaunch()
+        case .land:
+            completion = session.drone.action.land()
         case .gotoCoordinate(let coord, let relativeAltitudeM, let yawDeg):
             let fallbackBaseAlt = hubTelemetryByVehicleID[vehicleID]?.absoluteAltM ?? 0
             let targetAbsoluteAlt = fallbackBaseAlt + relativeAltitudeM
@@ -294,6 +401,12 @@ final class FleetLinkService: ObservableObject {
             )
         case .uploadAndStartMission:
             preconditionFailure("uploadAndStartMission must use runUploadArmStartMissionPipeline")
+        case .manualControl(let manual):
+            completion = completionForManualControl(
+                manual,
+                vehicleID: vehicleID,
+                session: session
+            )
         }
 
         completion
@@ -567,8 +680,9 @@ final class FleetLinkService: ObservableObject {
         if filteredVehicleIDs.isEmpty {
             return logLines
         }
+        let prefixes: [String] = filteredVehicleIDs.map { displayShortID(forVehicleID: $0) }
         return logLines.filter { line in
-            filteredVehicleIDs.contains { line.contains("[\($0)]") }
+            prefixes.contains { line.contains("[\($0)]") }
         }
     }
 
@@ -869,20 +983,45 @@ final class FleetLinkService: ObservableObject {
     private func ensureVehicleModel(
         vehicleID: String,
         systemID: Int?,
+        vehicleType: FleetVehicleType = .unknown,
         initialStatus: VehicleLifecycleStatus
     ) {
         if var existing = vehicleModelsByVehicleID[vehicleID] {
             if existing.data.systemID == nil, let systemID {
                 existing.data.systemID = systemID
-                vehicleModelsByVehicleID[vehicleID] = existing
             }
+            if existing.data.vehicleType == .unknown, vehicleType != .unknown {
+                existing.data.vehicleType = vehicleType
+            }
+            vehicleModelsByVehicleID[vehicleID] = existing
             return
         }
         vehicleModelsByVehicleID[vehicleID] = FleetVehicleModel(
             vehicleID: vehicleID,
             systemID: systemID,
+            vehicleType: vehicleType,
             initialStatus: initialStatus
         )
+    }
+
+    /// Promotes a previously-`unknown` vehicle type once the airframe is identified (e.g. MAV_TYPE inference,
+    /// roster pick metadata). No-op when the model is already classified.
+    func setVehicleType(_ type: FleetVehicleType, forVehicleID vehicleID: String) {
+        guard type != .unknown else { return }
+        guard var model = vehicleModelsByVehicleID[vehicleID] else { return }
+        guard model.data.vehicleType != type else { return }
+        model.data.vehicleType = type
+        vehicleModelsByVehicleID[vehicleID] = model
+    }
+
+    /// Canonical short ID shown across logs, vehicle cards, and headers (e.g. `UAV-C:1`). Falls back to a `VEH:N`
+    /// derived from the vehicleID tail when no model exists yet (very early in connection lifecycle).
+    func displayShortID(forVehicleID vehicleID: String) -> String {
+        if let model = vehicleModelsByVehicleID[vehicleID] {
+            return model.displayShortID
+        }
+        let tail = vehicleID.split(separator: ":").last.map(String.init) ?? vehicleID
+        return "VEH:\(tail)"
     }
 
     private func applyLifecycleStatus(_ status: VehicleLifecycleStatus, vehicleID: String) {
@@ -973,7 +1112,7 @@ final class FleetLinkService: ObservableObject {
     }
 
     private func appendVehicleLog(_ line: String, vehicleID: String) {
-        let tagged = "[\(vehicleID)] \(line)"
+        let tagged = "[\(displayShortID(forVehicleID: vehicleID))] \(line)"
         appendLog(tagged)
         var vehicleLogs = logLinesByVehicleID[vehicleID] ?? []
         vehicleLogs.append(line)
@@ -995,6 +1134,8 @@ final class FleetLinkService: ObservableObject {
             return "arm"
         case .disarm:
             return "disarm"
+        case .holdPosition:
+            return "holdPosition"
         case .gotoCoordinate(let coord, let relativeAltitudeM, let yawDeg):
             return String(
                 format: "goto(lat=%.6f lon=%.6f relAlt=%.1f yaw=%.1f)",
@@ -1007,7 +1148,217 @@ final class FleetLinkService: ObservableObject {
             return "uploadAndStartMission(\(items.count) items)"
         case .returnToLaunch:
             return "returnToLaunch"
+        case .land:
+            return "land"
+        case .manualControl(let manual):
+            return "manualControl(intent=\(manual.intent.rawValue) class=\(manual.vehicleClass.rawValue))"
         }
+    }
+
+    private func completionForManualControl(
+        _ manual: ManualControlIntentCommand,
+        vehicleID: String,
+        session: VehicleSession
+    ) -> Completable {
+        let yawStepDeg = manual.stepProfile.yawDeg
+        let hub = hubTelemetryByVehicleID[vehicleID]
+        switch manual.intent {
+        case .toggleArm:
+            if hub?.isArmed == true {
+                return session.drone.action.disarm()
+            }
+            return session.drone.action.arm()
+        case .engage:
+            // Return/Engage: enter a stable low hover for keyboard-driving takeover.
+            if manual.vehicleClass == .uav {
+                return completionForUAVEngageHover(
+                    vehicleID: vehicleID,
+                    session: session,
+                    hub: hub
+                )
+            }
+            // Ground/surface/sub classes: engage is "ready/active" without forcing hold.
+            if hub?.isArmed != true {
+                return session.drone.action.arm()
+            }
+            return Completable.empty()
+        case .terminate:
+            // UAVs return home; surface/ground/sub default to hold/stop behavior.
+            switch manual.vehicleClass {
+            case .uav:
+                return session.drone.action.returnToLaunch()
+            case .ugv, .usv, .uuv, .unknown:
+                return session.drone.action.hold()
+            }
+        case .yawLeft, .yawRight:
+            guard let lat = hub?.latitudeDeg, let lon = hub?.longitudeDeg else {
+                return Completable.error(NSError(domain: "FleetLinkService", code: 1, userInfo: [NSLocalizedDescriptionKey: "No position telemetry for yaw command."]))
+            }
+            let currentYaw = hub?.headingDeg ?? 0
+            let delta = manual.intent == .yawLeft ? -yawStepDeg : yawStepDeg
+            let currentAbsoluteAlt = hub?.absoluteAltM ?? 0
+            return session.drone.action.gotoLocation(
+                latitudeDeg: lat,
+                longitudeDeg: lon,
+                absoluteAltitudeM: Float(currentAbsoluteAlt),
+                yawDeg: Float(Self.normalizedDegrees(currentYaw + delta))
+            )
+        case .moveForward, .moveBackward, .moveLeft, .moveRight, .ascend, .descend:
+            guard let hub else {
+                return Completable.error(NSError(domain: "FleetLinkService", code: 2, userInfo: [NSLocalizedDescriptionKey: "No telemetry for manual movement command."]))
+            }
+            return completionForManualMoveIntent(manual, hub: hub, session: session, vehicleID: vehicleID)
+        }
+    }
+
+    /// UAV Live Drive engage pipeline:
+    /// 1) Arm if needed.
+    /// 2) Take off if disarmed or still on/near ground.
+    /// 3) For PX4, request ALTCTL/ALTHOLD.
+    /// 4) Hold a low hover setpoint (~0.1m AGL) at current lat/lon/yaw.
+    private func completionForUAVEngageHover(
+        vehicleID: String,
+        session: VehicleSession,
+        hub: FleetHubVehicleTelemetry?
+    ) -> Completable {
+        let isArmed = hub?.isArmed == true
+        let relAlt = hub?.relativeAltM ?? 0
+        let shouldTakeoff = !isArmed || relAlt < 0.05
+
+        var pipeline: Completable = isArmed ? .empty() : session.drone.action.arm()
+        if shouldTakeoff {
+            pipeline = pipeline.andThen(session.drone.action.takeoff())
+        }
+        pipeline = pipeline.andThen(
+            requestPX4AltitudeControlModeIfAvailable(vehicleID: vehicleID, session: session)
+        )
+
+        guard
+            let lat = hub?.latitudeDeg,
+            let lon = hub?.longitudeDeg,
+            let absAlt = hub?.absoluteAltM
+        else {
+            return pipeline
+        }
+
+        let inferredGroundAbsAlt = absAlt - relAlt
+        let targetAbsoluteAlt = inferredGroundAbsAlt + 0.1
+        let yaw = hub?.headingDeg ?? 0
+        return pipeline.andThen(
+            session.drone.action.gotoLocation(
+                latitudeDeg: lat,
+                longitudeDeg: lon,
+                absoluteAltitudeM: Float(targetAbsoluteAlt),
+                yawDeg: Float(Self.normalizedDegrees(yaw))
+            )
+        )
+    }
+
+    /// Best-effort PX4 engage mode request for keyboard takeover (`Return` key).
+    /// Tries `ALTCTL` first, then `ALTHOLD` for stacks/aliases that differ.
+    private func requestPX4AltitudeControlModeIfAvailable(
+        vehicleID: String,
+        session: VehicleSession
+    ) -> Completable {
+        let stack = vehicleModelsByVehicleID[vehicleID]?.data.telemetry?.autopilotStack
+            ?? hubTelemetryByVehicleID[vehicleID]?.autopilotStack
+            ?? .unknown
+        guard stack == .px4 else { return Completable.empty() }
+
+        return session.drone.shell.send(command: "commander mode altctl")
+            .catch { _ in
+                session.drone.shell.send(command: "commander mode althold")
+            }
+    }
+
+    private func completionForManualMoveIntent(
+        _ manual: ManualControlIntentCommand,
+        hub: FleetHubVehicleTelemetry,
+        session: VehicleSession,
+        vehicleID: String
+    ) -> Completable {
+        let lateralForwardBackwardStepM = manual.stepProfile.moveForwardBackwardM
+        let lateralStrafeStepM = manual.stepProfile.moveLeftRightM
+        let verticalStepM = manual.stepProfile.verticalM
+        guard let lat = hub.latitudeDeg, let lon = hub.longitudeDeg else {
+            return Completable.error(NSError(domain: "FleetLinkService", code: 3, userInfo: [NSLocalizedDescriptionKey: "No position telemetry for movement command."]))
+        }
+        let heading = hub.headingDeg ?? 0
+        let currentAbsoluteAlt = hub.absoluteAltM ?? 0
+        var verticalDeltaM = 0.0
+        var bearing = heading
+        var distanceM = 0.0
+
+        switch manual.intent {
+        case .moveForward:
+            bearing = heading
+            distanceM = lateralForwardBackwardStepM
+        case .moveBackward:
+            bearing = heading + 180
+            distanceM = lateralForwardBackwardStepM
+        case .moveLeft:
+            bearing = heading - 90
+            distanceM = lateralStrafeStepM
+        case .moveRight:
+            bearing = heading + 90
+            distanceM = lateralStrafeStepM
+        case .ascend:
+            guard manual.vehicleClass == .uav || manual.vehicleClass == .uuv else {
+                appendVehicleLog("Manual control ignored: vertical axis unavailable for this vehicle class.", vehicleID: vehicleID)
+                return Completable.empty()
+            }
+            verticalDeltaM += verticalStepM
+        case .descend:
+            guard manual.vehicleClass == .uav || manual.vehicleClass == .uuv else {
+                appendVehicleLog("Manual control ignored: vertical axis unavailable for this vehicle class.", vehicleID: vehicleID)
+                return Completable.empty()
+            }
+            verticalDeltaM -= verticalStepM
+        default:
+            break
+        }
+
+        let nextRelAlt = (hub.relativeAltM ?? 0) + verticalDeltaM
+        if manual.vehicleClass == .uav, nextRelAlt < 0 {
+            appendVehicleLog("Manual control blocked: UAV target altitude would be below ground.", vehicleID: vehicleID)
+            return Completable.empty()
+        }
+        if manual.vehicleClass == .uuv, nextRelAlt > 0 {
+            appendVehicleLog("Manual control blocked: UUV target altitude would be above waterline.", vehicleID: vehicleID)
+            return Completable.empty()
+        }
+
+        let target = Self.coordinateOffset(fromLat: lat, lon: lon, meters: distanceM, bearingDeg: bearing)
+        let targetAbsoluteAlt = currentAbsoluteAlt + verticalDeltaM
+        return session.drone.action.gotoLocation(
+            latitudeDeg: target.lat,
+            longitudeDeg: target.lon,
+            absoluteAltitudeM: Float(targetAbsoluteAlt),
+            yawDeg: Float(Self.normalizedDegrees(heading))
+        )
+    }
+
+    private static func normalizedDegrees(_ value: Double) -> Double {
+        let r = value.truncatingRemainder(dividingBy: 360)
+        if r < 0 { return r + 360 }
+        return r
+    }
+
+    private static func coordinateOffset(fromLat lat: Double, lon: Double, meters: Double, bearingDeg: Double) -> (lat: Double, lon: Double) {
+        guard meters > 0 else { return (lat, lon) }
+        let r = 6_371_000.0
+        let δ = meters / r
+        let θ = bearingDeg * .pi / 180
+        let φ1 = lat * .pi / 180
+        let λ1 = lon * .pi / 180
+        let sinφ1 = sin(φ1), cosφ1 = cos(φ1)
+        let sinδ = sin(δ), cosδ = cos(δ)
+        let sinφ2 = sinφ1 * cosδ + cosφ1 * sinδ * cos(θ)
+        let φ2 = asin(sinφ2)
+        let y = sin(θ) * sinδ * cosφ1
+        let x = cosδ - sinφ1 * sinφ2
+        let λ2 = λ1 + atan2(y, x)
+        return (φ2 * 180 / .pi, λ2 * 180 / .pi)
     }
 
     private func save(userDefaults: UserDefaults = .standard) {

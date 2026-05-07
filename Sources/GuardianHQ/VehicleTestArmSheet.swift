@@ -7,11 +7,34 @@ struct VehicleTestArmSheet: View {
     let fleetLink: FleetLinkService
     let sitl: SitlService
     let controlStore: MissionControlStore
+    let leaveArmed: Bool
+    let autoCloseOnPass: Bool
+    let onPassed: (() -> Void)?
 
     @Environment(\.dismiss) private var dismiss
 
     @State private var probeRunning = true
     @State private var result: SingleVehicleArmProbeResult?
+
+    init(
+        vehicleTitle: String,
+        vehicleID: String,
+        fleetLink: FleetLinkService,
+        sitl: SitlService,
+        controlStore: MissionControlStore,
+        leaveArmed: Bool = false,
+        autoCloseOnPass: Bool = false,
+        onPassed: (() -> Void)? = nil
+    ) {
+        self.vehicleTitle = vehicleTitle
+        self.vehicleID = vehicleID
+        self.fleetLink = fleetLink
+        self.sitl = sitl
+        self.controlStore = controlStore
+        self.leaveArmed = leaveArmed
+        self.autoCloseOnPass = autoCloseOnPass
+        self.onPassed = onPassed
+    }
 
     var body: some View {
         GuardianModalTemplate(
@@ -83,23 +106,16 @@ struct VehicleTestArmSheet: View {
         let r = await controlStore.runSingleVehicleArmProbe(
             vehicleID: vehicleID,
             fleetLink: fleetLink,
-            sitl: sitl
+            sitl: sitl,
+            leaveArmed: leaveArmed
         )
         result = r
         probeRunning = false
-
-        if r.passed && r.armedDuringProbe {
-            disarmAfterSuccessfulTestArm()
+        if r.passed {
+            onPassed?()
+            if autoCloseOnPass {
+                dismiss()
+            }
         }
-    }
-
-    private func disarmAfterSuccessfulTestArm() {
-        _ = fleetLink.executeVehicleCommand(
-            vehicleID: vehicleID,
-            command: .disarm,
-            source: "vehicles.testArmAutoDisarm",
-            category: .paladin,
-            onPaladinCommandOutcome: nil
-        )
     }
 }

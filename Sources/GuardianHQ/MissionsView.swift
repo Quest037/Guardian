@@ -150,6 +150,16 @@ struct MissionsView: View {
     }
 }
 
+private struct RouteTabMapSignature: Equatable {
+    let homeCoord: RouteCoordinate?
+    let allPathsCoords: [[RouteCoordinate]]
+    let selectedWaypoints: [RouteCoordinate]
+    let selectedWaypointIndex: Int?
+    let headingPreview: HeadingPreview?
+    let cameraPreview: CameraPreview?
+    let isEditingPath: Bool
+}
+
 private struct MissionWorkspaceView: View {
     enum WorkspaceTab: String, CaseIterable, Identifiable {
         case details = "Details"
@@ -163,8 +173,7 @@ private struct MissionWorkspaceView: View {
     @State private var selectedPathIndex = 0
     @State private var editingPathIndex: Int?
     @State private var selectedWaypointIndex: Int?
-    @State private var mapStyle: MapTileStyle
-    @State private var mapRecenterNonce = 0
+    @StateObject private var mapModel: GuardianMapModel
     @State private var setHomeFromMap = false
     @State private var showingDeleteHomeConfirm = false
     @State private var pendingDeletePathIndex: Int?
@@ -194,7 +203,9 @@ private struct MissionWorkspaceView: View {
         onToast: @escaping (String, ToastStyle) -> Void
     ) {
         _draft = State(initialValue: mission)
-        _mapStyle = State(initialValue: defaultMapTileStyle)
+        _mapModel = StateObject(
+            wrappedValue: GuardianMapModel(mapStyle: defaultMapTileStyle)
+        )
         self.onBack = onBack
         self.onDelete = onDelete
         self.onSave = onSave
@@ -490,120 +501,86 @@ private struct MissionWorkspaceView: View {
         ZStack {
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
-                    OSMMapView(
-                        home: draft.routeMacro.home,
-                        allPathsCoords: allPathsCoords,
-                        selectedPathWaypoints: selectedPath?.waypoints ?? [],
-                        selectedWaypointIndex: selectedWaypointIndex,
-                        vehicleMarkers: [],
-                        mapStyle: mapStyle,
-                        recenterNonce: mapRecenterNonce,
-                        headingPreview: headingPreview,
-                        cameraPreview: cameraPreview,
-                        preserveView: editingPathIndex != nil,
-                        isEditingPath: editingPathIndex != nil
-                    ) { lat, lon in
-                        if suppressNextMapClick {
-                            suppressNextMapClick = false
-                            return
-                        }
-                        if setHomeFromMap {
-                            var home = draft.routeMacro.home ?? RouteHome()
-                            home.coord.lat = lat
-                            home.coord.lon = lon
-                            draft.routeMacro.home = home
-                            setHomeFromMap = false
-                            onToast("Home saved from map", .success)
-                            return
-                        }
+                    GuardianMapView(
+                        model: mapModel,
+                        onMapClick: { lat, lon in
+                            if suppressNextMapClick {
+                                suppressNextMapClick = false
+                                return
+                            }
+                            if setHomeFromMap {
+                                var home = draft.routeMacro.home ?? RouteHome()
+                                home.coord.lat = lat
+                                home.coord.lon = lon
+                                draft.routeMacro.home = home
+                                setHomeFromMap = false
+                                onToast("Home saved from map", .success)
+                                return
+                            }
 
-                        guard let pathIndex = editingPathIndex,
-                              draft.routeMacro.paths.indices.contains(pathIndex) else { return }
+                            guard let pathIndex = editingPathIndex,
+                                  draft.routeMacro.paths.indices.contains(pathIndex) else { return }
 
-                        draft.routeMacro.paths[pathIndex].waypoints.append(
-                            RouteWaypoint(
+                            draft.routeMacro.paths[pathIndex].waypoints.append(
+                                RouteWaypoint(
+                                    coord: RouteCoordinate(lat: lat, lon: lon),
+                                    headingPreset: .followPath
+                                )
+                            )
+                            refreshAutoHeadings(for: pathIndex)
+                            selectedPathIndex = pathIndex
+                            selectedWaypointIndex = draft.routeMacro.paths[pathIndex].waypoints.count - 1
+                            onToast("Waypoint added", .success)
+                        },
+                        onWaypointClick: { idx in
+                            selectedWaypointIndex = idx
+                        },
+                        onWaypointMoved: { idx, lat, lon in
+                            guard let pathIndex = editingPathIndex,
+                                  draft.routeMacro.paths.indices.contains(pathIndex),
+                                  draft.routeMacro.paths[pathIndex].waypoints.indices.contains(idx) else { return }
+                            draft.routeMacro.paths[pathIndex].waypoints[idx].coord.lat = lat
+                            draft.routeMacro.paths[pathIndex].waypoints[idx].coord.lon = lon
+                            refreshAutoHeadings(for: pathIndex)
+                        },
+                        onWaypointDelete: { idx in
+                            guard let pathIndex = editingPathIndex,
+                                  draft.routeMacro.paths.indices.contains(pathIndex),
+                                  draft.routeMacro.paths[pathIndex].waypoints.indices.contains(idx) else { return }
+                            draft.routeMacro.paths[pathIndex].waypoints.remove(at: idx)
+                            refreshAutoHeadings(for: pathIndex)
+                            if let selectedWaypointIndex, selectedWaypointIndex == idx {
+                                self.selectedWaypointIndex = nil
+                            }
+                        },
+                        onPathInsert: { idx, lat, lon in
+                            guard let pathIndex = editingPathIndex,
+                                  draft.routeMacro.paths.indices.contains(pathIndex) else { return }
+                            suppressNextMapClick = true
+                            let waypoint = RouteWaypoint(
                                 coord: RouteCoordinate(lat: lat, lon: lon),
                                 headingPreset: .followPath
                             )
-                        )
-                        refreshAutoHeadings(for: pathIndex)
-                        selectedPathIndex = pathIndex
-                        selectedWaypointIndex = draft.routeMacro.paths[pathIndex].waypoints.count - 1
-                        onToast("Waypoint added", .success)
-                    } onVehicleMarkerMoved: { _, _, _ in
-                    } onWaypointClick: { idx in
-                        selectedWaypointIndex = idx
-                    } onWaypointMoved: { idx, lat, lon in
-                        guard let pathIndex = editingPathIndex,
-                              draft.routeMacro.paths.indices.contains(pathIndex),
-                              draft.routeMacro.paths[pathIndex].waypoints.indices.contains(idx) else { return }
-                        draft.routeMacro.paths[pathIndex].waypoints[idx].coord.lat = lat
-                        draft.routeMacro.paths[pathIndex].waypoints[idx].coord.lon = lon
-                        refreshAutoHeadings(for: pathIndex)
-                    } onWaypointDelete: { idx in
-                        guard let pathIndex = editingPathIndex,
-                              draft.routeMacro.paths.indices.contains(pathIndex),
-                              draft.routeMacro.paths[pathIndex].waypoints.indices.contains(idx) else { return }
-                        draft.routeMacro.paths[pathIndex].waypoints.remove(at: idx)
-                        refreshAutoHeadings(for: pathIndex)
-                        if let selectedWaypointIndex, selectedWaypointIndex == idx {
-                            self.selectedWaypointIndex = nil
+                            let safeInsert = max(0, min(idx, draft.routeMacro.paths[pathIndex].waypoints.count))
+                            draft.routeMacro.paths[pathIndex].waypoints.insert(waypoint, at: safeInsert)
+                            refreshAutoHeadings(for: pathIndex)
+                            selectedPathIndex = pathIndex
+                            selectedWaypointIndex = safeInsert
+                            onToast("Waypoint inserted", .success)
                         }
-                    } onPathInsert: { idx, lat, lon in
-                        guard let pathIndex = editingPathIndex,
-                              draft.routeMacro.paths.indices.contains(pathIndex) else { return }
-                        suppressNextMapClick = true
-                        let waypoint = RouteWaypoint(
-                            coord: RouteCoordinate(lat: lat, lon: lon),
-                            headingPreset: .followPath
-                        )
-                        let safeInsert = max(0, min(idx, draft.routeMacro.paths[pathIndex].waypoints.count))
-                        draft.routeMacro.paths[pathIndex].waypoints.insert(waypoint, at: safeInsert)
-                        refreshAutoHeadings(for: pathIndex)
-                        selectedPathIndex = pathIndex
-                        selectedWaypointIndex = safeInsert
-                        onToast("Waypoint inserted", .success)
+                    )
+                    .task(id: routeTabMapSignature) {
+                        mapModel.home = draft.routeMacro.home
+                        mapModel.allPathsCoords = allPathsCoords
+                        mapModel.selectedPathWaypoints = selectedPath?.waypoints ?? []
+                        mapModel.selectedWaypointIndex = selectedWaypointIndex
+                        mapModel.headingPreview = headingPreview
+                        mapModel.cameraPreview = cameraPreview
+                        mapModel.preserveView = editingPathIndex != nil
+                        mapModel.isEditingPath = editingPathIndex != nil
                     }
                     .frame(maxWidth: .infinity)
                     .frame(height: 500)
-                    .overlay(alignment: .topLeading) {
-                        VStack(spacing: 0) {
-                            Button {
-                                mapStyle = mapStyle == .standard ? .satellite : .standard
-                            } label: {
-                                Image(systemName: mapStyle == .standard ? "map" : "globe.americas.fill")
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .foregroundStyle(.black)
-                                    .frame(width: 33, height: 33)
-                            }
-                            .buttonStyle(.plain)
-                            .background(Color.white)
-                            .overlay(
-                                Rectangle()
-                                    .fill(Color.black.opacity(0.12))
-                                    .frame(height: 1),
-                                alignment: .bottom
-                            )
-
-                            Button {
-                                mapRecenterNonce += 1
-                            } label: {
-                                Image(systemName: "arrow.uturn.backward")
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .foregroundStyle(.black)
-                                    .frame(width: 33, height: 33)
-                            }
-                            .buttonStyle(.plain)
-                            .background(Color.white)
-                        }
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 4)
-                                .stroke(Color.black.opacity(0.16), lineWidth: 1)
-                        )
-                        .padding(.top, 78)
-                        .padding(.leading, 10)
-                    }
 
                     if let pathIndex = editingPathIndex,
                        draft.routeMacro.paths.indices.contains(pathIndex) {
@@ -844,6 +821,21 @@ private struct MissionWorkspaceView: View {
 
     private var allPathsCoords: [[RouteCoordinate]] {
         draft.routeMacro.paths.map { $0.waypoints.map(\.coord) }
+    }
+
+    /// Equatable signature of every input the route-tab map cares about.
+    /// Drives `.task(id:)` so the shared `mapModel` is re-pushed whenever the
+    /// home/paths/selection/preview/edit-state changes.
+    private var routeTabMapSignature: RouteTabMapSignature {
+        RouteTabMapSignature(
+            homeCoord: draft.routeMacro.home?.coord,
+            allPathsCoords: allPathsCoords,
+            selectedWaypoints: selectedPath?.waypoints.map(\.coord) ?? [],
+            selectedWaypointIndex: selectedWaypointIndex,
+            headingPreview: headingPreview,
+            cameraPreview: cameraPreview,
+            isEditingPath: editingPathIndex != nil
+        )
     }
 
     private var selectedPath: RoutePath? {

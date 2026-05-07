@@ -24,11 +24,111 @@ enum FleetVehicleCommandCategory: String, Equatable, Comparable {
 enum FleetVehicleCommand: Equatable {
     case arm
     case disarm
+    /// Hold / loiter in place using autopilot action-hold.
+    case holdPosition
     case gotoCoordinate(RouteCoordinate, relativeAltitudeM: Double, yawDeg: Double)
     /// Upload items to the autopilot, arm, then start mission execution (MAVSDK Mission plugin).
     case uploadAndStartMission(items: [Mavsdk.Mission.MissionItem])
     /// Command the autopilot to return to launch / home (MAVSDK Action plugin).
     case returnToLaunch
+    /// Command the autopilot to land now (where supported).
+    case land
+    /// High-level manual-control intent routed through FleetLink per vehicle class.
+    case manualControl(ManualControlIntentCommand)
+}
+
+enum UniversalVehicleClass: String, Equatable, Codable, CaseIterable {
+    case uav
+    case ugv
+    case usv
+    case uuv
+    case unknown
+}
+
+/// Granular vehicle classification used for the canonical short ID shown in logs, cards, and headers
+/// (e.g. `UAV-C:1`). Coarser bucket → ``UniversalVehicleClass``.
+///
+/// Eight first-class types match the airframes Guardian ships SITL presets for:
+/// `UAV-C` (multirotor), `UAV-F` (fixed-wing), `UAV-V` (VTOL), `UGV-W` (wheeled), `UGV-T` (tracked),
+/// `UGV-L` (legged), `USV` (surface), `UUV` (underwater). `unknown` falls back to the generic `VEH` code.
+enum FleetVehicleType: String, Equatable, Codable, CaseIterable, Sendable {
+    case uavCopter
+    case uavFixedWing
+    case uavVTOL
+    case ugvWheeled
+    case ugvTracked
+    case ugvLegged
+    case usv
+    case uuv
+    case unknown
+
+    /// Short class code embedded in `displayShortID` (e.g. `UAV-C`, `USV`, or `VEH` when unknown).
+    var classCode: String {
+        switch self {
+        case .uavCopter: return "UAV-C"
+        case .uavFixedWing: return "UAV-F"
+        case .uavVTOL: return "UAV-V"
+        case .ugvWheeled: return "UGV-W"
+        case .ugvTracked: return "UGV-T"
+        case .ugvLegged: return "UGV-L"
+        case .usv: return "USV"
+        case .uuv: return "UUV"
+        case .unknown: return "VEH"
+        }
+    }
+
+    /// Long form shown on info sheets and class settings (e.g. "UAV Copter").
+    var displayName: String {
+        switch self {
+        case .uavCopter: return "UAV Copter"
+        case .uavFixedWing: return "UAV Fixed-Wing"
+        case .uavVTOL: return "UAV VTOL"
+        case .ugvWheeled: return "UGV Wheeled"
+        case .ugvTracked: return "UGV Tracked"
+        case .ugvLegged: return "UGV Legged"
+        case .usv: return "USV (surface)"
+        case .uuv: return "UUV (underwater)"
+        case .unknown: return "Vehicle"
+        }
+    }
+
+    /// Coarser arbitration class — used by manual control, command routing, etc.
+    var universalClass: UniversalVehicleClass {
+        switch self {
+        case .uavCopter, .uavFixedWing, .uavVTOL: return .uav
+        case .ugvWheeled, .ugvTracked, .ugvLegged: return .ugv
+        case .usv: return .usv
+        case .uuv: return .uuv
+        case .unknown: return .unknown
+        }
+    }
+}
+
+enum ManualControlIntent: String, Equatable, Codable, CaseIterable {
+    case moveForward
+    case moveLeft
+    case moveBackward
+    case moveRight
+    case yawLeft
+    case yawRight
+    case ascend
+    case descend
+    case toggleArm
+    case engage
+    case terminate
+}
+
+struct ManualControlIntentCommand: Equatable {
+    let intent: ManualControlIntent
+    let vehicleClass: UniversalVehicleClass
+    let stepProfile: ManualControlStepProfile
+}
+
+struct ManualControlStepProfile: Equatable, Codable {
+    var moveForwardBackwardM: Double
+    var moveLeftRightM: Double
+    var yawDeg: Double
+    var verticalM: Double
 }
 
 enum FleetVehicleCommandStatus: Equatable {
@@ -76,6 +176,9 @@ struct FleetVehicleModel: Equatable {
         /// Stable saturated hex (`#RRGGBB`) for Leaflet / Mission Control markers — assigned when the model is created.
         let mapColorHex: String
         var systemID: Int?
+        /// Granular airframe classification — drives ``displayShortID``. Set at SIM spawn time from the preset;
+        /// `unknown` for live MAVLink links until MAV_TYPE inference is wired (then surfaces as `VEH:N`).
+        var vehicleType: FleetVehicleType
         var telemetry: FleetHubVehicleTelemetry?
         var lastError: String?
     }
@@ -107,16 +210,39 @@ struct FleetVehicleModel: Equatable {
         return String(format: "#%02X%02X%02X", rgb.0, rgb.1, rgb.2)
     }
 
-    init(vehicleID: String, systemID: Int? = nil, initialStatus: VehicleLifecycleStatus = .init(stage: .starting)) {
+    init(
+        vehicleID: String,
+        systemID: Int? = nil,
+        vehicleType: FleetVehicleType = .unknown,
+        initialStatus: VehicleLifecycleStatus = .init(stage: .starting)
+    ) {
         let emptyOperational = FleetVehicleOperationalModel(hub: nil, lifecycleStatus: initialStatus)
         let hex = Self.defaultMapColorHex(forVehicleID: vehicleID)
-        self.data = DataState(vehicleID: vehicleID, mapColorHex: hex, systemID: systemID, telemetry: nil, lastError: nil)
+        self.data = DataState(
+            vehicleID: vehicleID,
+            mapColorHex: hex,
+            systemID: systemID,
+            vehicleType: vehicleType,
+            telemetry: nil,
+            lastError: nil
+        )
         self.collections = Collections(
             lifecycleStatus: initialStatus,
             telemetrySnapshot: nil,
             operational: emptyOperational
         )
         self.functions = Functions()
+    }
+
+    /// Canonical short identifier shown across logs (`[UAV-C:1]`), vehicle cards, headers, and roster picker rows.
+    /// Combines ``FleetVehicleType.classCode`` with the numeric system ID (or vehicleID tail when no sysid is known).
+    var displayShortID: String {
+        let code = data.vehicleType.classCode
+        if let sysid = data.systemID {
+            return "\(code):\(sysid)"
+        }
+        let tail = data.vehicleID.split(separator: ":").last.map(String.init) ?? data.vehicleID
+        return "\(code):\(tail)"
     }
 
     mutating func applyLifecycleStatus(_ status: VehicleLifecycleStatus) {

@@ -81,8 +81,8 @@ struct MissionRosterVehiclePickerSidebar: View {
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(vehicle.lifecycleStatus.color.uiColor.opacity(enabled ? 0.95 : 0.55))
                                 .lineLimit(1)
-                            Text("Vehicle ID: \(vehicle.vehicleIDText)")
-                                .font(.system(size: 10, design: .monospaced))
+                            Text(vehicle.vehicleShortID)
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
                                 .foregroundStyle(.gray)
                                 .lineLimit(1)
                         }

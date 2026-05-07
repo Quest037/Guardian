@@ -206,7 +206,7 @@ enum SitlLaunchRecipe {
             args.append(contentsOf: ["--add-param-file", batteryParm.path])
         }
         // sim_vehicle.py accepts custom start via -l/--custom-location.
-        args.append(contentsOf: ["-l", "\(spawnDefaults.latitudeDeg),\(spawnDefaults.longitudeDeg),0,0"])
+        args.append(contentsOf: ["-l", "\(spawnDefaults.latitudeDeg),\(spawnDefaults.longitudeDeg),0,\(spawnDefaults.headingDeg)"])
 
         let cwd = URL(fileURLWithPath: root, isDirectory: true)
         var env = ProcessInfo.processInfo.environment

@@ -474,6 +474,20 @@ private enum LiveConsoleMediaTab: Hashable {
     case map
 }
 
+private struct LiveOverviewMapSignature: Equatable {
+    let missionID: UUID?
+    let homeCoord: RouteCoordinate?
+    let pathCoords: [[RouteCoordinate]]
+    let markers: [MapVehicleMarker]
+}
+
+private struct SetupStagingMapSignature: Equatable {
+    let missionID: UUID?
+    let homeCoord: RouteCoordinate?
+    let pathCoords: [[RouteCoordinate]]
+    let markers: [MapVehicleMarker]
+}
+
 private struct MissionRunDetailView: View {
     @State var run: MissionRun
     @ObservedObject var missionStore: MissionStore
@@ -488,9 +502,10 @@ private struct MissionRunDetailView: View {
     @State private var confirmDeleteRun = false
     @State private var rosterPickerAssignmentId: UUID?
     @State private var setupSelectedAssignmentId: UUID?
-    @State private var setupMapRecenterNonce: Int
-    @State private var liveMapRecenterNonce: Int
-    @State private var liveConsoleMapStyle: MapTileStyle
+    /// Shared model for both the Setup staging map and the Live overview map —
+    /// owns the tile style, recenter nonce, and the per-tab content that gets
+    /// pushed in via `.task(id:)`.
+    @StateObject private var mapModel: GuardianMapModel
     /// Paladin log card: default is reduced height; extended is taller.
     @State private var paladinLogExtended = false
     @State private var liveConsoleMediaTab: LiveConsoleMediaTab = .map
@@ -542,9 +557,12 @@ private struct MissionRunDetailView: View {
         _confirmDeleteRun = State(initialValue: false)
         _rosterPickerAssignmentId = State(initialValue: nil)
         _setupSelectedAssignmentId = State(initialValue: nil)
-        _setupMapRecenterNonce = State(initialValue: 0)
-        _liveMapRecenterNonce = State(initialValue: 0)
-        _liveConsoleMapStyle = State(initialValue: defaultLiveMapStyle)
+        _mapModel = StateObject(
+            wrappedValue: GuardianMapModel(
+                mapStyle: defaultLiveMapStyle,
+                preserveView: true
+            )
+        )
         _paladinLogTemplates = ObservedObject(wrappedValue: PaladinLogTemplateRegistry.shared)
     }
 
@@ -1126,13 +1144,13 @@ private struct MissionRunDetailView: View {
         }
         .onAppear {
             syncRunFromStore()
-            setupMapRecenterNonce &+= 1
+            mapModel.recenter()
             if run.status == .setup {
                 pruneStaleRosterFleetAssignmentsIfNeeded()
             }
         }
         .onChange(of: setupMapBoundsSignature) { _ in
-            setupMapRecenterNonce &+= 1
+            mapModel.recenter()
         }
         .onChange(of: sitlRosterPruneSignature) { _ in
             if run.status == .setup {
@@ -1741,83 +1759,47 @@ private struct MissionRunDetailView: View {
 
     /// Same Leaflet/OSM stack and bbox logic as Missions route tab: home marker + path polylines from the mission template.
     private var missionLiveOverviewMap: some View {
-        ZStack(alignment: .topLeading) {
-            Group {
-                if let mission = resolvedMission {
-                    OSMMapView(
-                        home: mission.routeMacro.home,
-                        allPathsCoords: mission.routeMacro.paths.map { $0.waypoints.map(\.coord) },
-                        selectedPathWaypoints: [],
-                        selectedWaypointIndex: nil,
-                        vehicleMarkers: missionLiveVehicleMarkers,
-                        mapStyle: liveConsoleMapStyle,
-                        recenterNonce: liveMapRecenterNonce,
-                        headingPreview: nil,
-                        cameraPreview: nil,
-                        preserveView: true,
-                        isEditingPath: false,
-                        onMapClick: { _, _ in },
-                        onVehicleMarkerMoved: { _, _, _ in },
-                        onWaypointClick: { _ in },
-                        onWaypointMoved: { _, _, _ in },
-                        onWaypointDelete: { _ in },
-                        onPathInsert: { _, _, _ in }
-                    )
-                } else {
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(liveConsoleCardFill)
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(liveConsoleCardStroke, lineWidth: 1)
-            )
-
+        Group {
             if resolvedMission != nil {
-                VStack(alignment: .leading, spacing: 8) {
-                    Button {
-                        liveConsoleMapStyle = liveConsoleMapStyle == .standard ? .satellite : .standard
-                    } label: {
-                        Image(systemName: liveConsoleMapStyle == .standard ? "map" : "globe.americas.fill")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.black)
-                            .frame(width: 33, height: 33)
+                GuardianMapView(model: mapModel)
+                .task(id: liveOverviewMapSignature) {
+                    if let mission = resolvedMission {
+                        mapModel.home = mission.routeMacro.home
+                        mapModel.allPathsCoords = mission.routeMacro.paths.map { $0.waypoints.map(\.coord) }
+                    } else {
+                        mapModel.home = nil
+                        mapModel.allPathsCoords = []
                     }
-                    .buttonStyle(.plain)
-                    .background(Color.white)
-                    .overlay(
-                        Rectangle()
-                            .fill(Color.black.opacity(0.12))
-                            .frame(height: 1),
-                        alignment: .bottom
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .help(liveConsoleMapStyle == .standard ? "Show satellite imagery" : "Show street map")
-
-                    Button {
-                        liveMapRecenterNonce &+= 1
-                    } label: {
-                        Image(systemName: "scope")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.black)
-                            .frame(width: 33, height: 33)
-                    }
-                    .buttonStyle(.plain)
-                    .background(Color.white)
-                    .overlay(
-                        Rectangle()
-                            .fill(Color.black.opacity(0.12))
-                            .frame(height: 1),
-                        alignment: .bottom
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .help("Fit map to mission and vehicles")
+                    mapModel.selectedPathWaypoints = []
+                    mapModel.selectedWaypointIndex = nil
+                    mapModel.vehicleMarkers = missionLiveVehicleMarkers
+                    mapModel.headingPreview = nil
+                    mapModel.cameraPreview = nil
+                    mapModel.isEditingPath = false
                 }
-                .padding(.leading, 10)
-                .padding(.top, 80)
+            } else {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(liveConsoleCardFill)
             }
         }
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(liveConsoleCardStroke, lineWidth: 1)
+        )
+    }
+
+    /// Equatable signature of every input that feeds the live overview map's
+    /// shared model state. Captures the actual home/path/marker data so the
+    /// `.task` re-runs whenever any vehicle drifts, the mission is edited,
+    /// etc. — not just when counts change.
+    private var liveOverviewMapSignature: LiveOverviewMapSignature {
+        LiveOverviewMapSignature(
+            missionID: resolvedMission?.id,
+            homeCoord: resolvedMission?.routeMacro.home?.coord,
+            pathCoords: resolvedMission?.routeMacro.paths.map { $0.waypoints.map(\.coord) } ?? [],
+            markers: missionLiveVehicleMarkers
+        )
     }
 
     private var missionLiveVehicleMarkers: [MapVehicleMarker] {
@@ -2626,26 +2608,29 @@ private struct MissionRunDetailView: View {
                 .foregroundStyle(.gray)
                 .fixedSize(horizontal: false, vertical: true)
 
-            OSMMapView(
-                home: resolvedMission?.routeMacro.home,
-                allPathsCoords: resolvedMission?.routeMacro.paths.map { $0.waypoints.map(\.coord) } ?? [],
-                selectedPathWaypoints: [],
-                selectedWaypointIndex: nil,
-                vehicleMarkers: setupVehicleMarkers,
-                mapStyle: liveConsoleMapStyle,
-                recenterNonce: setupMapRecenterNonce,
-                headingPreview: nil,
-                cameraPreview: nil,
-                preserveView: true,
-                isEditingPath: false
-            ) { lat, lon in
-                applySetupMapClick(lat: lat, lon: lon)
-            } onVehicleMarkerMoved: { markerID, lat, lon in
-                applySetupMarkerDrag(markerID: markerID, lat: lat, lon: lon)
-            } onWaypointClick: { _ in
-            } onWaypointMoved: { _, _, _ in
-            } onWaypointDelete: { _ in
-            } onPathInsert: { _, _, _ in
+            GuardianMapView(
+                model: mapModel,
+                onMapClick: { lat, lon in
+                    applySetupMapClick(lat: lat, lon: lon)
+                },
+                onVehicleMarkerMoved: { markerID, lat, lon in
+                    applySetupMarkerDrag(markerID: markerID, lat: lat, lon: lon)
+                }
+            )
+            .task(id: setupStagingMapSignature) {
+                if let mission = resolvedMission {
+                    mapModel.home = mission.routeMacro.home
+                    mapModel.allPathsCoords = mission.routeMacro.paths.map { $0.waypoints.map(\.coord) }
+                } else {
+                    mapModel.home = nil
+                    mapModel.allPathsCoords = []
+                }
+                mapModel.selectedPathWaypoints = []
+                mapModel.selectedWaypointIndex = nil
+                mapModel.vehicleMarkers = setupVehicleMarkers
+                mapModel.headingPreview = nil
+                mapModel.cameraPreview = nil
+                mapModel.isEditingPath = false
             }
             .frame(minHeight: 260, maxHeight: 300)
             .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -2658,6 +2643,18 @@ private struct MissionRunDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(red: 0.12, green: 0.12, blue: 0.13))
         .clipShape(RoundedRectangle(cornerRadius: MissionRunPrepLayout.pathCardCornerRadius))
+    }
+
+    /// Equatable signature of all setup-staging-map inputs (mission home /
+    /// paths + every vehicle marker). Pushed into `mapModel` whenever any
+    /// underlying coordinate or marker drag changes.
+    private var setupStagingMapSignature: SetupStagingMapSignature {
+        SetupStagingMapSignature(
+            missionID: resolvedMission?.id,
+            homeCoord: resolvedMission?.routeMacro.home?.coord,
+            pathCoords: resolvedMission?.routeMacro.paths.map { $0.waypoints.map(\.coord) } ?? [],
+            markers: setupVehicleMarkers
+        )
     }
 
     private var stagingMapInstructionText: String {

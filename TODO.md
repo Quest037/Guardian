@@ -13,7 +13,8 @@
 - **Missions / roster role model redesign:** move beyond string-only roster card fields (`title` / `role` / `hint`) and design a stronger mission roster model that can represent leader/follower (wingman), one-on-one-off (tag-team charging), primary + reserve(s), and planned switchover semantics in a first-class way.
 - **Live Drive panel (new sidebar destination):** add a dedicated operator panel for manual control of a selected live vehicle (fly/drive/sail), including vehicle selection, connection, command dispatch, live telemetry, Leaflet map, and camera view; must support intervention for vehicles currently participating in live missions (e.g. unsticking / recovery).
   - **FleetVehicleModel / command surface:** expand control commands so all supported vehicle types can be driven manually with predictable behavior.
-  - **Input devices:** keyboard controls by default, plus support for connected Bluetooth/wired game controllers and joysticks.
+  - **Input devices:** keyboard controls by default, plus support for connected Bluetooth/wired game controllers and joysticks. See full plan in **Live Drive: game controller / joystick integration** below.
+  - **Live vehicle calibration flow:** add a guided, user-facing calibration/capability-check wizard (focused on real/live vehicles) that steps through connectivity, control, camera/gimbal, and telemetry checks, then records what this vehicle can/can't do so UI/automation can adapt safely.
 - **SIM battery telemetry:** make battery status from SIM vehicles reliable and visible in mission/vehicle UI flows.
 - **Paladin reserve + handover orchestration:**
   - send reserve vehicles to take over when an active vehicle fails (when roster defines reserves),
@@ -28,3 +29,50 @@
 - **Mission Control grid cards redesign:** substantially improve run cards in the Mission Control grid with richer information density, clearer hierarchy, and better visual scanning.
 - **Internationalization (i18n):** expand localization coverage beyond Paladin log templates to full UI copy, formatting rules, and locale-aware defaults.
 - **Dashboard data expansion:** identify and add higher-value operational metrics to the dashboard (mission health, fleet readiness, alerts, utilization, and other actionable summaries).
+- **Live vehicle type inference (MAV_TYPE → ``FleetVehicleType``):** SIM vehicles get their granular ``FleetVehicleType`` from the SITL preset at `registerSimulatedVehicle`, so logs and cards already show `[UAV-C:1]` etc. **Live** MAVLink vehicles currently default to `.unknown` (rendered `VEH:N`). Wire up MAV_TYPE inference: capture `MAV_TYPE` from the heartbeat (via `mavsdk_bridge.py` event or MAVSDK `Info`) once on first telemetry, map to ``FleetVehicleType`` (e.g. `MAV_TYPE_QUADROTOR/HEXA/OCTO/HELI` → `.uavCopter`, `MAV_TYPE_FIXED_WING` → `.uavFixedWing`, `MAV_TYPE_VTOL_*` → `.uavVTOL`, `MAV_TYPE_GROUND_ROVER` → `.ugvWheeled`, `MAV_TYPE_SURFACE_BOAT` → `.usv`, `MAV_TYPE_SUBMARINE` → `.uuv`), then call `FleetLinkService.setVehicleType(_:forVehicleID:)` to promote the model. Cards/logs/sub-bar will update automatically. Also extend `LiveDriveView.selectedVehicleClass` to read `model.data.vehicleType.universalClass` instead of guessing from `flightMode` strings.
+
+- **Live Drive: game controller / joystick integration:** add support for wired/wireless **game controllers** (Xbox, PS4/PS5, MFi, Stadia, Joy-Cons) and **HID joysticks / HOTAS** (Logitech Extreme 3D, T.16000M, Thrustmaster, etc.) as a first-class input alongside the existing `KeyboardEventMonitor` in `LiveDriveView`. Macos-only today; both transports (USB + Bluetooth) covered by system frameworks with no third-party deps.
+
+  **Frameworks (no SwiftPM deps):**
+  - `import GameController` (`GCController` / `GCExtendedGamepad`) for Xbox/PS/MFi/Stadia/Joy-Cons. Hot-plug via `GCControllerDidConnect`/`Disconnect`. Has battery, haptics (`GCController.haptics`), normalized layout.
+  - `import IOKit.hid` (`IOHIDManager`) for non-MFi USB/BT joysticks and HOTAS that GameController doesn't surface. Lower-level enumeration, vendor/product IDs, raw axes/buttons.
+  - When we sandbox the macOS app target (see Xcode Run → real `.app` task), add entitlements: `com.apple.security.device.bluetooth` (BT controllers), `com.apple.security.device.usb` (USB joysticks).
+
+  **Architecture (mirror existing patterns):**
+  - **New** `Sources/GuardianHQ/ControllerInputService.swift` — `@MainActor final class ControllerInputService: ObservableObject` paralleling `FleetLinkService`. Owns both the `GCController` notifications and an `IOHIDManager`. Publishes `connectedDevices: [InputDevice]`, `activeDeviceID: String?`, `lastSnapshot: ControllerSnapshot?`. Samples at 30–50 Hz via `DispatchSourceTimer`. Wire into `RootView` as `@StateObject` next to the other stores; pass into `LiveDriveView` and `SettingsView`.
+  - **New** `Sources/GuardianHQ/ControllerBindingsStore.swift` — sibling of `ManualControlSettingsStore`. Holds `[ControllerProfile]` (id, name, `DeviceMatch`, `axisBindings: [AxisRole: AxisMapping]`, `buttonBindings: [ButtonRole: ManualControlAction]`, `deadzone`, `expoCurve`, `invertY`, per-axis `trim`/`scale`). UserDefaults JSON like the keyboard bindings. Ship 2–3 built-in profiles (Xbox/PS5 default UAV, Logitech Extreme 3D, generic HOTAS) plus per-`UniversalVehicleClass` defaults so picking a UAV auto-selects a UAV layout, a USV picks a marine layout, etc.
+  - **`Sources/GuardianHQ/FleetVehicleModel.swift`** — add `case manualVelocitySetpoint(VelocityNED, yawRate: Double)` to `FleetVehicleCommand` for the analog stream path. Optionally add `.freeRoamGamepad` to `FleetVehicleCommandCategory` if we want to differentiate from `.freeRoamKeyboard` in arbitration. Discrete `case manualControl(ManualControlIntentCommand)` stays unchanged for buttons / dpad.
+  - **`Sources/GuardianHQ/FleetLinkService.swift`** — add `startManualVelocityStream(vehicleID:)`, `updateManualVelocitySetpoint(...)`, `stopManualVelocityStream(vehicleID:)`. They own the **MAVSDK `Offboard` plugin** lifecycle (`Offboard.setVelocityNed(...)` resampled at ≥10 Hz, one-time `Offboard.start()` after seeding a zero setpoint, watchdog auto-`hold()` if no packet in ~750 ms). Long-lived `Disposable` stored on `VehicleSession` (alongside `session.bag`) for the duration of the freestyle session — **never** per-tick `Completable`s.
+  - **`Sources/GuardianHQ/MissionControlStore.swift`** — every new `FleetVehicleCommand` case (e.g. `manualVelocitySetpoint`) needs the matching one-liner in `paladinShortCommandSummary` and any other exhaustive switches. The compiler will surface them.
+  - **`Sources/GuardianHQ/LiveDriveStore.swift`** — add `controlMode: ControlMode { case keyboard; case controller(deviceID: String); case joystick(deviceID: String) }` and `activeInputDeviceID: String?`. `beginSession()` pins the input source to the session.
+  - **`Sources/GuardianHQ/LiveDriveView.swift`** — replace the lone `KeyboardEventMonitor` with a unified `InputRouter` that subscribes to **both** `NSEvent` keys and `ControllerInputService.$lastSnapshot`. Discrete events (keys, buttons, dpad) → existing `.manualControl(...)` path (no `FleetLinkService` changes). Analog snapshots → `startManualVelocityStream` + `updateManualVelocitySetpoint` path. Sub-bar gets an "Input: Keyboard / *Controller name* / *Joystick name*" picker.
+  - **`Sources/GuardianHQ/SettingsView.swift`** — extend `controlsPane` with two new sections: **Connected controllers** (live list from `ControllerInputService.connectedDevices`) and **Profiles** (CRUD on `ControllerProfile`s) using the existing `settingsRow` helper. Add a per-axis "wiggle to calibrate" sheet for IOHID joysticks (GameController doesn't need it).
+
+  **Command-shape decision (most important):** every existing manual command in `completionForManualControl` is **discrete** — one keypress = one `gotoLocation` 2.5 m away. That's correct shorthand for taps and dpad presses, but it's the wrong abstraction for analog sticks (autopilot stutters between micro-targets). Use a **two-mode adapter**:
+  1. **Discrete (existing pipeline):** keys, dpad, face buttons all stay on `.manualControl(ManualControlIntentCommand)`. Works on every supported vehicle today, zero changes needed for "Xbox-as-keyboard".
+  2. **Analog (new):** sticks/triggers go through `.manualVelocitySetpoint(...)` + Offboard streaming. Gated behind:
+     1. autopilot stack supports Offboard (PX4 + recent ArduPilot do),
+     2. active input device is analog (`gamepad`/`joystick`),
+     3. operator opted into "Direct stick control" in Settings (default off until validated per stack).
+
+  **Authority + safety (reuse the existing ladder):**
+  - Controller input maps to `manualTakeover` for the duration of a freestyle session — same priority as keyboard today, **don't** introduce a parallel gate.
+  - **Deadman:** on `GCControllerDidDisconnect` or IOHID drop mid-session, immediately push `.holdPosition`, banner the operator, pause Offboard stream.
+  - **Watchdog in `FleetLinkService`:** if no setpoint packet for ~750 ms, auto-`hold()` (defence in depth on top of MAVSDK Offboard's own timeout).
+  - **Window-focus:** `NSEvent.addLocalMonitorForEvents` only fires when key window. `GCController` notifications fire regardless of focus — surface a `Settings → Controls → "Continue manual control while Guardian is in the background"` toggle (default **off** until we've thought through failure modes).
+  - **Deadzone + idle collapse:** within deadzone for >250 ms → stream `setVelocityNed(0,0,0,0)`; sustained idle → one-shot `holdPosition`.
+
+  **Per-class UX gotchas:**
+  - Game pads self-center → "center = hold altitude". HOTAS throttle slider is unipolar 0..1 and stays where you put it — surface a per-axis `polarity: .bipolar / .unipolar` in `AxisMapping` so one code path handles both.
+  - Store one default `ControllerProfile` per `UniversalVehicleClass`. UAV right-Y = climb; USV left-Y = throttle, right-X = rudder; UGV similar; UUV adds vertical from triggers.
+
+  **MAVSDK Offboard landmines:**
+  - `Offboard.start()` throws `NoSetpointSet` if you start it before any setpoint arrived — always seed one zero `setVelocityNed(...)` *before* `start()`.
+  - ArduPilot mode-switch to GUIDED can take 100–300 ms on real vehicles — gate operator input on "mode confirmed via telemetry".
+
+  **Rollout sequence (ship-as-you-go):**
+  1. `ControllerInputService` (GameController only) + read-only "Detected devices" list in Settings → Controls. No control-flow changes — just see what shows up.
+  2. `ControllerBindingsStore` with one default Xbox profile mapping dpad + face buttons onto existing `ManualControlAction` cases. Now Xbox-as-keyboard works through the **existing** `completionForManualControl(...)` with **zero** `FleetLinkService` changes — useful for `arm`/`engage`/`terminate`/`holdPosition` while Paladin runs the rest.
+  3. Add `.manualVelocitySetpoint(...)` + Offboard streaming in `FleetLinkService`, gated behind a Settings toggle. Validate: PX4 SITL → ArduPilot SITL → real vehicles.
+  4. Add `IOHIDManager` discovery so flight sticks / HOTAS show up in `connectedDevices`. Same `ControllerSnapshot`, second source.
+  5. Polish: `GCController.haptics` cues on arm/takeoff/RTL, profile import/export, calibration sheet for IOHID joysticks.

@@ -89,6 +89,8 @@ struct VehicleTelemetryInfoSheet: View {
 
     private func summaryVehicleRows(model: FleetVehicleModel) -> [(String, String)] {
         var rows: [(String, String)] = [
+            ("Short ID", model.displayShortID),
+            ("Class", model.data.vehicleType.displayName),
             ("Autopilot", model.data.telemetry?.autopilotStack.displayName ?? "Unknown"),
             ("Vehicle ID", vehicleID ?? "—"),
             ("System ID", model.data.systemID.map(String.init) ?? "—"),

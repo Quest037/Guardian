@@ -206,7 +206,9 @@ final class SitlService: ObservableObject {
             link.registerSimulatedVehicle(
                 systemID: instance + 1,
                 mavlinkConnectionURL: "udpin://0.0.0.0:\(mavsdkIngressPort)",
-                autopilotStack: .ardupilot
+                autopilotStack: .ardupilot,
+                vehicleType: preset.fleetVehicleType,
+                spawnDefaults: defaults
             )
             link.appendSimulationLog(
                 "Started ArduPilot SITL [vehicle=\(preset.displayName) instance=\(instance) mavlink_sysid=\(instance + 1) session=\(id.uuidString)] primary_link=\(mavsdkIngressPort)"
@@ -279,7 +281,9 @@ final class SitlService: ObservableObject {
             link.registerSimulatedVehicle(
                 systemID: instance + 1,
                 mavlinkConnectionURL: "udpin://0.0.0.0:\(mavsdkIngressPort)",
-                autopilotStack: .px4
+                autopilotStack: .px4,
+                vehicleType: preset.fleetVehicleType,
+                spawnDefaults: defaults
             )
             link.appendSimulationLog(
                 "Started PX4 SITL [sim=SIH vehicle=\(preset.displayName) model=\(preset.px4SitlSimModel()) instance=\(instance) mavlink_sysid=\(instance + 1) session=\(id.uuidString)] gcs_udp=\(gcsUdpPort) mavsdk_udpin=\(mavsdkIngressPort)"

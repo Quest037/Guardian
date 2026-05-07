@@ -7,25 +7,29 @@ enum MapTileStyle: String, CaseIterable, Identifiable, Codable {
     var id: String { rawValue }
 }
 
-struct HeadingPreview {
+struct HeadingPreview: Equatable {
     var lat: Double
     var lon: Double
     var heading: Double
 }
 
-struct CameraPreview {
+struct CameraPreview: Equatable {
     var lat: Double
     var lon: Double
     var bearing: Double
     var fovDeg: Double
 }
 
-struct MapVehicleMarker {
+struct MapVehicleMarker: Equatable {
     var id: String
     var lat: Double
     var lon: Double
     var label: String
     var colorHex: String
+    /// Optional embedded thumbnail (data URL) rendered inside the circular marker.
+    var imageDataURL: String? = nil
+    /// Whether to render the marker label as a tooltip.
+    var showLabel: Bool = true
     var selected: Bool
     var draggable: Bool
     /// When set, a small heading wedge is drawn at this marker (degrees clockwise from north).
@@ -107,7 +111,8 @@ struct OSMMapView: NSViewRepresentable {
             } else {
                 headingJSON = "\"heading\":null"
             }
-            return "{\"id\":\(Self.jsStringLiteral(marker.id)),\"lat\":\(marker.lat),\"lon\":\(marker.lon),\"label\":\(Self.jsStringLiteral(marker.label)),\"color\":\(Self.jsStringLiteral(marker.colorHex)),\"selected\":\(marker.selected ? "true" : "false"),\"draggable\":\(marker.draggable ? "true" : "false"),\(headingJSON)}"
+            let imageJSON = marker.imageDataURL.map(Self.jsStringLiteral) ?? "null"
+            return "{\"id\":\(Self.jsStringLiteral(marker.id)),\"lat\":\(marker.lat),\"lon\":\(marker.lon),\"label\":\(Self.jsStringLiteral(marker.label)),\"color\":\(Self.jsStringLiteral(marker.colorHex)),\"image\":\(imageJSON),\"showLabel\":\(marker.showLabel ? "true" : "false"),\"selected\":\(marker.selected ? "true" : "false"),\"draggable\":\(marker.draggable ? "true" : "false"),\(headingJSON)}"
         }.joined(separator: ",")
         let headingPreviewJSON: String
         if let headingPreview {
@@ -455,18 +460,41 @@ private extension OSMMapView {
       if (missionVehicleMarkers && missionVehicleMarkers.length > 0) {
         missionVehicleMarkers.forEach((vm) => {
           if (!Number.isFinite(vm.lat) || !Number.isFinite(vm.lon)) return;
-          const size = vm.selected ? 18 : 14;
+          const size = vm.selected ? 36 : 32;
+          const border = vm.selected ? 3 : 2;
+          const inner = Math.max(14, size - (border * 2) - 2);
+          const ringColor = vm.color || '#94a3b8';
+          const headingArrow = Number.isFinite(vm.heading)
+            ? `<div style="
+                position:absolute;
+                top:-5px;
+                left:50%;
+                width:0;
+                height:0;
+                margin-left:-5px;
+                border-left:5px solid transparent;
+                border-right:5px solid transparent;
+                border-bottom:10px solid rgba(255,255,255,0.95);
+                transform: rotate(${vm.heading}deg);
+                transform-origin: 50% ${size/2 + 5}px;
+                filter: drop-shadow(0 0 2px rgba(0,0,0,0.9));
+                pointer-events:none;
+              "></div>`
+            : '';
+          const imageHTML = vm.image
+            ? `<img src="${vm.image}" alt="" style="width:${inner}px;height:${inner}px;border-radius:999px;object-fit:cover;display:block;"/>`
+            : `<div style="width:${inner}px;height:${inner}px;border-radius:999px;background:#1f2937;"></div>`;
           const marker = L.marker([vm.lat, vm.lon], {
             draggable: !!vm.draggable,
             title: vm.label || '',
             icon: L.divIcon({
               className: 'mission-vehicle-dot',
-              html: `<div style="width:${size}px;height:${size}px;border-radius:999px;background:${vm.color || '#94a3b8'};border:${vm.selected ? 2.5 : 1.2}px solid #111;"></div>`,
-              iconSize: [size + 3, size + 3],
-              iconAnchor: [(size + 3) / 2, (size + 3) / 2]
+              html: `<div style="position:relative;width:${size}px;height:${size}px;">${headingArrow}<div style="width:${size}px;height:${size}px;border-radius:999px;border:${border}px solid ${ringColor};background:#0b0f14;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 1px rgba(0,0,0,0.55);overflow:hidden;">${imageHTML}</div></div>`,
+              iconSize: [size, size],
+              iconAnchor: [size / 2, size / 2]
             })
           }).addTo(map);
-          if (vm.label && vm.selected) {
+          if (vm.showLabel && vm.label && vm.selected) {
             marker.bindTooltip(vm.label, { permanent: true, direction: 'top', offset: [0, -10], opacity: 0.95 });
           }
           if (vm.draggable && vm.id) {
@@ -481,21 +509,7 @@ private extension OSMMapView {
           }
           vehicleMarkers.push(marker);
           points.push([vm.lat, vm.lon]);
-          if (Number.isFinite(vm.heading)) {
-            const coneColor = headingColor(vm.heading);
-            const wedge = L.polygon(
-              conePoints(vm.lat, vm.lon, vm.heading, 20, 0.14),
-              {
-                color: coneColor,
-                fillColor: coneColor,
-                weight: 2,
-                opacity: 0.9,
-                fillOpacity: 0.22,
-                interactive: false
-              }
-            ).addTo(map);
-            vehicleMarkers.push(wedge);
-          }
+          // Heading wedge removed for vehicle markers (arrow already shows heading).
         });
       }
 

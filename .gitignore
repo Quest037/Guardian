@@ -26,3 +26,7 @@ DerivedData/
 
 # Local scratch scaffold folder (not part of app source)
 GuardianMacApp/
+
+# Packaged macOS .app output (run `./scripts/package-macos-app.sh`)
+build/*.app/
+build/*.app

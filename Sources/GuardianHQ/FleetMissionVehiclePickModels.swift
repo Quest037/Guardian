@@ -57,7 +57,8 @@ func buildMissionPickableVehicles(
         .filter { !simVehicleIDs.contains($0) }
         .sorted()
     if let firstHardwareVehicleID = liveHardwareVehicleIDs.first,
-       let snap = fleetLink.telemetryByVehicleID[firstHardwareVehicleID] {
+       let model = fleetLink.vehicleModel(forVehicleID: firstHardwareVehicleID),
+       let snap = model.collections.telemetrySnapshot {
         let idText = firstHardwareVehicleID.replacingOccurrences(of: "sysid:", with: "")
         rows.append(
             MissionPickableFleetVehicle(
@@ -65,7 +66,7 @@ func buildMissionPickableVehicles(
                 title: "Live vehicle",
                 detailLine: "\(snap.autopilotStack.displayName) · \(snap.flightMode)",
                 vehicleIDText: idText,
-                lifecycleStatus: .init(stage: .live),
+                lifecycleStatus: model.collections.lifecycleStatus,
                 autopilotStack: snap.autopilotStack,
                 domain: .aerial,
                 simulationImageBasenames: nil,
@@ -95,6 +96,39 @@ func buildMissionPickableVehicles(
     return rows
 }
 
+/// Resolves the FleetLink stream key (`sysid:n` or bridge id) for a roster assignment’s fleet token.
+@MainActor
+func resolvedFleetStreamVehicleID(
+    token: FleetMissionVehicleToken,
+    fleetLink: FleetLinkService,
+    sitl: SitlService
+) -> String? {
+    switch token {
+    case .sitl(let uuid):
+        guard let inst = sitl.instances.first(where: { $0.id == uuid }) else { return nil }
+        let systemID = inst.stackInstanceIndex + 1
+        return fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
+    case .live:
+        let simVehicleIDs = Set(sitl.instances.map { "sysid:\($0.stackInstanceIndex + 1)" })
+        return fleetLink.telemetryByVehicleID.keys
+            .filter { !simVehicleIDs.contains($0) }
+            .sorted()
+            .first
+    }
+}
+
+@MainActor
+func resolvedFleetStreamVehicleID(
+    assignment: MissionRunAssignment,
+    fleetLink: FleetLinkService,
+    sitl: SitlService
+) -> String? {
+    guard let key = assignment.attachedFleetVehicleToken,
+          let token = FleetMissionVehicleToken(storageKey: key)
+    else { return nil }
+    return resolvedFleetStreamVehicleID(token: token, fleetLink: fleetLink, sitl: sitl)
+}
+
 @MainActor
 func resolvedRosterVehicleLabel(
     assignment: MissionRunAssignment,
@@ -120,6 +154,30 @@ func resolvedRosterVehicleLabel(
     }
     let legacy = assignment.attachedDevice.trimmingCharacters(in: .whitespacesAndNewlines)
     return legacy.isEmpty ? nil : legacy
+}
+
+/// Optional second line under the slot title (modes, “stopped”, live summary). Hides generic SITL **preset** titles (e.g. “Multirotor”) when the thumbnail and stack/sim badges already convey airframe.
+@MainActor
+func resolvedRosterVehicleSecondaryLine(
+    assignment: MissionRunAssignment,
+    fleetLink: FleetLinkService,
+    sitl: SitlService
+) -> String? {
+    guard let full = resolvedRosterVehicleLabel(assignment: assignment, fleetLink: fleetLink, sitl: sitl) else {
+        let legacy = assignment.attachedDevice.trimmingCharacters(in: .whitespacesAndNewlines)
+        return legacy.isEmpty ? nil : legacy
+    }
+    if let key = assignment.attachedFleetVehicleToken,
+       let token = FleetMissionVehicleToken(storageKey: key),
+       case .sitl(let uuid) = token,
+       let inst = sitl.instances.first(where: { $0.id == uuid })
+    {
+        let stripped = full.replacingOccurrences(of: " (stopped)", with: "")
+        if stripped == inst.preset.displayName {
+            return nil
+        }
+    }
+    return full
 }
 
 @MainActor

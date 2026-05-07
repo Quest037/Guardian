@@ -1,0 +1,12 @@
+---
+description: Version bump policy for micro and minor releases
+alwaysApply: true
+---
+
+# Version Bump Policy
+
+- Version format is `major.minor.micro`.
+- For micro releases, increment `micro` by 1.
+- Micro releases can progress up to `x.x.100`.
+- After releasing `x.x.100`, the next release must bump minor and reset micro: `x.(x+1).0`.
+- Example: `0.0.100` -> `0.1.0`.

@@ -5,22 +5,20 @@ private let cardInner = Color(red: 0.10, green: 0.10, blue: 0.11)
 
 /// One cell in the fleet grid (live MAVLink vehicle or local SITL row).
 struct FleetVehicleGridCard: View {
-    let title: String
-    let domain: VehicleDomain
     let autopilotStack: FleetAutopilotStack
-    let vehicleId: String?
-    let systemId: Int?
-    let sessionUUID: String?
     /// Bundled `SimulationDevices` PNG basenames to try (without `.png`), or `nil` for the generic live placeholder.
     let simulationImageBasenames: [String]?
     let isSimulation: Bool
-    let liveTelemetry: FleetTelemetrySnapshot?
-    let simTelemetry: FleetHubVehicleTelemetry?
+    let vehicleModel: FleetVehicleModel?
     let sitlAlive: Bool?
     let sitlExitCode: Int32?
-    let lifecycleStatus: VehicleLifecycleStatus?
     let onInfo: (() -> Void)?
+    let onTestArm: (() -> Void)?
+    /// When non-`nil`, the Test button is disabled and this string is used for `.help`.
+    let testArmDisabledReason: String?
     let onStopSim: (() -> Void)?
+    /// When non-`nil`, the Stop button is disabled and this string is used for `.help` (e.g. live Mission Control run).
+    let stopSimDisabledReason: String?
     let onDismissSim: (() -> Void)?
 
     var body: some View {
@@ -44,16 +42,6 @@ struct FleetVehicleGridCard: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text(title)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Text(domain.rawValue)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.gray)
-
                 if let t = liveTelemetry {
                     liveTelemetryBlock(t)
                 }
@@ -147,11 +135,20 @@ struct FleetVehicleGridCard: View {
                     .foregroundStyle(.gray.opacity(0.9))
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if let onInfo {
+            if onInfo != nil || onTestArm != nil {
                 HStack(spacing: 8) {
-                    Button("Info", action: onInfo)
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                    if let onTestArm {
+                        Button("Test", action: onTestArm)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(testArmDisabledReason != nil)
+                            .help(testArmDisabledReason ?? "Run a one-shot arm check (same as Mission Control preflight).")
+                    }
+                    if let onInfo {
+                        Button("Info", action: onInfo)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                    }
                 }
             }
         }
@@ -168,22 +165,14 @@ struct FleetVehicleGridCard: View {
                     .foregroundStyle(.gray.opacity(0.9))
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if let vehicleId, !vehicleId.isEmpty {
-                Text("Vehicle ID: \(vehicleId)")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.gray)
-            }
-            if let systemId {
-                Text("System ID: \(systemId)")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.gray)
-            }
-            if let sessionUUID, !sessionUUID.isEmpty {
-                Text("Session UUID: \(sessionUUID)")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.gray.opacity(0.75))
-            }
             HStack(spacing: 8) {
+                if let onTestArm {
+                    Button("Test", action: onTestArm)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(testArmDisabledReason != nil)
+                        .help(testArmDisabledReason ?? "Run a one-shot arm check (same as Mission Control preflight).")
+                }
                 if let onInfo {
                     Button("Info", action: onInfo)
                         .buttonStyle(.bordered)
@@ -193,10 +182,14 @@ struct FleetVehicleGridCard: View {
                     Button("Stop", action: stop)
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .disabled(stopSimDisabledReason != nil)
+                        .help(stopSimDisabledReason ?? "Stop the simulator process.")
                 } else if sitlAlive == false, let dismiss = onDismissSim {
                     Button("Dismiss", action: dismiss)
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .disabled(stopSimDisabledReason != nil)
+                        .help(stopSimDisabledReason ?? "Remove this sim row from the grid.")
                 }
             }
         }
@@ -232,5 +225,17 @@ struct FleetVehicleGridCard: View {
 
     private var statusColor: Color {
         lifecycleStatus?.color.uiColor ?? Color.white.opacity(0.12)
+    }
+
+    private var liveTelemetry: FleetTelemetrySnapshot? {
+        vehicleModel?.collections.telemetrySnapshot
+    }
+
+    private var simTelemetry: FleetHubVehicleTelemetry? {
+        vehicleModel?.data.telemetry
+    }
+
+    private var lifecycleStatus: VehicleLifecycleStatus? {
+        vehicleModel?.collections.lifecycleStatus
     }
 }

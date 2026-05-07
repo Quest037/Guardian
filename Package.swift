@@ -27,6 +27,7 @@ let package = Package(
                 .copy("Resources/ArduPilotSitl"),
                 .copy("Resources/Px4SitlBundle"),
                 .copy("Resources/SimulationDevices"),
+                .copy("Resources/SitlDefaultParams/ArduPilotGuardianBattery.parm"),
             ],
             linkerSettings: [
                 // Embed a minimal Info.plist so NSBundle has a main bundle identifier

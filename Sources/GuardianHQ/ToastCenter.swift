@@ -10,9 +10,9 @@ enum ToastStyle {
         case .success:
             return GuardianSemanticColors.successBackground
         case .info:
-            return Color.blue.opacity(0.22)
+            return GuardianSemanticColors.infoBackground
         case .error:
-            return Color.red.opacity(0.24)
+            return GuardianSemanticColors.dangerBackground
         }
     }
 

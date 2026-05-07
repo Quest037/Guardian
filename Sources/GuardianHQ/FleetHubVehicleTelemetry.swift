@@ -118,6 +118,13 @@ struct FleetHubVehicleTelemetry: Equatable {
     var healthHomePositionOk: Bool?
     var healthArmable: Bool?
 
+    // MARK: Autopilot mission (MAVSDK native)
+
+    /// `Mission.missionProgress.current` when ingested via MAVSDK (nil for bridge-only telemetry).
+    var missionProgressCurrent: Int32?
+    /// `Mission.missionProgress.total` when ingested via MAVSDK.
+    var missionProgressTotal: Int32?
+
     // MARK: RC
 
     var rcWasAvailableOnce: Bool?
@@ -271,6 +278,8 @@ struct FleetHubVehicleTelemetry: Equatable {
         healthGlobalPositionOk: nil,
         healthHomePositionOk: nil,
         healthArmable: nil,
+        missionProgressCurrent: nil,
+        missionProgressTotal: nil,
         rcWasAvailableOnce: nil,
         rcIsAvailable: nil,
         rcSignalStrengthPercent: nil,

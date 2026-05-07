@@ -114,6 +114,15 @@ enum SitlLaunchRecipe {
         return nil
     }
 
+    /// Bundled `ArduPilotGuardianBattery.parm` for `sim_vehicle --add-param-file` (`nil` if absent from the bundle).
+    static func guardianArduPilotBatteryParmURL() -> URL? {
+        let name = "ArduPilotGuardianBattery"
+        if let u = Bundle.module.url(forResource: name, withExtension: "parm", subdirectory: "SitlDefaultParams") {
+            return u
+        }
+        return Bundle.module.url(forResource: name, withExtension: "parm")
+    }
+
     static func python3Executable() -> String? {
         if let env = ProcessInfo.processInfo.environment["GUARDIAN_PYTHON"]?.trimmingCharacters(in: .whitespacesAndNewlines),
            !env.isEmpty,
@@ -167,7 +176,12 @@ enum SitlLaunchRecipe {
     /// MAVLink reaches Guardian via MAVProxy’s default `--out` to UDP 14550+10*instance (see `sim_vehicle.py`).
     ///
     /// Do **not** pass `--console`: MAVProxy’s console module expects a TTY and exits immediately when spawned from `Process`, which ends `sim_vehicle.py` and drops the UI row.
-    static func arduPilotSpec(root: String, preset: SimulationVehiclePreset, instance: Int) throws -> SitlProcessSpec {
+    static func arduPilotSpec(
+        root: String,
+        preset: SimulationVehiclePreset,
+        instance: Int,
+        spawnDefaults: SimSpawnDefaults
+    ) throws -> SitlProcessSpec {
         guard let python = python3Executable() else { throw SitlError.missingPython3 }
         let script = (root as NSString).appendingPathComponent("Tools/autotest/sim_vehicle.py")
         guard FileManager.default.isReadableFile(atPath: script) else { throw SitlError.missingSimVehicleScript }
@@ -187,6 +201,12 @@ enum SitlLaunchRecipe {
         if let frame {
             args.append(contentsOf: ["-f", frame])
         }
+        if let batteryParm = Self.guardianArduPilotBatteryParmURL() {
+            // Ensures BATT_CAPACITY etc. so MAVLink battery remaining is published (MAVSDK Telemetry.Battery).
+            args.append(contentsOf: ["--add-param-file", batteryParm.path])
+        }
+        // sim_vehicle.py accepts custom start via -l/--custom-location.
+        args.append(contentsOf: ["-l", "\(spawnDefaults.latitudeDeg),\(spawnDefaults.longitudeDeg),0,0"])
 
         let cwd = URL(fileURLWithPath: root, isDirectory: true)
         var env = ProcessInfo.processInfo.environment
@@ -282,9 +302,9 @@ enum SitlLaunchRecipe {
     }
 
     /// PX4 `px4-rc.mavlink` offboard/API remote UDP port (`14540 + px4_instance`).
-    /// This is unique per instance and suitable for per-vehicle MAVSDK ingestion.
+    /// This must stay **one-to-one** with `instance`; capping indices used to collide instance ≥9 on the same port.
     static func px4OffboardRemotePort(instance: Int) -> Int {
-        14_540 + min(instance, 9)
+        14_540 + max(0, instance)
     }
 
     /// Resolves `build/<target>/{bin/px4, etc, rootfs}` under a PX4-Autopilot checkout, **or** a flat bundle root (`bin`, `etc` directly under `root`).
@@ -312,7 +332,12 @@ enum SitlLaunchRecipe {
     }
 
     /// Spawns `bin/px4` with `PX4_SIM_MODEL` set for built-in SIH airframes (no Gazebo / jMAVSim).
-    static func px4Spec(root: String, preset: SimulationVehiclePreset, instance: Int) throws -> SitlProcessSpec {
+    static func px4Spec(
+        root: String,
+        preset: SimulationVehiclePreset,
+        instance: Int,
+        spawnDefaults: SimSpawnDefaults
+    ) throws -> SitlProcessSpec {
         guard let layout = px4ResolvedBuildLayout(root: root) else {
             throw SitlError.missingPx4SitlBuild
         }
@@ -331,6 +356,12 @@ enum SitlLaunchRecipe {
         var env = ProcessInfo.processInfo.environment
         env["PX4_SIM_MODEL"] = model
         env["HEADLESS"] = "1"
+        // Prefer deterministic app defaults for initial home.
+        env["PX4_HOME_LAT"] = "\(spawnDefaults.latitudeDeg)"
+        env["PX4_HOME_LON"] = "\(spawnDefaults.longitudeDeg)"
+        env["PX4_HOME_ALT"] = "0"
+        // `etc/init.d-posix/rcS` applies `PX4_PARAM_*` so the battery library has a non-zero capacity in SIH SITL.
+        env["PX4_PARAM_BAT1_CAPACITY"] = "5000"
         // rcS runs `. px4-alias.sh`; that file lives next to px4 under bin/ (must be on PATH).
         let binDir = (layout.build as NSString).appendingPathComponent("bin")
         env["PATH"] = binDir + ":" + augmentedPATH(existing: env["PATH"] ?? "")

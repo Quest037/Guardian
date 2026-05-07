@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Spacing and widths for mission setup / roster prep.
 /// Tune here when adding sim battery, pre-place coordinates, staging waypoints, or other per-slot controls.
@@ -14,13 +16,26 @@ private enum MissionRunPrepLayout {
     static let rosterGridSpacing: CGFloat = 18
     static let scheduleCardPadding: CGFloat = 20
     static let scheduleCardSpacing: CGFloat = 16
-    static let rosterSlotPadding: CGFloat = 20
-    static let rosterSlotStackSpacing: CGFloat = 16
-    static let rosterSlotIconSize: CGFloat = 58
-    static let rosterSlotIconRowSpacing: CGFloat = 12
+    static let rosterSlotPadding: CGFloat = 26
+    static let rosterSlotStackSpacing: CGFloat = 20
+    static let rosterSlotIconSize: CGFloat = 64
+    static let rosterSlotIconRowSpacing: CGFloat = 14
     static let rosterTitleStackSpacing: CGFloat = 5
     static let rosterSlotCornerRadius: CGFloat = 14
+    /// Baseline card body grew ~25% vs earlier layout (taller icon column + spacing).
+    static let rosterSlotMinHeight: CGFloat = 220
     static let pathCardCornerRadius: CGFloat = 12
+}
+
+/// Matches `pathColor(index)` in `OSMMapView` (golden-angle hue on HSL) so route lines and progress bars align visually.
+private enum MissionPathMapColor {
+    static func hueDegrees(forPathIndex index: Int) -> Double {
+        (Double(index) * 137.508).truncatingRemainder(dividingBy: 360)
+    }
+
+    static func swiftUIColor(forPathIndex index: Int) -> Color {
+        Color(hue: hueDegrees(forPathIndex: index) / 360, saturation: 0.88, brightness: 0.62)
+    }
 }
 
 struct MissionControlView: View {
@@ -47,9 +62,16 @@ struct MissionControlView: View {
                     defaultLiveMapStyle: generalSettings.defaultMapTileStyle,
                     onBack: { selectedRunID = nil },
                     onUpdate: { controlStore.updateRun($0) },
-                    onStart: {
-                        controlStore.updateRun($0)
-                        controlStore.startRun(id: $0.id)
+                    onStart: { run in
+                        controlStore.updateRun(run)
+                        let mission = missionStore.missions.first { $0.id == run.missionId }
+                        controlStore.startRun(
+                            id: run.id,
+                            mission: mission,
+                            fleetLink: fleetLink,
+                            sitl: sitl,
+                            missionsProvider: { missionStore.missions }
+                        )
                     },
                     onDelete: { controlStore.deleteRun(id: $0) }
                 )
@@ -217,39 +239,33 @@ private struct MissionRunCard: View {
 private struct MissionControlRosterSlotCard: View {
     let title: String
     let subtitle: String
-    let assignedVehicleTitle: String?
+    /// Slot has a fleet or legacy device binding (chrome, buttons).
+    let isAttached: Bool
+    /// Extra line under titles (live mode summary, etc.); omits generic sim preset names like “Multirotor”.
+    let assignedVehicleDetail: String?
+    /// MAVLink bridge battery summary when a fleet vehicle is assigned (`nil` if unassigned).
+    let rosterBatterySummary: FleetVehicleOperationalModel.BatterySummary?
     /// `nil` when unassigned or legacy free-text only; `false` = live MAVLink, `true` = built-in sim.
     let assignedFleetIsSimulation: Bool?
+    /// ArduPilot / PX4 badge when a fleet vehicle is bound (matches Vehicles grid).
+    let autopilotStack: FleetAutopilotStack?
     let simulationImageBasenames: [String]?
+    /// Shown under the type glyph when a vehicle is assigned (two-word lifecycle line).
+    let lifecycleStatus: VehicleLifecycleStatus?
+    /// MAVLink `system_id` when resolved (`nil` if unknown).
+    let vehicleSystemID: Int?
+    let isSelectedForSetupMap: Bool
+    let onSelectForSetupMap: () -> Void
     let onChooseVehicle: () -> Void
     let onRemoveVehicle: () -> Void
-
-    private var isAttached: Bool {
-        assignedVehicleTitle != nil
-    }
+    let onInfo: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: MissionRunPrepLayout.rosterSlotStackSpacing) {
+            // Row 1: image | title / subtitle | stack + sim/live badges (vertical center)
             HStack(alignment: .center, spacing: MissionRunPrepLayout.rosterSlotIconRowSpacing) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    Color(red: 0.07, green: 0.12, blue: 0.14),
-                                    Color(red: 0.05, green: 0.07, blue: 0.09)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                    slotLeadingGlyph
-                }
-                .frame(width: MissionRunPrepLayout.rosterSlotIconSize, height: MissionRunPrepLayout.rosterSlotIconSize)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
-                )
+                iconTile
+                    .frame(width: MissionRunPrepLayout.rosterSlotIconSize, height: MissionRunPrepLayout.rosterSlotIconSize)
 
                 VStack(alignment: .leading, spacing: MissionRunPrepLayout.rosterTitleStackSpacing) {
                     Text(title)
@@ -262,75 +278,152 @@ private struct MissionControlRosterSlotCard: View {
                         .lineLimit(2)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+                if isAttached, let stack = autopilotStack {
+                    HStack(spacing: 6) {
+                        FleetAutopilotStackBadge(stack: stack)
+                        if let isSim = assignedFleetIsSimulation {
+                            FleetLiveSimBadge(isSimulation: isSim)
+                        }
+                    }
+                }
             }
 
-            if let assignedVehicleTitle {
-                Group {
-                    if let isSim = assignedFleetIsSimulation {
-                        HStack(alignment: .center, spacing: 10) {
-                            FleetLiveSimBadge(isSimulation: isSim)
-                            Text(assignedVehicleTitle)
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.92))
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
+            // Row 2: lifecycle status (+ optional mode line) | battery (vertical center)
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    if isAttached, let lifecycleStatus {
+                        Text(lifecycleStatus.compactTwoWordStatus)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(lifecycleStatus.color.uiColor.opacity(0.95))
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if isAttached {
+                        Text("—")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.gray)
                     } else {
-                        Text(assignedVehicleTitle)
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.92))
+                        Text("No vehicle assigned")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.gray)
+                    }
+                    if let detail = assignedVehicleDetail, !detail.isEmpty {
+                        Text(detail)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.white.opacity(0.72))
+                            .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-            } else {
-                Text("No vehicle assigned")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.gray)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                if isAttached {
+                    rosterSetupBatteryCompact
+                }
             }
 
-            HStack(spacing: 12) {
-                Button {
-                    onChooseVehicle()
-                } label: {
-                    if isAttached {
-                        Text("Change")
-                    } else {
-                        Label("Choose", systemImage: "plus.circle.fill")
-                            .labelStyle(.titleAndIcon)
-                    }
+            // Row 3: vehicle system ID
+            HStack(alignment: .center, spacing: 8) {
+                Text("System ID")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.gray)
+                Text(vehicleSystemID.map { "\($0)" } ?? "—")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.9))
+                Spacer(minLength: 0)
+            }
+
+            // Row 4: actions (text only, vertical center)
+            HStack(alignment: .center, spacing: 10) {
+                Button(action: onChooseVehicle) {
+                    Text(isAttached ? "Change" : "Choose")
                 }
                 .font(.system(size: 11, weight: .semibold))
                 .buttonStyle(.bordered)
                 .tint(.blue)
                 .controlSize(.small)
 
-                Spacer()
+                if isAttached, let onInfo {
+                    Button("Info", action: onInfo)
+                        .font(.system(size: 11, weight: .semibold))
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
+
+                Spacer(minLength: 0)
 
                 if isAttached {
-                    Button {
-                        onRemoveVehicle()
-                    } label: {
-                        Label("Remove", systemImage: "trash")
-                            .font(.system(size: 11, weight: .semibold))
+                    Button(action: onRemoveVehicle) {
+                        Text("Remove")
                     }
+                    .font(.system(size: 11, weight: .semibold))
                     .buttonStyle(.bordered)
                     .tint(.red)
                     .controlSize(.small)
-                    .labelStyle(.titleAndIcon)
                 }
             }
-            .padding(.top, 4)
         }
+        .frame(minHeight: MissionRunPrepLayout.rosterSlotMinHeight, alignment: .topLeading)
         .padding(MissionRunPrepLayout.rosterSlotPadding)
         .background(Color(red: 0.10, green: 0.10, blue: 0.11))
         .clipShape(RoundedRectangle(cornerRadius: MissionRunPrepLayout.rosterSlotCornerRadius))
         .overlay(
             RoundedRectangle(cornerRadius: MissionRunPrepLayout.rosterSlotCornerRadius)
                 .strokeBorder(
-                    isAttached ? Color.green.opacity(0.7) : Color.white.opacity(0.08),
-                    lineWidth: isAttached ? 2 : 1
+                    isSelectedForSetupMap ? Color.blue.opacity(0.92) : (isAttached ? Color.green.opacity(0.7) : Color.white.opacity(0.08)),
+                    lineWidth: isSelectedForSetupMap ? 2 : (isAttached ? 2 : 1)
                 )
         )
         .shadow(color: .black.opacity(0.25), radius: isAttached ? 6 : 2, y: isAttached ? 2 : 1)
+        .contentShape(RoundedRectangle(cornerRadius: MissionRunPrepLayout.rosterSlotCornerRadius))
+        .onTapGesture {
+            onSelectForSetupMap()
+        }
+    }
+
+    private var rosterSetupBatteryCompact: some View {
+        HStack(alignment: .center, spacing: 4) {
+            Image(systemName: rosterBatterySymbol)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(rosterBatteryIconTint)
+            Text(rosterBatteryPercentText)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.94))
+                .lineLimit(1)
+        }
+        .help(rosterBatteryHoverText)
+    }
+
+    private var rosterBatteryPercentText: String {
+        guard let p = rosterBatterySummary?.percent0to100 else { return "—" }
+        return "\(Int(round(p)))%"
+    }
+
+    private var rosterBatterySymbol: String {
+        if rosterBatterySummary?.isCharging == true {
+            return "battery.100.bolt"
+        }
+        return "battery.100"
+    }
+
+    private var rosterBatteryIconTint: Color {
+        guard let p = rosterBatterySummary?.percent0to100 else {
+            return Color.gray.opacity(0.55)
+        }
+        if p < 10 {
+            return Color.red.opacity(0.92)
+        }
+        if p < 80 {
+            return Color.yellow.opacity(0.95)
+        }
+        return GuardianSemanticColors.successForeground
+    }
+
+    private var rosterBatteryHoverText: String {
+        let pct = rosterBatteryPercentText
+        let v = rosterBatterySummary?.voltageV.map { String(format: "%.1f V", $0) } ?? "—"
+        let a = rosterBatterySummary?.currentA.map { String(format: "%.1f A", $0) } ?? "—"
+        return "Battery \(pct), \(v), \(a)"
     }
 
     @ViewBuilder
@@ -352,6 +445,33 @@ private struct MissionControlRosterSlotCard: View {
                 .symbolRenderingMode(.hierarchical)
         }
     }
+
+    private var iconTile: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.07, green: 0.12, blue: 0.14),
+                            Color(red: 0.05, green: 0.07, blue: 0.09),
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+            slotLeadingGlyph
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+        )
+    }
+}
+
+private enum LiveConsoleMediaTab: Hashable {
+    case camera
+    case map
 }
 
 private struct MissionRunDetailView: View {
@@ -367,7 +487,36 @@ private struct MissionRunDetailView: View {
 
     @State private var confirmDeleteRun = false
     @State private var rosterPickerAssignmentId: UUID?
+    @State private var setupSelectedAssignmentId: UUID?
+    @State private var setupMapRecenterNonce: Int
+    @State private var liveMapRecenterNonce: Int
     @State private var liveConsoleMapStyle: MapTileStyle
+    /// Paladin log card: default is reduced height; extended is taller.
+    @State private var paladinLogExtended = false
+    @State private var liveConsoleMediaTab: LiveConsoleMediaTab = .map
+    @ObservedObject private var paladinLogTemplates: PaladinLogTemplateRegistry
+    @State private var startPreflightPresented = false
+    @State private var rosterInfoSheetTitle: String?
+    @State private var rosterInfoVehicleID: String?
+    @State private var rosterInfoSitlSessionUUID: String?
+    /// Deferred one-off schedule: minutes to add when using **Go** on the running countdown banner.
+    @State private var scheduledStartPostponeMinutes: Int = 5
+    @State private var confirmSkipScheduledPaladinStart = false
+    @State private var confirmSkipScheduledPaladinMessage = ""
+    /// Initial path mission start deferral: minutes to add when using **Go** in the Progress card.
+    @State private var pathStartDeferralPostponeMinutes: Int = 5
+    @State private var confirmSkipPathStartDeferral = false
+    @State private var confirmSkipPathStartDeferralPathID: UUID?
+    @State private var confirmSkipPathStartDeferralMessage = ""
+    /// MC Setup Schedule card: **Schedule** vs **Paths** (per-path MAVLink mission start delays).
+    @State private var scheduleSetupCardSegment: Int = 0
+    /// Loop intermission (per path): minutes to add when using **Go** on the Progress card.
+    @State private var pathLoopIntermissionPostponeMinutes: Int = 5
+    @State private var confirmSkipPathLoopIntermission = false
+    @State private var confirmSkipPathLoopIntermissionPathID: UUID?
+    @State private var confirmSkipPathLoopIntermissionMessage = ""
+    /// Running sub-bar controls sidebar (cog button).
+    @State private var runControlsSidebarVisible = false
 
     init(
         run: MissionRun,
@@ -392,7 +541,11 @@ private struct MissionRunDetailView: View {
         self.onDelete = onDelete
         _confirmDeleteRun = State(initialValue: false)
         _rosterPickerAssignmentId = State(initialValue: nil)
+        _setupSelectedAssignmentId = State(initialValue: nil)
+        _setupMapRecenterNonce = State(initialValue: 0)
+        _liveMapRecenterNonce = State(initialValue: 0)
         _liveConsoleMapStyle = State(initialValue: defaultLiveMapStyle)
+        _paladinLogTemplates = ObservedObject(wrappedValue: PaladinLogTemplateRegistry.shared)
     }
 
     private var rosterPickerSpring: Animation {
@@ -405,8 +558,28 @@ private struct MissionRunDetailView: View {
         }
     }
 
+    /// Vertical rule between adjacent controls. `Divider()` in an `HStack` stretches to the full row height; a fixed `Rectangle` does not.
+    private func compactVerticalControlSeparator() -> some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor))
+            .frame(width: 1, height: 16)
+    }
+
+    private func refreshVehicleVoiceNarrativeFromTelemetry() {
+        syncRunFromStore()
+        guard run.status == .running || run.status == .paused else { return }
+        let mission = missionStore.missions.first { $0.id == run.missionId }
+        controlStore.ingestVehicleTelemetryNarrative(
+            runID: run.id,
+            run: run,
+            mission: mission,
+            fleetLink: fleetLink,
+            sitl: sitl
+        )
+    }
+
     private func applyStopImmediate() {
-        controlStore.stopRunImmediate(id: run.id)
+        controlStore.stopRunImmediate(id: run.id, fleetLink: fleetLink, sitl: sitl)
         syncRunFromStore()
     }
 
@@ -420,20 +593,81 @@ private struct MissionRunDetailView: View {
         syncRunFromStore()
     }
 
+    private var runLoopEnabled: Bool {
+        run.scheduleMode != .oneOff
+    }
+
+    private func setRunLoopEnabled(_ enabled: Bool) {
+        run.scheduleMode = enabled ? .loop : .oneOff
+        onUpdate(run)
+        syncRunFromStore()
+    }
+
     private var resolvedMission: Mission? {
         missionStore.missions.first { $0.id == run.missionId }
+    }
+
+    private var liveMavlinkPathContext: (path: RoutePath, missionItemCount: Int)? {
+        guard let mission = resolvedMission else { return nil }
+        return PaladinMavlinkMissionBuilder.mavlinkMissionProgressContext(run: run, mission: mission)
+    }
+
+    private var liveMavlinkVehicleID: String? {
+        guard let mission = resolvedMission, let ctx = liveMavlinkPathContext else { return nil }
+        let assignment =
+            run.assignments.first(where: { $0.pathId == ctx.path.id })
+            ?? {
+                let enabled = mission.routeMacro.paths.filter(\.enabled)
+                if enabled.count == 1, enabled.first?.id == ctx.path.id {
+                    return run.assignments.first(where: { $0.pathId == nil }) ?? run.assignments.first
+                }
+                return run.assignments.first
+            }()
+        guard let assignment else { return nil }
+        return resolvedFleetStreamVehicleID(assignment: assignment, fleetLink: fleetLink, sitl: sitl)
+    }
+
+    private var liveMavlinkHub: FleetHubVehicleTelemetry? {
+        guard let id = liveMavlinkVehicleID else { return nil }
+        return fleetLink.hubTelemetry(forVehicleID: id)
+    }
+
+    /// Drives SwiftUI refresh when MAVSDK mission progress updates (not always the same as global `hubTelemetry`).
+    private var liveMissionProgressPulseDate: Date? {
+        liveMavlinkHub?.lastUpdate
     }
 
     private var allRosterFilled: Bool {
         run.assignments.allSatisfy(\.hasFleetOrLegacyAssignment)
     }
 
-    private var canStart: Bool {
+    private func canStart(referenceNow: Date) -> Bool {
         guard allRosterFilled else { return false }
-        if run.scheduleMode == .loop {
-            return run.loopIntervalMinutes > 0
+        if run.oneOffStartAt != nil, run.oneOffScheduledTimeTooFarInPast(referenceNow: referenceNow) {
+            return false
+        }
+        if run.repeatsAutopilotMissionCycles {
+            return run.loopIntervalMinutes >= 0 && run.loopIntervalMinutes <= 59
         }
         return true
+    }
+
+    @ViewBuilder
+    private func runSetupActionButtons(referenceNow: Date) -> some View {
+        HStack(spacing: 10) {
+            Button("Start Run") {
+                startPreflightPresented = true
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+            .disabled(!canStart(referenceNow: referenceNow))
+
+            Button("Delete Run") {
+                confirmDeleteRun = true
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+        }
     }
 
     var body: some View {
@@ -456,38 +690,43 @@ private struct MissionRunDetailView: View {
                         Spacer()
 
                         if run.status == .setup {
-                            HStack(spacing: 10) {
-                                Button("Start Run") {
-                                    run.status = .running
-                                    onStart(run)
-                                    syncRunFromStore()
+                            if run.oneOffStartAt != nil {
+                                TimelineView(.periodic(from: .now, by: 1)) { context in
+                                    runSetupActionButtons(referenceNow: context.date)
                                 }
-                                .buttonStyle(.borderedProminent)
-                                .tint(.blue)
-                                .disabled(!canStart)
-
-                                Button("Delete Run") {
-                                    confirmDeleteRun = true
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .tint(.red)
+                            } else {
+                                runSetupActionButtons(referenceNow: Date())
                             }
                         } else if run.status == .running || run.status == .paused {
-                            Menu {
-                                Button("Immediate", role: .destructive) {
-                                    applyStopImmediate()
+                            HStack(spacing: 8) {
+                                Menu {
+                                    Button("Immediate", role: .destructive) {
+                                        applyStopImmediate()
+                                    }
+                                    Button("Finish loop", role: .destructive) {
+                                        applyStopAfterCycle()
+                                    }
+                                } label: {
+                                    Text("Stop run")
+                                        .font(.system(size: 12, weight: .semibold))
                                 }
-                                Button("Finish loop", role: .destructive) {
-                                    applyStopAfterCycle()
+                                .menuStyle(.button)
+                                .buttonStyle(.borderedProminent)
+                                .tint(.red)
+                                .controlSize(.regular)
+
+                                Button {
+                                    withAnimation(rosterPickerSpring) {
+                                        runControlsSidebarVisible.toggle()
+                                    }
+                                } label: {
+                                    Image(systemName: "gearshape.fill")
+                                        .font(.system(size: 12, weight: .semibold))
                                 }
-                            } label: {
-                                Text("Stop run")
-                                    .font(.system(size: 12, weight: .semibold))
+                                .buttonStyle(.bordered)
+                                .controlSize(.regular)
+                                .help("Run controls")
                             }
-                            .menuStyle(.button)
-                            .buttonStyle(.borderedProminent)
-                            .tint(.red)
-                            .controlSize(.regular)
                         } else if run.status == .completed {
                             Button("Back to setup") {
                                 applyResetToSetup()
@@ -505,12 +744,118 @@ private struct MissionRunDetailView: View {
                     if run.pendingGracefulCycleStop, run.status == .running || run.status == .paused {
                         gracefulStopPendingBanner
                     }
+                    if run.status == .running, controlStore.oneOffDeferredExecution(for: run.id) != nil {
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            if let deferred = controlStore.oneOffDeferredExecution(for: run.id) {
+                                oneOffDeferredExecutionBanner(
+                                    deferred: deferred,
+                                    now: context.date,
+                                    postponeMinutes: $scheduledStartPostponeMinutes,
+                                    onPostpone: {
+                                        controlStore.postponeDeferredOneOffExecutionByMinutes(
+                                            runID: run.id,
+                                            additionalMinutes: scheduledStartPostponeMinutes,
+                                            fleetLink: fleetLink,
+                                            sitl: sitl,
+                                            missionProvider: { [missionStore] in
+                                                missionStore.missions.first { $0.id == run.missionId }
+                                            }
+                                        )
+                                        syncRunFromStore()
+                                        onUpdate(run)
+                                    },
+                                    onRequestStartNow: {
+                                        if let def = controlStore.oneOffDeferredExecution(for: run.id) {
+                                            let rough = humanizedRoughTimeUntilScheduledStart(
+                                                executeAt: def.executeAt,
+                                                from: Date()
+                                            )
+                                            confirmSkipScheduledPaladinMessage =
+                                                "This mission is scheduled to start in \(rough). Are you sure you want to start it now?"
+                                            confirmSkipScheduledPaladinStart = true
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+                .confirmationDialog(
+                    "Start Paladin now?",
+                    isPresented: $confirmSkipScheduledPaladinStart,
+                    titleVisibility: .visible
+                ) {
+                    Button("Start now") {
+                        controlStore.beginDeferredOneOffPaladinImmediately(
+                            runID: run.id,
+                            fleetLink: fleetLink,
+                            sitl: sitl,
+                            missionProvider: { [missionStore] in
+                                missionStore.missions.first { $0.id == run.missionId }
+                            }
+                        )
+                        syncRunFromStore()
+                        onUpdate(run)
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text(confirmSkipScheduledPaladinMessage)
+                }
+                .confirmationDialog(
+                    "Start next loop now?",
+                    isPresented: $confirmSkipPathLoopIntermission,
+                    titleVisibility: .visible
+                ) {
+                    Button("Start now") {
+                        if let pathID = confirmSkipPathLoopIntermissionPathID {
+                            controlStore.skipMissionCycleIntermissionForPath(
+                                runID: run.id,
+                                pathID: pathID,
+                                fleetLink: fleetLink,
+                                sitl: sitl,
+                                missionsProvider: { [missionStore] in missionStore.missions }
+                            )
+                        }
+                        confirmSkipPathLoopIntermissionPathID = nil
+                        syncRunFromStore()
+                        onUpdate(run)
+                    }
+                    Button("Cancel", role: .cancel) {
+                        confirmSkipPathLoopIntermissionPathID = nil
+                    }
+                } message: {
+                    Text(confirmSkipPathLoopIntermissionMessage)
+                }
+                .confirmationDialog(
+                    "Start this path now?",
+                    isPresented: $confirmSkipPathStartDeferral,
+                    titleVisibility: .visible
+                ) {
+                    Button("Start now") {
+                        if let pathID = confirmSkipPathStartDeferralPathID {
+                            controlStore.skipMissionPathStartDeferralForPath(
+                                runID: run.id,
+                                pathID: pathID,
+                                fleetLink: fleetLink,
+                                sitl: sitl,
+                                missionsProvider: { [missionStore] in missionStore.missions }
+                            )
+                        }
+                        confirmSkipPathStartDeferralPathID = nil
+                        syncRunFromStore()
+                        onUpdate(run)
+                    }
+                    Button("Cancel", role: .cancel) {
+                        confirmSkipPathStartDeferralPathID = nil
+                    }
+                } message: {
+                    Text(confirmSkipPathStartDeferralMessage)
                 }
 
                 if run.status == .setup {
                     ScrollView {
                         VStack(alignment: .leading, spacing: MissionRunPrepLayout.setupBlockSpacing) {
-                            scheduleSetupCard
+                            setupScheduleAndMapRow
                             rosterPathsSetupSection
                         }
                         .padding(.horizontal, MissionRunPrepLayout.setupScrollPaddingH)
@@ -519,18 +864,31 @@ private struct MissionRunDetailView: View {
                     }
                 } else if run.status == .completed {
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 14) {
-                            completedSummaryCard
+                        VStack(alignment: .leading, spacing: 16) {
+                            missionCompletedReportCards
+                            completedPaladinLogExportSection
                         }
                         .padding(.horizontal, 24)
                         .padding(.vertical, 18)
                         .frame(maxWidth: .infinity)
                     }
                 } else {
-                    missionLiveConsole
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 18)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    ScrollView {
+                        missionLiveConsole
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 18)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .onChange(of: fleetLink.hubTelemetry?.lastUpdate) { _ in
+                        refreshVehicleVoiceNarrativeFromTelemetry()
+                    }
+                    .onChange(of: liveMissionProgressPulseDate) { _ in
+                        refreshVehicleVoiceNarrativeFromTelemetry()
+                    }
+                    .onAppear {
+                        refreshVehicleVoiceNarrativeFromTelemetry()
+                    }
                 }
             }
 
@@ -575,6 +933,133 @@ private struct MissionRunDetailView: View {
                 .transition(.move(edge: .trailing))
                 .zIndex(2)
             }
+
+            if (run.status == .running || run.status == .paused), runControlsSidebarVisible {
+                Color.black.opacity(0.45)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(rosterPickerSpring) {
+                            runControlsSidebarVisible = false
+                        }
+                    }
+                    .transition(.opacity)
+                    .zIndex(3)
+            }
+            if (run.status == .running || run.status == .paused), runControlsSidebarVisible {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack {
+                        Text("Run controls")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white)
+                        Spacer(minLength: 8)
+                        Button {
+                            withAnimation(rosterPickerSpring) {
+                                runControlsSidebarVisible = false
+                            }
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Loop schedule")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.95))
+
+                        Divider().opacity(0.18)
+
+                        Toggle(
+                            isOn: Binding(
+                                get: { runLoopEnabled },
+                                set: { setRunLoopEnabled($0) }
+                            )
+                        ) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Loop")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                Text("When off, the current cycle finishes and the run ends.")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.gray)
+                            }
+                        }
+                        .toggleStyle(.switch)
+
+                        Divider().opacity(0.18)
+
+                        Group {
+                            HStack(alignment: .center, spacing: 10) {
+                                Text("Times")
+                                Spacer(minLength: 8)
+                                Text(run.loopRepeatCount == 0 ? "Unlimited" : "\(run.loopRepeatCount)")
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(runLoopEnabled ? .white : .gray.opacity(0.8))
+                                Stepper(
+                                    "",
+                                    value: Binding(
+                                        get: { run.loopRepeatCount },
+                                        set: {
+                                            run.loopRepeatCount = min(999, max(0, $0))
+                                            if run.scheduleMode != .oneOff {
+                                                run.scheduleMode = .loop
+                                            }
+                                            onUpdate(run)
+                                            syncRunFromStore()
+                                        }
+                                    ),
+                                    in: 0...999
+                                )
+                                .labelsHidden()
+                            }
+
+                            HStack(alignment: .center, spacing: 10) {
+                                Text("Delay between cycles")
+                                Spacer(minLength: 8)
+                                Text("\(run.loopDelayMinutesClamped) min")
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(runLoopEnabled ? .white : .gray.opacity(0.8))
+                                Stepper(
+                                    "",
+                                    value: Binding(
+                                        get: { run.loopIntervalMinutes },
+                                        set: {
+                                            run.loopIntervalMinutes = min(59, max(0, $0))
+                                            if run.scheduleMode != .oneOff {
+                                                run.scheduleMode = .loop
+                                            }
+                                            onUpdate(run)
+                                            syncRunFromStore()
+                                        }
+                                    ),
+                                    in: 0...59
+                                )
+                                .labelsHidden()
+                            }
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(runLoopEnabled ? .white : .gray)
+                        .disabled(!runLoopEnabled)
+                    }
+
+                    Spacer(minLength: 0)
+                }
+                .padding(16)
+                .frame(width: 360)
+                .frame(maxHeight: .infinity)
+                .background(Color(red: 0.11, green: 0.11, blue: 0.12))
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color.white.opacity(0.08))
+                        .frame(width: 1)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+                .transition(.move(edge: .trailing))
+                .zIndex(4)
+            }
         }
         .background(Color(red: 0.07, green: 0.07, blue: 0.08))
         .confirmationDialog(
@@ -591,12 +1076,199 @@ private struct MissionRunDetailView: View {
         } message: {
             Text("This removes the run from Mission Control. The mission template is not deleted.")
         }
+        .sheet(isPresented: $startPreflightPresented) {
+            MissionRunStartPreflightSheet(
+                run: run,
+                fleetLink: fleetLink,
+                sitl: sitl,
+                controlStore: controlStore,
+                onSuccess: {
+                    if let mission = resolvedMission {
+                        let fleet = buildMissionPickableVehicles(fleetLink: fleetLink, sitl: sitl)
+                        controlStore.compilePaladinSession(
+                            run: run,
+                            mission: mission,
+                            fleetVehicles: fleet
+                        )
+                    }
+                    run.status = .running
+                    let deferOneOff: Bool = {
+                        guard let t = run.oneOffStartAt else { return false }
+                        return t.timeIntervalSince(Date()) > MissionRun.oneOffScheduleTimeTolerance
+                    }()
+                    if deferOneOff, let executeAt = run.oneOffStartAt {
+                        controlStore.updateRun(run)
+                        controlStore.scheduleDeferredOneOffPaladinExecution(
+                            runID: run.id,
+                            executeAt: executeAt,
+                            fleetLink: fleetLink,
+                            sitl: sitl,
+                            missionProvider: { [missionStore] in
+                                missionStore.missions.first { $0.id == run.missionId }
+                            }
+                        )
+                    } else {
+                        onStart(run)
+                    }
+                    syncRunFromStore()
+                },
+                onAbandonWithoutStart: {}
+            )
+        }
+        .sheet(isPresented: rosterTelemetryInfoSheetPresented) {
+            VehicleTelemetryInfoSheet(
+                title: rosterInfoSheetTitle ?? "Vehicle telemetry",
+                vehicleID: rosterInfoVehicleID,
+                sitlSessionUUID: rosterInfoSitlSessionUUID,
+                model: rosterInfoVehicleID.flatMap { fleetLink.vehicleModel(forVehicleID: $0) },
+                hub: rosterInfoVehicleID.flatMap { fleetLink.hubTelemetry(forVehicleID: $0) } ?? fleetLink.hubTelemetry
+            )
+        }
         .onAppear {
             syncRunFromStore()
+            setupMapRecenterNonce &+= 1
+            if run.status == .setup {
+                pruneStaleRosterFleetAssignmentsIfNeeded()
+            }
+        }
+        .onChange(of: setupMapBoundsSignature) { _ in
+            setupMapRecenterNonce &+= 1
+        }
+        .onChange(of: sitlRosterPruneSignature) { _ in
+            if run.status == .setup {
+                pruneStaleRosterFleetAssignmentsIfNeeded()
+            }
+        }
+        .onChange(of: fleetRosterPruneSignature) { _ in
+            if run.status == .setup {
+                pruneStaleRosterFleetAssignmentsIfNeeded()
+            }
+        }
+        .onChange(of: run.status) { new in
+            if new == .setup {
+                pruneStaleRosterFleetAssignmentsIfNeeded()
+            }
         }
         .onDisappear {
             onUpdate(run)
         }
+    }
+
+    private var rosterTelemetryInfoSheetPresented: Binding<Bool> {
+        Binding(
+            get: { rosterInfoVehicleID != nil },
+            set: { presented in
+                guard !presented else { return }
+                rosterInfoSheetTitle = nil
+                rosterInfoVehicleID = nil
+                rosterInfoSitlSessionUUID = nil
+            }
+        )
+    }
+
+    /// SITL instances + aliveness — roster slots drop removed sims.
+    private var sitlRosterPruneSignature: String {
+        sitl.instances
+            .map { "\($0.id.uuidString)|\($0.isAlive)" }
+            .sorted()
+            .joined(separator: ";")
+    }
+
+    /// Fleet vehicle keys + lifecycle stages — roster drops stopped / failed sessions.
+    private var fleetRosterPruneSignature: String {
+        let keys = fleetLink.vehicleModelsByVehicleID.keys.sorted().joined(separator: ",")
+        let stages = fleetLink.vehicleStatusByVehicleID
+            .map { "\($0.key):\($0.value.stage.rawValue)" }
+            .sorted()
+            .joined(separator: ";")
+        return "\(keys)|\(stages)"
+    }
+
+    private func presentRosterTelemetrySheet(for assignment: MissionRunAssignment) {
+        guard let vehicleID = telemetryVehicleID(for: assignment) else { return }
+        if let key = assignment.attachedFleetVehicleToken,
+           let token = FleetMissionVehicleToken(storageKey: key),
+           case .sitl(let uuid) = token,
+           let inst = sitl.instances.first(where: { $0.id == uuid })
+        {
+            rosterInfoSheetTitle = "\(inst.preset.displayName) telemetry"
+            rosterInfoVehicleID = vehicleID
+            rosterInfoSitlSessionUUID = inst.id.uuidString
+        } else {
+            rosterInfoSheetTitle = "Live vehicle telemetry"
+            rosterInfoVehicleID = vehicleID
+            rosterInfoSitlSessionUUID = nil
+        }
+    }
+
+    /// Clears fleet binding when the vehicle no longer exists in Vehicles or is stopped/failed.
+    private func pruneStaleRosterFleetAssignmentsIfNeeded() {
+        guard run.status == .setup else { return }
+        var changed = false
+        for assignment in run.assignments {
+            guard assignment.attachedFleetVehicleToken != nil else { continue }
+            guard let token = FleetMissionVehicleToken(storageKey: assignment.attachedFleetVehicleToken!) else { continue }
+
+            if case .sitl(let uuid) = token {
+                guard sitl.instances.contains(where: { $0.id == uuid }) else {
+                    clearFleetVehicle(assignmentId: assignment.id)
+                    changed = true
+                    continue
+                }
+            }
+
+            guard let vehicleID = resolvedFleetStreamVehicleID(assignment: assignment, fleetLink: fleetLink, sitl: sitl) else {
+                clearFleetVehicle(assignmentId: assignment.id)
+                changed = true
+                continue
+            }
+
+            if let stage = fleetLink.vehicleStatus(forVehicleID: vehicleID)?.stage,
+               stage == .stopped || stage == .failed
+            {
+                clearFleetVehicle(assignmentId: assignment.id)
+                changed = true
+            }
+        }
+        if changed {
+            onUpdate(run)
+        }
+    }
+
+    private func rosterAutopilotStack(for assignment: MissionRunAssignment) -> FleetAutopilotStack? {
+        guard assignment.attachedFleetVehicleToken != nil else { return nil }
+        if let vid = telemetryVehicleID(for: assignment),
+           let snap = fleetLink.vehicleModel(forVehicleID: vid)?.collections.telemetrySnapshot
+        {
+            return snap.autopilotStack
+        }
+        if let key = assignment.attachedFleetVehicleToken,
+           let token = FleetMissionVehicleToken(storageKey: key),
+           case .sitl(let uuid) = token,
+           let inst = sitl.instances.first(where: { $0.id == uuid })
+        {
+            return FleetAutopilotStack(simulationPlatform: inst.platform)
+        }
+        return .unknown
+    }
+
+    private func rosterLifecycleStatus(for assignment: MissionRunAssignment) -> VehicleLifecycleStatus? {
+        guard assignment.attachedFleetVehicleToken != nil else { return nil }
+        guard let vid = telemetryVehicleID(for: assignment) else { return nil }
+        return fleetLink.vehicleModel(forVehicleID: vid)?.collections.lifecycleStatus
+            ?? fleetLink.vehicleStatus(forVehicleID: vid)
+    }
+
+    private func rosterVehicleSystemID(for assignment: MissionRunAssignment) -> Int? {
+        guard let vid = telemetryVehicleID(for: assignment) else { return nil }
+        if let sid = fleetLink.vehicleModel(forVehicleID: vid)?.data.systemID {
+            return sid
+        }
+        let prefix = "sysid:"
+        if vid.hasPrefix(prefix), let n = Int(vid.dropFirst(prefix.count)) {
+            return n
+        }
+        return nil
     }
 
     private var gracefulStopPendingBanner: some View {
@@ -618,47 +1290,444 @@ private struct MissionRunDetailView: View {
         .background(GuardianSemanticColors.warningBackground.opacity(0.5))
     }
 
+    private func humanizedRoughTimeUntilScheduledStart(executeAt: Date, from now: Date) -> String {
+        let secs = max(1, Int(ceil(executeAt.timeIntervalSince(now))))
+        if secs < 90 {
+            return secs == 1 ? "about 1 second" : "about \(secs) seconds"
+        }
+        let minutes = (secs + 59) / 60
+        if minutes < 120 {
+            return minutes == 1 ? "about 1 minute" : "about \(minutes) minutes"
+        }
+        let hours = minutes / 60
+        let remMin = minutes % 60
+        if remMin == 0 {
+            return hours == 1 ? "about 1 hour" : "about \(hours) hours"
+        }
+        return "about \(hours) h \(remMin) min"
+    }
+
+    private func oneOffDeferredExecutionBanner(
+        deferred: MissionOneOffDeferredExecution,
+        now: Date,
+        postponeMinutes: Binding<Int>,
+        onPostpone: @escaping () -> Void,
+        onRequestStartNow: @escaping () -> Void
+    ) -> some View {
+        let remaining = max(0, deferred.executeAt.timeIntervalSince(now))
+        let total = max(deferred.executeAt.timeIntervalSince(deferred.countdownStartedAt), 0.001)
+        let progress = 1 - min(1, max(0, remaining / total))
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.cyan.opacity(0.92))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Scheduled Paladin start")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.95))
+                    Text(
+                        "Execution begins \(deferred.executeAt.guardianScheduleOnAtPhrase) — in \(formattedOneOffCountdown(seconds: remaining))."
+                    )
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.gray)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                HStack(alignment: .center, spacing: 8) {
+                    Picker("Delay", selection: postponeMinutes) {
+                        ForEach(1...30, id: \.self) { m in
+                            Text("\(m) min").tag(m)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(minWidth: 88, alignment: .leading)
+                    Button("Go") {
+                        onPostpone()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
+                    .controlSize(.small)
+                    compactVerticalControlSeparator()
+                        .padding(.horizontal, 6)
+                    Button("Start") {
+                        onRequestStartNow()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
+                    .controlSize(.small)
+                }
+                .fixedSize(horizontal: true, vertical: true)
+                .padding(.top, 1)
+            }
+            ProgressView(value: progress)
+                .tint(Color.cyan.opacity(0.85))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.cyan.opacity(0.14))
+    }
+
+    private func formattedOneOffCountdown(seconds: TimeInterval) -> String {
+        let s = max(0, Int(ceil(seconds)))
+        let h = s / 3600
+        let m = (s % 3600) / 60
+        let sec = s % 60
+        if h > 0 {
+            return String(format: "%d:%02d:%02d", h, m, sec)
+        }
+        return String(format: "%d:%02d", m, sec)
+    }
+
     private let liveConsoleCardFill = Color(red: 0.10, green: 0.10, blue: 0.11)
     private let liveConsoleCardStroke = Color.white.opacity(0.06)
+    /// Map + camera row: 50% taller than the previous 220pt baseline.
+    private let liveConsoleMapCameraRowMinHeight: CGFloat = 330
 
-    /// Running / paused: loop strip, camera | 3D, per-vehicle status, log — placeholders only (no section headings).
+    /// Running / paused: tabbed camera/map (70%) + progress card (30%), then vehicles and Paladin log.
     private var missionLiveConsole: some View {
         VStack(spacing: 12) {
-            missionLiveLoopStrip
-            HStack(spacing: 12) {
-                missionLiveCameraPlaceholder
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                missionLiveOverviewMap
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            .frame(minHeight: 220)
-            .frame(maxHeight: .infinity)
-            .layoutPriority(1)
+            missionLiveTopSplitRow
             missionLiveVehicleStatusRow
             missionLiveLogPlaceholder
         }
     }
 
-    private var missionLiveLoopStrip: some View {
-        HStack(spacing: 12) {
-            ProgressView(value: 0.34)
-                .progressViewStyle(.linear)
-                .tint(.cyan.opacity(0.85))
-                .frame(maxWidth: .infinity)
-            Text("0 / —")
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.gray)
-                .fixedSize(horizontal: true, vertical: false)
+    /// Segmented camera vs map on the left (~70% width), run progress card on the right (~30%).
+    private var missionLiveTopSplitRow: some View {
+        let mediaH = liveConsoleMapCameraRowMinHeight
+        let tabGap: CGFloat = 8
+        let tabBarHeight: CGFloat = 24
+        let rowTotal = tabBarHeight + tabGap + mediaH
+        let hGap: CGFloat = 12
+
+        return GeometryReader { geo in
+            let totalW = geo.size.width
+            let usableW = max(0, totalW - hGap)
+            let leftW = usableW * 0.7
+            let rightW = usableW * 0.3
+
+            HStack(alignment: .top, spacing: hGap) {
+                VStack(alignment: .leading, spacing: tabGap) {
+                    Picker("Camera or map", selection: $liveConsoleMediaTab) {
+                        Text("Camera").tag(LiveConsoleMediaTab.camera)
+                        Text("Map").tag(LiveConsoleMediaTab.map)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(height: tabBarHeight)
+                    .accessibilityLabel("Camera or map")
+
+                    Group {
+                        switch liveConsoleMediaTab {
+                        case .camera:
+                            missionLiveCameraPlaceholder
+                        case .map:
+                            missionLiveOverviewMap
+                        }
+                    }
+                    .frame(width: leftW, height: mediaH)
+                }
+                .frame(width: leftW, height: rowTotal, alignment: .topLeading)
+
+                missionLiveProgressSideCard
+                    .frame(width: rightW, height: rowTotal, alignment: .topLeading)
+            }
+            .frame(width: totalW, height: rowTotal, alignment: .topLeading)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: rowTotal)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var missionLiveProgressSideCard: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Progress")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.gray)
+                    Spacer(minLength: 8)
+                    missionLiveScheduleCounter
+                }
+                if let mission = resolvedMission {
+                    if run.status == .running,
+                       controlStore.hasMissionCycleIntermission(for: run.id) || controlStore.hasMissionPathStartDeferral(for: run.id)
+                    {
+                        TimelineView(.periodic(from: .now, by: 0.25)) { context in
+                            missionLivePathProgressList(mission: mission, now: context.date)
+                        }
+                    } else {
+                        missionLivePathProgressList(mission: mission, now: Date())
+                    }
+                } else {
+                    Text("No mission template")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.gray)
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(red: 0.12, green: 0.12, blue: 0.13))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
+            RoundedRectangle(cornerRadius: 10)
                 .strokeBorder(liveConsoleCardStroke, lineWidth: 1)
         )
+    }
+
+    @ViewBuilder
+    private var missionLiveScheduleCounter: some View {
+        switch run.scheduleMode {
+        case .oneOff:
+            Text("—")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.gray.opacity(0.55))
+        case .loop, .continuous:
+            if run.loopRepeatCount > 0 {
+                Text("Runs \(controlStore.completedAutopilotCycles(for: run.id))/\(run.loopRepeatCount)")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.gray)
+            } else {
+                Text("Runs \(controlStore.completedAutopilotCycles(for: run.id))")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.gray)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func missionLivePathProgressList(mission: Mission, now: Date) -> some View {
+        ForEach(Array(mission.routeMacro.paths.enumerated()), id: \.element.id) { index, path in
+            missionLivePathProgressRow(path: path, pathIndex: index, mission: mission, now: now)
+        }
+    }
+
+    private func missionLivePathProgressRow(path: RoutePath, pathIndex: Int, mission: Mission, now: Date) -> some View {
+        let mavlinkPathId = liveMavlinkPathContext?.path.id
+        let hub = liveMavlinkHub
+        let tint = MissionPathMapColor.swiftUIColor(forPathIndex: pathIndex)
+        let pathStartDef = controlStore.missionPathStartDeferral(for: run.id, pathID: path.id)
+        let inPathStartDeferral = path.enabled
+            && run.status == .running
+            && (pathStartDef.map { now < $0.startAt } ?? false)
+        let inter = controlStore.missionCycleIntermission(for: run.id, pathID: path.id)
+        let inIntermission = path.enabled
+            && run.repeatsAutopilotMissionCycles
+            && run.status == .running
+            && !inPathStartDeferral
+            && (inter.map { now < $0.restartAt } ?? false)
+
+        let missionFraction = missionLivePathFraction(path: path, mavlinkPathId: mavlinkPathId, hub: hub)
+        let barFraction: Double
+        let barTint: Color
+        if inPathStartDeferral, let def = pathStartDef {
+            let remaining = def.startAt.timeIntervalSince(now)
+            let elapsed = def.totalDelay - max(0, remaining)
+            barFraction = def.totalDelay > 0 ? min(1, max(0, elapsed / def.totalDelay)) : 1
+            barTint = Color.cyan.opacity(0.78)
+        } else if inIntermission, let interUnwrapped = inter {
+            let remaining = interUnwrapped.restartAt.timeIntervalSince(now)
+            let elapsed = interUnwrapped.totalDelay - max(0, remaining)
+            barFraction = interUnwrapped.totalDelay > 0 ? min(1, max(0, elapsed / interUnwrapped.totalDelay)) : 1
+            barTint = Color.orange.opacity(0.85)
+        } else {
+            barFraction = missionFraction
+            barTint = path.enabled ? tint : Color.gray.opacity(0.35)
+        }
+
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(path.name)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(path.enabled ? .white : .gray)
+                Spacer(minLength: 6)
+                Group {
+                    if inPathStartDeferral, let pathStartDef {
+                        Text(formattedPathStartDeferralStatus(
+                            remaining: max(0, pathStartDef.startAt.timeIntervalSince(now)),
+                            totalDelay: pathStartDef.totalDelay
+                        ))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(Color.cyan.opacity(0.9))
+                            .lineLimit(2)
+                            .multilineTextAlignment(.trailing)
+                    } else if inIntermission, let inter {
+                        Text(formattedIntermissionStatus(
+                            inter: inter,
+                            remaining: max(0, inter.restartAt.timeIntervalSince(now))
+                        ))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(Color.orange.opacity(0.92))
+                            .lineLimit(2)
+                            .multilineTextAlignment(.trailing)
+                    } else if path.id == mavlinkPathId, let hub, let tot = hub.missionProgressTotal, tot > 0, let cur = hub.missionProgressCurrent {
+                        Text("\(cur)/\(tot)")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.gray)
+                    } else if !path.enabled {
+                        Text("Off")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.gray)
+                    } else {
+                        Text("—")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.gray.opacity(0.45))
+                    }
+                }
+            }
+            missionLiveAnimatedProgressBar(
+                fraction: barFraction,
+                tint: barTint
+            )
+
+            if inPathStartDeferral, let pathStartDefForControls = pathStartDef {
+                HStack(alignment: .center, spacing: 8) {
+                    Picker("Delay", selection: $pathStartDeferralPostponeMinutes) {
+                        ForEach(1...30, id: \.self) { m in
+                            Text("\(m) min").tag(m)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(minWidth: 72, alignment: .leading)
+                    .controlSize(.small)
+                    Button("Go") {
+                        controlStore.extendMissionPathStartDeferralForPathByMinutes(
+                            runID: run.id,
+                            pathID: path.id,
+                            additionalMinutes: pathStartDeferralPostponeMinutes,
+                            fleetLink: fleetLink,
+                            sitl: sitl,
+                            missionsProvider: { [missionStore] in missionStore.missions }
+                        )
+                        syncRunFromStore()
+                        onUpdate(run)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.cyan.opacity(0.8))
+                    .controlSize(.small)
+                    compactVerticalControlSeparator()
+                        .padding(.horizontal, 6)
+                    Button("Start") {
+                        let rough = humanizedRoughTimeUntilScheduledStart(
+                            executeAt: pathStartDefForControls.startAt,
+                            from: now
+                        )
+                        confirmSkipPathStartDeferralPathID = path.id
+                        confirmSkipPathStartDeferralMessage =
+                            "This path mission is scheduled to start in \(rough). Start it immediately?"
+                        confirmSkipPathStartDeferral = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.cyan.opacity(0.88))
+                    .controlSize(.small)
+                }
+                .fixedSize(horizontal: true, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.top, 2)
+            }
+
+            if !inPathStartDeferral, inIntermission, let interForControls = inter {
+                HStack(alignment: .center, spacing: 8) {
+                    Picker("Delay", selection: $pathLoopIntermissionPostponeMinutes) {
+                        ForEach(1...30, id: \.self) { m in
+                            Text("\(m) min").tag(m)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(minWidth: 72, alignment: .leading)
+                    .controlSize(.small)
+                    Button("Go") {
+                        controlStore.extendMissionCycleIntermissionForPathByMinutes(
+                            runID: run.id,
+                            pathID: path.id,
+                            additionalMinutes: pathLoopIntermissionPostponeMinutes,
+                            fleetLink: fleetLink,
+                            sitl: sitl,
+                            missionsProvider: { [missionStore] in missionStore.missions }
+                        )
+                        syncRunFromStore()
+                        onUpdate(run)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange.opacity(0.85))
+                    .controlSize(.small)
+                    compactVerticalControlSeparator()
+                        .padding(.horizontal, 6)
+                    Button("Start") {
+                        let rough = humanizedRoughTimeUntilScheduledStart(
+                            executeAt: interForControls.restartAt,
+                            from: now
+                        )
+                        confirmSkipPathLoopIntermissionPathID = path.id
+                        confirmSkipPathLoopIntermissionMessage =
+                            "This path’s next loop is scheduled in \(rough). Start it immediately?"
+                        confirmSkipPathLoopIntermission = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange.opacity(0.92))
+                    .controlSize(.small)
+                }
+                .fixedSize(horizontal: true, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.top, 2)
+            }
+        }
+    }
+
+    private func formattedIntermissionStatus(inter: MissionCycleIntermission, remaining: TimeInterval) -> String {
+        if inter.totalDelay < 1 {
+            return remaining > 0.08 ? "Restarting…" : "Starting…"
+        }
+        if remaining <= 0 {
+            return "Restarting…"
+        }
+        let secs = max(1, Int(ceil(remaining)))
+        let m = secs / 60
+        let s = secs % 60
+        let clock = String(format: "%d:%02d", m, s)
+        return "\(clock) until restart"
+    }
+
+    /// Live progress caption while a path awaits its initial MAVLink mission start (see ``MissionPathStartDeferral``).
+    private func formattedPathStartDeferralStatus(remaining: TimeInterval, totalDelay: TimeInterval) -> String {
+        if totalDelay < 1 {
+            return remaining > 0.08 ? "Starting mission…" : "Starting mission…"
+        }
+        if remaining <= 0 {
+            return "Starting mission…"
+        }
+        let secs = max(1, Int(ceil(remaining)))
+        let m = secs / 60
+        let s = secs % 60
+        let clock = String(format: "%d:%02d", m, s)
+        return "\(clock) until mission start"
+    }
+
+    private func missionLivePathFraction(path: RoutePath, mavlinkPathId: UUID?, hub: FleetHubVehicleTelemetry?) -> Double {
+        guard path.enabled, path.id == mavlinkPathId, let hub, let tot = hub.missionProgressTotal, tot > 0,
+              let cur = hub.missionProgressCurrent
+        else { return 0 }
+        let t = Double(tot)
+        let c = Double(cur)
+        if c >= t { return 1 }
+        return min(1, max(0, c / t))
+    }
+
+    private func missionLiveAnimatedProgressBar(fraction: Double, tint: Color) -> some View {
+        GeometryReader { geo in
+            let w = max(0, min(1, fraction)) * geo.size.width
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.08))
+                Capsule()
+                    .fill(tint)
+                    .frame(width: w)
+                    .animation(.easeInOut(duration: 0.35), value: fraction)
+            }
+        }
+        .frame(height: 7)
     }
 
     private var missionLiveCameraPlaceholder: some View {
@@ -680,13 +1749,15 @@ private struct MissionRunDetailView: View {
                         allPathsCoords: mission.routeMacro.paths.map { $0.waypoints.map(\.coord) },
                         selectedPathWaypoints: [],
                         selectedWaypointIndex: nil,
+                        vehicleMarkers: missionLiveVehicleMarkers,
                         mapStyle: liveConsoleMapStyle,
-                        recenterNonce: 0,
+                        recenterNonce: liveMapRecenterNonce,
                         headingPreview: nil,
                         cameraPreview: nil,
-                        preserveView: false,
+                        preserveView: true,
                         isEditingPath: false,
                         onMapClick: { _, _ in },
+                        onVehicleMarkerMoved: { _, _, _ in },
                         onWaypointClick: { _ in },
                         onWaypointMoved: { _, _, _ in },
                         onWaypointDelete: { _ in },
@@ -704,27 +1775,71 @@ private struct MissionRunDetailView: View {
             )
 
             if resolvedMission != nil {
-                Button {
-                    liveConsoleMapStyle = liveConsoleMapStyle == .standard ? .satellite : .standard
-                } label: {
-                    Image(systemName: liveConsoleMapStyle == .standard ? "map" : "globe.americas.fill")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.black)
-                        .frame(width: 33, height: 33)
+                VStack(alignment: .leading, spacing: 8) {
+                    Button {
+                        liveConsoleMapStyle = liveConsoleMapStyle == .standard ? .satellite : .standard
+                    } label: {
+                        Image(systemName: liveConsoleMapStyle == .standard ? "map" : "globe.americas.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.black)
+                            .frame(width: 33, height: 33)
+                    }
+                    .buttonStyle(.plain)
+                    .background(Color.white)
+                    .overlay(
+                        Rectangle()
+                            .fill(Color.black.opacity(0.12))
+                            .frame(height: 1),
+                        alignment: .bottom
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .help(liveConsoleMapStyle == .standard ? "Show satellite imagery" : "Show street map")
+
+                    Button {
+                        liveMapRecenterNonce &+= 1
+                    } label: {
+                        Image(systemName: "scope")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.black)
+                            .frame(width: 33, height: 33)
+                    }
+                    .buttonStyle(.plain)
+                    .background(Color.white)
+                    .overlay(
+                        Rectangle()
+                            .fill(Color.black.opacity(0.12))
+                            .frame(height: 1),
+                        alignment: .bottom
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .help("Fit map to mission and vehicles")
                 }
-                .buttonStyle(.plain)
-                .background(Color.white)
-                .overlay(
-                    Rectangle()
-                        .fill(Color.black.opacity(0.12))
-                        .frame(height: 1),
-                    alignment: .bottom
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 4))
                 .padding(.leading, 10)
-                .padding(.top, 85)
-                .help(liveConsoleMapStyle == .standard ? "Show satellite imagery" : "Show street map")
+                .padding(.top, 80)
             }
+        }
+    }
+
+    private var missionLiveVehicleMarkers: [MapVehicleMarker] {
+        run.assignments.compactMap { assignment in
+            guard let vehicleID = resolvedFleetStreamVehicleID(assignment: assignment, fleetLink: fleetLink, sitl: sitl),
+                  let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID),
+                  let lat = hub.latitudeDeg,
+                  let lon = hub.longitudeDeg,
+                  assignment.attachedFleetVehicleToken != nil
+            else { return nil }
+            let colorHex = fleetLink.mapColorHex(forVehicleID: vehicleID)
+            let heading = hub.headingDeg ?? hub.yawDeg
+            return MapVehicleMarker(
+                id: assignment.id.uuidString,
+                lat: lat,
+                lon: lon,
+                label: assignment.slotName,
+                colorHex: colorHex,
+                selected: false,
+                draggable: false,
+                headingDeg: heading
+            )
         }
     }
 
@@ -762,29 +1877,418 @@ private struct MissionRunDetailView: View {
     }
 
     private var missionLiveLogPlaceholder: some View {
-        RoundedRectangle(cornerRadius: 10)
-            .fill(liveConsoleCardFill)
-            .frame(minHeight: 120, maxHeight: 200)
-            .frame(maxWidth: .infinity)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(liveConsoleCardStroke, lineWidth: 1)
-            )
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 10) {
+                Text("Paladin")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+
+                if let session = controlStore.paladinSessionsByRunID[run.id] {
+                    let phaseStyle = GuardianSemanticColors.paladinPhaseBadgeStyle(for: session.phase)
+                    HStack(spacing: 6) {
+                        Text(session.phase.rawValue.capitalized)
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(phaseStyle.foreground)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(phaseStyle.background)
+                            .clipShape(Capsule())
+                        Text(paladinCondensedHeaderMetadata(session: session))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.gray.opacity(0.92))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                }
+
+                Spacer(minLength: 8)
+
+                Button(paladinLogExtended ? "Compact" : "Expand") {
+                    paladinLogExtended.toggle()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help(paladinLogExtended ? "Use reduced log height" : "Use extended log height")
+
+                Button("Copy log") {
+                    copyPaladinLiveLogToPasteboard()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(controlStore.paladinSessionsByRunID[run.id] == nil)
+            }
+
+            if let session = controlStore.paladinSessionsByRunID[run.id] {
+                Divider().opacity(0.18)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(session.events.suffix(80)) { event in
+                            paladinLogEventRow(event: event)
+                        }
+                    }
+                }
+            } else {
+                Text("No Paladin session for this run yet.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.gray)
+            }
+        }
+        .padding(12)
+        .frame(
+            minHeight: paladinLogExtended ? 420 : 280,
+            idealHeight: paladinLogExtended ? 520 : 360,
+            maxHeight: paladinLogExtended ? 720 : 480
+        )
+        .animation(.easeInOut(duration: 0.2), value: paladinLogExtended)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(liveConsoleCardFill)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(liveConsoleCardStroke, lineWidth: 1)
+        )
     }
 
-    private var completedSummaryCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Mission completed")
-                    .font(.system(size: 15, weight: .semibold))
+    private func paladinCondensedHeaderMetadata(session: PaladinSession) -> String {
+        let p = session.plan
+        return "\(p.pathTopology.rawValue) · \(p.teamTopology.rawValue) · \(p.roleTracks.count) trk"
+    }
+
+    private func paladinCondensedHeaderLine(session: PaladinSession) -> String {
+        "\(session.phase.rawValue) · \(paladinCondensedHeaderMetadata(session: session))"
+    }
+
+    private func paladinLiveLogPlainText(session: PaladinSession) -> String {
+        let header = "Paladin — \(paladinCondensedHeaderLine(session: session))"
+        let body = session.events.map { $0.plainTextLine() }
+        return ([header] + body).joined(separator: "\n")
+    }
+
+    private func paladinColorFromMapHex(_ hex: String) -> Color {
+        var s = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, let n = UInt32(s, radix: 16) else {
+            return Color(red: 0.55, green: 0.55, blue: 0.58)
+        }
+        let r = Double((n >> 16) & 0xFF) / 255
+        let g = Double((n >> 8) & 0xFF) / 255
+        let b = Double(n & 0xFF) / 255
+        return Color(red: r, green: g, blue: b)
+    }
+
+    private func paladinLogSeverityBorderColor(_ level: PaladinEventLevel) -> Color {
+        switch level {
+        case .info: return Color.white.opacity(0.22)
+        case .warning: return Color.orange.opacity(0.9)
+        case .error: return Color.red.opacity(0.9)
+        }
+    }
+
+    @ViewBuilder
+    private func paladinLogEventRow(event: PaladinEvent) -> some View {
+        let mission = resolvedMission
+        let pathTint: Color? = {
+            guard let pid = event.pathID, let mission else { return nil }
+            if let idx = mission.routeMacro.paths.firstIndex(where: { $0.id == pid }) {
+                return MissionPathMapColor.swiftUIColor(forPathIndex: idx)
+            }
+            return nil
+        }()
+        let pathTextColor = pathTint ?? Color.gray.opacity(0.85)
+        let speakerColor: Color = {
+            switch event.speaker {
+            case .paladin:
+                return .white
+            case .vehicleSlot(let slot):
+                guard let a = run.assignments.first(where: { $0.slotName == slot }),
+                      let vid = resolvedFleetStreamVehicleID(assignment: a, fleetLink: fleetLink, sitl: sitl)
+                else { return Color.gray.opacity(0.9) }
+                return paladinColorFromMapHex(fleetLink.mapColorHex(forVehicleID: vid))
+            }
+        }()
+        let bodyColor: Color = {
+            switch event.level {
+            case .info: return Color.gray.opacity(0.92)
+            case .warning: return Color.orange.opacity(0.88)
+            case .error: return Color.red.opacity(0.9)
+            }
+        }()
+
+        HStack(alignment: .top, spacing: 0) {
+            Rectangle()
+                .fill(paladinLogSeverityBorderColor(event.level))
+                .frame(width: 3)
+            HStack(alignment: .firstTextBaseline, spacing: 0) {
+                if let pl = event.pathLabel {
+                    Text("[\(pl)]")
+                        .foregroundStyle(pathTextColor)
+                }
+                switch event.speaker {
+                case .paladin:
+                    Text("[Paladin]")
+                        .foregroundStyle(speakerColor)
+                case .vehicleSlot(let s):
+                    Text("[\(s)]")
+                        .foregroundStyle(speakerColor)
+                }
+                Text(verbatim: " \(paladinLogTemplates.resolveDisplayBody(for: event))")
+                    .foregroundStyle(bodyColor)
+            }
+            .font(.system(size: 11, design: .monospaced))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 6)
+            .padding(.vertical, 2)
+        }
+    }
+
+    private func copyPaladinLiveLogToPasteboard() {
+        guard let session = controlStore.paladinSessionsByRunID[run.id] else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(paladinLiveLogPlainText(session: session), forType: .string)
+    }
+
+    private var missionCompletedReportCards: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Mission report")
+                    .font(.system(size: 18, weight: .bold))
                     .foregroundStyle(.white)
                 Spacer()
                 MissionRunStatusBadge(status: .completed)
             }
-            if let completedAt = run.completedAt {
-                Text(completedAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.system(size: 12))
+
+            completedOutcomeCard
+            completedScheduleCyclesCard
+            completedTimelineCard
+            completedRosterCard
+            completedPaladinHealthCard
+        }
+    }
+
+    private var completedOutcomeCard: some View {
+        let accent = completedOutcomeAccent
+        return completedReportCardChrome(title: "Outcome", accent: accent) {
+            Text(completedOutcomeTitle)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white)
+            Text(completedOutcomeDetail)
+                .font(.system(size: 13))
+                .foregroundStyle(.gray)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var completedOutcomeAccent: Color {
+        switch run.completionKind {
+        case .oneOffAutopilotFinished, .loopCompletedAllRepeats:
+            return Color.green.opacity(0.75)
+        case .operatorStoppedAfterCycle:
+            return Color.blue.opacity(0.8)
+        case .operatorStoppedImmediate:
+            return Color.orange.opacity(0.85)
+        case .none:
+            return Color.gray.opacity(0.55)
+        }
+    }
+
+    private var completedOutcomeTitle: String {
+        switch run.completionKind {
+        case .operatorStoppedImmediate:
+            return "Stopped by operator"
+        case .operatorStoppedAfterCycle:
+            return "Stopped after current cycle"
+        case .oneOffAutopilotFinished:
+            return "Mission finished"
+        case .loopCompletedAllRepeats:
+            return "Loop schedule finished"
+        case .none:
+            return "Run completed"
+        }
+    }
+
+    private var completedOutcomeDetail: String {
+        switch run.completionKind {
+        case .operatorStoppedImmediate:
+            return "The run was ended immediately (vehicles were commanded home / RTL where applicable)."
+        case .operatorStoppedAfterCycle:
+            return "The active mission cycle was allowed to finish, then the run ended."
+        case .oneOffAutopilotFinished:
+            return "The scheduled one-off mission cycle completed on the autopilot."
+        case .loopCompletedAllRepeats:
+            return "All configured loop iterations completed successfully."
+        case .none:
+            return "This run is marked complete. Older runs may not store a detailed outcome."
+        }
+    }
+
+    private var completedScheduleCyclesCard: some View {
+        completedReportCardChrome(title: "Schedule & cycles", accent: Color.white.opacity(0.2)) {
+            labeledReportRow("Schedule mode", run.scheduleMode.rawValue)
+            if run.scheduleMode == .loop {
+                let limit = run.loopRepeatCount
+                labeledReportRow(
+                    "Loop target",
+                    limit > 0 ? "\(limit) mission run(s)" : "Repeat until stopped"
+                )
+                let intervalLabel =
+                    run.loopDelayMinutesClamped == 0
+                    ? "Immediate (next cycle as soon as ready)"
+                    : "Every \(run.loopDelayMinutesClamped) minute(s)"
+                labeledReportRow("Between cycles", intervalLabel)
+            }
+            let plannedStart: String? = {
+                if let t = run.oneOffStartAt {
+                    return t.formatted(date: .abbreviated, time: .shortened)
+                }
+                if run.scheduleMode == .oneOff {
+                    return "Immediate (when started)"
+                }
+                return nil
+            }()
+            if let plannedStart {
+                labeledReportRow("Planned start", plannedStart)
+            }
+            let cycles = run.reportAutopilotCyclesCompleted ?? 0
+            labeledReportRow(
+                "Autopilot mission cycles completed",
+                "\(cycles)"
+            )
+        }
+    }
+
+    private var completedTimelineCard: some View {
+        completedReportCardChrome(title: "Timeline", accent: Color.white.opacity(0.2)) {
+            labeledReportRow("Created", run.createdAt.formatted(date: .abbreviated, time: .shortened))
+            if let s = run.startedAt {
+                labeledReportRow("Started", s.formatted(date: .abbreviated, time: .shortened))
+            } else {
+                labeledReportRow("Started", "—")
+            }
+            if let e = run.completedAt {
+                labeledReportRow("Completed", e.formatted(date: .abbreviated, time: .shortened))
+            }
+            if let dur = completedRunDurationFormatted {
+                labeledReportRow("Elapsed (start → complete)", dur)
+            }
+        }
+    }
+
+    private var completedRunDurationFormatted: String? {
+        guard let s = run.startedAt, let e = run.completedAt else { return nil }
+        let sec = max(0, e.timeIntervalSince(s))
+        if sec < 60 { return String(format: "%.0f s", sec) }
+        let m = Int(sec / 60)
+        if m < 60 { return "\(m) min" }
+        let h = m / 60
+        let rm = m % 60
+        return "\(h) h \(rm) min"
+    }
+
+    private var completedRosterCard: some View {
+        completedReportCardChrome(title: "Roster", accent: Color.white.opacity(0.2)) {
+            if run.assignments.isEmpty {
+                Text("No roster slots.")
+                    .font(.system(size: 13))
                     .foregroundStyle(.gray)
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(run.assignments) { a in
+                        let bound = a.attachedFleetVehicleToken != nil || !a.attachedDevice.isEmpty
+                        Text("• \(a.slotName)\(bound ? "" : " — unassigned")")
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundStyle(.gray)
+                    }
+                }
+            }
+        }
+    }
+
+    private var completedPaladinHealthCard: some View {
+        let errs = completedPaladinErrorCount
+        let warns = completedPaladinWarningCount
+        let accent: Color = errs > 0 ? Color.red.opacity(0.8) : (warns > 0 ? Color.orange.opacity(0.8) : Color.green.opacity(0.65))
+        return completedReportCardChrome(title: "Paladin log health", accent: accent) {
+            if controlStore.paladinSessionsByRunID[run.id] == nil {
+                Text("No Paladin session is stored for this run.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.gray)
+            } else {
+                let events = controlStore.paladinSessionsByRunID[run.id]?.events.count ?? 0
+                labeledReportRow("Events recorded", "\(events)")
+                labeledReportRow("Warnings", "\(warns)")
+                labeledReportRow("Errors", "\(errs)")
+                if errs == 0, warns == 0 {
+                    Text("No warnings or errors in the Paladin log.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.gray.opacity(0.9))
+                        .padding(.top, 4)
+                }
+            }
+        }
+    }
+
+    private var completedPaladinErrorCount: Int {
+        controlStore.paladinSessionsByRunID[run.id]?.events.filter { $0.level == .error }.count ?? 0
+    }
+
+    private var completedPaladinWarningCount: Int {
+        controlStore.paladinSessionsByRunID[run.id]?.events.filter { $0.level == .warning }.count ?? 0
+    }
+
+    private var completedPaladinLogExportSection: some View {
+        let session = controlStore.paladinSessionsByRunID[run.id]
+        let text = session.map { paladinLiveLogPlainText(session: $0) } ?? ""
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Paladin log")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                Spacer()
+                Button("Copy") {
+                    copyCompletedPaladinLog()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(session == nil || text.isEmpty)
+
+                Button("Save…") {
+                    saveCompletedPaladinLog()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(session == nil || text.isEmpty)
+
+                Button("Print…") {
+                    printCompletedPaladinLog()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(session == nil || text.isEmpty)
+            }
+
+            if session == nil {
+                Text("No Paladin session for this run.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.gray)
+            } else {
+                ScrollView {
+                    Text(text)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.gray.opacity(0.92))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(minHeight: 220, idealHeight: 320, maxHeight: 480)
+                .padding(10)
+                .background(Color(red: 0.09, green: 0.09, blue: 0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+                )
             }
         }
         .padding(14)
@@ -793,43 +2297,306 @@ private struct MissionRunDetailView: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
+    private func completedReportCardChrome<Content: View>(
+        title: String,
+        accent: Color,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            Rectangle()
+                .fill(accent)
+                .frame(width: 4)
+            VStack(alignment: .leading, spacing: 10) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                content()
+            }
+            .padding(.leading, 12)
+            .padding(.vertical, 12)
+            .padding(.trailing, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func labeledReportRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundStyle(.gray)
+            Spacer(minLength: 12)
+            Text(value)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.trailing)
+        }
+    }
+
+    private func copyCompletedPaladinLog() {
+        guard let session = controlStore.paladinSessionsByRunID[run.id] else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(paladinLiveLogPlainText(session: session), forType: .string)
+    }
+
+    private func saveCompletedPaladinLog() {
+        guard let session = controlStore.paladinSessionsByRunID[run.id] else { return }
+        let text = paladinLiveLogPlainText(session: session)
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.plainText]
+        panel.canCreateDirectories = true
+        panel.title = "Save Paladin log"
+        let safeName = run.missionName
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        panel.nameFieldStringValue = "\(safeName)-paladin-log.txt"
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                try text.write(to: url, atomically: true, encoding: .utf8)
+            } catch {
+                // Best-effort export; avoid crashing the UI.
+            }
+        }
+    }
+
+    private func printCompletedPaladinLog() {
+        guard let session = controlStore.paladinSessionsByRunID[run.id] else { return }
+        let text = paladinLiveLogPlainText(session: session)
+        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: 680, height: 2000))
+        tv.string = text
+        tv.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        tv.isEditable = false
+        tv.drawsBackground = false
+        let op = NSPrintOperation(view: tv, printInfo: NSPrintInfo.shared)
+        op.jobTitle = "\(run.missionName) — Paladin log"
+        op.run()
+    }
+
     private var scheduleSetupCard: some View {
         VStack(alignment: .leading, spacing: MissionRunPrepLayout.scheduleCardSpacing) {
-            Text("Schedule")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white)
-
-            Picker("Mode", selection: $run.scheduleMode) {
-                ForEach(MissionRunScheduleMode.allCases) { mode in
-                    Text(mode.rawValue).tag(mode)
-                }
+            Picker("", selection: $scheduleSetupCardSegment) {
+                Text("Schedule").tag(0)
+                Text("Paths").tag(1)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
 
-            if run.scheduleMode == .oneOff {
-                DatePicker(
-                    "Start At",
-                    selection: $run.oneOffStartAt,
-                    displayedComponents: [.date, .hourAndMinute]
-                )
-            } else if run.scheduleMode == .loop {
-                Stepper(
-                    "Loop every \(run.loopIntervalMinutes) minutes",
-                    value: $run.loopIntervalMinutes,
-                    in: 1...1440
-                )
-            } else {
-                Text("Runs without a fixed start time or repeat interval. Continue until you pause or complete the run.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.gray)
-                    .fixedSize(horizontal: false, vertical: true)
+            Group {
+                if scheduleSetupCardSegment == 0 {
+                    scheduleSetupScheduleTabContent
+                } else {
+                    scheduleSetupPathsTabContent
+                }
             }
         }
         .padding(MissionRunPrepLayout.scheduleCardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(red: 0.12, green: 0.12, blue: 0.13))
         .clipShape(RoundedRectangle(cornerRadius: MissionRunPrepLayout.pathCardCornerRadius))
+    }
+
+    /// Per-path binding: omit path from `run.pathStartDelays` when delay is zero.
+    private func pathStartDelayBinding(pathId: UUID) -> Binding<Int> {
+        Binding(
+            get: {
+                run.pathStartDelays.first { $0.pathId == pathId }?.startDelayMinutes ?? 0
+            },
+            set: { newValue in
+                let clamped = min(59, max(0, newValue))
+                var list = run.pathStartDelays
+                list.removeAll { $0.pathId == pathId }
+                if clamped > 0 {
+                    list.append(PathStartDelay(pathId: pathId, startDelayMinutes: clamped))
+                }
+                run.pathStartDelays = list
+                onUpdate(run)
+            }
+        )
+    }
+
+    private var scheduleSetupPathsTabContent: some View {
+        VStack(alignment: .leading, spacing: MissionRunPrepLayout.scheduleCardSpacing) {
+            Text("Mission start delays")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.92))
+            Text(
+                "After Paladin finishes staging at execution start, each path’s MAVLink mission upload/start waits this many minutes (0 = start with the run)."
+            )
+            .font(.system(size: 11))
+            .foregroundStyle(.gray)
+            .fixedSize(horizontal: false, vertical: true)
+
+            if let mission = resolvedMission {
+                ForEach(mission.routeMacro.paths) { path in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(path.name)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(path.enabled ? .white : Color.gray.opacity(0.72))
+                            .lineLimit(2)
+                            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                        Text("Delay")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.gray.opacity(0.85))
+                        Picker("Delay", selection: pathStartDelayBinding(pathId: path.id)) {
+                            ForEach(0...59, id: \.self) { m in
+                                Text(m == 0 ? "0 min" : "\(m) min").tag(m)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 88, alignment: .trailing)
+                        .labelsHidden()
+                    }
+                    .opacity(path.enabled ? 1 : 0.55)
+                }
+            } else {
+                Text("Mission template unavailable for this run.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.gray)
+            }
+        }
+    }
+
+    private var scheduleSetupScheduleTabContent: some View {
+        let loopOn = run.scheduleMode == .loop || run.scheduleMode == .continuous
+        return VStack(alignment: .leading, spacing: MissionRunPrepLayout.scheduleCardSpacing) {
+            Text("Timing")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.92))
+
+            Toggle(
+                "Start immediately",
+                isOn: Binding(
+                    get: { run.oneOffStartAt == nil },
+                    set: { immediate in
+                        if immediate {
+                            run.oneOffStartAt = nil
+                        } else if run.oneOffStartAt == nil {
+                            run.oneOffStartAt = scheduleDefaultDeferredStartDate()
+                        }
+                        onUpdate(run)
+                    }
+                )
+            )
+            .tint(.blue)
+
+            if run.oneOffStartAt != nil {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    VStack(alignment: .leading, spacing: 8) {
+                        DatePicker(
+                            "Start date & time",
+                            selection: Binding(
+                                get: { run.oneOffStartAt ?? Date() },
+                                set: { run.oneOffStartAt = $0; onUpdate(run) }
+                            ),
+                            displayedComponents: [.date, .hourAndMinute]
+                        )
+                        if run.oneOffScheduledTimeTooFarInPast(referenceNow: context.date) {
+                            Text("That time is in the past. Move it forward or enable “Start immediately”.")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Color.orange.opacity(0.95))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+
+            Toggle(
+                "Loop",
+                isOn: Binding(
+                    get: { loopOn },
+                    set: { enabled in
+                        if enabled {
+                            run.scheduleMode = .loop
+                            run.loopIntervalMinutes = min(59, max(0, run.loopIntervalMinutes))
+                            run.loopRepeatCount = min(9999, max(0, run.loopRepeatCount))
+                        } else {
+                            run.scheduleMode = .oneOff
+                        }
+                        onUpdate(run)
+                    }
+                )
+            )
+            .tint(.blue)
+
+            if loopOn {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text("Times")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                    HStack(spacing: 6) {
+                        StrictNumberField(
+                            value: Binding(
+                                get: { Double(run.loopRepeatCount) },
+                                set: {
+                                    run.loopRepeatCount = min(9999, max(0, Int($0.rounded())))
+                                    onUpdate(run)
+                                }
+                            ),
+                            step: 1,
+                            min: 0,
+                            max: 9999
+                        )
+                        .frame(width: 72)
+                        Stepper(
+                            "",
+                            value: Binding(
+                                get: { run.loopRepeatCount },
+                                set: {
+                                    run.loopRepeatCount = min(9999, max(0, $0))
+                                    onUpdate(run)
+                                }
+                            ),
+                            in: 0...9999,
+                            step: 1
+                        )
+                        .labelsHidden()
+                    }
+                }
+                Text("Mission cycles before the run completes (0 = repeat until you stop the run).")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.gray)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Stepper(
+                    "Delay between cycles: \(run.loopIntervalMinutes) min",
+                    value: Binding(
+                        get: { run.loopIntervalMinutes },
+                        set: {
+                            run.loopIntervalMinutes = min(59, max(0, $0))
+                            onUpdate(run)
+                        }
+                    ),
+                    in: 0...59
+                )
+                Text("Wait between autopilot mission cycles (0 = start the next cycle immediately).")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.gray)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func scheduleDefaultDeferredStartDate() -> Date {
+        Calendar.current.date(byAdding: .minute, value: 5, to: Date()) ?? Date().addingTimeInterval(300)
+    }
+
+    private var setupScheduleAndMapRow: some View {
+        GeometryReader { geo in
+            let spacing = MissionRunPrepLayout.rosterGridSpacing
+            let usableWidth = max(0, geo.size.width - spacing)
+            let scheduleWidth = usableWidth * 0.33
+            let mapWidth = usableWidth * 0.67
+            HStack(alignment: .top, spacing: spacing) {
+                scheduleSetupCard
+                    .frame(width: scheduleWidth)
+                setupVehicleStagingMapCard
+                    .frame(width: mapWidth)
+            }
+        }
+        .frame(minHeight: 370, maxHeight: 420)
     }
 
     private var rosterPathsSetupSection: some View {
@@ -846,6 +2613,158 @@ private struct MissionRunDetailView: View {
                 missionMissingTemplateRosterFallback
             }
         }
+    }
+
+    private var setupVehicleStagingMapCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Vehicle staging map")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white)
+
+            Text(stagingMapInstructionText)
+                .font(.system(size: 12))
+                .foregroundStyle(.gray)
+                .fixedSize(horizontal: false, vertical: true)
+
+            OSMMapView(
+                home: resolvedMission?.routeMacro.home,
+                allPathsCoords: resolvedMission?.routeMacro.paths.map { $0.waypoints.map(\.coord) } ?? [],
+                selectedPathWaypoints: [],
+                selectedWaypointIndex: nil,
+                vehicleMarkers: setupVehicleMarkers,
+                mapStyle: liveConsoleMapStyle,
+                recenterNonce: setupMapRecenterNonce,
+                headingPreview: nil,
+                cameraPreview: nil,
+                preserveView: true,
+                isEditingPath: false
+            ) { lat, lon in
+                applySetupMapClick(lat: lat, lon: lon)
+            } onVehicleMarkerMoved: { markerID, lat, lon in
+                applySetupMarkerDrag(markerID: markerID, lat: lat, lon: lon)
+            } onWaypointClick: { _ in
+            } onWaypointMoved: { _, _, _ in
+            } onWaypointDelete: { _ in
+            } onPathInsert: { _, _, _ in
+            }
+            .frame(minHeight: 260, maxHeight: 300)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+            )
+        }
+        .padding(MissionRunPrepLayout.pathCardPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .clipShape(RoundedRectangle(cornerRadius: MissionRunPrepLayout.pathCardCornerRadius))
+    }
+
+    private var stagingMapInstructionText: String {
+        guard let aid = setupSelectedAssignmentId,
+              let assignment = run.assignments.first(where: { $0.id == aid }),
+              let tokenKey = assignment.attachedFleetVehicleToken,
+              let token = FleetMissionVehicleToken(storageKey: tokenKey)
+        else {
+            return "Select a roster slot and click map to set SIM start point. Live vehicles remain read-only."
+        }
+        switch token {
+        case .sitl:
+            return "Selected SIM slot: click map to set start position override before mission execution."
+        case .live:
+            return "Selected live vehicle: position is read-only and updates from telemetry."
+        }
+    }
+
+    private var setupVehicleMarkers: [MapVehicleMarker] {
+        run.assignments.compactMap { assignment in
+            guard let tokenKey = assignment.attachedFleetVehicleToken,
+                  let token = FleetMissionVehicleToken(storageKey: tokenKey)
+            else { return nil }
+            let selected = assignment.id == setupSelectedAssignmentId
+            let label = "\(assignment.slotName)"
+            switch token {
+            case .sitl(let uuid):
+                guard let inst = sitl.instances.first(where: { $0.id == uuid }) else { return nil }
+                let systemID = inst.stackInstanceIndex + 1
+                let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
+                let colorHex = fleetLink.mapColorHex(forVehicleID: vehicleID)
+                if let override = assignment.simStartOverrideCoord {
+                    return MapVehicleMarker(
+                        id: assignment.id.uuidString,
+                        lat: override.lat,
+                        lon: override.lon,
+                        label: "\(label) (SIM start)",
+                        colorHex: colorHex,
+                        selected: selected,
+                        draggable: selected,
+                        headingDeg: nil
+                    )
+                }
+                guard let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID),
+                      let lat = hub.latitudeDeg,
+                      let lon = hub.longitudeDeg else { return nil }
+                let heading = hub.headingDeg ?? hub.yawDeg
+                return MapVehicleMarker(
+                    id: assignment.id.uuidString,
+                    lat: lat,
+                    lon: lon,
+                    label: "\(label) (SIM live)",
+                    colorHex: colorHex,
+                    selected: selected,
+                    draggable: selected,
+                    headingDeg: heading
+                )
+            case .live:
+                guard let vehicleID = resolvedFleetStreamVehicleID(assignment: assignment, fleetLink: fleetLink, sitl: sitl),
+                      let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID),
+                      let lat = hub.latitudeDeg,
+                      let lon = hub.longitudeDeg
+                else { return nil }
+                let heading = hub.headingDeg ?? hub.yawDeg
+                return MapVehicleMarker(
+                    id: assignment.id.uuidString,
+                    lat: lat,
+                    lon: lon,
+                    label: "\(label) (Live)",
+                    colorHex: fleetLink.mapColorHex(forVehicleID: vehicleID),
+                    selected: selected,
+                    draggable: false,
+                    headingDeg: heading
+                )
+            }
+        }
+    }
+
+    private func applySetupMapClick(lat: Double, lon: Double) {
+        guard let aid = setupSelectedAssignmentId,
+              let idx = run.assignments.firstIndex(where: { $0.id == aid }),
+              let tokenKey = run.assignments[idx].attachedFleetVehicleToken,
+              let token = FleetMissionVehicleToken(storageKey: tokenKey)
+        else { return }
+        guard case .sitl = token else { return }
+        run.assignments[idx].simStartOverrideCoord = RouteCoordinate(lat: lat, lon: lon)
+    }
+
+    private func applySetupMarkerDrag(markerID: String, lat: Double, lon: Double) {
+        guard let aid = UUID(uuidString: markerID),
+              let idx = run.assignments.firstIndex(where: { $0.id == aid }),
+              let tokenKey = run.assignments[idx].attachedFleetVehicleToken,
+              let token = FleetMissionVehicleToken(storageKey: tokenKey)
+        else { return }
+        guard case .sitl = token else { return }
+        setupSelectedAssignmentId = aid
+        run.assignments[idx].simStartOverrideCoord = RouteCoordinate(lat: lat, lon: lon)
+    }
+
+    private var setupMapBoundsSignature: String {
+        run.assignments
+            .compactMap { assignment -> String? in
+                guard let token = assignment.attachedFleetVehicleToken else { return nil }
+                return "\(assignment.id.uuidString)|\(token)"
+            }
+            .sorted()
+            .joined(separator: ";")
     }
 
     private var legacyUnassignedIndices: [Int] {
@@ -950,23 +2869,45 @@ private struct MissionRunDetailView: View {
     private func rosterSlotCard(assignmentIndex: Int, mission: Mission?) -> some View {
         let a = run.assignments[assignmentIndex]
         let device = mission.flatMap { m in m.rosterDevices.first { $0.id == a.rosterDeviceId } }
-        let label = resolvedRosterVehicleLabel(assignment: a, fleetLink: fleetLink, sitl: sitl)
+        let detailLine = resolvedRosterVehicleSecondaryLine(assignment: a, fleetLink: fleetLink, sitl: sitl)
         let basenames = simulationImageBasenamesForAssignment(a, sitl: sitl)
         let assignmentId = a.id
+        let slotFilled = a.hasFleetOrLegacyAssignment
+        let batterySummary: FleetVehicleOperationalModel.BatterySummary? = {
+            guard let vid = telemetryVehicleID(for: a) else { return nil }
+            return fleetLink.vehicleOperationalModel(forVehicleID: vid).battery
+        }()
+        let infoVehicleID = telemetryVehicleID(for: a)
+        let systemID = rosterVehicleSystemID(for: a)
         return MissionControlRosterSlotCard(
             title: a.slotName,
             subtitle: rosterRoleSubtitle(device),
-            assignedVehicleTitle: label,
+            isAttached: slotFilled,
+            assignedVehicleDetail: detailLine,
+            rosterBatterySummary: batterySummary,
             assignedFleetIsSimulation: rosterAssignmentFleetIsSimulation(a),
+            autopilotStack: rosterAutopilotStack(for: a),
             simulationImageBasenames: basenames,
+            lifecycleStatus: rosterLifecycleStatus(for: a),
+            vehicleSystemID: systemID,
+            isSelectedForSetupMap: setupSelectedAssignmentId == assignmentId,
+            onSelectForSetupMap: {
+                setupSelectedAssignmentId = assignmentId
+            },
             onChooseVehicle: {
+                setupSelectedAssignmentId = assignmentId
                 withAnimation(rosterPickerSpring) {
                     rosterPickerAssignmentId = assignmentId
                 }
             },
             onRemoveVehicle: {
                 clearFleetVehicle(assignmentId: assignmentId)
-            }
+            },
+            onInfo: infoVehicleID == nil
+                ? nil
+                : {
+                    presentRosterTelemetrySheet(for: a)
+                }
         )
     }
 
@@ -992,12 +2933,16 @@ private struct MissionRunDetailView: View {
         guard let idx = run.assignments.firstIndex(where: { $0.id == assignmentId }) else { return }
         run.assignments[idx].attachedFleetVehicleToken = vehicle.token.storageKey
         run.assignments[idx].attachedDevice = vehicle.title
+        if !vehicle.isSimulation {
+            run.assignments[idx].simStartOverrideCoord = nil
+        }
     }
 
     private func clearFleetVehicle(assignmentId: UUID) {
         guard let idx = run.assignments.firstIndex(where: { $0.id == assignmentId }) else { return }
         run.assignments[idx].attachedFleetVehicleToken = nil
         run.assignments[idx].attachedDevice = ""
+        run.assignments[idx].simStartOverrideCoord = nil
     }
 
     private func rosterPickDisabledReason(_ vehicle: MissionPickableFleetVehicle, assignmentId: UUID) -> String? {
@@ -1016,22 +2961,8 @@ private struct MissionRunDetailView: View {
 
     /// Bridge vehicle stream key for a roster assignment (`sysid:<id>` for SITL).
     private func telemetryVehicleID(for assignment: MissionRunAssignment) -> String? {
-        guard let key = assignment.attachedFleetVehicleToken,
-              let token = FleetMissionVehicleToken(storageKey: key)
-        else { return nil }
-        switch token {
-        case .sitl(let uuid):
-            guard let inst = sitl.instances.first(where: { $0.id == uuid }) else { return nil }
-            // SITL instance indices are expected as MAVLink system ids `instance + 1`,
-            // but we resolve through the bridge runtime map in case key format changes.
-            let expectedSystemID = inst.stackInstanceIndex + 1
-            return fleetLink.vehicleID(forSystemID: expectedSystemID) ?? "sysid:\(expectedSystemID)"
-        case .live:
-            return nil
-        }
+        resolvedFleetStreamVehicleID(assignment: assignment, fleetLink: fleetLink, sitl: sitl)
     }
-
-
 }
 
 /// One vehicle column in Mission Control: vehicle-type thumbnail + slot title / roster role subtitle, battery/GPS, MAVSDK health. Top-trailing reserved for a future cog menu.
@@ -1237,53 +3168,52 @@ private struct AddMissionRunSheet: View {
     let onCreateRun: (Mission) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Select Mission")
-                .font(.title3.bold())
-            if missionStore.missions.isEmpty {
-                Text("No mission templates available.")
-                    .foregroundStyle(.gray)
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(missionStore.missions) { mission in
-                            Button {
-                                onCreateRun(mission)
-                                dismiss()
-                            } label: {
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(mission.name)
-                                            .foregroundStyle(.white)
-                                        Text(mission.description.isEmpty ? "No description" : mission.description)
-                                            .font(.system(size: 11))
-                                            .foregroundStyle(.gray)
-                                            .lineLimit(1)
-                                    }
-                                    Spacer()
-                                    Image(systemName: "plus.circle.fill")
-                                }
-                                .padding(10)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color(red: 0.12, green: 0.12, blue: 0.13))
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-            }
-
-            HStack {
-                Spacer()
+        GuardianModalTemplate(
+            title: "Select Mission",
+            headerActions: {
                 Button("Close") {
                     dismiss()
                 }
                 .buttonStyle(.bordered)
+            },
+            bodyContent: {
+                VStack(alignment: .leading, spacing: 12) {
+                    if missionStore.missions.isEmpty {
+                        Text("No mission templates available.")
+                            .foregroundStyle(.gray)
+                    } else {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(missionStore.missions) { mission in
+                                    Button {
+                                        onCreateRun(mission)
+                                        dismiss()
+                                    } label: {
+                                        HStack {
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(mission.name)
+                                                    .foregroundStyle(.white)
+                                                Text(mission.description.isEmpty ? "No description" : mission.description)
+                                                    .font(.system(size: 11))
+                                                    .foregroundStyle(.gray)
+                                                    .lineLimit(1)
+                                            }
+                                            Spacer()
+                                            Image(systemName: "plus.circle.fill")
+                                        }
+                                        .padding(10)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+                    }
+                }
             }
-        }
-        .padding(18)
+        )
         .frame(width: 520, height: 420)
-        .background(Color(red: 0.07, green: 0.07, blue: 0.08))
     }
 }

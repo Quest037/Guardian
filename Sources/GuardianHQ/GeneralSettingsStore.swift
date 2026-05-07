@@ -17,6 +17,19 @@ enum LogRetentionProfile: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+struct SimSpawnDefaults: Equatable, Codable {
+    var latitudeDeg: Double
+    var longitudeDeg: Double
+    /// Fixed at 0m by design for cross-domain defaults (UAV/USV/UUV).
+    var altitudeM: Double
+
+    static let `default` = SimSpawnDefaults(
+        latitudeDeg: 47.397742,
+        longitudeDeg: 8.545594,
+        altitudeM: 0
+    )
+}
+
 /// Persisted app-wide preferences (General settings).
 @MainActor
 final class GeneralSettingsStore: ObservableObject {
@@ -46,15 +59,34 @@ final class GeneralSettingsStore: ObservableObject {
         }
     }
 
+    /// Default spawn location for newly added simulated vehicles.
+    @Published var simSpawnDefaults: SimSpawnDefaults {
+        didSet {
+            var next = simSpawnDefaults
+            // Keep defaults valid and deterministic.
+            next.latitudeDeg = min(90, max(-90, next.latitudeDeg))
+            next.longitudeDeg = min(180, max(-180, next.longitudeDeg))
+            next.altitudeM = 0
+            if next != simSpawnDefaults {
+                simSpawnDefaults = next
+                return
+            }
+            guard simSpawnDefaults != oldValue else { return }
+            save()
+        }
+    }
+
     init(userDefaults: UserDefaults = .standard) {
         if let loaded = Self.load(from: userDefaults) {
             defaultSimulationPlatform = loaded.defaultSimulationPlatform
             defaultMapTileStyle = loaded.defaultMapTileStyle ?? .standard
             logRetentionProfile = loaded.logRetentionProfile ?? .default
+            simSpawnDefaults = loaded.simSpawnDefaults ?? .default
         } else {
             defaultSimulationPlatform = .ardupilot
             defaultMapTileStyle = .standard
             logRetentionProfile = .default
+            simSpawnDefaults = .default
         }
     }
 
@@ -62,7 +94,8 @@ final class GeneralSettingsStore: ObservableObject {
         let snapshot = Snapshot(
             defaultSimulationPlatform: defaultSimulationPlatform,
             defaultMapTileStyle: defaultMapTileStyle,
-            logRetentionProfile: logRetentionProfile
+            logRetentionProfile: logRetentionProfile,
+            simSpawnDefaults: simSpawnDefaults
         )
         if let data = try? JSONEncoder().encode(snapshot) {
             userDefaults.set(data, forKey: Self.defaultsKey)
@@ -80,5 +113,7 @@ final class GeneralSettingsStore: ObservableObject {
         var defaultMapTileStyle: MapTileStyle?
         /// Omitted in older saves; treated as `.default`.
         var logRetentionProfile: LogRetentionProfile?
+        /// Omitted in older saves; treated as `.default`.
+        var simSpawnDefaults: SimSpawnDefaults?
     }
 }

@@ -495,6 +495,7 @@ private struct MissionWorkspaceView: View {
                         allPathsCoords: allPathsCoords,
                         selectedPathWaypoints: selectedPath?.waypoints ?? [],
                         selectedWaypointIndex: selectedWaypointIndex,
+                        vehicleMarkers: [],
                         mapStyle: mapStyle,
                         recenterNonce: mapRecenterNonce,
                         headingPreview: headingPreview,
@@ -529,6 +530,7 @@ private struct MissionWorkspaceView: View {
                         selectedPathIndex = pathIndex
                         selectedWaypointIndex = draft.routeMacro.paths[pathIndex].waypoints.count - 1
                         onToast("Waypoint added", .success)
+                    } onVehicleMarkerMoved: { _, _, _ in
                     } onWaypointClick: { idx in
                         selectedWaypointIndex = idx
                     } onWaypointMoved: { idx, lat, lon in
@@ -2146,50 +2148,51 @@ private struct AddMissionSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("New Mission")
-                .font(.title2.bold())
+        GuardianModalTemplate(
+            title: "New Mission",
+            headerActions: {
+                HStack(spacing: 8) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
 
-            TextField("Name", text: $name)
-                .textFieldStyle(.roundedBorder)
-
-            AutoGrowingTextEditor(
-                text: $description,
-                measuredHeight: $descriptionEditorHeight,
-                placeholder: "Description",
-                minHeight: 96,
-                maxHeight: 220
-            )
-
-            Picker("Type", selection: $type) {
-                Text("mobile").tag(MissionType.mobile)
-                Text("static").tag(MissionType.staticType)
-            }
-            .pickerStyle(.segmented)
-
-            HStack {
-                Spacer()
-                Button("Cancel") {
-                    dismiss()
+                    Button("Save Mission") {
+                        store.addMission(
+                            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                            description: description.trimmingCharacters(in: .whitespacesAndNewlines),
+                            type: type
+                        )
+                        toastCenter.show("Mission created", style: .success)
+                        dismiss()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
+                    .disabled(!canSave)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
+            },
+            bodyContent: {
+                VStack(alignment: .leading, spacing: 14) {
+                    TextField("Name", text: $name)
+                        .textFieldStyle(.roundedBorder)
 
-                Button("Save Mission") {
-                    store.addMission(
-                        name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-                        description: description.trimmingCharacters(in: .whitespacesAndNewlines),
-                        type: type
+                    AutoGrowingTextEditor(
+                        text: $description,
+                        measuredHeight: $descriptionEditorHeight,
+                        placeholder: "Description",
+                        minHeight: 96,
+                        maxHeight: 220
                     )
-                    toastCenter.show("Mission created", style: .success)
-                    dismiss()
+
+                    Picker("Type", selection: $type) {
+                        Text("mobile").tag(MissionType.mobile)
+                        Text("static").tag(MissionType.staticType)
+                    }
+                    .pickerStyle(.segmented)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.blue)
-                .disabled(!canSave)
             }
-        }
-        .padding(20)
+        )
         .frame(width: 460)
     }
 }
@@ -2275,161 +2278,6 @@ private enum WaypointActionOption: String, CaseIterable, Identifiable {
     case none
 
     var id: String { rawValue }
-}
-
-private struct StrictNumberField: NSViewRepresentable {
-    @Binding var value: Double
-    let step: Double
-    let min: Double
-    let max: Double
-    var onFocusChange: ((Bool) -> Void)?
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(value: $value, step: step, min: min, max: max, onFocusChange: onFocusChange)
-    }
-
-    func makeNSView(context: Context) -> ArrowStepTextField {
-        let textField = ArrowStepTextField(frame: .zero)
-        textField.isBordered = true
-        textField.isBezeled = true
-        textField.bezelStyle = .roundedBezel
-        textField.focusRingType = .default
-        textField.font = NSFont.systemFont(ofSize: 15, weight: .medium)
-        textField.delegate = context.coordinator
-        textField.stringValue = context.coordinator.string(from: value)
-        textField.onFocusChange = { isFocused in
-            context.coordinator.onFocusChange?(isFocused)
-        }
-        return textField
-    }
-
-    func updateNSView(_ nsView: ArrowStepTextField, context: Context) {
-        context.coordinator.step = step
-        context.coordinator.min = min
-        context.coordinator.max = max
-        context.coordinator.onFocusChange = onFocusChange
-        let expected = context.coordinator.string(from: value)
-        if nsView.stringValue != expected {
-            nsView.stringValue = expected
-        }
-    }
-
-    final class Coordinator: NSObject, NSTextFieldDelegate {
-        var value: Binding<Double>
-        var step: Double
-        var min: Double
-        var max: Double
-        var onFocusChange: ((Bool) -> Void)?
-
-        init(value: Binding<Double>, step: Double, min: Double, max: Double, onFocusChange: ((Bool) -> Void)?) {
-            self.value = value
-            self.step = step
-            self.min = min
-            self.max = max
-            self.onFocusChange = onFocusChange
-        }
-
-        func controlTextDidBeginEditing(_ obj: Notification) {
-            onFocusChange?(true)
-        }
-
-        func controlTextDidEndEditing(_ obj: Notification) {
-            onFocusChange?(false)
-            if let textField = obj.object as? NSTextField {
-                textField.stringValue = string(from: value.wrappedValue)
-            }
-        }
-
-        func controlTextDidChange(_ obj: Notification) {
-            guard let textField = obj.object as? NSTextField else { return }
-            let sanitized = sanitize(textField.stringValue)
-            if textField.stringValue != sanitized {
-                textField.stringValue = sanitized
-            }
-            guard !sanitized.isEmpty, sanitized != ".", let parsed = Double(sanitized) else { return }
-            value.wrappedValue = clamped(parsed)
-        }
-
-        func adjustFromLiveValue(_ liveText: String, delta: Double) -> Double {
-            let sanitized = sanitize(liveText)
-            let base = (sanitized.isEmpty || sanitized == ".") ? value.wrappedValue : (Double(sanitized) ?? value.wrappedValue)
-            let next = clamped(base + delta)
-            value.wrappedValue = next
-            return next
-        }
-
-        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-            let delta: Double
-            switch commandSelector {
-            case #selector(NSResponder.moveUp(_:)):
-                delta = step
-            case #selector(NSResponder.moveDown(_:)):
-                delta = -step
-            default:
-                return false
-            }
-
-            let next = adjustFromLiveValue(textView.string, delta: delta)
-            let formatted = string(from: next)
-            textView.string = formatted
-            if let field = control as? NSTextField {
-                field.stringValue = formatted
-            }
-            return true
-        }
-
-        func clamped(_ number: Double) -> Double {
-            Swift.max(min, Swift.min(max, number))
-        }
-
-        func sanitize(_ input: String) -> String {
-            var result = ""
-            var seenDot = false
-            for char in input {
-                if char >= "0" && char <= "9" {
-                    result.append(char)
-                } else if char == "." && !seenDot {
-                    seenDot = true
-                    result.append(char)
-                }
-            }
-            if result.first == "." {
-                result = "0" + result
-            }
-            return result
-        }
-
-        func string(from number: Double) -> String {
-            if number.rounded() == number {
-                return String(Int(number))
-            }
-            let formatter = NumberFormatter()
-            formatter.minimumFractionDigits = 0
-            formatter.maximumFractionDigits = 8
-            formatter.decimalSeparator = "."
-            return formatter.string(from: NSNumber(value: number)) ?? String(number)
-        }
-    }
-}
-
-private final class ArrowStepTextField: NSTextField {
-    var onFocusChange: ((Bool) -> Void)?
-
-    override func becomeFirstResponder() -> Bool {
-        let became = super.becomeFirstResponder()
-        if became {
-            onFocusChange?(true)
-        }
-        return became
-    }
-
-    override func resignFirstResponder() -> Bool {
-        let resigned = super.resignFirstResponder()
-        if resigned {
-            onFocusChange?(false)
-        }
-        return resigned
-    }
 }
 
 private extension View {

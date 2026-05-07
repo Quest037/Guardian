@@ -1,0 +1,5 @@
+# Applied by Guardian after stock ArduPilot SITL defaults (sim_vehicle --add-param-file).
+# Ensures the battery monitor publishes a capacity-based remaining estimate on MAVLink
+# (SYS_STATUS / BATTERY_STATUS) so MAVSDK Telemetry.Battery.remaining_percent is valid.
+BATT_MONITOR 4
+BATT_CAPACITY 5000

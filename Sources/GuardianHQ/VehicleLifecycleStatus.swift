@@ -72,6 +72,13 @@ struct VehicleLifecycleStatus: Equatable, Sendable {
         }
     }
 
+    /// Two-word (or shorter) line for tight roster / glyph captions under vehicle type art.
+    var compactTwoWordStatus: String {
+        let words = mediumLabel.split(separator: " ").map(String.init)
+        if words.count <= 2 { return mediumLabel }
+        return "\(words[0]) \(words[1])"
+    }
+
     var sentence: String {
         if let sentenceOverride, !sentenceOverride.isEmpty {
             return sentenceOverride

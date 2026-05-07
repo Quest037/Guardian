@@ -52,9 +52,13 @@ struct GuardianHQApp: App {
     @State private var selection: AppSection = .dashboard
     @State private var showingSplash = true
     @StateObject private var toastCenter = ToastCenter()
+    @StateObject private var fleetLinkService = FleetLinkService()
+    @StateObject private var sitlService = SitlService()
 
     init() {
         NSWindow.allowsAutomaticWindowTabbing = false
+        // Force-quit leaves PX4 / ArduPilot children; clear before any new SITL or MAVSDK work this session.
+        GuardianSitlOrphanBlitz.kickoffFromColdLaunch()
     }
 
     var body: some Scene {
@@ -63,12 +67,25 @@ struct GuardianHQApp: App {
                 if showingSplash {
                     TacticalSplashView()
                 } else {
-                    RootView(selection: $selection)
+                    RootView(selection: $selection, fleetLinkService: fleetLinkService, sitlService: sitlService)
                         .withToasts()
                         .environmentObject(toastCenter)
+                        .onAppear {
+                            // SwiftPM / early launch: re-run after splash so permission + System Settings registration line up with a real NSApplication + window session.
+                            PaladinUserNotificationService.shared.configure()
+                        }
                 }
             }
             .preferredColorScheme(.dark)
+            .onChange(of: showingSplash) { stillShowingSplash in
+                guard !stillShowingSplash else { return }
+                Task { @MainActor in
+                    PaladinUserNotificationService.shared.configure()
+                }
+            }
+            .onAppear {
+                sitlService.attachFleetLink(fleetLinkService)
+            }
             .task {
                 guard showingSplash else { return }
                 try? await Task.sleep(nanoseconds: 1_800_000_000)
@@ -90,6 +107,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
         NSApp.windows.first?.makeKeyAndOrderFront(nil)
+        Task { @MainActor in
+            PaladinUserNotificationService.shared.configure()
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                PaladinUserNotificationService.shared.refreshAuthorizationStatus()
+            }
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // AppKit invokes this on the main thread; run inline so MainActor work does not deadlock.
+        MainActor.assumeIsolated {
+            GuardianAppQuitCoordinator.shared.teardownForApplicationQuit()
+        }
     }
 }
 

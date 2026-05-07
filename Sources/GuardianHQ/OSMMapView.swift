@@ -20,11 +20,24 @@ struct CameraPreview {
     var fovDeg: Double
 }
 
+struct MapVehicleMarker {
+    var id: String
+    var lat: Double
+    var lon: Double
+    var label: String
+    var colorHex: String
+    var selected: Bool
+    var draggable: Bool
+    /// When set, a small heading wedge is drawn at this marker (degrees clockwise from north).
+    var headingDeg: Double? = nil
+}
+
 struct OSMMapView: NSViewRepresentable {
     var home: RouteHome?
     var allPathsCoords: [[RouteCoordinate]]
     var selectedPathWaypoints: [RouteWaypoint]
     var selectedWaypointIndex: Int?
+    var vehicleMarkers: [MapVehicleMarker]
     var mapStyle: MapTileStyle
     var recenterNonce: Int
     var headingPreview: HeadingPreview?
@@ -32,6 +45,7 @@ struct OSMMapView: NSViewRepresentable {
     var preserveView: Bool
     var isEditingPath: Bool
     var onMapClick: (Double, Double) -> Void
+    var onVehicleMarkerMoved: (String, Double, Double) -> Void
     var onWaypointClick: (Int) -> Void
     var onWaypointMoved: (Int, Double, Double) -> Void
     var onWaypointDelete: (Int) -> Void
@@ -40,6 +54,7 @@ struct OSMMapView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator(
             onMapClick: onMapClick,
+            onVehicleMarkerMoved: onVehicleMarkerMoved,
             onWaypointClick: onWaypointClick,
             onWaypointMoved: onWaypointMoved,
             onWaypointDelete: onWaypointDelete,
@@ -50,6 +65,7 @@ struct OSMMapView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: "mapClick")
+        controller.add(context.coordinator, name: "vehicleMove")
         controller.add(context.coordinator, name: "waypointClick")
         controller.add(context.coordinator, name: "waypointMove")
         controller.add(context.coordinator, name: "waypointDelete")
@@ -57,12 +73,15 @@ struct OSMMapView: NSViewRepresentable {
 
         let config = WKWebViewConfiguration()
         config.userContentController = controller
+        // Sandboxed macOS apps: default persistent store + nil baseURL can trigger noisy WebContent / pasteboard XPC failures.
+        config.websiteDataStore = .nonPersistent()
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         context.coordinator.webView = webView
         webView.setValue(false, forKey: "drawsBackground")
-        webView.loadHTMLString(Self.html, baseURL: nil)
+        let mapPageBase = URL(string: "about:blank")!
+        webView.loadHTMLString(Self.html, baseURL: mapPageBase)
         return webView
     }
 
@@ -81,6 +100,15 @@ struct OSMMapView: NSViewRepresentable {
             "{\"idx\":\(idx),\"lat\":\(wp.coord.lat),\"lon\":\(wp.coord.lon)}"
         }.joined(separator: ",")
         let selectedWaypointIndexJS = selectedWaypointIndex.map(String.init) ?? "null"
+        let vehicleMarkersJSON = vehicleMarkers.map { marker in
+            let headingJSON: String
+            if let h = marker.headingDeg {
+                headingJSON = "\"heading\":\(h)"
+            } else {
+                headingJSON = "\"heading\":null"
+            }
+            return "{\"id\":\(Self.jsStringLiteral(marker.id)),\"lat\":\(marker.lat),\"lon\":\(marker.lon),\"label\":\(Self.jsStringLiteral(marker.label)),\"color\":\(Self.jsStringLiteral(marker.colorHex)),\"selected\":\(marker.selected ? "true" : "false"),\"draggable\":\(marker.draggable ? "true" : "false"),\(headingJSON)}"
+        }.joined(separator: ",")
         let headingPreviewJSON: String
         if let headingPreview {
             headingPreviewJSON = "{\"lat\":\(headingPreview.lat),\"lon\":\(headingPreview.lon),\"heading\":\(headingPreview.heading)}"
@@ -93,8 +121,19 @@ struct OSMMapView: NSViewRepresentable {
         } else {
             cameraPreviewJSON = "null"
         }
-        let js = "setMissionData(\(homeJSON), [\(allPathsJSON)], [\(waypointsJSON)], \(selectedWaypointIndexJS), \"\(mapStyle.rawValue)\", \(recenterNonce), \(headingPreviewJSON), \(cameraPreviewJSON), \(preserveView ? "true" : "false"), \(isEditingPath ? "true" : "false"));"
+        let js = "setMissionData(\(homeJSON), [\(allPathsJSON)], [\(waypointsJSON)], \(selectedWaypointIndexJS), [\(vehicleMarkersJSON)], \"\(mapStyle.rawValue)\", \(recenterNonce), \(headingPreviewJSON), \(cameraPreviewJSON), \(preserveView ? "true" : "false"), \(isEditingPath ? "true" : "false"));"
         context.coordinator.apply(script: js)
+    }
+}
+
+private extension OSMMapView {
+    static func jsStringLiteral(_ raw: String) -> String {
+        let escaped = raw
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "")
+        return "\"\(escaped)\""
     }
 }
 
@@ -104,6 +143,7 @@ extension OSMMapView {
         private var pendingScript: String?
         private var didFinishInitialLoad = false
         private let onMapClick: (Double, Double) -> Void
+        private let onVehicleMarkerMoved: (String, Double, Double) -> Void
         private let onWaypointClick: (Int) -> Void
         private let onWaypointMoved: (Int, Double, Double) -> Void
         private let onWaypointDelete: (Int) -> Void
@@ -111,12 +151,14 @@ extension OSMMapView {
 
         init(
             onMapClick: @escaping (Double, Double) -> Void,
+            onVehicleMarkerMoved: @escaping (String, Double, Double) -> Void,
             onWaypointClick: @escaping (Int) -> Void,
             onWaypointMoved: @escaping (Int, Double, Double) -> Void,
             onWaypointDelete: @escaping (Int) -> Void,
             onPathInsert: @escaping (Int, Double, Double) -> Void
         ) {
             self.onMapClick = onMapClick
+            self.onVehicleMarkerMoved = onVehicleMarkerMoved
             self.onWaypointClick = onWaypointClick
             self.onWaypointMoved = onWaypointMoved
             self.onWaypointDelete = onWaypointDelete
@@ -173,6 +215,14 @@ extension OSMMapView {
                 onPathInsert(idx, lat, lon)
             }
 
+            if message.name == "vehicleMove",
+               let payload = message.body as? [String: Any],
+               let id = payload["id"] as? String,
+               let lat = payload["lat"] as? Double,
+               let lon = payload["lon"] as? Double {
+                onVehicleMarkerMoved(id, lat, lon)
+            }
+
         }
     }
 }
@@ -210,6 +260,7 @@ private extension OSMMapView {
     var homeMarker = null;
     var headingCone = null;
     var cameraCone = null;
+    const vehicleMarkers = [];
     const pathLines = [];
     const state = { lastDataSignature: null, lastRecenterNonce: -1 };
 
@@ -282,7 +333,21 @@ private extension OSMMapView {
       return `hsl(${normalized}, 88%, 58%)`;
     }
 
-    function setMissionData(home, allPathsCoords, selectedWaypoints, selectedWaypointIndex, mapStyle, recenterNonce, headingPreview, cameraPreview, preserveView, isEditingPath) {
+    /** When home + vehicle share the same lat/lon, bounds are degenerate and fitBounds zooms in too far — treat as one point. */
+    function collapsedCenterIfAllSame(pts) {
+      if (!pts || pts.length === 0) return null;
+      if (pts.length === 1) return pts[0];
+      const lat0 = pts[0][0];
+      const lon0 = pts[0][1];
+      for (let i = 1; i < pts.length; i++) {
+        if (Math.abs(pts[i][0] - lat0) > 1e-7 || Math.abs(pts[i][1] - lon0) > 1e-7) return null;
+      }
+      return [lat0, lon0];
+    }
+
+    const defaultSinglePointZoom = 15;
+
+    function setMissionData(home, allPathsCoords, selectedWaypoints, selectedWaypointIndex, missionVehicleMarkers, mapStyle, recenterNonce, headingPreview, cameraPreview, preserveView, isEditingPath) {
       if (homeMarker) { map.removeLayer(homeMarker); homeMarker = null; }
       if (headingCone) { map.removeLayer(headingCone); headingCone = null; }
       if (cameraCone) { map.removeLayer(cameraCone); cameraCone = null; }
@@ -294,6 +359,10 @@ private extension OSMMapView {
         const m = waypointMarkers.pop();
         map.removeLayer(m);
       }
+      while (vehicleMarkers.length > 0) {
+        const m = vehicleMarkers.pop();
+        map.removeLayer(m);
+      }
       applyStyle(mapStyle);
       map.getContainer().style.cursor = isEditingPath ? 'pointer' : '';
 
@@ -301,7 +370,8 @@ private extension OSMMapView {
       const geometryPaths = (allPathsCoords || []).filter(path => path && path.length > 0);
       const dataSignature = JSON.stringify({
         home: home,
-        geometryPaths: geometryPaths
+        geometryPaths: geometryPaths,
+        missionVehicleMarkers: missionVehicleMarkers
       });
       const dataChanged = state.lastDataSignature !== dataSignature;
       state.lastDataSignature = dataSignature;
@@ -382,6 +452,53 @@ private extension OSMMapView {
         });
       }
 
+      if (missionVehicleMarkers && missionVehicleMarkers.length > 0) {
+        missionVehicleMarkers.forEach((vm) => {
+          if (!Number.isFinite(vm.lat) || !Number.isFinite(vm.lon)) return;
+          const size = vm.selected ? 18 : 14;
+          const marker = L.marker([vm.lat, vm.lon], {
+            draggable: !!vm.draggable,
+            title: vm.label || '',
+            icon: L.divIcon({
+              className: 'mission-vehicle-dot',
+              html: `<div style="width:${size}px;height:${size}px;border-radius:999px;background:${vm.color || '#94a3b8'};border:${vm.selected ? 2.5 : 1.2}px solid #111;"></div>`,
+              iconSize: [size + 3, size + 3],
+              iconAnchor: [(size + 3) / 2, (size + 3) / 2]
+            })
+          }).addTo(map);
+          if (vm.label && vm.selected) {
+            marker.bindTooltip(vm.label, { permanent: true, direction: 'top', offset: [0, -10], opacity: 0.95 });
+          }
+          if (vm.draggable && vm.id) {
+            marker.on('dragend', function(e) {
+              const pos = e.target.getLatLng();
+              window.webkit.messageHandlers.vehicleMove.postMessage({
+                id: vm.id,
+                lat: pos.lat,
+                lon: pos.lng
+              });
+            });
+          }
+          vehicleMarkers.push(marker);
+          points.push([vm.lat, vm.lon]);
+          if (Number.isFinite(vm.heading)) {
+            const coneColor = headingColor(vm.heading);
+            const wedge = L.polygon(
+              conePoints(vm.lat, vm.lon, vm.heading, 20, 0.14),
+              {
+                color: coneColor,
+                fillColor: coneColor,
+                weight: 2,
+                opacity: 0.9,
+                fillOpacity: 0.22,
+                interactive: false
+              }
+            ).addTo(map);
+            vehicleMarkers.push(wedge);
+          }
+        });
+      }
+
       if (headingPreview && Number.isFinite(headingPreview.lat) && Number.isFinite(headingPreview.lon) && Number.isFinite(headingPreview.heading)) {
         const coneColor = headingColor(headingPreview.heading);
         headingCone = L.polygon(
@@ -417,10 +534,13 @@ private extension OSMMapView {
       }
 
       if ((dataChanged && !preserveView) || forceRecenter) {
-        if (points.length > 1) {
-          map.fitBounds(points, { padding: [30, 30] });
+        const collapsed = collapsedCenterIfAllSame(points);
+        if (collapsed) {
+          map.setView(collapsed, defaultSinglePointZoom);
+        } else if (points.length > 1) {
+          map.fitBounds(points, { padding: [30, 30], maxZoom: defaultSinglePointZoom });
         } else if (points.length === 1) {
-          map.setView(points[0], 14);
+          map.setView(points[0], defaultSinglePointZoom);
         } else if (navigator.geolocation) {
           navigator.geolocation.getCurrentPosition(
             function(pos) {

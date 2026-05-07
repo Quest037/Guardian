@@ -24,11 +24,18 @@ final class SitlService: ObservableObject {
     private var runners: [UUID: SitlProcessRunner] = [:]
     private var nextSimulationInstance: Int = 0
 
+    init() {
+        GuardianAppQuitCoordinator.shared.noteSitlServiceCreated(self)
+    }
+
     func attachFleetLink(_ link: FleetLinkService) {
         fleetLink = link
     }
 
     private func reconcileFleetLinkVehicleCacheAfterSitlChange() {
+        if instances.isEmpty {
+            nextSimulationInstance = 0
+        }
         guard let link = fleetLink else { return }
         let anyAlive = instances.contains { $0.isAlive }
         if !anyAlive {
@@ -45,7 +52,7 @@ final class SitlService: ObservableObject {
     }
 
     private func reserveNextSimulationInstance(maxScan: Int = 256) -> Int? {
-        var candidate = max(0, nextSimulationInstance)
+        var candidate = instances.isEmpty ? 0 : max(0, nextSimulationInstance)
         let occupied = Set(instances.map(\.stackInstanceIndex))
         for _ in 0..<maxScan {
             if !occupied.contains(candidate) {
@@ -58,17 +65,24 @@ final class SitlService: ObservableObject {
     }
 
     func stopAll() {
-        for id in runners.keys {
+        stopAllForApplicationQuit()
+        reconcileFleetLinkVehicleCacheAfterSitlChange()
+    }
+
+    /// Terminate every SITL child (PX4 / ArduPilot) and stop all MAVSDK sessions on the fleet link. Does not run stale-cache reconcile (used from app quit after fleet teardown).
+    func stopAllForApplicationQuit() {
+        for id in Array(runners.keys) {
             if let runner = runners.removeValue(forKey: id) {
                 runner.onLogLine = nil
                 runner.onTerminated = nil
                 runner.stop()
             }
         }
+        runners.removeAll()
         instances.removeAll()
         lastError = nil
+        nextSimulationInstance = 0
         fleetLink?.stopAllVehicleSessions()
-        reconcileFleetLinkVehicleCacheAfterSitlChange()
     }
 
     /// Stops a running SITL process and removes its row.
@@ -91,10 +105,11 @@ final class SitlService: ObservableObject {
     /// Removes a finished instance row from the list.
     func dismiss(id: UUID) {
         instances.removeAll { $0.id == id && !$0.isAlive }
+        reconcileFleetLinkVehicleCacheAfterSitlChange()
     }
 
     /// Spawns SITL when **Simulate** is on.
-    func spawn(preset: SimulationVehiclePreset, platform: SimulationPlatform) {
+    func spawn(preset: SimulationVehiclePreset, platform: SimulationPlatform, defaults: SimSpawnDefaults) {
         lastError = nil
         guard let link = fleetLink, link.isSimulateEnabled else {
             lastError = "Turn on Simulate before spawning SITL."
@@ -103,13 +118,13 @@ final class SitlService: ObservableObject {
 
         switch platform {
         case .ardupilot:
-            spawnArduPilot(preset: preset, link: link)
+            spawnArduPilot(preset: preset, link: link, defaults: defaults)
         case .px4:
-            spawnPX4(preset: preset, link: link)
+            spawnPX4(preset: preset, link: link, defaults: defaults)
         }
     }
 
-    private func spawnArduPilot(preset: SimulationVehiclePreset, link: FleetLinkService) {
+    private func spawnArduPilot(preset: SimulationVehiclePreset, link: FleetLinkService, defaults: SimSpawnDefaults) {
         guard let root = SitlLaunchRecipe.ardupilotRootPath() else {
             lastError = SitlError.missingArduPilotRuntime.errorDescription
             return
@@ -123,7 +138,7 @@ final class SitlService: ObservableObject {
         let id = UUID()
         let spec: SitlProcessSpec
         do {
-            spec = try SitlLaunchRecipe.arduPilotSpec(root: root, preset: preset, instance: instance)
+            spec = try SitlLaunchRecipe.arduPilotSpec(root: root, preset: preset, instance: instance, spawnDefaults: defaults)
         } catch {
             lastError = error.localizedDescription
             return
@@ -190,7 +205,8 @@ final class SitlService: ObservableObject {
             )
             link.registerSimulatedVehicle(
                 systemID: instance + 1,
-                mavlinkConnectionURL: "udpin://0.0.0.0:\(mavsdkIngressPort)"
+                mavlinkConnectionURL: "udpin://0.0.0.0:\(mavsdkIngressPort)",
+                autopilotStack: .ardupilot
             )
             link.appendSimulationLog(
                 "Started ArduPilot SITL [vehicle=\(preset.displayName) instance=\(instance) mavlink_sysid=\(instance + 1) session=\(id.uuidString)] primary_link=\(mavsdkIngressPort)"
@@ -202,7 +218,7 @@ final class SitlService: ObservableObject {
         }
     }
 
-    private func spawnPX4(preset: SimulationVehiclePreset, link: FleetLinkService) {
+    private func spawnPX4(preset: SimulationVehiclePreset, link: FleetLinkService, defaults: SimSpawnDefaults) {
         guard let root = SitlLaunchRecipe.px4SitlRootPath() else {
             lastError = SitlError.missingPx4AutopilotRoot.errorDescription
             return
@@ -216,7 +232,7 @@ final class SitlService: ObservableObject {
         let id = UUID()
         let spec: SitlProcessSpec
         do {
-            spec = try SitlLaunchRecipe.px4Spec(root: root, preset: preset, instance: instance)
+            spec = try SitlLaunchRecipe.px4Spec(root: root, preset: preset, instance: instance, spawnDefaults: defaults)
         } catch {
             lastError = error.localizedDescription
             return
@@ -262,7 +278,8 @@ final class SitlService: ObservableObject {
             )
             link.registerSimulatedVehicle(
                 systemID: instance + 1,
-                mavlinkConnectionURL: "udpin://0.0.0.0:\(mavsdkIngressPort)"
+                mavlinkConnectionURL: "udpin://0.0.0.0:\(mavsdkIngressPort)",
+                autopilotStack: .px4
             )
             link.appendSimulationLog(
                 "Started PX4 SITL [sim=SIH vehicle=\(preset.displayName) model=\(preset.px4SitlSimModel()) instance=\(instance) mavlink_sysid=\(instance + 1) session=\(id.uuidString)] gcs_udp=\(gcsUdpPort) mavsdk_udpin=\(mavsdkIngressPort)"
@@ -276,7 +293,7 @@ final class SitlService: ObservableObject {
 
     /// Finds the next PX4 instance whose GCS UDP port is not currently occupied.
     private func reserveNextAvailablePx4Instance(maxScan: Int = 64) -> Int? {
-        var candidate = max(0, nextSimulationInstance)
+        var candidate = instances.isEmpty ? 0 : max(0, nextSimulationInstance)
         let occupiedByGuardian = Set(instances.map(\.stackInstanceIndex))
         for _ in 0..<maxScan {
             let gcsPort = SitlLaunchRecipe.px4SihGcsUdpPort(instance: candidate)

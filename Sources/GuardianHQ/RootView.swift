@@ -3,11 +3,11 @@ import AppKit
 
 struct RootView: View {
     @Binding var selection: AppSection
+    @ObservedObject var fleetLinkService: FleetLinkService
+    @ObservedObject var sitlService: SitlService
     @StateObject private var missionStore = MissionStore()
     @StateObject private var missionControlStore = MissionControlStore()
-    @StateObject private var fleetLinkService = FleetLinkService()
     @StateObject private var generalSettingsStore = GeneralSettingsStore()
-    @StateObject private var sitlService = SitlService()
     @State private var settingsPane: SettingsPane = .general
     @State private var isSidebarCollapsed = false
 
@@ -43,8 +43,27 @@ struct RootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(bgMain)
         .onAppear {
-            sitlService.attachFleetLink(fleetLinkService)
             fleetLinkService.applyLogRetentionProfile(generalSettingsStore.logRetentionProfile)
+            fleetLinkService.onAutopilotMissionCycleFinished = { vehicleID in
+                Task { @MainActor in
+                    missionControlStore.handleAutopilotMissionCycleFinished(
+                        vehicleID: vehicleID,
+                        fleetLink: fleetLinkService,
+                        sitl: sitlService,
+                        missionsProvider: { missionStore.missions }
+                    )
+                }
+            }
+            fleetLinkService.onMirrorFleetLineToPaladin = { vehicleID, line in
+                Task { @MainActor in
+                    missionControlStore.ingestFleetMirrorLineForPaladin(
+                        vehicleID: vehicleID,
+                        line: line,
+                        fleetLink: fleetLinkService,
+                        sitl: sitlService
+                    )
+                }
+            }
         }
         .onChange(of: fleetLinkService.isSimulateEnabled) { sim in
             if !sim { sitlService.stopAll() }
@@ -186,7 +205,8 @@ struct RootView: View {
                 DevicesView(
                     fleetLink: fleetLinkService,
                     sitl: sitlService,
-                    generalSettings: generalSettingsStore
+                    generalSettings: generalSettingsStore,
+                    missionControlStore: missionControlStore
                 )
             case .settings:
                 SettingsView(
@@ -216,7 +236,8 @@ private struct DashboardView: View {
 
     /// Same cardinality as `fleetGridEntries` on Devices (live MAVLink row when connected, plus every SITL row).
     private var vehiclesTotalCount: Int {
-        let liveVehicleCount = fleetLink.telemetryByVehicleID.count
+        let simVehicleIDs = Set(sitl.instances.map { "sysid:\($0.stackInstanceIndex + 1)" })
+        let liveVehicleCount = fleetLink.vehicleModelsByVehicleID.keys.filter { !simVehicleIDs.contains($0) }.count
         return liveVehicleCount + simInstanceRowCount
     }
 

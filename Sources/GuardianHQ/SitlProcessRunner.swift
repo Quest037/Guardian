@@ -50,6 +50,11 @@ final class SitlProcessRunner {
         do {
             try proc.run()
             process = proc
+            GuardianSitlSpawnRegistry.register(
+                pid: proc.processIdentifier,
+                executablePath: spec.executable,
+                arguments: spec.arguments
+            )
         } catch {
             try? stdinWriteKeepAlive?.close()
             stdinWriteKeepAlive = nil
@@ -114,6 +119,10 @@ final class SitlProcessRunner {
     private func teardownOnce(exitCode: Int32) {
         guard !didTeardown else { return }
         didTeardown = true
+
+        if let proc = process, proc.processIdentifier > 1 {
+            GuardianSitlSpawnRegistry.unregister(pid: proc.processIdentifier)
+        }
 
         flushRemainder(&stdoutRemainder, prefix: "[sitl] ")
         flushRemainder(&stderrRemainder, prefix: "[sitl:err] ")

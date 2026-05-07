@@ -1,0 +1,66 @@
+{
+  "id": "sysid:1",
+  "data": {
+    "vehicleID": "sysid:1",
+    "systemID": 1,
+    "telemetry": {
+      "autopilotStack": "ardupilot",
+      "isArmed": false,
+      "flightMode": "Hold",
+      "latitudeDeg": 47.39774,
+      "longitudeDeg": 8.54559,
+      "absoluteAltM": 184.2,
+      "relativeAltM": 3.1,
+      "batteryVoltageV": 15.6,
+      "batteryRemainingPercent": 0.72,
+      "batteryCurrentA": 8.4,
+      "batteryTimeRemainingS": 1260,
+      "gpsNumSatellites": 12,
+      "gpsFixType": "fix3D",
+      "lastUpdate": "2026-05-06T15:59:30Z"
+    },
+    "lastError": null
+  },
+  "collections": {
+    "lifecycleStatus": {
+      "stage": "live",
+      "shortLabel": "Live",
+      "mediumLabel": "Telemetry live",
+      "sentence": "Live telemetry is flowing for this vehicle.",
+      "color": "green"
+    },
+    "telemetrySnapshot": {
+      "isArmed": false,
+      "flightMode": "Hold",
+      "latitudeDeg": 47.39774,
+      "longitudeDeg": 8.54559,
+      "relativeAltM": 3.1,
+      "autopilotStack": "ardupilot"
+    },
+    "operational": {
+      "telemetryAgeS": 0.4,
+      "battery": {
+        "percent0to100": 72,
+        "voltageV": 15.6,
+        "currentA": 8.4,
+        "isCharging": false,
+        "trendText": "Draining",
+        "etaText": "ETA 21m"
+      },
+      "gps": {
+        "satellites": 12,
+        "fixShort": "3D",
+        "titleText": "GPS 12 3D"
+      },
+      "movement": {
+        "horizontalSpeedMS": 1.7,
+        "titleText": "Moving 1.7"
+      }
+    }
+  },
+  "functions": {
+    "applyTelemetryMutation": "mutates data.telemetry and refreshes collections",
+    "applyLifecycleStatus": "sets lifecycle and refreshes operational view",
+    "applyError": "records latest vehicle-level error"
+  }
+}

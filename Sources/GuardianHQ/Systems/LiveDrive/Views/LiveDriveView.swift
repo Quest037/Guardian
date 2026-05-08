@@ -786,7 +786,7 @@ struct LiveDriveView: View {
             guard let assignment = run.assignments.first(where: {
                 resolvedFleetStreamVehicleID(assignment: $0, fleetLink: fleetLink, sitl: sitl) == selectedVehicleID
             }) else { continue }
-            let roleFromPlan = missionControlStore.paladinSessionsByRunID[run.id]?.plan.roleTracks
+            let roleFromPlan = run.compiledPlan?.roleTracks
                 .first(where: { $0.assignmentID == assignment.id })?
                 .pathDisplayName
             return (assignment.slotName, roleFromPlan)
@@ -860,11 +860,10 @@ struct LiveDriveView: View {
     private var logText: String {
         guard let vehicleID = selectedVehicleID else { return "No vehicle selected." }
         if vehicleIsInLiveMission {
-            let sessions = missionControlStore.runs
+            let runs = missionControlStore.runs
                 .filter { $0.status == .running || $0.status == .paused }
-                .compactMap { missionControlStore.paladinSessionsByRunID[$0.id] }
-            let lines = sessions.flatMap { session in
-                session.events.map { $0.plainTextLine() }
+            let lines = runs.flatMap { run in
+                run.events.map { $0.plainTextLine() }
             }
             return lines.isEmpty ? "No Paladin lines yet." : lines.joined(separator: "\n")
         }

@@ -43,10 +43,11 @@ struct RootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.backgroundBase)
         .onAppear {
+            PaladinEngine.shared.missionControlDomainBridge().connect(to: missionControlStore)
             fleetLinkService.applyLogRetentionProfile(generalSettingsStore.logRetentionProfile)
             fleetLinkService.onAutopilotMissionCycleFinished = { vehicleID in
                 Task { @MainActor in
-                    missionControlStore.handleAutopilotMissionCycleFinished(
+                    missionControlStore.ingestAutopilotMissionCycleFinished(
                         vehicleID: vehicleID,
                         fleetLink: fleetLinkService,
                         sitl: sitlService,
@@ -56,7 +57,7 @@ struct RootView: View {
             }
             fleetLinkService.onMirrorFleetLineToPaladin = { vehicleID, line in
                 Task { @MainActor in
-                    missionControlStore.ingestFleetMirrorLineForPaladin(
+                    missionControlStore.ingestFleetMirrorLine(
                         vehicleID: vehicleID,
                         line: line,
                         fleetLink: fleetLinkService,

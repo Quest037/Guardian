@@ -2,17 +2,17 @@ import Foundation
 
 /// Payload discriminator for Paladin notifications in `userInfo["guardian.kind"]`.
 enum PaladinUserNotificationKind: String, Sendable {
-    case planCompiled = "paladin.plan_compiled"
+    case planCompiled = "missionControl.plan_compiled"
     case executionStarted = "paladin.execution_started"
     case runCompleted = "paladin.run_completed"
 }
 
 /// Paladin-specific notification helpers plugged into the global app notification service.
 extension UserNotificationService {
-    func notifyPaladinPlanCompiled(runID: UUID, missionName: String) {
+    func notifyMissionControlPlanCompiled(runID: UUID, missionName: String) {
         deliver(
             kind: PaladinUserNotificationKind.planCompiled.rawValue,
-            title: "Paladin",
+            title: "Mission Control",
             subtitle: missionName,
             body: "Mission plan compiled and ready.",
             runID: runID

@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Modal arm preflight before Mission Control enters **running**; on full success runs `onSuccess` and dismisses.
 struct MissionRunStartPreflightSheet: View {
-    let run: MissionRun
+    let run: MissionRunEnvironment
     let fleetLink: FleetLinkService
     let sitl: SitlService
     let controlStore: MissionControlStore

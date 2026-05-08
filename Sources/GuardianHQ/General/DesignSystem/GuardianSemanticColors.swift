@@ -22,7 +22,7 @@ enum GuardianSemanticColors {
     static let neutralBadgeForeground = Color.gray.opacity(0.95)
 
     /// Paladin session phase badge: pre-execution states use warning; live execution success; completed info; failed danger.
-    static func paladinPhaseBadgeStyle(for phase: PaladinSessionPhase) -> (background: Color, foreground: Color) {
+    static func paladinPhaseBadgeStyle(for phase: MissionRunSessionPhase) -> (background: Color, foreground: Color) {
         switch phase {
         case .draft, .compiled, .staging:
             return (warningBackground, warningForeground)

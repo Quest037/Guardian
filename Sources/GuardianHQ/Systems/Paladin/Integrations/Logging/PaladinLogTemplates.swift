@@ -3,7 +3,7 @@ import Foundation
 
 // MARK: - Stable template ids (future i18n / string tables)
 
-/// Namespace of stable keys for Paladin log lines. `PaladinEvent.message` remains the default English;
+/// Namespace of stable keys for Paladin log lines. `MissionRunEvent.message` remains the default English;
 /// when a string table maps `templateKey` → pattern, `PaladinLogTemplateRegistry` formats the displayed line.
 enum PaladinLogTemplateKey {
     // Fleet mirror (from `FleetLinkService` → Paladin)
@@ -149,7 +149,7 @@ final class PaladinLogTemplateRegistry: ObservableObject {
         templates = [:]
     }
 
-    func resolveDisplayBody(for event: PaladinEvent) -> String {
+    func resolveDisplayBody(for event: MissionRunEvent) -> String {
         guard let key = event.templateKey,
               let pattern = templates[key],
               !pattern.isEmpty
@@ -165,5 +165,29 @@ final class PaladinLogTemplateRegistry: ObservableObject {
             result = result.replacingOccurrences(of: "{{\(k)}}", with: v)
         }
         return result
+    }
+}
+
+extension MissionRunEvent {
+    /// Plain line for copy / print (no colours). Uses `PaladinLogTemplateRegistry`
+    /// when a `templateKey` pattern is registered.
+    @MainActor
+    func plainTextLine(templateRegistry: PaladinLogTemplateRegistry = .shared) -> String {
+        let body = templateRegistry.resolveDisplayBody(for: self)
+        let pathPart = pathLabel.map { "[\($0)]" } ?? ""
+        let speakerPart: String
+        switch speaker {
+        case .missionControl: speakerPart = "[MissionControl]"
+        case .paladin: speakerPart = "[Paladin]"
+        case .vehicleSlot(let slot): speakerPart = "[\(slot)]"
+        }
+        let prefix = pathPart.isEmpty ? speakerPart : "\(pathPart)\(speakerPart)"
+        let sevSuffix: String
+        switch level {
+        case .info: sevSuffix = ""
+        case .warning: sevSuffix = " · warn"
+        case .error: sevSuffix = " · error"
+        }
+        return "\(prefix) \(body)\(sevSuffix)"
     }
 }

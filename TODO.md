@@ -28,6 +28,11 @@
 - Make clicking non-input UI areas unfocus the currently focused input field (desktop blur-on-background-click behavior).
 - **Turn project into real .app:** this allows us to access lots of systems and permissions that our current swift build cannot.
 - **UserNotifications:** hook into MacOS user notifications system so that MC-R can keep user updated if app is running in background.
+- **Internationalization (i18n):** expand localization coverage beyond Paladin log templates to full UI copy, formatting rules, and locale-aware defaults.
+
+## Utilities System
+
+- **Global Utilities migration:** continue migrating reusable pure helper/derivation functions from MissionControl, LiveDrive, Missions, Settings, and Fleet into the top-level `Utilities.*` namespace (e.g. `Utilities.mission.path.waypoint.*`, `Utilities.fleet.vehicle.*`) so shared logic has one canonical implementation.
 
 ## Dashboard System
 
@@ -46,14 +51,17 @@ The Live Drive system allows a user to manually take control of a connected vehi
 - **LiveDrive takeover of live mission vehicle:** This has been coded, it needs testing properly when Paladin is capable of handing off vehicle to user.
 - **LiveDrive map expansion:** Integrate CesiumJS system to offer 3D map version as well as Leaflet 2D map.
 - **LiveDrive UGV/USV/UUV RTL:** At the moment it just drives back in straight line, probably not likely to be able to achieve this. Needs consideration.
+- **Testing:** Test the LiveDrive system with all variants of both stacks to see how they work out.
 
 ## Missions
+
 Missions are the templates created by users that involve telling one or more vehicles what, when where and how to do what it needs to do.
 
 - **Mission Path Rosters:** Figure out how to design rosters so that you can do tag-teams, back-ups, leader+followers etc. Also, look at fixed values for roster card "role", so that Paladin knows what to do with a vehicle by default. 
 - **Custom Popup Mission Templates:** E.g. quick circle radius patrol with x vehicles & tag-team.
 
 ## Mission Control
+
 Mission Control is the system where mission templates are run by the Paladin system. Paladin in Guardian's mission brain, that reads mission templates and puts them into practive.
 
 Mission Control includes Setup, Running, Completed as the main three states. It will also have a Simulation mode, where Paladin runs a mission template in a headless environment and reports back on its feasibility.
@@ -67,16 +75,18 @@ Mission Control: Environment is the world environment that mission control uses 
 - MC-Setup is the authoring surface; the policy/fixture model it edits lives under **MC-E** below. (Slot↔vehicle binding, scheduling, and `simStartOverrideCoord` UX continue to live on the MC-Setup screens.)
 
 ### Mission Control: Running
+- **Command accountability:** `MissionRunIssuedCommand` carries `issuer` + `issuerKey`; operator aborts use `MissionRunCommandIssuerKey.localOperator` until HQ has a stable operator identity (account/session), then re-stamp `issuerKey` from that id. Same for LiveDrive / other surfaces issuing fleet commands.
 - Integrate CesiumJS system to offer 3D map version as well as Leaflet 2D map.
+- **MRE generic execution/projections:** remove single-drone / single-path assumptions across `MissionRunEnvironment` subsystems (especially planner/projections/executor) so runtime and UI fully support multi-path and multi-vehicle missions.
 - **MC-R Paladin reserve + handover orchestration:** (depends on **MC-E** rollout slices 3–4 for handover thresholds + role eligibility — this ticket is the *behaviour*; MC-E is the *config*.)
   - send reserve vehicles to take over when an active vehicle fails (when roster defines reserves),
   - perform path roster switchovers for low-battery tag-team operations when partner is ready,
   - analyze ahead of time (and continuously at runtime) to prepare handovers before thresholds are reached,
   - improve fault handling lifecycle: retry policy, give-up criteria, contingency triggers, and explicit operator intervention prompts.
+  - If mission is stopped early by operator determine if user should wait for vehicles to handle that or not. (Return to launch y/n etc.) Offer user choice. If it's a sim-only mission then allow them not to, otherwise if live that running screen should continue to be there until all drones have been accounted for. (User should see visuals about shutting the mission down).
 
 ### Mission Control: Completed
-
-- **Internationalization (i18n):** expand localization coverage beyond Paladin log templates to full UI copy, formatting rules, and locale-aware defaults.
+- **Exporting:** export the mission report for outside app review. (Compact, Default, Full)
 
 
 ### Mission Control: Environment (MC-E)
@@ -140,6 +150,7 @@ Paladin is Guardian's mission running brain. It takes a mission template into mi
 - **Paladin: staging override execution:** during **Start Run**, apply each setup `simStartOverrideCoord` directly to the assigned SIM vehicle before path execution begins (authoritative pre-stage reposition step), emit Paladin events for success/failure per slot, and surface failures as setup blockers with actionable operator messaging. (Once **MC-E** lands, this generalises to "apply each slot's resolved `SimFixtureEnvironment` — pose, battery %, drain rate, scheduled failures — as one cohesive staging step." Keep this ticket as the active path until MC-E rollout slice 2 supersedes it.)
 - **Paladin log copy / i18n:** every `PaladinEvent` carries a stable **`templateKey`** (see `PaladinLogTemplateKey` in `PaladinLogTemplates.swift`) plus **`templateParams`**; **`message`** stays the default English. To ship **our own wording** (or another language) without changing call sites, register format strings on **`PaladinLogTemplateRegistry.shared`** (e.g. `setTemplate(_:pattern:)` or `setTemplates`) using **`{{param}}`** placeholders that match the keys in `templateParams` for that event. Unregistered keys fall back to **`message`**. Next steps when we prioritize this: load patterns from **UserDefaults / JSON in the app bundle / `.lproj` string tables** keyed by `templateKey`, wire **locale** into the resolver, and optionally add a **Settings** UI to edit overrides. The live Paladin log and **`plainTextLine()`** export both resolve through the same registry.
 - **Paladin Fleet readiness autopopulation:** wire `PaladinFleetPreflightBridge` into real preflight result callsites in `MissionControlStore` and `VehiclesView` flow so `PaladinFleetDomain` readiness updates automatically from probe outcomes.
+- **Paladin MissionRunAssistant on-demand vehicle telemetry queries (MAVSDK/MAVLink):** add a Paladin-specific active-query path so `MissionRunAssistant` can request immediate values (e.g. battery now, link health now, GPS/attitude now) rather than waiting for passive subscription refresh. Route as `MissionRunAssistant -> MissionRunEnvironment command interface -> FleetLinkService -> MAVSDK/MAVLink` and back as a typed response into Paladin decision logic. `FleetLinkService` needs a stack-aware request strategy per `FleetAutopilotStack` (PX4 vs ArduPilot vs unknown): prefer plugin/cache read when freshness SLA is satisfied, otherwise issue explicit MAVLink request(s) (`MAV_CMD_REQUEST_MESSAGE` / interval controls where appropriate), normalize to one Guardian response model, and include timeout/retry/error reason semantics so MissionRun decisions can degrade safely.
 
 ## Controllers System
 - **Game controller / joystick integration:** add support for wired/wireless **game controllers** (Xbox, PS4/PS5, MFi, Stadia, Joy-Cons) and **HID joysticks / HOTAS** (Logitech Extreme 3D, T.16000M, Thrustmaster, etc.) as a first-class input alongside the existing `KeyboardEventMonitor` in `LiveDriveView`. Macos-only today; both transports (USB + Bluetooth) covered by system frameworks with no third-party deps.

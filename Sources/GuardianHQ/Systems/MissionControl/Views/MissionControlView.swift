@@ -121,7 +121,7 @@ struct MissionControlView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var selectedRun: MissionRun? {
+    private var selectedRun: MissionRunEnvironment? {
         guard let selectedRunID else { return nil }
         return controlStore.runs.first(where: { $0.id == selectedRunID })
     }
@@ -215,7 +215,7 @@ private struct MissionRunStatusBadge: View {
 }
 
 private struct MissionRunCard: View {
-    let run: MissionRun
+    let run: MissionRunEnvironment
     let isSelected: Bool
 
     var body: some View {
@@ -327,7 +327,7 @@ private struct MissionRunCard: View {
     }
 
     private var progressLabel: String? {
-        guard let cycles = run.reportAutopilotCyclesCompleted else { return nil }
+        guard let cycles = run.reportCyclesCompleted else { return nil }
         if run.loopRepeatCount > 0 {
             return "Cycles \(cycles)/\(run.loopRepeatCount)"
         }
@@ -335,7 +335,7 @@ private struct MissionRunCard: View {
     }
 
     private var progressFraction: CGFloat {
-        guard let cycles = run.reportAutopilotCyclesCompleted else { return 0 }
+        guard let cycles = run.reportCyclesCompleted else { return 0 }
         guard run.loopRepeatCount > 0 else { return min(1, CGFloat(cycles) / 8) }
         return min(1, CGFloat(cycles) / CGFloat(max(1, run.loopRepeatCount)))
     }
@@ -645,15 +645,15 @@ private struct SetupStagingMapSignature: Equatable {
 }
 
 private struct MissionRunDetailView: View {
-    @State var run: MissionRun
+    @State var run: MissionRunEnvironment
     @ObservedObject var missionStore: MissionStore
     @ObservedObject var fleetLink: FleetLinkService
     @ObservedObject var sitl: SitlService
     @ObservedObject var controlStore: MissionControlStore
     @ObservedObject var generalSettings: GeneralSettingsStore
     let onBack: () -> Void
-    let onUpdate: (MissionRun) -> Void
-    let onStart: (MissionRun) -> Void
+    let onUpdate: (MissionRunEnvironment) -> Void
+    let onStart: (MissionRunEnvironment) -> Void
     let onDelete: (UUID) -> Void
 
     @State private var confirmDeleteRun = false
@@ -673,8 +673,8 @@ private struct MissionRunDetailView: View {
     @State private var rosterInfoSitlSessionUUID: String?
     /// Deferred one-off schedule: minutes to add when using **Go** on the running countdown banner.
     @State private var scheduledStartPostponeMinutes: Int = 5
-    @State private var confirmSkipScheduledPaladinStart = false
-    @State private var confirmSkipScheduledPaladinMessage = ""
+    @State private var confirmSkipScheduledMissionStart = false
+    @State private var confirmSkipScheduledMissionMessage = ""
     /// Initial path mission start deferral: minutes to add when using **Go** in the Progress card.
     @State private var pathStartDeferralPostponeMinutes: Int = 5
     @State private var confirmSkipPathStartDeferral = false
@@ -691,7 +691,7 @@ private struct MissionRunDetailView: View {
     @State private var runControlsSidebarVisible = false
 
     init(
-        run: MissionRun,
+        run: MissionRunEnvironment,
         missionStore: MissionStore,
         fleetLink: FleetLinkService,
         sitl: SitlService,
@@ -699,8 +699,8 @@ private struct MissionRunDetailView: View {
         generalSettings: GeneralSettingsStore,
         defaultLiveMapStyle: MapTileStyle,
         onBack: @escaping () -> Void,
-        onUpdate: @escaping (MissionRun) -> Void,
-        onStart: @escaping (MissionRun) -> Void,
+        onUpdate: @escaping (MissionRunEnvironment) -> Void,
+        onStart: @escaping (MissionRunEnvironment) -> Void,
         onDelete: @escaping (UUID) -> Void
     ) {
         _run = State(initialValue: run)
@@ -746,9 +746,7 @@ private struct MissionRunDetailView: View {
         syncRunFromStore()
         guard run.status == .running || run.status == .paused else { return }
         let mission = missionStore.missions.first { $0.id == run.missionId }
-        controlStore.ingestVehicleTelemetryNarrative(
-            runID: run.id,
-            run: run,
+        run.systems.logging.ingestVehicleTelemetryNarrative(
             mission: mission,
             fleetLink: fleetLink,
             sitl: sitl
@@ -756,12 +754,21 @@ private struct MissionRunDetailView: View {
     }
 
     private func applyStopImmediate() {
-        controlStore.stopRunImmediate(id: run.id, fleetLink: fleetLink, sitl: sitl)
+        run.attachServices(fleetLink: fleetLink, sitl: sitl)
+        run.systems.scheduling.abortNow()
+        onUpdate(run)
         syncRunFromStore()
     }
 
     private func applyStopAfterCycle() {
-        controlStore.stopRunAfterCurrentCycle(id: run.id)
+        run.systems.scheduling.abortAfterCycle()
+        onUpdate(run)
+        syncRunFromStore()
+    }
+
+    private func applyRevokeAbortAfterCycle() {
+        run.systems.scheduling.revokeAbortAfterCycle()
+        onUpdate(run)
         syncRunFromStore()
     }
 
@@ -822,7 +829,7 @@ private struct MissionRunDetailView: View {
 
     private var liveMavlinkPathContext: (path: RoutePath, missionItemCount: Int)? {
         guard let mission = resolvedMission else { return nil }
-        return PaladinMavlinkMissionBuilder.mavlinkMissionProgressContext(run: run, mission: mission)
+        return run.systems.projections.mavlinkMissionProgressContext(mission: mission)
     }
 
     private var liveMavlinkVehicleID: String? {
@@ -957,35 +964,29 @@ private struct MissionRunDetailView: View {
                     if run.pendingGracefulCycleStop, run.status == .running || run.status == .paused {
                         gracefulStopPendingBanner
                     }
-                    if run.status == .running, controlStore.oneOffDeferredExecution(for: run.id) != nil {
+                    if run.status == .running, run.oneOffDeferredExecution != nil {
                         TimelineView(.periodic(from: .now, by: 1)) { context in
-                            if let deferred = controlStore.oneOffDeferredExecution(for: run.id) {
+                            if let deferred = run.oneOffDeferredExecution {
                                 oneOffDeferredExecutionBanner(
                                     deferred: deferred,
                                     now: context.date,
                                     postponeMinutes: $scheduledStartPostponeMinutes,
                                     onPostpone: {
-                                        controlStore.postponeDeferredOneOffExecutionByMinutes(
-                                            runID: run.id,
-                                            additionalMinutes: scheduledStartPostponeMinutes,
-                                            fleetLink: fleetLink,
-                                            sitl: sitl,
-                                            missionProvider: { [missionStore] in
-                                                missionStore.missions.first { $0.id == run.missionId }
-                                            }
-                                        )
+                                        run.systems.scheduling.postponeDeferredOneOffExecutionByMinutes(scheduledStartPostponeMinutes) {
+                                            onStart(run)
+                                        }
                                         syncRunFromStore()
                                         onUpdate(run)
                                     },
                                     onRequestStartNow: {
-                                        if let def = controlStore.oneOffDeferredExecution(for: run.id) {
+                                        if let def = run.oneOffDeferredExecution {
                                             let rough = humanizedRoughTimeUntilScheduledStart(
                                                 executeAt: def.executeAt,
                                                 from: Date()
                                             )
-                                            confirmSkipScheduledPaladinMessage =
+                                            confirmSkipScheduledMissionMessage =
                                                 "This mission is scheduled to start in \(rough). Are you sure you want to start it now?"
-                                            confirmSkipScheduledPaladinStart = true
+                                            confirmSkipScheduledMissionStart = true
                                         }
                                     }
                                 )
@@ -994,25 +995,19 @@ private struct MissionRunDetailView: View {
                     }
                 }
                 .confirmationDialog(
-                    "Start Paladin now?",
-                    isPresented: $confirmSkipScheduledPaladinStart,
+                    "Start mission now?",
+                    isPresented: $confirmSkipScheduledMissionStart,
                     titleVisibility: .visible
                 ) {
                     Button("Start now") {
-                        controlStore.beginDeferredOneOffPaladinImmediately(
-                            runID: run.id,
-                            fleetLink: fleetLink,
-                            sitl: sitl,
-                            missionProvider: { [missionStore] in
-                                missionStore.missions.first { $0.id == run.missionId }
-                            }
-                        )
+                        run.systems.scheduling.beginDeferredOneOffImmediately()
+                        onStart(run)
                         syncRunFromStore()
                         onUpdate(run)
                     }
                     Button("Cancel", role: .cancel) {}
                 } message: {
-                    Text(confirmSkipScheduledPaladinMessage)
+                    Text(confirmSkipScheduledMissionMessage)
                 }
                 .confirmationDialog(
                     "Start next loop now?",
@@ -1021,12 +1016,9 @@ private struct MissionRunDetailView: View {
                 ) {
                     Button("Start now") {
                         if let pathID = confirmSkipPathLoopIntermissionPathID {
-                            controlStore.skipMissionCycleIntermissionForPath(
-                                runID: run.id,
+                            run.systems.scheduling.skipMissionCycleIntermissionForPath(
                                 pathID: pathID,
-                                fleetLink: fleetLink,
-                                sitl: sitl,
-                                missionsProvider: { [missionStore] in missionStore.missions }
+                                onRestartNow: { onStart(run) }
                             )
                         }
                         confirmSkipPathLoopIntermissionPathID = nil
@@ -1046,12 +1038,9 @@ private struct MissionRunDetailView: View {
                 ) {
                     Button("Start now") {
                         if let pathID = confirmSkipPathStartDeferralPathID {
-                            controlStore.skipMissionPathStartDeferralForPath(
-                                runID: run.id,
+                            run.systems.scheduling.skipMissionPathStartDeferralForPath(
                                 pathID: pathID,
-                                fleetLink: fleetLink,
-                                sitl: sitl,
-                                missionsProvider: { [missionStore] in missionStore.missions }
+                                onStartNow: { onStart(run) }
                             )
                         }
                         confirmSkipPathStartDeferralPathID = nil
@@ -1298,7 +1287,7 @@ private struct MissionRunDetailView: View {
                 onSuccess: {
                     if let mission = resolvedMission {
                         let fleet = buildMissionPickableVehicles(fleetLink: fleetLink, sitl: sitl)
-                        controlStore.compilePaladinSession(
+                        controlStore.compileMissionControlPlan(
                             run: run,
                             mission: mission,
                             fleetVehicles: fleet
@@ -1307,19 +1296,13 @@ private struct MissionRunDetailView: View {
                     run.status = .running
                     let deferOneOff: Bool = {
                         guard let t = run.oneOffStartAt else { return false }
-                        return t.timeIntervalSince(Date()) > MissionRun.oneOffScheduleTimeTolerance
+                        return t.timeIntervalSince(Date()) > MissionRunEnvironment.oneOffScheduleTimeTolerance
                     }()
                     if deferOneOff, let executeAt = run.oneOffStartAt {
                         controlStore.updateRun(run)
-                        controlStore.scheduleDeferredOneOffPaladinExecution(
-                            runID: run.id,
-                            executeAt: executeAt,
-                            fleetLink: fleetLink,
-                            sitl: sitl,
-                            missionProvider: { [missionStore] in
-                                missionStore.missions.first { $0.id == run.missionId }
-                            }
-                        )
+                        run.systems.scheduling.scheduleDeferredOneOffExecution(executeAt: executeAt) {
+                            onStart(run)
+                        }
                     } else {
                         onStart(run)
                     }
@@ -1510,6 +1493,13 @@ private struct MissionRunDetailView: View {
             .foregroundStyle(GuardianDynamicColors.textSecondary)
             .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
+            Button("Keep running") {
+                applyRevokeAbortAfterCycle()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+            .controlSize(.small)
+            .help("Cancel the pending stop-after-cycle and clear the queued abort batch.")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -1550,7 +1540,7 @@ private struct MissionRunDetailView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.cyan.opacity(0.92))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Scheduled Paladin start")
+                    Text("Scheduled mission start")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.95))
                     Text(
@@ -1679,7 +1669,7 @@ private struct MissionRunDetailView: View {
                 }
                 if let mission = resolvedMission {
                     if run.status == .running,
-                       controlStore.hasMissionCycleIntermission(for: run.id) || controlStore.hasMissionPathStartDeferral(for: run.id)
+                       !run.cycleIntermissionByPathID.isEmpty || !run.pathStartDeferralByPathID.isEmpty
                     {
                         TimelineView(.periodic(from: .now, by: 0.25)) { context in
                             missionLivePathProgressList(mission: mission, now: context.date)
@@ -1713,11 +1703,11 @@ private struct MissionRunDetailView: View {
                 .foregroundStyle(GuardianDynamicColors.textTertiary)
         case .loop, .continuous:
             if run.loopRepeatCount > 0 {
-                Text("Runs \(controlStore.completedAutopilotCycles(for: run.id))/\(run.loopRepeatCount)")
+                Text("Runs \(run.cyclesCompleted)/\(run.loopRepeatCount)")
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundStyle(GuardianDynamicColors.textSecondary)
             } else {
-                Text("Runs \(controlStore.completedAutopilotCycles(for: run.id))")
+                Text("Runs \(run.cyclesCompleted)")
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundStyle(GuardianDynamicColors.textSecondary)
             }
@@ -1735,11 +1725,11 @@ private struct MissionRunDetailView: View {
         let mavlinkPathId = liveMavlinkPathContext?.path.id
         let hub = liveMavlinkHub
         let tint = MissionPathMapColor.swiftUIColor(forPathIndex: pathIndex)
-        let pathStartDef = controlStore.missionPathStartDeferral(for: run.id, pathID: path.id)
+        let pathStartDef = run.pathStartDeferralByPathID[path.id]
         let inPathStartDeferral = path.enabled
             && run.status == .running
             && (pathStartDef.map { now < $0.startAt } ?? false)
-        let inter = controlStore.missionCycleIntermission(for: run.id, pathID: path.id)
+        let inter = run.cycleIntermissionByPathID[path.id]
         let inIntermission = path.enabled
             && run.repeatsAutopilotMissionCycles
             && run.status == .running
@@ -1820,13 +1810,10 @@ private struct MissionRunDetailView: View {
                     .frame(minWidth: 72, alignment: .leading)
                     .controlSize(.small)
                     Button("Go") {
-                        controlStore.extendMissionPathStartDeferralForPathByMinutes(
-                            runID: run.id,
+                        run.systems.scheduling.extendMissionPathStartDeferralForPathByMinutes(
                             pathID: path.id,
                             additionalMinutes: pathStartDeferralPostponeMinutes,
-                            fleetLink: fleetLink,
-                            sitl: sitl,
-                            missionsProvider: { [missionStore] in missionStore.missions }
+                            onStartNow: { onStart(run) }
                         )
                         syncRunFromStore()
                         onUpdate(run)
@@ -1866,13 +1853,10 @@ private struct MissionRunDetailView: View {
                     .frame(minWidth: 72, alignment: .leading)
                     .controlSize(.small)
                     Button("Go") {
-                        controlStore.extendMissionCycleIntermissionForPathByMinutes(
-                            runID: run.id,
+                        run.systems.scheduling.extendMissionCycleIntermissionForPathByMinutes(
                             pathID: path.id,
                             additionalMinutes: pathLoopIntermissionPostponeMinutes,
-                            fleetLink: fleetLink,
-                            sitl: sitl,
-                            missionsProvider: { [missionStore] in missionStore.missions }
+                            onRestartNow: { onStart(run) }
                         )
                         syncRunFromStore()
                         onUpdate(run)
@@ -2098,17 +2082,17 @@ private struct MissionRunDetailView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(GuardianDynamicColors.textPrimary)
 
-                if let session = controlStore.paladinSessionsByRunID[run.id] {
-                    let phaseStyle = GuardianSemanticColors.paladinPhaseBadgeStyle(for: session.phase)
+                if let compiledPlan = run.compiledPlan {
+                    let phaseStyle = GuardianSemanticColors.paladinPhaseBadgeStyle(for: run.sessionPhase)
                     HStack(spacing: 6) {
-                        Text(session.phase.rawValue.capitalized)
+                        Text(run.sessionPhase.rawValue.capitalized)
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(phaseStyle.foreground)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 2)
                             .background(phaseStyle.background)
                             .clipShape(Capsule())
-                        Text(paladinCondensedHeaderMetadata(session: session))
+                        Text(paladinCondensedHeaderMetadata(plan: compiledPlan))
                             .font(.system(size: 10, design: .monospaced))
                             .foregroundStyle(GuardianDynamicColors.textTertiary)
                             .lineLimit(1)
@@ -2131,21 +2115,21 @@ private struct MissionRunDetailView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .disabled(controlStore.paladinSessionsByRunID[run.id] == nil)
+                .disabled(run.events.isEmpty)
             }
 
-            if let session = controlStore.paladinSessionsByRunID[run.id] {
+            if !run.events.isEmpty {
                 Divider().opacity(0.18)
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(session.events.suffix(80)) { event in
+                        ForEach(run.events.suffix(80)) { event in
                             paladinLogEventRow(event: event)
                         }
                     }
                 }
             } else {
-                Text("No Paladin session for this run yet.")
+                Text("No mission log entries for this run yet.")
                     .font(.system(size: 11))
                     .foregroundStyle(GuardianDynamicColors.textSecondary)
             }
@@ -2166,18 +2150,21 @@ private struct MissionRunDetailView: View {
         )
     }
 
-    private func paladinCondensedHeaderMetadata(session: PaladinSession) -> String {
-        let p = session.plan
-        return "\(p.pathTopology.rawValue) · \(p.teamTopology.rawValue) · \(p.roleTracks.count) trk"
+    private func paladinCondensedHeaderMetadata(plan: MissionControlPlan) -> String {
+        "\(plan.pathTopology.rawValue) · \(plan.teamTopology.rawValue) · \(plan.roleTracks.count) trk"
     }
 
-    private func paladinCondensedHeaderLine(session: PaladinSession) -> String {
-        "\(session.phase.rawValue) · \(paladinCondensedHeaderMetadata(session: session))"
+    private func paladinCondensedHeaderLine(phase: MissionRunSessionPhase, plan: MissionControlPlan) -> String {
+        "\(phase.rawValue) · \(paladinCondensedHeaderMetadata(plan: plan))"
     }
 
-    private func paladinLiveLogPlainText(session: PaladinSession) -> String {
-        let header = "Paladin — \(paladinCondensedHeaderLine(session: session))"
-        let body = session.events.map { $0.plainTextLine() }
+    private func paladinLiveLogPlainText(
+        events: [MissionRunEvent],
+        phase: MissionRunSessionPhase,
+        plan: MissionControlPlan?
+    ) -> String {
+        let header = plan.map { "Paladin - \(paladinCondensedHeaderLine(phase: phase, plan: $0))" } ?? "Mission log"
+        let body = events.map { $0.plainTextLine() }
         return ([header] + body).joined(separator: "\n")
     }
 
@@ -2193,7 +2180,7 @@ private struct MissionRunDetailView: View {
         return Color(red: r, green: g, blue: b)
     }
 
-    private func paladinLogSeverityBorderColor(_ level: PaladinEventLevel) -> Color {
+    private func paladinLogSeverityBorderColor(_ level: MissionRunEventLevel) -> Color {
         switch level {
         case .info: return Color.white.opacity(0.22)
         case .warning: return Color.orange.opacity(0.9)
@@ -2202,7 +2189,7 @@ private struct MissionRunDetailView: View {
     }
 
     @ViewBuilder
-    private func paladinLogEventRow(event: PaladinEvent) -> some View {
+    private func paladinLogEventRow(event: MissionRunEvent) -> some View {
         let mission = resolvedMission
         let pathTint: Color? = {
             guard let pid = event.pathID, let mission else { return nil }
@@ -2214,6 +2201,8 @@ private struct MissionRunDetailView: View {
         let pathTextColor = pathTint ?? Color.gray.opacity(0.85)
         let speakerColor: Color = {
             switch event.speaker {
+            case .missionControl:
+                return GuardianDynamicColors.textPrimary
             case .paladin:
                 return GuardianDynamicColors.textPrimary
             case .vehicleSlot(let slot):
@@ -2241,6 +2230,9 @@ private struct MissionRunDetailView: View {
                         .foregroundStyle(pathTextColor)
                 }
                 switch event.speaker {
+                case .missionControl:
+                    Text("[MissionControl]")
+                        .foregroundStyle(speakerColor)
                 case .paladin:
                     Text("[Paladin]")
                         .foregroundStyle(speakerColor)
@@ -2259,10 +2251,13 @@ private struct MissionRunDetailView: View {
     }
 
     private func copyPaladinLiveLogToPasteboard() {
-        guard let session = controlStore.paladinSessionsByRunID[run.id] else { return }
+        guard !run.events.isEmpty else { return }
         let pb = NSPasteboard.general
         pb.clearContents()
-        pb.setString(paladinLiveLogPlainText(session: session), forType: .string)
+        pb.setString(
+            paladinLiveLogPlainText(events: run.events, phase: run.sessionPhase, plan: run.compiledPlan),
+            forType: .string
+        )
     }
 
     private var missionCompletedReportCards: some View {
@@ -2331,7 +2326,7 @@ private struct MissionRunDetailView: View {
         case .operatorStoppedAfterCycle:
             return "The active mission cycle was allowed to finish, then the run ended."
         case .oneOffAutopilotFinished:
-            return "The scheduled one-off mission cycle completed on the autopilot."
+            return "The scheduled one-off mission cycle completed."
         case .loopCompletedAllRepeats:
             return "All configured loop iterations completed successfully."
         case .none:
@@ -2366,9 +2361,9 @@ private struct MissionRunDetailView: View {
             if let plannedStart {
                 labeledReportRow("Planned start", plannedStart)
             }
-            let cycles = run.reportAutopilotCyclesCompleted ?? 0
+            let cycles = run.reportCyclesCompleted ?? 0
             labeledReportRow(
-                "Autopilot mission cycles completed",
+                "Mission cycles completed",
                 "\(cycles)"
             )
         }
@@ -2426,12 +2421,12 @@ private struct MissionRunDetailView: View {
         let warns = completedPaladinWarningCount
         let accent: Color = errs > 0 ? Color.red.opacity(0.8) : (warns > 0 ? Color.orange.opacity(0.8) : Color.green.opacity(0.65))
         return completedReportCardChrome(title: "Paladin log health", accent: accent) {
-            if controlStore.paladinSessionsByRunID[run.id] == nil {
-                Text("No Paladin session is stored for this run.")
+            if run.events.isEmpty {
+                Text("No mission log entries are stored for this run.")
                     .font(.system(size: 13))
                     .foregroundStyle(GuardianDynamicColors.textSecondary)
             } else {
-                let events = controlStore.paladinSessionsByRunID[run.id]?.events.count ?? 0
+                let events = run.events.count
                 labeledReportRow("Events recorded", "\(events)")
                 labeledReportRow("Warnings", "\(warns)")
                 labeledReportRow("Errors", "\(errs)")
@@ -2446,16 +2441,15 @@ private struct MissionRunDetailView: View {
     }
 
     private var completedPaladinErrorCount: Int {
-        controlStore.paladinSessionsByRunID[run.id]?.events.filter { $0.level == .error }.count ?? 0
+        run.events.filter { $0.level == .error }.count
     }
 
     private var completedPaladinWarningCount: Int {
-        controlStore.paladinSessionsByRunID[run.id]?.events.filter { $0.level == .warning }.count ?? 0
+        run.events.filter { $0.level == .warning }.count
     }
 
     private var completedPaladinLogExportSection: some View {
-        let session = controlStore.paladinSessionsByRunID[run.id]
-        let text = session.map { paladinLiveLogPlainText(session: $0) } ?? ""
+        let text = paladinLiveLogPlainText(events: run.events, phase: run.sessionPhase, plan: run.compiledPlan)
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("Paladin log")
@@ -2467,25 +2461,25 @@ private struct MissionRunDetailView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .disabled(session == nil || text.isEmpty)
+                .disabled(text.isEmpty)
 
                 Button("Save…") {
                     saveCompletedPaladinLog()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .disabled(session == nil || text.isEmpty)
+                .disabled(text.isEmpty)
 
                 Button("Print…") {
                     printCompletedPaladinLog()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .disabled(session == nil || text.isEmpty)
+                .disabled(text.isEmpty)
             }
 
-            if session == nil {
-                Text("No Paladin session for this run.")
+            if text.isEmpty {
+                Text("No mission log entries for this run.")
                     .font(.system(size: 13))
                     .foregroundStyle(GuardianDynamicColors.textSecondary)
             } else {
@@ -2550,15 +2544,18 @@ private struct MissionRunDetailView: View {
     }
 
     private func copyCompletedPaladinLog() {
-        guard let session = controlStore.paladinSessionsByRunID[run.id] else { return }
+        guard !run.events.isEmpty else { return }
         let pb = NSPasteboard.general
         pb.clearContents()
-        pb.setString(paladinLiveLogPlainText(session: session), forType: .string)
+        pb.setString(
+            paladinLiveLogPlainText(events: run.events, phase: run.sessionPhase, plan: run.compiledPlan),
+            forType: .string
+        )
     }
 
     private func saveCompletedPaladinLog() {
-        guard let session = controlStore.paladinSessionsByRunID[run.id] else { return }
-        let text = paladinLiveLogPlainText(session: session)
+        guard !run.events.isEmpty else { return }
+        let text = paladinLiveLogPlainText(events: run.events, phase: run.sessionPhase, plan: run.compiledPlan)
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.plainText]
         panel.canCreateDirectories = true
@@ -2578,8 +2575,8 @@ private struct MissionRunDetailView: View {
     }
 
     private func printCompletedPaladinLog() {
-        guard let session = controlStore.paladinSessionsByRunID[run.id] else { return }
-        let text = paladinLiveLogPlainText(session: session)
+        guard !run.events.isEmpty else { return }
+        let text = paladinLiveLogPlainText(events: run.events, phase: run.sessionPhase, plan: run.compiledPlan)
         let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: 680, height: 2000))
         tv.string = text
         tv.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)

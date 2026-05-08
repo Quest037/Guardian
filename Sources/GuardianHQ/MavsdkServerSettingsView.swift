@@ -5,12 +5,12 @@ import SwiftUI
 struct MavsdkServerSettingsView: View {
     @ObservedObject var fleetLink: FleetLinkService
     @EnvironmentObject private var toastCenter: ToastCenter
+    @Environment(\.colorScheme) private var colorScheme
 
     @State private var draft: FleetLinkConfiguration = .defaults
     @State private var extraURLsText = ""
 
-    private let bgPanel = Color(red: 0.12, green: 0.12, blue: 0.13)
-    private let bgMain = Color(red: 0.07, green: 0.07, blue: 0.08)
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
         ScrollView {
@@ -18,12 +18,12 @@ struct MavsdkServerSettingsView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("MAVSDK Server")
                         .font(.system(size: 22, weight: .bold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(theme.textPrimary)
                     Text(
                         "The link server runs only when Server is on in the top bar. Adjust ports and extra addresses below if your network or simulator needs it, or leave the defaults."
                     )
                     .font(.system(size: 13))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 }
 
@@ -36,7 +36,7 @@ struct MavsdkServerSettingsView: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(bgMain)
+        .background(theme.backgroundBase)
         .onAppear {
             draft = fleetLink.configuration
             extraURLsText = fleetLink.configuration.additionalMavlinkConnectionURLs.joined(separator: "\n")
@@ -57,10 +57,10 @@ struct MavsdkServerSettingsView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(fleetLink.isRunning ? "mavsdk_server running" : "mavsdk_server stopped")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.textPrimary)
                 Text("Use the Server switch in the top bar to start or stop.")
                     .font(.system(size: 11))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
             }
             Spacer()
             Button("Save settings") {
@@ -72,7 +72,7 @@ struct MavsdkServerSettingsView: View {
             .disabled(fleetLink.isRunning)
         }
         .padding(14)
-        .background(bgPanel)
+        .background(theme.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
@@ -80,7 +80,7 @@ struct MavsdkServerSettingsView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Connection")
                 .font(.system(size: 15, weight: .bold))
-                .foregroundStyle(.white)
+                .foregroundStyle(theme.textPrimary)
 
             labeledField(title: "gRPC port") {
                 TextField("50051", value: $draft.grpcPort, format: .number)
@@ -116,7 +116,7 @@ struct MavsdkServerSettingsView: View {
             }
         }
         .padding(16)
-        .background(bgPanel)
+        .background(theme.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
@@ -125,16 +125,16 @@ struct MavsdkServerSettingsView: View {
             HStack {
                 Text("Server log")
                     .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.textPrimary)
                 Spacer()
                 Button("Copy") { copyServerLogToPasteboard() }
                     .buttonStyle(.borderless)
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
                     .disabled(fleetLink.logLines.isEmpty)
                     .help("Copy all log lines to the clipboard")
                 Button("Clear") { fleetLink.clearLog() }
                     .buttonStyle(.borderless)
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
             }
 
             ScrollView {
@@ -142,7 +142,7 @@ struct MavsdkServerSettingsView: View {
                     ForEach(Array(fleetLink.logLines.enumerated()), id: \.offset) { _, line in
                         Text(line)
                             .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.gray)
+                            .foregroundStyle(theme.textSecondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -150,7 +150,7 @@ struct MavsdkServerSettingsView: View {
             .frame(minHeight: 160, maxHeight: 280)
         }
         .padding(16)
-        .background(bgPanel)
+        .background(theme.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
@@ -158,7 +158,7 @@ struct MavsdkServerSettingsView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.gray)
+                .foregroundStyle(theme.textSecondary)
             content()
         }
     }

@@ -1596,6 +1596,7 @@ final class MissionControlStore: ObservableObject {
         case .uploadAndStartMission(let items): return "upload+start mission (\(items.count) item(s))"
         case .returnToLaunch: return "return to launch"
         case .land: return "land"
+        case .idle: return "idle (manual)"
         case .manualControl(let manual): return "manual \(manual.intent.rawValue)"
         }
     }

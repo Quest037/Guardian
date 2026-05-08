@@ -571,7 +571,7 @@ public class Action {
         - yawDeg: Yaw angle (in degrees, frame is NED, 0 is North, positive is clockwise)
      
      */
-    public func gotoLocation(latitudeDeg: Double, longitudeDeg: Double, absoluteAltitudeM: Float, yawDeg: Float) -> Completable {
+    public func gotoLocation(latitudeDeg: Double, longitudeDeg: Double, absoluteAltitudeM: Double, yawDeg: Double) -> Completable {
         return Completable.create { completable in
             var request = Mavsdk_Rpc_Action_GotoLocationRequest()
 
@@ -585,11 +585,11 @@ public class Action {
                 
             
                 
-            request.absoluteAltitudeM = absoluteAltitudeM
+            request.absoluteAltitudeM = Float(absoluteAltitudeM)
                 
             
                 
-            request.yawDeg = yawDeg
+            request.yawDeg = Float(yawDeg)
                 
             
 

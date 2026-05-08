@@ -1,8 +1,5 @@
 import SwiftUI
 
-private let cardBg = Color(red: 0.12, green: 0.12, blue: 0.13)
-private let cardInner = Color(red: 0.10, green: 0.10, blue: 0.11)
-
 /// One cell in the fleet grid (live MAVLink vehicle or local SITL row).
 struct FleetVehicleGridCard: View {
     let autopilotStack: FleetAutopilotStack
@@ -20,6 +17,9 @@ struct FleetVehicleGridCard: View {
     /// When non-`nil`, the Stop button is disabled and this string is used for `.help` (e.g. live Mission Control run).
     let stopSimDisabledReason: String?
     let onDismissSim: (() -> Void)?
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -42,10 +42,6 @@ struct FleetVehicleGridCard: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                if let t = liveTelemetry {
-                    liveTelemetryBlock(t)
-                }
-
                 if isSimulation {
                     simStatusRow
                 } else {
@@ -54,7 +50,7 @@ struct FleetVehicleGridCard: View {
             }
             .padding(12)
         }
-        .background(cardBg)
+        .background(theme.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
@@ -81,48 +77,9 @@ struct FleetVehicleGridCard: View {
                 )
                 Image(systemName: "antenna.radiowaves.left.and.right")
                     .font(.system(size: 36, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.35))
+                    .foregroundStyle(theme.textPrimary.opacity(0.35))
             }
         }
-    }
-
-    @ViewBuilder
-    private func liveTelemetryBlock(_ t: FleetTelemetrySnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 10) {
-                pill("Armed", t.isArmed ? "Yes" : "No", emphasis: t.isArmed)
-                pill("Mode", t.flightMode, emphasis: true)
-            }
-            if let lat = t.latitudeDeg, let lon = t.longitudeDeg {
-                Text(String(format: "%.5f°, %.5f°", lat, lon))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.gray)
-            }
-            if let alt = t.relativeAltM {
-                Text(String(format: "Rel. alt %.1f m", alt))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.gray)
-            }
-            Text("Updated \(t.lastUpdate.formatted(date: .omitted, time: .standard))")
-                .font(.system(size: 10))
-                .foregroundStyle(.gray.opacity(0.85))
-        }
-        .padding(.top, 2)
-    }
-
-    private func pill(_ k: String, _ v: String, emphasis: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(k)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.gray)
-            Text(v)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(emphasis ? .white : .gray)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(cardInner)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     @ViewBuilder
@@ -132,7 +89,7 @@ struct FleetVehicleGridCard: View {
             if let lifecycleStatus {
                 Text(lifecycleStatus.sentence)
                     .font(.system(size: 10))
-                    .foregroundStyle(.gray.opacity(0.9))
+                    .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if onInfo != nil || onTestArm != nil {
@@ -162,7 +119,7 @@ struct FleetVehicleGridCard: View {
             if let lifecycleStatus {
                 Text(lifecycleStatus.sentence)
                     .font(.system(size: 10))
-                    .foregroundStyle(.gray.opacity(0.9))
+                    .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 8) {
@@ -199,7 +156,7 @@ struct FleetVehicleGridCard: View {
     @ViewBuilder
     private var statusBadge: some View {
         if let lifecycleStatus {
-            Text(lifecycleStatus.mediumLabel)
+            Text(lifecycleStatus.compactTwoWordStatus)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(lifecycleStatus.color.uiColor.opacity(0.95))
         } else if simTelemetryIsLive {

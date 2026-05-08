@@ -1,37 +1,151 @@
 # TODO
-- **SIM scenario commands (`FleetVehicleModel` / `FleetVehicleCommand`):** extend the fleet vehicle command surface so that, **when the vehicle is a SIM**, we can **author arbitrary starting state** (pose, heading, battery %, camera/gimbal, health/preflight knobs, etc.) behind a **stack-agnostic API** with **ArduPilot / PX4** (and future stacks) adapters—distinct from normal MAVSDK fly commands where needed, but unified in history / arbitration / UI where it makes sense. Goal: MC Setup can **fixture** sims for mission rehearsal (e.g. arm blockers, 20% battery) without one-off hacks per autopilot.
-- **ArduPilot SITL parity:** treat ArduPilot in SITL as a first-class path (not only PX4): bundled/launch **params and pre-arm policy** so vehicles **arm reliably** (e.g. compass / `ARMING_CHECK` / health expectations vs strict autotest defaults), verify **spawn/home** matches Settings, and align UDP/`sim_vehicle` behaviour with mission + telemetry so Mission Control matches PX4’s smooth experience.
-- **Vehicle lifecycle detail level:** add a **General Settings** toggle to switch between **generic** `VehicleLifecycleStatus` messaging (default, stack-agnostic wording for non-expert users) and **detailed** status objects for power users (deeper stage granularity / richer diagnostics, including stack-specific context when useful).
-- **Mission Control → Mission view:** include an optional **3D view** (vehicle pose / scene) alongside the existing mission UI when we get to that milestone.
-- **macOS notifications:** integrate with the system **User Notifications** framework (`UNUserNotificationCenter`, authorization, categories/actions as needed) so we can alert the user when **live missions** are active while the app is **in the background** (e.g. important state changes, failsafes, or a periodic “mission still running” ping — tune copy and rate limits to avoid noise).
-- Make clicking non-input UI areas unfocus the currently focused input field (desktop blur-on-background-click behavior).
-- **Paladin: staging override execution:** during **Start Run**, apply each setup `simStartOverrideCoord` directly to the assigned SIM vehicle before path execution begins (authoritative pre-stage reposition step), emit Paladin events for success/failure per slot, and surface failures as setup blockers with actionable operator messaging.
 
-- **Paladin log copy / i18n:** every `PaladinEvent` carries a stable **`templateKey`** (see `PaladinLogTemplateKey` in `PaladinLogTemplates.swift`) plus **`templateParams`**; **`message`** stays the default English. To ship **our own wording** (or another language) without changing call sites, register format strings on **`PaladinLogTemplateRegistry.shared`** (e.g. `setTemplate(_:pattern:)` or `setTemplates`) using **`{{param}}`** placeholders that match the keys in `templateParams` for that event. Unregistered keys fall back to **`message`**. Next steps when we prioritize this: load patterns from **UserDefaults / JSON in the app bundle / `.lproj` string tables** keyed by `templateKey`, wire **locale** into the resolver, and optionally add a **Settings** UI to edit overrides. The live Paladin log and **`plainTextLine()`** export both resolve through the same registry.
+## Repo
+- **Sources Folder:**
+  - Restructure files into subfolders to keep logic organised and separate.
+
+## Vehicles System
+
+- **Vehicle calibration flow:** add a guided, user-facing calibration/capability-check wizard (focused on real/live vehicles) that steps through connectivity, control, camera/gimbal, and telemetry checks, then records what this vehicle can/can't do so UI/automation can adapt safely.
+- **Vehicle lifecycle detail level:** add a **General Settings** toggle to switch between **generic** `VehicleLifecycleStatus` messaging (default, stack-agnostic wording for non-expert users) and **detailed** status objects for power users (deeper stage granularity / richer diagnostics, including stack-specific context when useful).
+- **Live vehicle type inference (MAV_TYPE → ``FleetVehicleType``):** SIM vehicles get their granular ``FleetVehicleType`` from the SITL preset at `registerSimulatedVehicle`, so logs and cards already show `[UAV-C:1]` etc. **Live** MAVLink vehicles currently default to `.unknown` (rendered `VEH:N`). Wire up MAV_TYPE inference: capture `MAV_TYPE` from the heartbeat (via `mavsdk_bridge.py` event or MAVSDK `Info`) once on first telemetry, map to ``FleetVehicleType`` (e.g. `MAV_TYPE_QUADROTOR/HEXA/OCTO/HELI` → `.uavCopter`, `MAV_TYPE_FIXED_WING` → `.uavFixedWing`, `MAV_TYPE_VTOL_*` → `.uavVTOL`, `MAV_TYPE_GROUND_ROVER` → `.ugvWheeled`, `MAV_TYPE_SURFACE_BOAT` → `.usv`, `MAV_TYPE_SUBMARINE` → `.uuv`), then call `FleetLinkService.setVehicleType(_:forVehicleID:)` to promote the model. Cards/logs/sub-bar will update automatically. Also extend `LiveDriveView.selectedVehicleClass` to read `model.data.vehicleType.universalClass` instead of guessing from `flightMode` strings.
 - **Arm failure remediation catalog:** extend **`ArmFailureAdvisor`** (`ArmFailureAdvisor.swift`): add **pattern rules** (ordered entries in **`buildRules()`**) for remaining real-world **MAVSDK / STATUSTEXT** arm denials (battery failsafes, terrain, airspeed, logging, parachute, etc.); tighten **stack-specific** branches (ArduPilot vs PX4 vs **unknown**); use **`hubSnapshot`** fields (`health*`, GPS, RC) to **bias** steps when telemetry confirms or contradicts the message; add **unit tests** with log snippets; optional **`patternId` → localization / `PaladinLogTemplateKey`** for non-English operator copy; optionally mirror **`ArmFailureRemediationAdvice`** into **fleet logs** or **Paladin events** on arm failure; reuse from **Vehicles grid “test arm”** and any other arm UX.
-- **Xcode Run → real `.app` (User Notifications):** macOS only allows **`UNUserNotificationCenter.requestAuthorization`** for processes inside a proper **`.app`** bundle; Xcode “Play” on a flat **`…/Build/Products/Debug/GuardianHQ`** product gets **UNError 1 (`notificationsNotAllowed`)**. **Do:** refactor the Swift package to vend a **`GuardianHQLib`** library (almost all of `Sources/GuardianHQ/`) and keep a thin **`GuardianHQ`** executable only if we still want **`swift run`**. In the outer **Guardian** Xcode project, add a **macOS App** target (e.g. **Guardian HQ**) that **depends on `GuardianHQLib`**, with a small **`@main` `App`** in the Xcode target that mirrors the current **`WindowGroup`** / environment wiring, and make the **default scheme** run that **`.app`** so Paladin notifications and **System Settings → Notifications** work without **`scripts/package-macos-app.sh`**. Until then, the script remains the quick way to test notifications.
-- **Missions / roster role model redesign:** move beyond string-only roster card fields (`title` / `role` / `hint`) and design a stronger mission roster model that can represent leader/follower (wingman), one-on-one-off (tag-team charging), primary + reserve(s), and planned switchover semantics in a first-class way.
-- **Live Drive panel (new sidebar destination):** add a dedicated operator panel for manual control of a selected live vehicle (fly/drive/sail), including vehicle selection, connection, command dispatch, live telemetry, Leaflet map, and camera view; must support intervention for vehicles currently participating in live missions (e.g. unsticking / recovery).
-  - **FleetVehicleModel / command surface:** expand control commands so all supported vehicle types can be driven manually with predictable behavior.
-  - **Input devices:** keyboard controls by default, plus support for connected Bluetooth/wired game controllers and joysticks. See full plan in **Live Drive: game controller / joystick integration** below.
-  - **Live vehicle calibration flow:** add a guided, user-facing calibration/capability-check wizard (focused on real/live vehicles) that steps through connectivity, control, camera/gimbal, and telemetry checks, then records what this vehicle can/can't do so UI/automation can adapt safely.
-- **SIM battery telemetry:** make battery status from SIM vehicles reliable and visible in mission/vehicle UI flows.
-- **Paladin reserve + handover orchestration:**
+
+- **FleetVehicleModel / command surface:** expand control commands so all supported vehicle types can be driven manually with predictable behavior.
+- **Input devices:** keyboard controls by default, plus support for connected Bluetooth/wired game controllers and joysticks. See full plan in **Live Drive: game controller / joystick integration** below.
+- **Advanced control tuning (per SIM, with Settings defaults):** expose stack- and class-specific autopilot tuning to power users without making them open QGC / Mission Planner. **Live tune lives per running SIM**, defaults live in **Settings → SIMs → Advanced**, and any new SIM gets the defaults pushed at `registerSimulatedVehicle` time (alongside the existing PX4 `BAT1_CAPACITY` workaround in `applyMavlinkBatteryTelemetryTuningOnce`).
+  - **Why:** params like `ATC_STR_RAT_P` (rover steering response), `CRUISE_SPEED`, `WPNAV_SPEED`, `MC_YAWRATE_P` change driving feel substantially. They're the difference between a "sluggish toy car" and a "silky rover" feel under LiveDrive.
+  - **Plumbing already exists:** `FleetLinkService.getVehicleIntParameter(_:vehicleID:)` and `setVehicleIntParameter(_:value:vehicleID:)` work today against MAVSDK's `Param` plugin for any param name. Add `Float` variants (`getParamFloat`/`setParamFloat`) when we wire up since most tuning knobs are floats.
+  - **Curate, don't expose raw param names.** ArduPilot has ~600 params, PX4 ~800 — a free-form editor will brick somebody's tune. Build a `VehicleTuningProfile` model keyed by `(FleetVehicleType, FleetAutopilotStack)` with abstract knobs (`steeringResponse: Soft/Default/Stiff`, `throttleResponse: Soft/Default/Stiff`, `cruiseSpeedMS: Double`, etc.) and per-stack mapping tables that translate the abstract knob to concrete param names + multipliers off stock values. Power users can still tune individual params in QGC/Mission Planner; we don't need to be the canonical full param editor.
+  - **Stack + class gating is mandatory.** ArduPilot Rover's `ATC_STR_RAT_P` simply doesn't exist on PX4 multicopter; writing the wrong param to the wrong stack is at best a no-op and at worst a footgun. The Settings UI must filter knobs to those valid for the currently-selected `(FleetVehicleType, FleetAutopilotStack)` pair, and the spawn-time push must too.
+  - **Architecture (3 slices):**
+    1. **Tuning model layer.** New `Sources/GuardianHQ/VehicleTuningProfile.swift` — `struct VehicleTuningProfile: Codable, Equatable` plus `enum TuningKnob` (the abstract knobs) and `static let parameterMap: [TuningKnob: [FleetAutopilotStack: [FleetVehicleType: ParameterBinding]]]` where `ParameterBinding = (paramName: String, type: .int | .float, stockValue: Double, presetMultipliers: [softFactor, stiffFactor])`.
+    2. **Persistence + apply helpers.** New `Sources/GuardianHQ/VehicleTuningStore.swift` paralleling `ManualControlSettingsStore` — holds `defaultsByTypeAndStack: [String: VehicleTuningProfile]` (the Settings defaults) and `liveOverridesByVehicleID: [String: VehicleTuningProfile]` (per-SIM live tunes). Add `FleetLinkService.applyTuningProfile(_:vehicleID:) async -> [TuningKnob: Result<Void, Error>]` that batch-writes via `param.setParamFloat`/`setParamInt`, returning per-knob success/failure for UI feedback. Call it from `SitlService.spawnArduPilot`/`spawnPX4` (defaults) and from per-SIM sheets (live).
+    3. **UI.** Two surfaces:
+       - **Settings → SIMs → Advanced**: per-(class, stack) preset cards. Each shows the abstract knobs with sliders/segmented pickers and a stack badge. Reuse `settingsRow` helper. Only edits the default; no live vehicle effect.
+       - **Per-SIM "Drive tune" sheet** off the vehicle card or LiveDrive subbar (Settings cog icon, only visible when the vehicle is a SIM). Pulls current values from the live drone (`Param.getParamFloat`), shows them next to the abstract knobs with a "modified" diff indicator, and writes via `applyTuningProfile`. Add **Pull from vehicle** / **Push defaults** / **Reset to stock** buttons.
+  - **SIM-only initially; live hardware extension later.** The first slice is intentionally SIM-only because (a) we control spawn and can guarantee param push timing, (b) bricking a SIM tune is recoverable in 5 seconds via respawn, and (c) we want to validate the abstract-knob mapping table on something disposable before pointing it at someone's $50k aircraft. Live hardware adds a "Pull from vehicle / Push to vehicle / Save as profile" UX layer on top of the same model — log as a follow-up.
+  - **Don't build speculatively.** Wait until keyboard polish and controller integration give us concrete "this knob feels wrong" signal — building speculative knobs is how tuning UIs become unmaintainable graveyards.
+
+## App System
+
+- Make clicking non-input UI areas unfocus the currently focused input field (desktop blur-on-background-click behavior).
+- **Turn project into real .app:** this allows us to access lots of systems and permissions that our current swift build cannot.
+- **UserNotifications:** hook into MacOS user notifications system so that MC-R can keep user updated if app is running in background.
+
+## Dashboard System
+
+- Test the "Idle" card when a mission is running. Then test it when 2 missions are running side-by-side. See what it shows/what happens.
+
+## Map System
+
+- **CesiumJS 3D map spike (LiveDrive + MC Running):** evaluate replacing the current Leaflet 2D map in **LiveDrive** and **Mission Control Running** with a CesiumJS-based 3D map mode (camera follow/tracked entity, per-marker context menu parity, route/vehicle overlays, and acceptable telemetry update performance in `WKWebView`). Keep **Settings → default SIM coords** and mission authoring maps on lightweight 2D for now; this spike is for operational views first.
+- Fix reset button gogin to a fixed zoom (it should use a bbox for everything)
+
+## Live Drive
+
+The Live Drive system allows a user to manually take control of a connected vehicle and send it commands to do things. The user can fly UAVs, drive UGVs etc. This works for both live vehicles and SIMs. This system can be used in freestyle, or can be the way the user takes control of a vehicle in a running mission.
+
+- **LiveDrive takeover of live mission vehicle** Paladin will create a secret key for every vehicle in a mission. User can take over vehicle by inputting key and if Paladin has marked it for takeover. (So if you went cloudbased remote users could achieve this also)
+- **LiveDrive takeover of live mission vehicle:** This has been coded, it needs testing properly when Paladin is capable of handing off vehicle to user.
+- **LiveDrive map expansion:** Integrate CesiumJS system to offer 3D map version as well as Leaflet 2D map.
+- **LiveDrive UGV/USV/UUV RTL:** At the moment it just drives back in straight line, probably not likely to be able to achieve this. Needs consideration.
+
+## Missions
+Missions are the templates created by users that involve telling one or more vehicles what, when where and how to do what it needs to do.
+
+- **Mission Path Rosters:** Figure out how to design rosters so that you can do tag-teams, back-ups, leader+followers etc. Also, look at fixed values for roster card "role", so that Paladin knows what to do with a vehicle by default. 
+- **Custom Popup Mission Templates:** E.g. quick circle radius patrol with x vehicles & tag-team.
+
+## Mission Control
+Mission Control is the system where mission templates are run by the Paladin system. Paladin in Guardian's mission brain, that reads mission templates and puts them into practive.
+
+Mission Control includes Setup, Running, Completed as the main three states. It will also have a Simulation mode, where Paladin runs a mission template in a headless environment and reports back on its feasibility.
+
+Mission Control: Environment is the world environment that mission control uses when running missions. Paladin is bound to the environment.
+
+### Mission Control: Simulate Mode (Paladin Only)
+- **Mission Control Simulate mode:** add a simulation mode where live vehicle(s) test-run mission paths and feed results back into route refinement via trial-and-error updates.
+
+### Mission Control: Setup
+- MC-Setup is the authoring surface; the policy/fixture model it edits lives under **MC-E** below. (Slot↔vehicle binding, scheduling, and `simStartOverrideCoord` UX continue to live on the MC-Setup screens.)
+
+### Mission Control: Running
+- Integrate CesiumJS system to offer 3D map version as well as Leaflet 2D map.
+- **MC-R Paladin reserve + handover orchestration:** (depends on **MC-E** rollout slices 3–4 for handover thresholds + role eligibility — this ticket is the *behaviour*; MC-E is the *config*.)
   - send reserve vehicles to take over when an active vehicle fails (when roster defines reserves),
   - perform path roster switchovers for low-battery tag-team operations when partner is ready,
   - analyze ahead of time (and continuously at runtime) to prepare handovers before thresholds are reached,
   - improve fault handling lifecycle: retry policy, give-up criteria, contingency triggers, and explicit operator intervention prompts.
-- **Mission Control Setup (between-loop behavior policy):**
-  - configure per-path between-loop behavior during delay windows (switch over, loiter at end, loiter at start, return to mission home),
-  - design how to create/set/store charging locations on the fly (beyond mission home), including UX and persistence discussion.
-- **Mission Control Simulate mode:** add a simulation mode where live vehicle(s) test-run mission paths and feed results back into route refinement via trial-and-error updates.
-- **App theming system:** implement robust light mode / dark mode support across the app (including map surfaces, overlays, cards, and semantic status colors).
-- **Mission Control grid cards redesign:** substantially improve run cards in the Mission Control grid with richer information density, clearer hierarchy, and better visual scanning.
-- **Internationalization (i18n):** expand localization coverage beyond Paladin log templates to full UI copy, formatting rules, and locale-aware defaults.
-- **Dashboard data expansion:** identify and add higher-value operational metrics to the dashboard (mission health, fleet readiness, alerts, utilization, and other actionable summaries).
-- **Live vehicle type inference (MAV_TYPE → ``FleetVehicleType``):** SIM vehicles get their granular ``FleetVehicleType`` from the SITL preset at `registerSimulatedVehicle`, so logs and cards already show `[UAV-C:1]` etc. **Live** MAVLink vehicles currently default to `.unknown` (rendered `VEH:N`). Wire up MAV_TYPE inference: capture `MAV_TYPE` from the heartbeat (via `mavsdk_bridge.py` event or MAVSDK `Info`) once on first telemetry, map to ``FleetVehicleType`` (e.g. `MAV_TYPE_QUADROTOR/HEXA/OCTO/HELI` → `.uavCopter`, `MAV_TYPE_FIXED_WING` → `.uavFixedWing`, `MAV_TYPE_VTOL_*` → `.uavVTOL`, `MAV_TYPE_GROUND_ROVER` → `.ugvWheeled`, `MAV_TYPE_SURFACE_BOAT` → `.usv`, `MAV_TYPE_SUBMARINE` → `.uuv`), then call `FleetLinkService.setVehicleType(_:forVehicleID:)` to promote the model. Cards/logs/sub-bar will update automatically. Also extend `LiveDriveView.selectedVehicleClass` to read `model.data.vehicleType.universalClass` instead of guessing from `flightMode` strings.
 
-- **Live Drive: game controller / joystick integration:** add support for wired/wireless **game controllers** (Xbox, PS4/PS5, MFi, Stadia, Joy-Cons) and **HID joysticks / HOTAS** (Logitech Extreme 3D, T.16000M, Thrustmaster, etc.) as a first-class input alongside the existing `KeyboardEventMonitor` in `LiveDriveView`. Macos-only today; both transports (USB + Bluetooth) covered by system frameworks with no third-party deps.
+### Mission Control: Completed
+
+- **Internationalization (i18n):** expand localization coverage beyond Paladin log templates to full UI copy, formatting rules, and locale-aware defaults.
+
+
+### Mission Control: Environment (MC-E)
+
+- **Mission Control Environment (MC-E):** the authoritative artefact describing the conditions under which a `MissionRun` executes — the missing peer of **Plan** (route) and **Roster** (vehicles). Authored on the **MC-Setup** screens, consumed by **Paladin** at plan-compile and run time. This is what subsumes the previous scattered "set SIM battery %", "drain on/off per-SIM", "between-loop behavior policy", and "charging locations" tickets.
+  - **Two cohabiting structs (the SIM-vs-live split is structural, not conditional):**
+    1. `EnvironmentRules` — universal, applies to live + SIM (irrelevant fields are inert on the wrong side):
+       - **Engagement (Rules of Engagement):** per-action records `{ disposition, triggers }`, **not** flat `Bool`s. Action classes: `rtl`, `land`, `forceDisarm`, `takeoverFromOperator`, `requestOperatorHandoff`, plus a default for unenumerated commands. Dispositions:
+         - `.autonomous` — Paladin acts unilaterally.
+         - `.ask` — Paladin wants to act, requests operator confirmation first (yes/no roundtrip; Paladin is the actor).
+         - `.defer` — Paladin won't act until operator commands.
+         - `.forbidden` — Operator must do this; Paladin won't even ask.
+         - `.handoff` — **Paladin asks the operator to take over** (operator becomes the actor; Paladin steps back). Distinct from `.ask`: `.ask` is "may I do X?", `.handoff` is "you do X". Triggered by conditions like `.stuckForSeconds(60)`, `.geofenceBreachImminent`, `.batteryLowNoReserve`, `.gpsLostForSeconds(30)`.
+       - **Handover thresholds (roster-internal):** battery %, time-to-empty, distance-from-home at which Paladin should swap in a reserve / tag-team partner. **Naming note:** intra-roster *handover* (SIM A → reserve SIM B) is distinct from operator *handoff* (Paladin → operator) — the existing `PaladinHandoffMode` (`PaladinService.swift:30`) is intra-roster and keeps that name; operator handoff lives entirely in the engagement slice above.
+       - **Envelope:** geofence polygon, `maxAltitudeM`, `maxSpeedMS`, no-fly zones — Paladin refuses (or asks the operator) when commands would violate them. Envelope breaches are a primary trigger source for `.handoff` and `.ask` dispositions.
+       - **Role eligibility:** `mayBePrimary` / `mayBeReserve` / `mayBeTagTeamPartner` / `mayBeChargingBuddy`.
+    2. `SimFixtureEnvironment` — SIM-only, gated on `attachedFleetVehicleToken == .sitl`:
+       - **Start state:** `startBatteryPercent`, `startPose` (today's `simStartOverrideCoord` collapses into this).
+       - **Battery dynamics:** `drainEnabled` + `drainRate` (today's global `SimBatteryDrainRate` becomes the global default of this slice).
+       - **Failure injection:** ordered `[SimFailureInjection]` script. Start with a fixed enum (`.batteryFailsafeAt(percent:)`, `.gpsLossAt(seconds:)`, `.linkDropAt(seconds:)`, `.simulatedReturnToLaunch`); resist building a DSL until pain demands it.
+       - **Charging locations:** authored coordinates beyond mission home, persisted with the run.
+  - **3-layer resolution (mirrors `simStartOverrideCoord`'s precedent):**
+    - **Global default** in `GeneralSettingsStore`, optionally keyed by `(FleetVehicleType, FleetAutopilotStack)` so e.g. UGV-T and UAV-C carry different default envelopes.
+    - **Per-run override** on `MissionRun.environmentRunOverride: EnvironmentRules?` and `simFixtureRunOverride: SimFixtureEnvironment?`.
+    - **Per-slot override** on `MissionRunAssignment.environmentSlotOverride: EnvironmentRules?` and `simFixtureSlotOverride: SimFixtureEnvironment?`.
+    - Pure `EnvironmentResolver.resolve(...) -> ResolvedEnvironment` collapses the three layers at plan-compile time. `PaladinPlan` carries `effectiveEnvironment: [AssignmentID: ResolvedEnvironment]` so runtime never re-walks the hierarchy. `nil` at any layer means "inherit from below."
+  - **Architecture (5 slices):**
+    1. **Model layer.** New `Sources/GuardianHQ/MissionControlEnvironment.swift` — `EnvironmentRules`, `SimFixtureEnvironment`, `ResolvedEnvironment`, `EnvironmentResolver`, plus `enum PaladinEngagementDecision { case allow; case ask(prompt:); case defer_; case forbidden(reason:); case handoff(reason:) }` and `enum PaladinEngagementDisposition` / `enum PaladinEngagementTrigger`.
+    2. **Operator prompt channel.** New `Sources/GuardianHQ/PaladinOperatorPrompt.swift` — typed escalation channel parallel to `PaladinEvent`: `struct PaladinOperatorPrompt { id; severity; vehicleID; ask: PaladinPromptAsk; deadline: Date; autoAction: AutoAction }` where `PaladinPromptAsk` is `.confirmAction(...)` (for `.ask` disposition) / `.requestTakeover(reason:)` (for `.handoff` disposition) and `autoAction` says what happens if the operator doesn't respond by the deadline (`.continue` / `.rtl` / `.hold`). Routes through:
+       - **Inline:** mission console + the relevant vehicle card banner.
+       - **System:** macOS User Notifications (depends on the User Notifications TODO above).
+       - **Inbound:** when operator clicks "Take over" on a `.requestTakeover` prompt, the handler raises the manual-takeover gate against the prompted vehicle (`FleetLinkService.setCommandAuthorityGate(...)`, already plumbed at `LiveDriveView.swift:451`) and opens LiveDrive on it. The empty placeholder at `LiveDriveView.swift:522` is the natural landing for this. **Connects directly to** the LiveDrive takeover ticket above (operator-initiated takeover); together they're the two directions of the same UX.
+    3. **Model wiring.** Extend `MissionControlModels.swift` (add the optional override fields on `MissionRun` + `MissionRunAssignment`, with `Codable` migration tolerance for runs created before MC-E shipped), `GeneralSettingsStore.swift` (the global defaults), `PaladinService.swift` (`PaladinPlan` carries `effectiveEnvironment`, `PaladinRuntime.executeStagingPass` consumes `SimFixtureEnvironment`, plan-build consumes role eligibility).
+    4. **Paladin engagement gate.** New `Sources/GuardianHQ/PaladinEngagementGate.swift` — single entry point `shouldIssue(_ command:, under: ResolvedEnvironment, telemetry:) -> PaladinEngagementDecision`. Every `commands.append(...)` site in `PaladinService` routes through it. The gate evaluates `disposition` first, then walks `triggers` against current telemetry to decide whether to emit a `PaladinOperatorPrompt`. Without this gate, "may RTL?" sprawls into a forest of inline `if`s — that's the bug we're avoiding.
+    5. **UI.** Three surfaces, all reusing `settingsRow` + popover patterns we already have:
+       - **Settings → Mission Control → Environment defaults** — tabbed editor (`Engagement (RoE)` / `Handover` / `Envelope` / `Role eligibility` / `SIM fixtures`). SIM-fixture defaults keyed by `(FleetVehicleType, FleetAutopilotStack)` so per-class defaults Just Work. Engagement editor: per action-class row, disposition picker + a triggers builder.
+       - **MC-Setup run header → "Run environment overrides…"** sheet — same tabbed editor, only run-level fields, `"Inherits global"` badge on each unset field.
+       - **MC-Setup slot inspector → "Slot environment overrides…"** sheet alongside the existing `simStartOverrideCoord` editor. SIM-fixture sheet hides itself when the slot's token is `.live`.
+  - **Consumption points (single owner per slice — that's the litmus for whether the slice is well-shaped):**
+    - `SimFixtureEnvironment.startBatteryPercent` / `drainEnabled` / `drainRate` / `startPose` → `PaladinRuntime.executeStagingPass`. Already calls `FleetLinkService.setSimBatteryDrainEnabled(...)`; needs new `setSimBatteryStartPercent(...)` (ArduPilot `SIM_BATT_VOLTAGE`; PX4 SIH has no clean knob — pre-spawn parameter file is the likely workaround, document the asymmetry).
+    - `SimFixtureEnvironment.failureInjections` → new `Sources/GuardianHQ/PaladinFailureInjectionScheduler.swift` (run-lifetime, drains the script against wall-clock + telemetry triggers, emits `PaladinEvent`s on every injection).
+    - `EnvironmentRules.engagement` + `.envelope` → `PaladinEngagementGate` (sole consumer of both). Gate emits `PaladinOperatorPrompt`s for `.ask` and `.handoff` decisions.
+    - `EnvironmentRules.handover` → the runtime cycle planner that today produces `PaladinHandoffMode.thresholdDriven` (`PaladinService.swift`); replace the bool with the resolved threshold values.
+    - `EnvironmentRules.roleEligibility` → plan-build role-track assembler. Ineligible reserve = setup-time blocker, not a runtime surprise.
+  - **Live-vehicle scope:** `EnvironmentRules` applies universally; `SimFixtureEnvironment` is SIM-only. Live envelope enforcement is the most expensive bug surface — design the gate, ship the SIM path first, validate `.deny` on SITL before pointing it at a real aircraft.
+  - **Rollout sequence (ship-as-you-go):**
+    1. Model layer + resolver + plan-time integration. Empty UI. Verify resolved values land on `PaladinPlan` correctly via existing log surface (`PaladinEvent`). `PaladinOperatorPrompt` type lands here too (channel definition only — nothing emits or renders yet).
+    2. SIM fixtures slice end-to-end: `startBatteryPercent`, `drainEnabled`/`drainRate` per-SIM (the existing global drain rate setting moves into the resolver as the global default). Settings + per-slot UI. This delivers the user-visible "MC-S battery state" + "drain on/off per-SIM" tickets as a side-effect.
+    3. Engagement (RoE) + envelope through `PaladinEngagementGate`. Default every action class to `.autonomous` to start so no behaviour change; flip dispositions slice-by-slice as we validate. `.ask` rendering (mission console + vehicle card banner) lands here. `.handoff` triggers + system-notification rendering follow once macOS User Notifications ship.
+    4. Handover thresholds replace `paladinTightCycleHandoff`. Unblocks "MC-R Paladin reserve + handover orchestration" below.
+    5. Failure injection + charging locations.
+  - **Cross-references:**
+    - **Subsumes:** the standalone "SIM scenario commands" battery slice (top-of-file), "MC-S set battery state", "MC-S drain on/off per SIM", "MC-S between-loop behavior policy" + charging locations bullets.
+    - **Unblocks:** "MC-R Paladin reserve + handover orchestration", "MC-R Simulate Mode" (Simulate Mode is just MC-R with a synthetic environment — no separate config surface).
+    - **Independent (do NOT absorb):** vehicle autopilot tuning profile, LiveDrive controller integration, vehicle calibration flow. Tuning is "how the vehicle behaves on the wire"; environment is "the world it operates in."
+
+## Paladin System
+Paladin is Guardian's mission running brain. It takes a mission template into mission control: running and executes it according to the specs and rules it is given.
+
+- **MC-E Vehicle API Key:** when Paladin runs a mission, it creates a secret API key for every vehicle involved. This key can be used by users to gain permission to take manual control of a vehicle during the mission to solve a problem.
+- **Paladin: staging override execution:** during **Start Run**, apply each setup `simStartOverrideCoord` directly to the assigned SIM vehicle before path execution begins (authoritative pre-stage reposition step), emit Paladin events for success/failure per slot, and surface failures as setup blockers with actionable operator messaging. (Once **MC-E** lands, this generalises to "apply each slot's resolved `SimFixtureEnvironment` — pose, battery %, drain rate, scheduled failures — as one cohesive staging step." Keep this ticket as the active path until MC-E rollout slice 2 supersedes it.)
+- **Paladin log copy / i18n:** every `PaladinEvent` carries a stable **`templateKey`** (see `PaladinLogTemplateKey` in `PaladinLogTemplates.swift`) plus **`templateParams`**; **`message`** stays the default English. To ship **our own wording** (or another language) without changing call sites, register format strings on **`PaladinLogTemplateRegistry.shared`** (e.g. `setTemplate(_:pattern:)` or `setTemplates`) using **`{{param}}`** placeholders that match the keys in `templateParams` for that event. Unregistered keys fall back to **`message`**. Next steps when we prioritize this: load patterns from **UserDefaults / JSON in the app bundle / `.lproj` string tables** keyed by `templateKey`, wire **locale** into the resolver, and optionally add a **Settings** UI to edit overrides. The live Paladin log and **`plainTextLine()`** export both resolve through the same registry.
+
+## Controllers System
+- **Game controller / joystick integration:** add support for wired/wireless **game controllers** (Xbox, PS4/PS5, MFi, Stadia, Joy-Cons) and **HID joysticks / HOTAS** (Logitech Extreme 3D, T.16000M, Thrustmaster, etc.) as a first-class input alongside the existing `KeyboardEventMonitor` in `LiveDriveView`. Macos-only today; both transports (USB + Bluetooth) covered by system frameworks with no third-party deps.
 
   **Frameworks (no SwiftPM deps):**
   - `import GameController` (`GCController` / `GCExtendedGamepad`) for Xbox/PS/MFi/Stadia/Joy-Cons. Hot-plug via `GCControllerDidConnect`/`Disconnect`. Has battery, haptics (`GCController.haptics`), normalized layout.

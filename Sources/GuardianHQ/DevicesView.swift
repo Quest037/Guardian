@@ -6,7 +6,9 @@ struct DevicesView: View {
     @ObservedObject var sitl: SitlService
     @ObservedObject var generalSettings: GeneralSettingsStore
     @ObservedObject var missionControlStore: MissionControlStore
+    @ObservedObject var liveDriveStore: LiveDriveStore
     @EnvironmentObject private var toastCenter: ToastCenter
+    @Environment(\.colorScheme) private var colorScheme
 
     @State private var isAddSimSidebarPresented = false
     @State private var sidebarSpawnPlatform: SimulationPlatform = .ardupilot
@@ -16,12 +18,12 @@ struct DevicesView: View {
     @State private var pendingSimStop: PendingSimStop?
     @State private var testArmSheetContext: VehicleTestArmSheetContext?
 
-    private let bgMain = Color(red: 0.07, green: 0.07, blue: 0.08)
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
         devicesContent
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(bgMain)
+        .background(theme.backgroundBase)
         .confirmationDialog(
             "Stop simulator?",
             isPresented: Binding(
@@ -31,8 +33,22 @@ struct DevicesView: View {
             titleVisibility: .visible
         ) {
             Button("Stop", role: .destructive) {
-                if let id = pendingSimStop?.id {
-                    sitl.stop(id: id)
+                if let pending = pendingSimStop {
+                    if missionControlStore.isVehicleStreamUsedInLiveMission(
+                        vehicleID: pending.vehicleID,
+                        fleetLink: fleetLink,
+                        sitl: sitl
+                    ) {
+                        toastCenter.show(
+                            "Cannot stop simulator while vehicle is assigned to a live Mission Control run.",
+                            style: .error,
+                            duration: 4
+                        )
+                        pendingSimStop = nil
+                        return
+                    }
+                    teardownLiveDriveIfNeeded(vehicleID: pending.vehicleID)
+                    sitl.stop(id: pending.id)
                 }
                 pendingSimStop = nil
             }
@@ -127,13 +143,13 @@ struct DevicesView: View {
             VStack(spacing: 14) {
                 Image(systemName: systemImage)
                     .font(.system(size: 44, weight: .medium))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
                 Text(title)
                     .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.textPrimary)
                 subtitle()
                     .font(.system(size: 14))
-                    .foregroundColor(.gray)
+                    .foregroundColor(theme.textSecondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 480)
             }
@@ -147,7 +163,7 @@ struct DevicesView: View {
         HStack(alignment: .center, spacing: 16) {
             Text("Vehicles")
                 .font(.system(size: 22, weight: .bold))
-                .foregroundStyle(.white)
+                .foregroundStyle(theme.textPrimary)
             Spacer(minLength: 8)
             if fleetLink.isSimulateEnabled {
                 Button("Add Sim") {
@@ -193,7 +209,7 @@ struct DevicesView: View {
 
             // Separate `if` branches so each view’s transition runs (one ZStack would animate as a single insert).
             if isAddSimSidebarPresented {
-                Color.black.opacity(0.45)
+                theme.overlayScrim
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Rectangle())
                     .onTapGesture {
@@ -233,10 +249,10 @@ struct DevicesView: View {
         )
         .frame(width: 352)
         .frame(maxHeight: .infinity)
-        .background(Color(red: 0.11, green: 0.11, blue: 0.12))
+        .background(theme.backgroundElevated)
         .overlay(alignment: .leading) {
             Rectangle()
-                .fill(Color.white.opacity(0.08))
+                .fill(theme.borderSubtle)
                 .frame(width: 1)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
@@ -316,7 +332,11 @@ struct DevicesView: View {
                         },
                         testArmDisabledReason: testArmBlock,
                         onStopSim: {
-                            pendingSimStop = PendingSimStop(id: inst.id, vehicleLabel: inst.preset.displayName)
+                            pendingSimStop = PendingSimStop(
+                                id: inst.id,
+                                vehicleLabel: inst.preset.displayName,
+                                vehicleID: resolvedVehicleID
+                            )
                         },
                         stopSimDisabledReason: fleetVehicleLiveMissionLockReason(vehicleID: resolvedVehicleID),
                         onDismissSim: { sitl.dismiss(id: inst.id) }
@@ -329,6 +349,25 @@ struct DevicesView: View {
     private struct PendingSimStop {
         let id: UUID
         let vehicleLabel: String
+        let vehicleID: String
+    }
+
+    private func teardownLiveDriveIfNeeded(vehicleID: String) {
+        let vehicleIsInLiveDrive = liveDriveStore.activeVehicleID == vehicleID
+            || liveDriveStore.activeControlledVehicleID == vehicleID
+        guard vehicleIsInLiveDrive else { return }
+
+        Task { @MainActor in
+            await fleetLink.stopManualControlStream(vehicleID: vehicleID)
+            fleetLink.clearLiveDriveControlSessionVehicleIfMatches(vehicleID: vehicleID)
+            fleetLink.setCommandAuthorityGate(vehicleID: vehicleID, minimumCategory: .paladin)
+        }
+        if liveDriveStore.activeControlledVehicleID == vehicleID {
+            liveDriveStore.discardActiveSessionRecording()
+        }
+        if liveDriveStore.activeVehicleID == vehicleID {
+            liveDriveStore.selectVehicle(nil)
+        }
     }
 
     private enum FleetGridEntry {
@@ -370,7 +409,7 @@ struct DevicesView: View {
                 .frame(width: 9, height: 9)
             Text(bridgeHeaderTitleTwoWords)
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(theme.textPrimary)
                 .lineLimit(1)
         }
         .accessibilityElement(children: .combine)
@@ -444,7 +483,8 @@ struct DevicesView: View {
         fleetLink: FleetLinkService(),
         sitl: SitlService(),
         generalSettings: GeneralSettingsStore(),
-        missionControlStore: MissionControlStore()
+        missionControlStore: MissionControlStore(),
+        liveDriveStore: LiveDriveStore()
     )
     .environmentObject(ToastCenter())
     .frame(width: 720, height: 480)

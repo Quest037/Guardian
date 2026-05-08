@@ -6,15 +6,15 @@ struct SimulationVehiclePickerSidebar: View {
     let onSelect: (SimulationVehiclePreset) -> Void
     let onClose: () -> Void
 
-    private let bgHeader = Color(red: 0.10, green: 0.10, blue: 0.11)
-    private let cardBg = Color(red: 0.12, green: 0.12, blue: 0.13)
+    @Environment(\.colorScheme) private var colorScheme
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .center, spacing: 12) {
                 Text("Select Vehicle")
                     .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)
                 Spacer(minLength: 8)
                 Picker("Stack", selection: $platform) {
@@ -39,7 +39,7 @@ struct SimulationVehiclePickerSidebar: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
-            .background(bgHeader)
+            .background(theme.backgroundElevated)
 
             ScrollView {
                 VStack(spacing: 10) {
@@ -64,24 +64,24 @@ struct SimulationVehiclePickerSidebar: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(preset.displayName)
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(theme.textPrimary)
                         .multilineTextAlignment(.leading)
                     Text(preset.vehicleDomain.rawValue)
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.gray)
+                        .foregroundStyle(theme.textSecondary)
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.gray.opacity(0.8))
+                    .foregroundStyle(theme.textTertiary)
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(cardBg)
+            .background(theme.backgroundRaised)
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay(
                 RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+                    .strokeBorder(theme.borderSubtle, lineWidth: 1)
             )
         }
         .buttonStyle(.plain)

@@ -11,11 +11,14 @@ struct MissionRunStartPreflightSheet: View {
     let onAbandonWithoutStart: () -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
 
     @State private var rows: [MissionRunPreflightSlotRow] = []
     @State private var probeRunning = true
     @State private var allSlotsPassed = false
     @State private var vehicleIDsArmedDuringProbe: [String] = []
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
         GuardianModalTemplate(
@@ -49,7 +52,7 @@ struct MissionRunStartPreflightSheet: View {
                                 .controlSize(.small)
                             Text("Checking roster…")
                                 .font(.system(size: 12))
-                                .foregroundStyle(Color.gray.opacity(0.9))
+                                .foregroundStyle(theme.textTertiary)
                         } else if allSlotsPassed {
                             Label("All vehicles armed successfully.", systemImage: "checkmark.circle.fill")
                                 .font(.system(size: 12, weight: .medium))
@@ -82,10 +85,10 @@ struct MissionRunStartPreflightSheet: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(row.slotName)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.textPrimary)
                 Text(row.detail)
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(Color.gray.opacity(0.92))
+                    .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
                 if row.phase == .failed, let advice = row.remediationAdvice {
                     ArmProbeRemediationBlock(advice: advice)

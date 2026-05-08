@@ -12,9 +12,12 @@ struct VehicleTestArmSheet: View {
     let onPassed: (() -> Void)?
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
 
     @State private var probeRunning = true
     @State private var result: SingleVehicleArmProbeResult?
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     init(
         vehicleTitle: String,
@@ -55,7 +58,7 @@ struct VehicleTestArmSheet: View {
                             ProgressView().controlSize(.small)
                             Text("Sending arm command…")
                                 .font(.system(size: 12))
-                                .foregroundStyle(Color.gray.opacity(0.9))
+                                .foregroundStyle(theme.textTertiary)
                         }
                     } else if let result {
                         outcomeBlock(result)
@@ -63,7 +66,7 @@ struct VehicleTestArmSheet: View {
                         if result.passed, result.armedDuringProbe {
                             Text("The vehicle was disarmed automatically after the test.")
                                 .font(.system(size: 11))
-                                .foregroundStyle(.gray)
+                                .foregroundStyle(theme.textSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -88,10 +91,10 @@ struct VehicleTestArmSheet: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(result.passed ? "Pass" : "Fail")
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(theme.textPrimary)
                     Text(result.detail)
                         .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(Color.gray.opacity(0.92))
+                        .foregroundStyle(theme.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                     if !result.passed, let advice = result.remediationAdvice {
                         ArmProbeRemediationBlock(advice: advice)

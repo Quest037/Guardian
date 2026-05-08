@@ -25,6 +25,8 @@ enum FleetVehicleCommand: Equatable {
     case arm
     case disarm
     /// Hold / loiter in place using autopilot action-hold.
+    /// Surfaced in the LiveDrive end-session menu as "Loiter" for UAV and "Park" for
+    /// UGV/USV/UUV — same underlying autopilot action, class-specific UI label.
     case holdPosition
     case gotoCoordinate(RouteCoordinate, relativeAltitudeM: Double, yawDeg: Double)
     /// Upload items to the autopilot, arm, then start mission execution (MAVSDK Mission plugin).
@@ -33,6 +35,14 @@ enum FleetVehicleCommand: Equatable {
     case returnToLaunch
     /// Command the autopilot to land now (where supported).
     case land
+    /// Stop streaming and switch the autopilot to its "MANUAL" stick-passthrough mode so
+    /// the vehicle stops moving but remains immediately controllable. Issued from the
+    /// LiveDrive end-session menu for non-flying classes (UGV/USV/UUV) — handy when
+    /// Paladin needs to retake the vehicle quickly during a live mission without going
+    /// through the full re-arm / mode-engage cycle. Routed via stack-specific shell
+    /// command (`commander mode manual` on PX4, `mode manual` on ArduPilot) because
+    /// MAVSDK's `Action` plugin has no direct "set MANUAL" helper.
+    case idle
     /// High-level manual-control intent routed through FleetLink per vehicle class.
     case manualControl(ManualControlIntentCommand)
 }
@@ -125,10 +135,54 @@ struct ManualControlIntentCommand: Equatable {
 }
 
 struct ManualControlStepProfile: Equatable, Codable {
+    /// Legacy bump distance (m) used by the discrete `gotoLocation` movement path.
+    /// Retained for `engage`/recovery actions; superseded for axis input by `max…MS` velocities.
     var moveForwardBackwardM: Double
     var moveLeftRightM: Double
     var yawDeg: Double
     var verticalM: Double
+
+    /// Body-frame forward velocity (m/s) at full keyboard or stick deflection.
+    /// Streamed via `Offboard.setVelocityBody` (or scaled into `ManualControl.x` for stick mode).
+    var maxForwardMS: Double
+    /// Body-frame strafe velocity (m/s, +right) at full deflection.
+    var maxStrafeMS: Double
+    /// Climb / descent rate (m/s) at full deflection (ascend = positive forward, descend = negative).
+    var maxVerticalMS: Double
+    /// Yaw rate (deg/s) at full deflection (+right / clockwise viewed from above).
+    var maxYawRateDegS: Double
+
+    init(
+        moveForwardBackwardM: Double,
+        moveLeftRightM: Double,
+        yawDeg: Double,
+        verticalM: Double,
+        maxForwardMS: Double = 1.5,
+        maxStrafeMS: Double = 1.5,
+        maxVerticalMS: Double = 0.8,
+        maxYawRateDegS: Double = 30
+    ) {
+        self.moveForwardBackwardM = moveForwardBackwardM
+        self.moveLeftRightM = moveLeftRightM
+        self.yawDeg = yawDeg
+        self.verticalM = verticalM
+        self.maxForwardMS = maxForwardMS
+        self.maxStrafeMS = maxStrafeMS
+        self.maxVerticalMS = maxVerticalMS
+        self.maxYawRateDegS = maxYawRateDegS
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        moveForwardBackwardM = try c.decode(Double.self, forKey: .moveForwardBackwardM)
+        moveLeftRightM = try c.decode(Double.self, forKey: .moveLeftRightM)
+        yawDeg = try c.decode(Double.self, forKey: .yawDeg)
+        verticalM = try c.decode(Double.self, forKey: .verticalM)
+        maxForwardMS = try c.decodeIfPresent(Double.self, forKey: .maxForwardMS) ?? 1.5
+        maxStrafeMS = try c.decodeIfPresent(Double.self, forKey: .maxStrafeMS) ?? 1.5
+        maxVerticalMS = try c.decodeIfPresent(Double.self, forKey: .maxVerticalMS) ?? 0.8
+        maxYawRateDegS = try c.decodeIfPresent(Double.self, forKey: .maxYawRateDegS) ?? 30
+    }
 }
 
 enum FleetVehicleCommandStatus: Equatable {

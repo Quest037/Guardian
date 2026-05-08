@@ -54,6 +54,11 @@ final class FleetLinkService: ObservableObject {
         var bag = DisposeBag()
         /// One-shot: request MAVSDK battery stream rate and optional PX4 SIM battery capacity.
         var didApplyMavlinkBatteryTuning = false
+        /// Continuous body-velocity / virtual-stick streamer. Created on demand when the
+        /// operator activates a Live Drive freestyle session and torn down when the session ends.
+        var manualStream: ManualControlStream?
+        /// One-shot: after MAVSDK reports connected, `applySimState` reinforces spawn pose/SIM fields from `SimSpawnDefaults`.
+        var pendingSpawnSimState: FleetSimState?
 
         init(vehicleID: String, systemID: Int, grpcPort: Int, mavlinkConnectionURL: String, runner: MavsdkServerRunner, drone: Drone) {
             self.vehicleID = vehicleID
@@ -76,6 +81,10 @@ final class FleetLinkService: ObservableObject {
     private var simulationStdoutLogDedupe = SimulationStdoutLogDedupeState()
     /// Vehicle stream keys (`sysid:n`) created by `registerSimulatedVehicle` (built-in SITL only).
     private var simulatedFleetVehicleIDs: Set<String> = []
+
+    /// Live Drive **control session**: the vehicle ID that may receive `liveDrive.*` `.manualTakeover` commands
+    /// and manual-control stream updates. Set when any LD session starts (freestyle or mission, SIM or live); cleared when it ends.
+    private var liveDriveControlSessionVehicleID: String?
 
     /// Fires when MAVSDK mission progress indicates a full mission run has finished (`current >= total`).
     var onAutopilotMissionCycleFinished: ((String) -> Void)?
@@ -108,8 +117,24 @@ final class FleetLinkService: ObservableObject {
         autopilotMissionCompletionLatchByVehicleID.removeAll(keepingCapacity: true)
         simulationStdoutLogDedupe.reset()
         simulatedFleetVehicleIDs.removeAll(keepingCapacity: true)
+        liveDriveControlSessionVehicleID = nil
         bridgePhase = .inactive
         lastError = nil
+    }
+
+    /// Install or clear the Live Drive control session (see `liveDriveControlSessionVehicleID`).
+    func setLiveDriveControlSessionVehicle(_ vehicleID: String?) {
+        liveDriveControlSessionVehicleID = vehicleID
+        if let id = vehicleID {
+            appendVehicleLog("Live Drive control session active [\(id)].", vehicleID: id)
+        }
+    }
+
+    /// Clear the control session only when it still points at this vehicle (safe for teardown / discard).
+    func clearLiveDriveControlSessionVehicleIfMatches(vehicleID: String) {
+        guard liveDriveControlSessionVehicleID == vehicleID else { return }
+        liveDriveControlSessionVehicleID = nil
+        appendVehicleLog("Live Drive control session cleared.", vehicleID: vehicleID)
     }
 
     func applyConfiguration(_ config: FleetLinkConfiguration) {
@@ -133,6 +158,43 @@ final class FleetLinkService: ObservableObject {
             return
         }
         session.drone.param.getParamInt(name: name)
+            .observe(on: MainScheduler.asyncInstance)
+            .subscribe(
+                onSuccess: { [weak self] value in
+                    Task { @MainActor [weak self] in
+                        self?.appendVehicleLog(
+                            "Param read [source=\(source)] \(name)=\(value)",
+                            vehicleID: vehicleID
+                        )
+                        onResult(.success(value))
+                    }
+                },
+                onFailure: { [weak self] error in
+                    Task { @MainActor [weak self] in
+                        let detail = self?.mavsdkPublicErrorDescription(error) ?? error.localizedDescription
+                        self?.appendVehicleLog(
+                            "Param read failed [source=\(source)] \(name): \(detail)",
+                            vehicleID: vehicleID
+                        )
+                        onResult(.failure(FleetLinkParameterError(message: detail)))
+                    }
+                }
+            )
+            .disposed(by: session.bag)
+    }
+
+    /// Read a floating-point autopilot parameter for a connected vehicle.
+    func getVehicleFloatParameter(
+        vehicleID: String,
+        name: String,
+        source: String,
+        onResult: @escaping @MainActor (Result<Float, FleetLinkParameterError>) -> Void
+    ) {
+        guard let session = sessionsByVehicleID[vehicleID] else {
+            onResult(.failure(FleetLinkParameterError(message: "No MAVSDK session for vehicle.")))
+            return
+        }
+        session.drone.param.getParamFloat(name: name)
             .observe(on: MainScheduler.asyncInstance)
             .subscribe(
                 onSuccess: { [weak self] value in
@@ -196,6 +258,326 @@ final class FleetLinkService: ObservableObject {
             .disposed(by: session.bag)
     }
 
+    /// Set a floating-point autopilot parameter for a connected vehicle.
+    func setVehicleFloatParameter(
+        vehicleID: String,
+        name: String,
+        value: Float,
+        source: String,
+        onResult: (@MainActor (Result<Void, FleetLinkParameterError>) -> Void)? = nil
+    ) {
+        guard let session = sessionsByVehicleID[vehicleID] else {
+            onResult?(.failure(FleetLinkParameterError(message: "No MAVSDK session for vehicle.")))
+            return
+        }
+        session.drone.param.setParamFloat(name: name, value: value)
+            .observe(on: MainScheduler.asyncInstance)
+            .subscribe(
+                onCompleted: { [weak self] in
+                    Task { @MainActor [weak self] in
+                        self?.appendVehicleLog(
+                            "Param set [source=\(source)] \(name)=\(value)",
+                            vehicleID: vehicleID
+                        )
+                        onResult?(.success(()))
+                    }
+                },
+                onError: { [weak self] error in
+                    Task { @MainActor [weak self] in
+                        let detail = self?.mavsdkPublicErrorDescription(error) ?? error.localizedDescription
+                        self?.appendVehicleLog(
+                            "Param set failed [source=\(source)] \(name)=\(value): \(detail)",
+                            vehicleID: vehicleID
+                        )
+                        onResult?(.failure(FleetLinkParameterError(message: detail)))
+                    }
+                }
+            )
+            .disposed(by: session.bag)
+    }
+
+    /// Stack-agnostic SIM battery-drain toggle used by operational flows (LiveDrive / MC Running).
+    /// - PX4: sets `SIM_BAT_DRAIN` (`0` = disabled, `>0` = seconds for a full 100→0% discharge **while armed**).
+    ///   Upstream `BatterySimulator` **resets to 100% whenever disarmed**, so disarmed LD/MC-R will look “stuck” at full.
+    /// - ArduPilot: sets `SIM_BATT_CAP_AH` (`0` = no integrator model / static pack, `>0` = capacity for the SITL battery model).
+    ///   Remaining charge only moves with **non‑zero battery current** (e.g. motor load); idling at ~0 A yields little or no drop.
+    func setSimBatteryDrainEnabled(
+        vehicleID: String,
+        enabled: Bool,
+        rate: SimBatteryDrainRate = .normal,
+        source: String,
+        onResult: (@MainActor (Result<Void, FleetLinkParameterError>) -> Void)? = nil
+    ) {
+        guard simulatedFleetVehicleIDs.contains(vehicleID) else {
+            onResult?(.failure(FleetLinkParameterError(message: "Battery drain control applies to SIM vehicles only.")))
+            return
+        }
+        let stack = vehicleModelsByVehicleID[vehicleID]?.data.telemetry?.autopilotStack ?? .unknown
+        switch stack {
+        case .px4:
+            let drainSeconds: Float = enabled ? rate.px4FullDischargeSeconds : 0
+            setVehicleFloatParameter(
+                vehicleID: vehicleID,
+                name: "SIM_BAT_DRAIN",
+                value: drainSeconds,
+                source: source,
+                onResult: onResult
+            )
+        case .ardupilot:
+            // ArduPilot SITL depletion model is active only when capacity Ah is positive.
+            let capacityAh: Float = enabled ? rate.ardupilotCapacityAh : 0.0
+            setVehicleFloatParameter(
+                vehicleID: vehicleID,
+                name: "SIM_BATT_CAP_AH",
+                value: capacityAh,
+                source: source,
+                onResult: onResult
+            )
+        case .unknown:
+            onResult?(.failure(FleetLinkParameterError(message: "Autopilot stack unknown; cannot apply SIM drain toggle.")))
+        }
+    }
+
+    /// Applies `state` to a **Guardian-managed SITL** stream via MAVLink params (pose + optional SIM knobs).
+    ///
+    /// This is the **single entrypoint** for SIM state on the wire. Used by:
+    /// - Spawn handshake (`sitl.spawnHandshake`), after MAVSDK connects
+    /// - Mission Control‑E and future “SIM recovery / arm prep” flows (build a `FleetSimState`, call here)
+    ///
+    /// - **ArduPilot:** `SIM_OPOS_LAT` / `SIM_OPOS_LNG` / `SIM_OPOS_ALT` / `SIM_OPOS_HDG` — same family as `sim_vehicle.py -l`.
+    ///   Optional `SIM_BATT_VOLTAGE`, `SIM_BATT_CAP_AH` when present on `state`.
+    /// - **PX4 SIH:** `SIH_LOC_LAT0` / `SIH_LOC_LON0` / `SIH_LOC_H0` / `SIH_LOC_HDG0`; optional `SIM_BAT_DRAIN` when set on `state`.
+    ///
+    /// When callers must change ArduPilot `SIM_BATT_CAP_AH`, stop any manual control stream and call
+    /// `setSimBatteryDrainEnabled(false)` first so the parameter is writable.
+    func applySimState(
+        vehicleID: String,
+        state: FleetSimState,
+        autopilotStack: FleetAutopilotStack,
+        source: String
+    ) async {
+        guard simulatedFleetVehicleIDs.contains(vehicleID) else {
+            appendVehicleLog("applySimState skipped: not a Guardian SITL stream [\(source)].", vehicleID: vehicleID)
+            return
+        }
+        guard sessionsByVehicleID[vehicleID] != nil else { return }
+
+        let altM = Float(state.absoluteAltitudeM ?? 0)
+        let tagBase = "\(source).pose"
+
+        switch autopilotStack {
+        case .ardupilot:
+            await awaitSetSimStateFloatBestEffort(
+                vehicleID: vehicleID,
+                name: "SIM_OPOS_LAT",
+                value: Float(state.latitudeDeg),
+                logTag: "\(tagBase).SIM_OPOS_LAT"
+            )
+            await awaitSetSimStateFloatBestEffort(
+                vehicleID: vehicleID,
+                name: "SIM_OPOS_LNG",
+                value: Float(state.longitudeDeg),
+                logTag: "\(tagBase).SIM_OPOS_LNG"
+            )
+            await awaitSetSimStateFloatBestEffort(
+                vehicleID: vehicleID,
+                name: "SIM_OPOS_ALT",
+                value: altM,
+                logTag: "\(tagBase).SIM_OPOS_ALT"
+            )
+            await awaitSetSimStateFloatBestEffort(
+                vehicleID: vehicleID,
+                name: "SIM_OPOS_HDG",
+                value: state.yawDeg,
+                logTag: "\(tagBase).SIM_OPOS_HDG"
+            )
+            appendVehicleLog(
+                "applySimState: ArduPilot SIM_OPOS_* applied [\(source)].",
+                vehicleID: vehicleID
+            )
+            if let v = state.batteryVoltageV, v > 0.1 {
+                await awaitSetSimStateFloatBestEffort(
+                    vehicleID: vehicleID,
+                    name: "SIM_BATT_VOLTAGE",
+                    value: Float(v),
+                    logTag: "\(tagBase).SIM_BATT_VOLTAGE"
+                )
+            }
+            if let cap = state.ardupilotSimBattCapAh, cap > 0 {
+                await awaitSetSimStateFloatBestEffort(
+                    vehicleID: vehicleID,
+                    name: "SIM_BATT_CAP_AH",
+                    value: cap,
+                    logTag: "\(tagBase).SIM_BATT_CAP_AH"
+                )
+            }
+        case .px4:
+            await awaitSetSimStateFloatBestEffort(
+                vehicleID: vehicleID,
+                name: "SIH_LOC_LAT0",
+                value: Float(state.latitudeDeg),
+                logTag: "\(tagBase).SIH_LOC_LAT0"
+            )
+            await awaitSetSimStateFloatBestEffort(
+                vehicleID: vehicleID,
+                name: "SIH_LOC_LON0",
+                value: Float(state.longitudeDeg),
+                logTag: "\(tagBase).SIH_LOC_LON0"
+            )
+            await awaitSetSimStateFloatBestEffort(
+                vehicleID: vehicleID,
+                name: "SIH_LOC_H0",
+                value: altM,
+                logTag: "\(tagBase).SIH_LOC_H0"
+            )
+            // Mirror of ArduPilot's SIM_OPOS_HDG — PX4 SIH's heading initial uses the same `SIH_LOC_*`
+            // family. `awaitSetSimStateFloatBestEffort` tolerates "param not found" gracefully (logs +
+            // continues), so on PX4 builds where this name differs we'll see the failure in the vehicle
+            // log and can rename here without touching anything else.
+            await awaitSetSimStateFloatBestEffort(
+                vehicleID: vehicleID,
+                name: "SIH_LOC_HDG0",
+                value: state.yawDeg,
+                logTag: "\(tagBase).SIH_LOC_HDG0"
+            )
+            if let drain = state.px4SimBatDrain {
+                await awaitSetSimStateFloatBestEffort(
+                    vehicleID: vehicleID,
+                    name: "SIM_BAT_DRAIN",
+                    value: drain,
+                    logTag: "\(tagBase).SIM_BAT_DRAIN"
+                )
+            }
+            appendVehicleLog(
+                "applySimState: PX4 SIH_LOC_* (+ SIM_BAT_DRAIN if set) [\(source)].",
+                vehicleID: vehicleID
+            )
+        case .unknown:
+            appendVehicleLog(
+                "applySimState skipped: autopilot stack unknown [\(source)].",
+                vehicleID: vehicleID
+            )
+            return
+        }
+
+        reflectAppliedSimStateInHubTelemetry(
+            vehicleID: vehicleID,
+            state: state,
+            autopilotStack: autopilotStack,
+            source: source
+        )
+    }
+
+    /// MAVSDK pose/attitude can lag behind SIM param teleports (`SIM_OPOS_*` / `SIH_LOC_*`). Patch hub immediately so
+    /// map markers, fleet cards, and Live Drive health cards match the state we just pushed on the wire.
+    private func reflectAppliedSimStateInHubTelemetry(
+        vehicleID: String,
+        state: FleetSimState,
+        autopilotStack: FleetAutopilotStack,
+        source: String
+    ) {
+        guard let session = sessionsByVehicleID[vehicleID] else {
+            appendVehicleLog("reflectSimStateInHub skipped: no MAVSDK session [\(source)].", vehicleID: vehicleID)
+            return
+        }
+        let lifecycle = vehicleStatusByVehicleID[vehicleID] ?? VehicleLifecycleStatus(stage: .live)
+        let existingType = vehicleModelsByVehicleID[vehicleID]?.data.vehicleType ?? .unknown
+        ensureVehicleModel(
+            vehicleID: vehicleID,
+            systemID: session.systemID,
+            vehicleType: existingType,
+            initialStatus: lifecycle
+        )
+        guard var model = vehicleModelsByVehicleID[vehicleID] else {
+            appendVehicleLog("reflectSimStateInHub skipped: no vehicle model after ensure [\(source)].", vehicleID: vehicleID)
+            return
+        }
+
+        let heading = Self.normalizedDegrees(Double(state.yawDeg))
+        let appliedAbsAlt = state.absoluteAltitudeM ?? 0
+        model.applyTelemetryMutation { hub in
+            if autopilotStack != .unknown {
+                hub.autopilotStack = autopilotStack
+            }
+            hub.latitudeDeg = state.latitudeDeg
+            hub.longitudeDeg = state.longitudeDeg
+            hub.absoluteAltM = appliedAbsAlt
+            hub.altitudeAmslM = appliedAbsAlt
+            hub.altitudeRelativeM = hub.homeAbsoluteAltM.map { appliedAbsAlt - $0 }
+            if let home = hub.homeAbsoluteAltM {
+                hub.relativeAltM = appliedAbsAlt - home
+            }
+            hub.headingDeg = heading
+            hub.yawDeg = heading
+            hub.rollDeg = 0
+            hub.pitchDeg = 0
+            hub.velocityNorthMS = 0
+            hub.velocityEastMS = 0
+            hub.velocityDownMS = 0
+            hub.positionVelNorthM = 0
+            hub.positionVelEastM = 0
+            hub.positionVelDownM = 0
+            hub.positionVelVnMS = 0
+            hub.positionVelVeMS = 0
+            hub.positionVelVdMS = 0
+            hub.positionVelHeadingDeg = heading
+            if let v = state.batteryVoltageV, v > 0.1 {
+                hub.batteryVoltageV = v
+            }
+        }
+        vehicleModelsByVehicleID[vehicleID] = model
+        hubTelemetryByVehicleID[vehicleID] = model.data.telemetry
+        telemetryByVehicleID[vehicleID] = model.collections.telemetrySnapshot
+        hubTelemetry = hubTelemetryByVehicleID[vehicleID]
+        telemetry = telemetryByVehicleID[vehicleID]
+        appendVehicleLog(
+            "Hub telemetry hydrated from applied sim state [\(source)] (lat/lon/alt/hdg + stale motion cleared).",
+            vehicleID: vehicleID
+        )
+    }
+
+    private func awaitSetSimStateFloatBestEffort(vehicleID: String, name: String, value: Float, logTag: String) async {
+        guard let session = sessionsByVehicleID[vehicleID] else { return }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            session.drone.param.setParamFloat(name: name, value: value)
+                .observe(on: MainScheduler.asyncInstance)
+                .subscribe(
+                    onCompleted: { [weak self] in
+                        Task { @MainActor [weak self] in
+                            self?.appendVehicleLog("applySimState param set [\(logTag)] \(name)=\(value).", vehicleID: vehicleID)
+                            cont.resume()
+                        }
+                    },
+                    onError: { [weak self] error in
+                        Task { @MainActor [weak self] in
+                            let d = self?.mavsdkPublicErrorDescription(error) ?? error.localizedDescription
+                            self?.appendVehicleLog("applySimState param failed [\(logTag)] \(name): \(d).", vehicleID: vehicleID)
+                            cont.resume()
+                        }
+                    }
+                )
+                .disposed(by: session.bag)
+        }
+    }
+
+    /// After SITL spawn, once MAVSDK is connected, re-apply `SimSpawnDefaults` on the wire (see `applySimState`).
+    private func scheduleApplyPendingSpawnSimStateIfNeeded(session: VehicleSession, vehicleID: String) {
+        guard let payload = session.pendingSpawnSimState else { return }
+        session.pendingSpawnSimState = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard self.sessionsByVehicleID[vehicleID] === session else { return }
+            let stack = self.vehicleModelsByVehicleID[vehicleID]?.data.telemetry?.autopilotStack ?? .unknown
+            await self.applySimState(
+                vehicleID: vehicleID,
+                state: payload,
+                autopilotStack: stack,
+                source: "sitl.spawnHandshake"
+            )
+        }
+    }
+
     func registerSimulatedVehicle(
         systemID: Int,
         mavlinkConnectionURL: String,
@@ -219,6 +601,9 @@ final class FleetLinkService: ObservableObject {
             runner: runner,
             drone: drone
         )
+        if let defaults = spawnDefaults {
+            session.pendingSpawnSimState = FleetSimState(spawnDefaults: defaults)
+        }
         sessionsByVehicleID[vehicleID] = session
         vehicleIDBySystemID[systemID] = vehicleID
         vehicleStatusByVehicleID[vehicleID] = VehicleLifecycleStatus(stage: .starting)
@@ -281,6 +666,7 @@ final class FleetLinkService: ObservableObject {
         recentVehicleStatusMessagesByVehicleID.removeAll(keepingCapacity: true)
         autopilotMissionCompletionLatchByVehicleID.removeAll(keepingCapacity: true)
         simulatedFleetVehicleIDs.removeAll(keepingCapacity: true)
+        liveDriveControlSessionVehicleID = nil
         bridgePhase = .awaitingVehicle
     }
 
@@ -325,6 +711,18 @@ final class FleetLinkService: ObservableObject {
         )
     }
 
+    /// Blocks `liveDrive.*` `.manualTakeover` unless an active Live Drive control session holds this `vehicleID`.
+    /// Non–Live Drive sources and other categories are unaffected.
+    private func liveDriveAllowsManualTakeoverCommand(
+        vehicleID: String,
+        source: String,
+        category: FleetVehicleCommandCategory
+    ) -> Bool {
+        guard category == .manualTakeover else { return true }
+        guard source.hasPrefix("liveDrive.") else { return true }
+        return liveDriveControlSessionVehicleID == vehicleID
+    }
+
     /// Command dispatch entrypoint for Paladin and future manual-control systems.
     @discardableResult
     func executeVehicleCommand(
@@ -349,6 +747,14 @@ final class FleetLinkService: ObservableObject {
                     "Command rejected: authority gate on this vehicle requires a higher-priority source than \(category.rawValue)."
                 )
             )
+            return nil
+        }
+        if !liveDriveAllowsManualTakeoverCommand(vehicleID: vehicleID, source: source, category: category) {
+            appendVehicleLog(
+                "Live Drive: blocked \(source) — no active control session (start a Live Drive session first).",
+                vehicleID: vehicleID
+            )
+            onPaladinCommandOutcome?(.failed("Live Drive has no active session for this vehicle."))
             return nil
         }
         let commandID = model.queueCommand(command, source: source, category: category)
@@ -390,14 +796,16 @@ final class FleetLinkService: ObservableObject {
             completion = session.drone.action.returnToLaunch()
         case .land:
             completion = session.drone.action.land()
+        case .idle:
+            completion = completionForIdleManualMode(vehicleID: vehicleID, session: session)
         case .gotoCoordinate(let coord, let relativeAltitudeM, let yawDeg):
             let fallbackBaseAlt = hubTelemetryByVehicleID[vehicleID]?.absoluteAltM ?? 0
             let targetAbsoluteAlt = fallbackBaseAlt + relativeAltitudeM
             completion = session.drone.action.gotoLocation(
                 latitudeDeg: coord.lat,
                 longitudeDeg: coord.lon,
-                absoluteAltitudeM: Float(targetAbsoluteAlt),
-                yawDeg: Float(yawDeg)
+                absoluteAltitudeM: targetAbsoluteAlt,
+                yawDeg: yawDeg
             )
         case .uploadAndStartMission:
             preconditionFailure("uploadAndStartMission must use runUploadArmStartMissionPipeline")
@@ -436,6 +844,291 @@ final class FleetLinkService: ObservableObject {
             .disposed(by: session.bag)
 
         return commandID
+    }
+
+    /// UGV / USV / UUV **Park** at Live Drive session end: `Action.hold()` then `Action.disarm()`.
+    ///
+    /// MAVSDK `hold()` moves the vehicle into a hold navigation state but **often leaves the platform armed**
+    /// (ArduPilot Rover and PX4 rovers). Operators expect Park to be safe to approach; disarm completes that.
+    ///
+    /// UAV "Loiter" also maps to `.holdPosition` in the UI but must **not** auto-disarm mid-air — callers
+    /// should only invoke this for surface / ground classes.
+    func awaitLiveDriveSurfaceParkHoldAndDisarm(vehicleID: String) async {
+        guard let session = sessionsByVehicleID[vehicleID] else {
+            appendVehicleLog("Live Drive park sequence: skipped (no MAVSDK session).", vehicleID: vehicleID)
+            return
+        }
+        appendVehicleLog("Live Drive park sequence: hold then disarm.", vehicleID: vehicleID)
+        do {
+            try await awaitCompletableForManualStream(session.drone.action.hold())
+            appendVehicleLog("Live Drive park sequence: hold acknowledged.", vehicleID: vehicleID)
+        } catch {
+            let d = mavsdkPublicErrorDescription(error)
+            appendVehicleLog("Live Drive park sequence: hold failed (\(d)); attempting disarm anyway.", vehicleID: vehicleID)
+        }
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        do {
+            try await awaitCompletableForManualStream(session.drone.action.disarm())
+            appendVehicleLog("Live Drive park sequence: disarm acknowledged.", vehicleID: vehicleID)
+        } catch {
+            appendVehicleLog(
+                "Live Drive park sequence: disarm failed (\(mavsdkPublicErrorDescription(error))).",
+                vehicleID: vehicleID
+            )
+        }
+    }
+
+    /// UGV / USV / UUV **RTL → Park** at Live Drive session end: drive home, then HOLD + disarm.
+    ///
+    /// Why this exists vs. plain `Action.returnToLaunch()`: ArduPilot Rover and PX4 rover RTL drive the
+    /// vehicle home and (depending on `RTL_AUTODISARM_DELAY` / equivalent) usually auto-disarm at the
+    /// destination — but they leave the *flight mode* in RTL, not HOLD. Operator mental model is
+    /// "RTL = go home and park", so the post-RTL state should match Park: HOLD mode + disarmed. Without
+    /// this follow-up, the rover sits at home in RTL mode and the next mission/manual stint has to clear
+    /// that state explicitly.
+    ///
+    /// Sequencing:
+    ///   1. Issue `returnToLaunch()`.
+    ///   2. Wait for the auto-disarm transition (`hub.isArmed` flips to `false`) — that's the closest
+    ///      universally-reliable signal that the rover has actually arrived. Bounded with a generous
+    ///      timeout so a stuck RTL doesn't hang the session-end task forever.
+    ///   3. Push `hold()` to set HOLD mode (works whether or not the vehicle auto-disarmed).
+    ///   4. Belt-and-braces `disarm()` in case auto-disarm didn't fire (e.g. operator has
+    ///      `RTL_AUTODISARM_DELAY = 0` on ArduPilot, or PX4 cold-set custom params).
+    ///
+    /// **Surface / ground classes only** — UAV RTL ends in LAND, which already disarms after touchdown
+    /// and must not be followed by a HOLD push (would interrupt the descent).
+    func awaitLiveDriveSurfaceRTLHomeAndPark(vehicleID: String) async {
+        guard let session = sessionsByVehicleID[vehicleID] else {
+            appendVehicleLog("Live Drive RTL→park: skipped (no MAVSDK session).", vehicleID: vehicleID)
+            return
+        }
+        appendVehicleLog("Live Drive RTL→park: returnToLaunch issued.", vehicleID: vehicleID)
+        do {
+            try await awaitCompletableForManualStream(session.drone.action.returnToLaunch())
+        } catch {
+            let d = mavsdkPublicErrorDescription(error)
+            appendVehicleLog("Live Drive RTL→park: returnToLaunch failed (\(d)); attempting park anyway.", vehicleID: vehicleID)
+        }
+
+        // Wait for arrival (= auto-disarm). 90 s covers a ~450 m drive at 5 m/s with margin; on SITL
+        // the home → spawn distance is usually < 30 m so this typically resolves in < 30 s.
+        let arrivalTimeoutMs: Int = 90_000
+        let pollIntervalMs: Int = 250
+        let pollIntervalNs: UInt64 = UInt64(pollIntervalMs) * 1_000_000
+        var elapsedMs = 0
+        var arrived = false
+        // Skip the wait entirely if the vehicle is already disarmed (rare but possible, e.g. RTL on a
+        // SITL rover that was already at home and triggered auto-disarm immediately).
+        if hubTelemetryByVehicleID[vehicleID]?.isArmed == false {
+            arrived = true
+        }
+        while !arrived && elapsedMs < arrivalTimeoutMs {
+            try? await Task.sleep(nanoseconds: pollIntervalNs)
+            elapsedMs += pollIntervalMs
+            if hubTelemetryByVehicleID[vehicleID]?.isArmed == false {
+                arrived = true
+            }
+        }
+        if arrived {
+            appendVehicleLog("Live Drive RTL→park: arrival detected (auto-disarmed after \(elapsedMs) ms).", vehicleID: vehicleID)
+        } else {
+            appendVehicleLog(
+                "Live Drive RTL→park: arrival timeout (\(arrivalTimeoutMs) ms); pushing HOLD anyway.",
+                vehicleID: vehicleID
+            )
+        }
+
+        do {
+            try await awaitCompletableForManualStream(session.drone.action.hold())
+            appendVehicleLog("Live Drive RTL→park: hold acknowledged.", vehicleID: vehicleID)
+        } catch {
+            let d = mavsdkPublicErrorDescription(error)
+            appendVehicleLog("Live Drive RTL→park: hold failed (\(d)); attempting disarm anyway.", vehicleID: vehicleID)
+        }
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        // Disarm is a no-op if already disarmed; MAVSDK returns success and we just log either way.
+        if hubTelemetryByVehicleID[vehicleID]?.isArmed == true {
+            do {
+                try await awaitCompletableForManualStream(session.drone.action.disarm())
+                appendVehicleLog("Live Drive RTL→park: disarm acknowledged.", vehicleID: vehicleID)
+            } catch {
+                appendVehicleLog(
+                    "Live Drive RTL→park: disarm failed (\(mavsdkPublicErrorDescription(error))).",
+                    vehicleID: vehicleID
+                )
+            }
+        } else {
+            appendVehicleLog("Live Drive RTL→park: already disarmed; skipping explicit disarm.", vehicleID: vehicleID)
+        }
+    }
+
+    // MARK: - Manual Control Stream (Live Drive continuous setpoints)
+
+    /// True if a continuous manual-control stream is currently driving this vehicle.
+    func isManualControlStreaming(vehicleID: String) -> Bool {
+        sessionsByVehicleID[vehicleID]?.manualStream?.isRunning == true
+    }
+
+    /// Start a continuous manual-control stream for a vehicle.
+    ///
+    /// - Parameters:
+    ///   - vehicleID: Stream key (e.g. `"sysid:1"`).
+    ///   - mode: `.offboard` for body-velocity setpoints (best for keyboard);
+    ///           `.manualControl` for normalized stick input (best for analog gamepad).
+    ///   - autoTakeoff: When `true`, arm the vehicle and issue a takeoff before entering
+    ///                  Offboard mode if the vehicle is on or near the ground. UAV-only behaviour;
+    ///                  callers should pass `false` for ground / surface / sub vehicles.
+    /// - Returns: `true` if the plugin entered streaming mode successfully.
+    @discardableResult
+    func startManualControlStream(
+        vehicleID: String,
+        mode: ManualControlStream.Mode,
+        autoTakeoff: Bool,
+        profile: ManualControlStepProfile
+    ) async -> Bool {
+        guard let session = sessionsByVehicleID[vehicleID] else {
+            appendVehicleLog("Manual stream: cannot start, no MAVSDK session.", vehicleID: vehicleID)
+            return false
+        }
+
+        guard liveDriveControlSessionVehicleID == vehicleID else {
+            appendVehicleLog(
+                "Manual stream: refused — no Live Drive control session for this vehicle (start a session first).",
+                vehicleID: vehicleID
+            )
+            return false
+        }
+
+        if let existing = session.manualStream, existing.isRunning {
+            return true
+        }
+
+        let stack = vehicleModelsByVehicleID[vehicleID]?.data.telemetry?.autopilotStack
+            ?? hubTelemetryByVehicleID[vehicleID]?.autopilotStack
+            ?? .unknown
+
+        if autoTakeoff {
+            await runAutoTakeoffIfNeeded(vehicleID: vehicleID, session: session)
+        }
+
+        let stream = ManualControlStream(
+            vehicleID: vehicleID,
+            drone: session.drone,
+            stack: stack,
+            mode: mode,
+            profile: profile,
+            log: { [weak self] line in
+                Task { @MainActor [weak self] in
+                    self?.appendVehicleLog(line, vehicleID: vehicleID)
+                }
+            }
+        )
+        session.manualStream = stream
+
+        let started = await stream.start()
+        if !started {
+            session.manualStream = nil
+            return false
+        }
+
+        // PX4 ground keyboard path: now that the 30 Hz `MANUAL_CONTROL` stream is
+        // primed, push the autopilot from HOLD into MANUAL via raw MAVLink. The
+        // `Shell.send("commander mode manual")` route silently fails on PX4 SITL
+        // (no `mavlink_shell` on the Onboard link) — see `Px4ModeCommander` for
+        // the full diagnosis. We give the rover module ~300 ms to register the
+        // freshly-published `manual_control_setpoint` topic before issuing the
+        // mode change so the commander accepts the transition instead of bouncing
+        // straight back to HOLD on the RC-loss failsafe watchdog.
+        if mode == .px4GroundManual, let port = px4GcsUdpPort(for: session) {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            let target = UInt8(clamping: session.systemID)
+            // No log closure — Px4ModeCommander only emits errors on UDP-send
+            // failure to localhost, which essentially never happens in SITL,
+            // and forwarding a `(String) -> Void` from `@MainActor` to a
+            // `nonisolated` async helper trips Swift 6 strict-concurrency.
+            await Px4ModeCommander.setMode(
+                port: port,
+                targetSystem: target,
+                mainMode: .manual
+            )
+            appendVehicleLog(
+                "PX4 SET_MODE manual sent (liveDrive.streamStart, gcs udp 127.0.0.1:\(port), target_system=\(target)).",
+                vehicleID: vehicleID
+            )
+        }
+
+        return true
+    }
+
+    /// Refresh the per-vehicle profile (e.g. after the operator edits max speeds in Settings).
+    func updateManualControlProfile(vehicleID: String, profile: ManualControlStepProfile) {
+        sessionsByVehicleID[vehicleID]?.manualStream?.updateProfile(profile)
+    }
+
+    /// Push a fresh operator intent (-1…1 per axis) to the active stream.
+    /// Safe no-op if no stream is running for this vehicle.
+    func updateManualControlIntent(
+        vehicleID: String,
+        forward: Double,
+        right: Double,
+        up: Double,
+        yawRate: Double
+    ) {
+        guard let stream = sessionsByVehicleID[vehicleID]?.manualStream, stream.isRunning else { return }
+        guard liveDriveControlSessionVehicleID == vehicleID else { return }
+        stream.update(intent: .init(forward: forward, right: right, up: up, yawRate: yawRate))
+    }
+
+    /// Stop the active manual control stream and exit Offboard / ManualControl mode.
+    func stopManualControlStream(vehicleID: String) async {
+        guard let session = sessionsByVehicleID[vehicleID], let stream = session.manualStream else { return }
+        session.manualStream = nil
+        await stream.stop()
+    }
+
+    /// Best-effort UAV pre-flight: arm if needed, take off, give the autopilot a few seconds to
+    /// climb to default takeoff altitude before we steal control with Offboard. No-op if the
+    /// vehicle is already airborne (relative altitude > 1.0 m).
+    private func runAutoTakeoffIfNeeded(vehicleID: String, session: VehicleSession) async {
+        let hub = hubTelemetryByVehicleID[vehicleID]
+        let alreadyAirborne = (hub?.relativeAltM ?? 0) > 1.0
+        if alreadyAirborne { return }
+
+        let isArmed = hub?.isArmed == true
+        if !isArmed {
+            do {
+                try await awaitCompletableForManualStream(session.drone.action.arm())
+                appendVehicleLog("Manual stream: arm acknowledged.", vehicleID: vehicleID)
+            } catch {
+                let detail = mavsdkPublicErrorDescription(error)
+                appendVehicleLog("Manual stream: arm failed: \(detail). Continuing with takeoff anyway.", vehicleID: vehicleID)
+            }
+        }
+
+        do {
+            try await awaitCompletableForManualStream(session.drone.action.takeoff())
+            appendVehicleLog("Manual stream: takeoff acknowledged; waiting for climb to settle.", vehicleID: vehicleID)
+        } catch {
+            let detail = mavsdkPublicErrorDescription(error)
+            appendVehicleLog("Manual stream: takeoff failed: \(detail). Operator can still keyboard-drive once airborne.", vehicleID: vehicleID)
+            return
+        }
+        // `action.takeoff()` returns when the autopilot acknowledges MAV_CMD_NAV_TAKEOFF, NOT when
+        // the vehicle has reached takeoff altitude. Give it a few seconds to climb and stabilise
+        // before we yank control with Offboard or it'll fight the takeoff sequence.
+        try? await Task.sleep(nanoseconds: 4_000_000_000)
+    }
+
+    /// Bridge a single-shot RxSwift `Completable` to async/await. The Rx pipeline keeps itself
+    /// alive until it terminates; dropping the returned Disposable is safe and intentional.
+    private func awaitCompletableForManualStream(_ completable: Completable) async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            _ = completable.subscribe(
+                onCompleted: { cont.resume() },
+                onError: { error in cont.resume(throwing: error) }
+            )
+        }
     }
 
     /// Human-readable MAVSDK failure (autopilot `resultStr` + enum case), not only `localizedDescription`.
@@ -676,6 +1369,11 @@ final class FleetLinkService: ObservableObject {
         logLinesByVehicleID.keys.sorted()
     }
 
+    /// Raw per-vehicle log buffer (matches global prefix filtering used in the UI).
+    func storedLogLines(forVehicleID vehicleID: String) -> [String] {
+        logLinesByVehicleID[vehicleID] ?? []
+    }
+
     func combinedLogs(filteredVehicleIDs: Set<String>) -> [String] {
         if filteredVehicleIDs.isEmpty {
             return logLines
@@ -775,6 +1473,7 @@ final class FleetLinkService: ObservableObject {
                         ), vehicleID: vehicleID)
                         if state.isConnected {
                             self.applyMavlinkBatteryTelemetryTuningOnce(session: session, vehicleID: vehicleID)
+                            self.scheduleApplyPendingSpawnSimStateIfNeeded(session: session, vehicleID: vehicleID)
                         }
                     }
                 })
@@ -837,6 +1536,22 @@ final class FleetLinkService: ObservableObject {
                 Task { @MainActor [weak self] in
                     self?.applyNativeTelemetry(vehicleID: vehicleID, systemID: systemID) { hub in
                         hub.isArmed = armed
+                    }
+                }
+            })
+            .disposed(by: session.bag)
+        // Yaw → heading. Without this, the marker arrow + telemetry "Heading" value never
+        // update during keyboard yaw or autopilot turns. We use `attitudeEuler` (ATTITUDE
+        // MAVLink message) because it's universally published by both PX4 and ArduPilot,
+        // unlike `telemetry.heading` which depends on global-position health on some stacks.
+        // `yawDeg` is reported in ±180; `normalizedDegrees` maps it to the 0…360 range
+        // that the rest of the app (map marker, telemetry sheet, log formatters) expects.
+        session.drone.telemetry.attitudeEuler
+            .observe(on: MainScheduler.asyncInstance)
+            .subscribe(onNext: { [weak self] euler in
+                Task { @MainActor [weak self] in
+                    self?.applyNativeTelemetry(vehicleID: vehicleID, systemID: systemID) { hub in
+                        hub.headingDeg = Self.normalizedDegrees(Double(euler.yawDeg))
                     }
                 }
             })
@@ -920,9 +1635,19 @@ final class FleetLinkService: ObservableObject {
 
     private func stopSession(vehicleID: String) {
         guard let session = sessionsByVehicleID.removeValue(forKey: vehicleID) else { return }
+        if liveDriveControlSessionVehicleID == vehicleID {
+            liveDriveControlSessionVehicleID = nil
+        }
         simulatedFleetVehicleIDs.remove(vehicleID)
         recentVehicleStatusMessagesByVehicleID[vehicleID] = nil
         autopilotMissionCompletionLatchByVehicleID[vehicleID] = nil
+        if let stream = session.manualStream {
+            session.manualStream = nil
+            // Best-effort: stop the manual control stream synchronously enough that the
+            // disconnected drone doesn't keep getting setpoints. The Task is fire-and-forget
+            // because the gRPC pipe is about to be closed by `drone.disconnect()` anyway.
+            Task { await stream.stop() }
+        }
         session.bag = DisposeBag()
         session.drone.disconnect()
         session.runner.stop()
@@ -930,11 +1655,24 @@ final class FleetLinkService: ObservableObject {
         hubTelemetryByVehicleID.removeValue(forKey: vehicleID)
         telemetryByVehicleID.removeValue(forKey: vehicleID)
         vehicleIDBySystemID.removeValue(forKey: session.systemID)
-        applyLifecycleStatus(.init(stage: .stopped), vehicleID: vehicleID)
+        // Drop fleet model + status outright. `applyLifecycleStatus(.stopped)` previously kept the model and
+        // re-wrote hub/telemetry from **stale** embedded telemetry — with multiple SIMs, that orphaned `sysid:N`
+        // was mis-classified as "live hardware" in DevicesView (`fleetGridEntries` excludes only *current*
+        // `sitl.instances` IDs), producing an extra phantom card until the last sim stopped or Simulate toggled off.
+        vehicleModelsByVehicleID.removeValue(forKey: vehicleID)
+        vehicleStatusByVehicleID.removeValue(forKey: vehicleID)
+        recentVehicleStatusMessagesByVehicleID[vehicleID] = nil
+        logLinesByVehicleID.removeValue(forKey: vehicleID)
         if hubTelemetryByVehicleID.isEmpty {
             telemetry = nil
             hubTelemetry = nil
             bridgePhase = .awaitingVehicle
+        } else {
+            // Primary hub/telemetry snapshots track "last writer"; refreshing avoids leaving them on a torn-down ID.
+            if let survivor = hubTelemetryByVehicleID.keys.sorted().first {
+                hubTelemetry = hubTelemetryByVehicleID[survivor]
+                telemetry = telemetryByVehicleID[survivor]
+            }
         }
     }
 
@@ -1053,10 +1791,35 @@ final class FleetLinkService: ObservableObject {
         return nil
     }
 
-    /// Request faster battery-related MAVLink via MAVSDK, and for **PX4 SITL** set a non-zero `BAT1_CAPACITY` so remaining % is estimable.
+    /// Request faster battery-related MAVLink via MAVSDK, bump the attitude stream so
+    /// heading updates feel smooth during yaw, and for **PX4 SITL** set a non-zero
+    /// `BAT1_CAPACITY` so remaining % is estimable.
     private func applyMavlinkBatteryTelemetryTuningOnce(session: VehicleSession, vehicleID: String) {
         guard !session.didApplyMavlinkBatteryTuning else { return }
         session.didApplyMavlinkBatteryTuning = true
+
+        // 10 Hz attitude is more than enough for a smooth heading arrow on the map; ATTITUDE
+        // MAVLink messages are cheap so this isn't a bandwidth concern. Failure here is
+        // logged but non-fatal — the subscription still works at whatever default rate the
+        // autopilot publishes.
+        session.drone.telemetry.setRateAttitude(rateHz: 10.0)
+            .observe(on: MainScheduler.asyncInstance)
+            .subscribe(
+                onCompleted: { [weak self] in
+                    Task { @MainActor [weak self] in
+                        self?.appendVehicleLog("Set MAVSDK attitude telemetry stream rate to 10 Hz.", vehicleID: vehicleID)
+                    }
+                },
+                onError: { [weak self] error in
+                    Task { @MainActor [weak self] in
+                        self?.appendVehicleLog(
+                            "Attitude telemetry set-rate unavailable: \(error.localizedDescription)",
+                            vehicleID: vehicleID
+                        )
+                    }
+                }
+            )
+            .disposed(by: session.bag)
 
         session.drone.telemetry.setRateBattery(rateHz: 5.0)
             .observe(on: MainScheduler.asyncInstance)
@@ -1096,6 +1859,40 @@ final class FleetLinkService: ObservableObject {
                     Task { @MainActor [weak self] in
                         self?.appendVehicleLog(
                             "SIM BAT1_CAPACITY default skipped: \(error.localizedDescription)",
+                            vehicleID: vehicleID
+                        )
+                    }
+                }
+            )
+            .disposed(by: session.bag)
+
+        // COM_RC_IN_MODE = 1 (Joystick only).
+        //
+        // Default is 0 (RC Transmitter only). With 0, PX4 ignores every MAVLink
+        // `MANUAL_CONTROL` message because there's no hardware RC link in SIH SITL,
+        // so `rc_signal_lost = true`, MANUAL mode is rejected as "no manual control
+        // source", and the rover bounces straight back to HOLD. Setting this to 1
+        // tells PX4 to treat our MAVLink joystick stream as the canonical manual input
+        // source, which is what unblocks `commander mode manual` for the LiveDrive
+        // PX4-ground keyboard path.
+        //
+        // Safe for non-rover PX4 SITLs too: the parameter just changes the input
+        // priority; UAVs that aren't using MANUAL_CONTROL aren't affected.
+        session.drone.param.setParamInt(name: "COM_RC_IN_MODE", value: 1)
+            .observe(on: MainScheduler.asyncInstance)
+            .subscribe(
+                onCompleted: { [weak self] in
+                    Task { @MainActor [weak self] in
+                        self?.appendVehicleLog(
+                            "Applied SIM default COM_RC_IN_MODE=1 (Joystick) so MAVLink MANUAL_CONTROL is accepted.",
+                            vehicleID: vehicleID
+                        )
+                    }
+                },
+                onError: { [weak self] error in
+                    Task { @MainActor [weak self] in
+                        self?.appendVehicleLog(
+                            "SIM COM_RC_IN_MODE default skipped: \(error.localizedDescription)",
                             vehicleID: vehicleID
                         )
                     }
@@ -1150,6 +1947,8 @@ final class FleetLinkService: ObservableObject {
             return "returnToLaunch"
         case .land:
             return "land"
+        case .idle:
+            return "idle(manualMode)"
         case .manualControl(let manual):
             return "manualControl(intent=\(manual.intent.rawValue) class=\(manual.vehicleClass.rawValue))"
         }
@@ -1177,11 +1976,14 @@ final class FleetLinkService: ObservableObject {
                     hub: hub
                 )
             }
-            // Ground/surface/sub classes: engage is "ready/active" without forcing hold.
+            // Ground/surface/sub classes: arm (if needed) and explicitly leave HOLD-like states.
+            var pipeline: Completable = Completable.empty()
             if hub?.isArmed != true {
-                return session.drone.action.arm()
+                pipeline = session.drone.action.arm()
             }
-            return Completable.empty()
+            return pipeline.andThen(
+                requestSurfaceOrGroundDriveModeIfAvailable(vehicleID: vehicleID, session: session)
+            )
         case .terminate:
             // UAVs return home; surface/ground/sub default to hold/stop behavior.
             switch manual.vehicleClass {
@@ -1200,8 +2002,8 @@ final class FleetLinkService: ObservableObject {
             return session.drone.action.gotoLocation(
                 latitudeDeg: lat,
                 longitudeDeg: lon,
-                absoluteAltitudeM: Float(currentAbsoluteAlt),
-                yawDeg: Float(Self.normalizedDegrees(currentYaw + delta))
+                absoluteAltitudeM: currentAbsoluteAlt,
+                yawDeg: Self.normalizedDegrees(currentYaw + delta)
             )
         case .moveForward, .moveBackward, .moveLeft, .moveRight, .ascend, .descend:
             guard let hub else {
@@ -1248,8 +2050,8 @@ final class FleetLinkService: ObservableObject {
             session.drone.action.gotoLocation(
                 latitudeDeg: lat,
                 longitudeDeg: lon,
-                absoluteAltitudeM: Float(targetAbsoluteAlt),
-                yawDeg: Float(Self.normalizedDegrees(yaw))
+                absoluteAltitudeM: targetAbsoluteAlt,
+                yawDeg: Self.normalizedDegrees(yaw)
             )
         )
     }
@@ -1269,6 +2071,136 @@ final class FleetLinkService: ObservableObject {
             .catch { _ in
                 session.drone.shell.send(command: "commander mode althold")
             }
+    }
+
+    /// Best-effort non-UAV engage mode request so Return exits HOLD-style mode.
+    private func requestSurfaceOrGroundDriveModeIfAvailable(
+        vehicleID: String,
+        session: VehicleSession
+    ) -> Completable {
+        let stack = vehicleModelsByVehicleID[vehicleID]?.data.telemetry?.autopilotStack
+            ?? hubTelemetryByVehicleID[vehicleID]?.autopilotStack
+            ?? .unknown
+        switch stack {
+        case .px4:
+            // PX4 surface/ground: switch to MANUAL via a raw MAVLink `SET_MODE` packet.
+            // We used to send `commander mode manual` through the MAVSDK Shell plugin,
+            // but PX4 SITL doesn't run a `mavlink_shell` instance on the Onboard link
+            // that mavsdk_server connects through, so SERIAL_CONTROL bytes are silently
+            // dropped — the gRPC call "succeeds" without changing the autopilot mode.
+            // `Px4ModeCommander.setMode(.manual)` posts the canonical SET_MODE message
+            // to PX4's GCS UDP port (the same path QGroundControl uses), which is
+            // handled by the standard command pipeline and emits a COMMAND_ACK.
+            return sendPx4SetModeCompletable(
+                vehicleID: vehicleID,
+                session: session,
+                mainMode: .manual,
+                logTag: "engage"
+            )
+        case .ardupilot:
+            // ArduPilot rover/boat: guided enables external navigation commands.
+            return session.drone.shell.send(command: "mode guided")
+        case .unknown:
+            return Completable.empty()
+        }
+    }
+
+    /// Wrap `Px4ModeCommander.setMode(...)` in a `Completable` so the existing
+    /// command-pipeline plumbing (queueing, status tracking, Paladin outcome
+    /// reporting) keeps working without leaking async/await everywhere.
+    private func sendPx4SetModeCompletable(
+        vehicleID: String,
+        session: VehicleSession,
+        mainMode: Px4ModeCommander.MainMode,
+        logTag: String
+    ) -> Completable {
+        guard let port = px4GcsUdpPort(for: session) else {
+            return Completable.error(NSError(
+                domain: "FleetLinkService",
+                code: 7,
+                userInfo: [NSLocalizedDescriptionKey: "PX4 GCS UDP port could not be derived from \(session.mavlinkConnectionURL)"]
+            ))
+        }
+        let target = UInt8(clamping: session.systemID)
+        return Completable.create { [weak self] observer in
+            Task { @MainActor [weak self] in
+                // No log closure — see `startManualControlStream` for the
+                // strict-concurrency rationale. We bracket the call with
+                // explicit `appendVehicleLog` lines on success.
+                await Px4ModeCommander.setMode(
+                    port: port,
+                    targetSystem: target,
+                    mainMode: mainMode
+                )
+                self?.appendVehicleLog(
+                    "PX4 SET_MODE \(mainMode) sent (\(logTag), gcs udp 127.0.0.1:\(port), target_system=\(target)).",
+                    vehicleID: vehicleID
+                )
+                observer(.completed)
+            }
+            return Disposables.create()
+        }
+    }
+
+    /// PX4 SITL exposes its "Normal/GCS" MAVLink instance at UDP `18570 + px4_instance`,
+    /// where `px4_instance = mavsdkUdpinPort - 14540` for our launch recipe (see
+    /// `Px4SitlLocator.px4OffboardRemotePort` and `px4SihGcsUdpPort`). We send raw
+    /// MAVLink (SET_MODE) there because (a) the port is stable, (b) the link runs
+    /// the standard command set, and (c) we avoid sharing the Onboard port with
+    /// `mavsdk_server` and tripping local UDP socket conflicts.
+    private func px4GcsUdpPort(for session: VehicleSession) -> UInt16? {
+        guard let url = URL(string: session.mavlinkConnectionURL),
+              let host = url.host, host.contains("0.0.0.0") || host.contains("127.0.0.1") || host.isEmpty || host == "*",
+              let port = url.port,
+              port >= 14_540
+        else { return nil }
+        let instance = port - 14_540
+        let gcs = 18_570 + instance
+        guard gcs <= UInt16.max else { return nil }
+        return UInt16(gcs)
+    }
+
+    /// Resolve `.idle` to the per-stack shell command that drops the autopilot into its
+    /// "MANUAL stick passthrough" mode. The vehicle stops moving (zero stick from the
+    /// LiveDrive teardown) but remains in a mode that responds instantly to RC / virtual
+    /// stick input — Paladin or the operator can grab control again without re-engaging.
+    ///
+    /// MAVSDK's `Action` plugin has no `setMode(MANUAL)` helper, so this routes via the
+    /// `Shell` plugin. PX4 SITL exposes the firmware shell directly; ArduPilot SITL
+    /// accepts a small set of `mode <name>` commands through the same plugin (used today
+    /// by the `requestSurfaceOrGroundDriveModeIfAvailable` engage path above).
+    private func completionForIdleManualMode(
+        vehicleID: String,
+        session: VehicleSession
+    ) -> Completable {
+        let stack = vehicleModelsByVehicleID[vehicleID]?.data.telemetry?.autopilotStack
+            ?? hubTelemetryByVehicleID[vehicleID]?.autopilotStack
+            ?? .unknown
+        switch stack {
+        case .px4:
+            // Raw MAVLink SET_MODE — see `sendPx4SetModeCompletable` for why
+            // `Shell.send("commander mode manual")` doesn't actually move PX4
+            // out of HOLD on the Onboard link.
+            return sendPx4SetModeCompletable(
+                vehicleID: vehicleID,
+                session: session,
+                mainMode: .manual,
+                logTag: "idle"
+            )
+        case .ardupilot:
+            return session.drone.shell.send(command: "mode manual")
+        case .unknown:
+            // No stack info — best effort: ArduPilot first, then PX4 raw MAVLink.
+            return session.drone.shell.send(command: "mode manual")
+                .catch { _ in
+                    self.sendPx4SetModeCompletable(
+                        vehicleID: vehicleID,
+                        session: session,
+                        mainMode: .manual,
+                        logTag: "idle.fallback"
+                    )
+                }
+        }
     }
 
     private func completionForManualMoveIntent(
@@ -1333,8 +2265,8 @@ final class FleetLinkService: ObservableObject {
         return session.drone.action.gotoLocation(
             latitudeDeg: target.lat,
             longitudeDeg: target.lon,
-            absoluteAltitudeM: Float(targetAbsoluteAlt),
-            yawDeg: Float(Self.normalizedDegrees(heading))
+            absoluteAltitudeM: targetAbsoluteAlt,
+            yawDeg: Self.normalizedDegrees(heading)
         )
     }
 

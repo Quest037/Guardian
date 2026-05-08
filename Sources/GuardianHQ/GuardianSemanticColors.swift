@@ -6,9 +6,9 @@ enum GuardianSemanticColors {
     static let successBackground = Color.green.opacity(0.22)
     static let successForeground = Color.green
 
-    /// Warning — same translucency pattern as success; use for setup / caution badges.
-    static let warningBackground = Color.yellow.opacity(0.22)
-    static let warningForeground = Color.yellow.opacity(0.92)
+    /// Warning — darker amber pair to keep setup/caution badges legible in light mode.
+    static let warningBackground = Color(red: 0.98, green: 0.86, blue: 0.42).opacity(0.36)
+    static let warningForeground = Color(red: 0.48, green: 0.33, blue: 0.00)
 
     /// Info (e.g. completed / neutral-positive emphasis).
     static let infoBackground = Color.blue.opacity(0.22)

@@ -390,11 +390,19 @@ extension SimulationVehiclePreset {
         case .ugvWheeled:
             return ("Rover", "rover")
         case .ugvTracked:
-            return ("Rover", "skid")
+            // Frame name must match a key in `Tools/autotest/pysim/vehicleinfo.py`
+            // under "Rover". The skid-steer entry is `rover-skid`; passing `skid`
+            // hits sim_vehicle.py's "no config for frame" warning, which silently
+            // skips loading default_params/rover.parm + rover-skid.parm, and the
+            // half-configured ardurover never opens its SITL TCP listener — so
+            // MAVProxy times out and Guardian sees "fails to connect telemetry".
+            return ("Rover", "rover-skid")
         case .ugvLegged:
             return ("Rover", "balancebot")
         case .usv:
-            return ("ArduBoat", "motorboat")
+            // Same gotcha as `.ugvTracked`: boats live under the `Rover` vehicle
+            // key in vehicleinfo.py, not a (non-existent) `ArduBoat` key.
+            return ("Rover", "motorboat")
         case .uuv:
             return ("ArduSub", "vectored")
         }

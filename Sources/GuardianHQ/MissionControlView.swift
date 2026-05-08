@@ -44,11 +44,12 @@ struct MissionControlView: View {
     @ObservedObject var fleetLink: FleetLinkService
     @ObservedObject var sitl: SitlService
     @ObservedObject var generalSettings: GeneralSettingsStore
+    @Environment(\.colorScheme) private var colorScheme
 
     @State private var selectedRunID: UUID?
     @State private var showingAddRunSheet = false
 
-    private let bgMain = Color(red: 0.07, green: 0.07, blue: 0.08)
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
         Group {
@@ -59,6 +60,7 @@ struct MissionControlView: View {
                     fleetLink: fleetLink,
                     sitl: sitl,
                     controlStore: controlStore,
+                    generalSettings: generalSettings,
                     defaultLiveMapStyle: generalSettings.defaultMapTileStyle,
                     onBack: { selectedRunID = nil },
                     onUpdate: { controlStore.updateRun($0) },
@@ -80,7 +82,7 @@ struct MissionControlView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(bgMain)
+        .background(theme.backgroundBase)
         .sheet(isPresented: $showingAddRunSheet) {
             AddMissionRunSheet(
                 missionStore: missionStore,
@@ -103,13 +105,13 @@ struct MissionControlView: View {
             VStack(spacing: 14) {
                 Image(systemName: systemImage)
                     .font(.system(size: 44, weight: .medium))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
                 Text(title)
                     .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.textPrimary)
                 subtitle()
                     .font(.system(size: 14))
-                    .foregroundColor(.gray)
+                    .foregroundColor(theme.textSecondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 480)
             }
@@ -129,7 +131,7 @@ struct MissionControlView: View {
             HStack {
                 Text("Mission Runs")
                     .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.textPrimary)
                 Spacer()
                 Button("Add Run") {
                     showingAddRunSheet = true
@@ -140,7 +142,7 @@ struct MissionControlView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity)
-            .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+            .background(theme.backgroundRaised)
 
             if controlStore.runs.isEmpty {
                 centeredEmptyStateBlock(
@@ -160,14 +162,17 @@ struct MissionControlView: View {
                             Button {
                                 selectedRunID = run.id
                             } label: {
-                                MissionRunCard(run: run)
+                                MissionRunCard(
+                                    run: run,
+                                    isSelected: selectedRunID == run.id
+                                )
                             }
                             .buttonStyle(.plain)
                         }
                     }
                     .padding(16)
                 }
-                .background(Color(red: 0.07, green: 0.07, blue: 0.08))
+                .background(theme.backgroundBase)
             }
         }
     }
@@ -211,27 +216,178 @@ private struct MissionRunStatusBadge: View {
 
 private struct MissionRunCard: View {
     let run: MissionRun
+    let isSelected: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text(run.missionName)
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(GuardianDynamicColors.textPrimary)
+                    .lineLimit(1)
                 Spacer()
                 MissionRunStatusBadge(status: run.status)
             }
-            Text("Schedule: \(run.scheduleMode.rawValue)")
-                .font(.system(size: 12))
-                .foregroundStyle(.gray)
-            Text("Slots: \(run.assignments.count)")
-                .font(.system(size: 12))
-                .foregroundStyle(.gray)
+
+            HStack(spacing: 8) {
+                Image(systemName: scheduleIconName)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(GuardianDynamicColors.textTertiary)
+                Text(scheduleSummaryText)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if run.pendingGracefulCycleStop {
+                    Text("Stopping after cycle")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(GuardianSemanticColors.warningForeground)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(GuardianSemanticColors.warningBackground)
+                        .clipShape(Capsule())
+                }
+            }
+
+            HStack(spacing: 8) {
+                statPill(label: "Slots", value: "\(run.assignments.count)")
+                statPill(label: "Assigned", value: "\(assignedSlots)")
+                statPill(label: "Unassigned", value: "\(unassignedSlots)")
+            }
+
+            if let progressLabel {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(progressLabel)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(GuardianDynamicColors.textTertiary)
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(GuardianDynamicColors.borderSubtle)
+                            Capsule()
+                                .fill(progressFillColor)
+                                .frame(width: geo.size.width * progressFraction)
+                        }
+                    }
+                    .frame(height: 5)
+                }
+            }
+
+            Divider()
+                .overlay(GuardianDynamicColors.borderSubtle)
+
+            Text(timelineSummaryText)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(GuardianDynamicColors.textTertiary)
+                .lineLimit(1)
         }
-        .padding(14)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .background(isSelected ? GuardianDynamicColors.backgroundElevated : GuardianDynamicColors.backgroundRaised)
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(
+                    isSelected
+                        ? Color.blue.opacity(0.7)
+                        : GuardianDynamicColors.borderSubtle,
+                    lineWidth: isSelected ? 1.6 : 1
+                )
+        }
         .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var scheduleIconName: String {
+        switch run.scheduleMode {
+        case .oneOff:
+            return "calendar.badge.clock"
+        case .loop, .continuous:
+            return "repeat"
+        }
+    }
+
+    private var scheduleSummaryText: String {
+        switch run.scheduleMode {
+        case .oneOff:
+            if let start = run.oneOffStartAt {
+                return "One-off · starts \(start.formatted(date: .omitted, time: .shortened))"
+            }
+            return "One-off · starts after preflight"
+        case .loop, .continuous:
+            let repeatText = run.loopRepeatCount > 0 ? "target \(run.loopRepeatCount) cycles" : "unbounded cycles"
+            return "Loop · every \(run.loopDelayMinutesClamped)m · \(repeatText)"
+        }
+    }
+
+    private var assignedSlots: Int {
+        run.assignments.filter(\.hasFleetOrLegacyAssignment).count
+    }
+
+    private var unassignedSlots: Int {
+        max(0, run.assignments.count - assignedSlots)
+    }
+
+    private var progressLabel: String? {
+        guard let cycles = run.reportAutopilotCyclesCompleted else { return nil }
+        if run.loopRepeatCount > 0 {
+            return "Cycles \(cycles)/\(run.loopRepeatCount)"
+        }
+        return "Cycles \(cycles)"
+    }
+
+    private var progressFraction: CGFloat {
+        guard let cycles = run.reportAutopilotCyclesCompleted else { return 0 }
+        guard run.loopRepeatCount > 0 else { return min(1, CGFloat(cycles) / 8) }
+        return min(1, CGFloat(cycles) / CGFloat(max(1, run.loopRepeatCount)))
+    }
+
+    private var progressFillColor: Color {
+        switch run.status {
+        case .running:
+            return GuardianSemanticColors.successForeground.opacity(0.95)
+        case .setup:
+            return GuardianSemanticColors.warningForeground.opacity(0.95)
+        case .paused:
+            return GuardianDynamicColors.textSecondary.opacity(0.9)
+        case .completed:
+            return GuardianSemanticColors.infoForeground.opacity(0.95)
+        }
+    }
+
+    private var timelineSummaryText: String {
+        switch run.status {
+        case .setup:
+            return "Created \(run.createdAt.formatted(date: .abbreviated, time: .shortened))"
+        case .running, .paused:
+            if let startedAt = run.startedAt {
+                return "Started \(startedAt.formatted(date: .abbreviated, time: .shortened))"
+            }
+            return "Created \(run.createdAt.formatted(date: .abbreviated, time: .shortened))"
+        case .completed:
+            let completedText = run.completedAt?.formatted(date: .abbreviated, time: .shortened) ?? "Unknown"
+            if let startedAt = run.startedAt, let completedAt = run.completedAt {
+                let duration = completedAt.timeIntervalSince(startedAt)
+                let mins = Int(max(0, duration) / 60)
+                return "Completed \(completedText) · \(mins)m"
+            }
+            return "Completed \(completedText)"
+        }
+    }
+
+    @ViewBuilder
+    private func statPill(label: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(GuardianDynamicColors.textTertiary)
+            Text(value)
+                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                .foregroundStyle(GuardianDynamicColors.textPrimary)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(GuardianDynamicColors.backgroundElevated)
+        .clipShape(RoundedRectangle(cornerRadius: 7))
     }
 }
 
@@ -270,11 +426,11 @@ private struct MissionControlRosterSlotCard: View {
                 VStack(alignment: .leading, spacing: MissionRunPrepLayout.rosterTitleStackSpacing) {
                     Text(title)
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(GuardianDynamicColors.textPrimary)
                         .lineLimit(2)
                     Text(subtitle)
                         .font(.system(size: 11))
-                        .foregroundStyle(.gray)
+                        .foregroundStyle(GuardianDynamicColors.textSecondary)
                         .lineLimit(2)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -301,16 +457,16 @@ private struct MissionControlRosterSlotCard: View {
                     } else if isAttached {
                         Text("—")
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.gray)
+                            .foregroundStyle(GuardianDynamicColors.textSecondary)
                     } else {
                         Text("No vehicle assigned")
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.gray)
+                            .foregroundStyle(GuardianDynamicColors.textSecondary)
                     }
                     if let detail = assignedVehicleDetail, !detail.isEmpty {
                         Text(detail)
                             .font(.system(size: 10))
-                            .foregroundStyle(.white.opacity(0.72))
+                            .foregroundStyle(GuardianDynamicColors.textTertiary)
                             .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -326,10 +482,10 @@ private struct MissionControlRosterSlotCard: View {
             HStack(alignment: .center, spacing: 8) {
                 Text("System ID")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
                 Text(vehicleSystemID.map { "\($0)" } ?? "—")
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.9))
+                    .foregroundStyle(GuardianDynamicColors.textPrimary.opacity(0.9))
                 Spacer(minLength: 0)
             }
 
@@ -365,12 +521,12 @@ private struct MissionControlRosterSlotCard: View {
         }
         .frame(minHeight: MissionRunPrepLayout.rosterSlotMinHeight, alignment: .topLeading)
         .padding(MissionRunPrepLayout.rosterSlotPadding)
-        .background(Color(red: 0.10, green: 0.10, blue: 0.11))
+        .background(GuardianDynamicColors.backgroundElevated)
         .clipShape(RoundedRectangle(cornerRadius: MissionRunPrepLayout.rosterSlotCornerRadius))
         .overlay(
             RoundedRectangle(cornerRadius: MissionRunPrepLayout.rosterSlotCornerRadius)
                 .strokeBorder(
-                    isSelectedForSetupMap ? Color.blue.opacity(0.92) : (isAttached ? Color.green.opacity(0.7) : Color.white.opacity(0.08)),
+                    isSelectedForSetupMap ? Color.blue.opacity(0.92) : (isAttached ? Color.green.opacity(0.7) : GuardianDynamicColors.borderSubtle),
                     lineWidth: isSelectedForSetupMap ? 2 : (isAttached ? 2 : 1)
                 )
         )
@@ -388,7 +544,7 @@ private struct MissionControlRosterSlotCard: View {
                 .foregroundStyle(rosterBatteryIconTint)
             Text(rosterBatteryPercentText)
                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.94))
+                .foregroundStyle(GuardianDynamicColors.textPrimary.opacity(0.94))
                 .lineLimit(1)
         }
         .help(rosterBatteryHoverText)
@@ -494,6 +650,7 @@ private struct MissionRunDetailView: View {
     @ObservedObject var fleetLink: FleetLinkService
     @ObservedObject var sitl: SitlService
     @ObservedObject var controlStore: MissionControlStore
+    @ObservedObject var generalSettings: GeneralSettingsStore
     let onBack: () -> Void
     let onUpdate: (MissionRun) -> Void
     let onStart: (MissionRun) -> Void
@@ -539,6 +696,7 @@ private struct MissionRunDetailView: View {
         fleetLink: FleetLinkService,
         sitl: SitlService,
         controlStore: MissionControlStore,
+        generalSettings: GeneralSettingsStore,
         defaultLiveMapStyle: MapTileStyle,
         onBack: @escaping () -> Void,
         onUpdate: @escaping (MissionRun) -> Void,
@@ -550,6 +708,7 @@ private struct MissionRunDetailView: View {
         self.fleetLink = fleetLink
         self.sitl = sitl
         self.controlStore = controlStore
+        self.generalSettings = generalSettings
         self.onBack = onBack
         self.onUpdate = onUpdate
         self.onStart = onStart
@@ -609,6 +768,42 @@ private struct MissionRunDetailView: View {
     private func applyResetToSetup() {
         controlStore.resetRunToSetup(id: run.id)
         syncRunFromStore()
+    }
+
+    private func isSimulationVehicleID(_ vehicleID: String) -> Bool {
+        sitl.instances.contains { inst in
+            let sid = inst.stackInstanceIndex + 1
+            let resolved = fleetLink.vehicleID(forSystemID: sid) ?? "sysid:\(sid)"
+            return resolved == vehicleID
+        }
+    }
+
+    private var assignedSimulationVehicleIDs: [String] {
+        Array(
+            Set(
+                run.assignments.compactMap { assignment in
+                    guard let vid = resolvedFleetStreamVehicleID(assignment: assignment, fleetLink: fleetLink, sitl: sitl),
+                          isSimulationVehicleID(vid)
+                    else { return nil }
+                    return vid
+                }
+            )
+        )
+    }
+
+    /// Mission Control Running owns SIM battery drain policy for this run:
+    /// running => drain on, otherwise off.
+    private func syncSimBatteryDrainForRunStatus() {
+        let enableDrain = (run.status == .running)
+        for vehicleID in assignedSimulationVehicleIDs {
+            fleetLink.setSimBatteryDrainEnabled(
+                vehicleID: vehicleID,
+                enabled: enableDrain,
+                rate: generalSettings.defaultSimBatteryDrainRate,
+                source: "missionControl.runStatus.\(run.status.rawValue)",
+                onResult: nil
+            )
+        }
     }
 
     private var runLoopEnabled: Bool {
@@ -704,7 +899,7 @@ private struct MissionRunDetailView: View {
 
                         Text(run.missionName)
                             .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(GuardianDynamicColors.textPrimary)
                         Spacer()
 
                         if run.status == .setup {
@@ -757,7 +952,7 @@ private struct MissionRunDetailView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .frame(maxWidth: .infinity)
-                    .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+                    .background(GuardianDynamicColors.backgroundRaised)
 
                     if run.pendingGracefulCycleStop, run.status == .running || run.status == .paused {
                         gracefulStopPendingBanner
@@ -911,7 +1106,7 @@ private struct MissionRunDetailView: View {
             }
 
             if run.status == .setup, rosterPickerAssignmentId != nil {
-                Color.black.opacity(0.45)
+                GuardianDynamicColors.backgroundBase.opacity(0.45)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Rectangle())
                     .onTapGesture {
@@ -941,10 +1136,10 @@ private struct MissionRunDetailView: View {
                 )
                 .frame(width: 420)
                 .frame(maxHeight: .infinity)
-                .background(Color(red: 0.11, green: 0.11, blue: 0.12))
+                .background(GuardianDynamicColors.backgroundElevated)
                 .overlay(alignment: .leading) {
                     Rectangle()
-                        .fill(Color.white.opacity(0.08))
+                        .fill(GuardianDynamicColors.borderSubtle)
                         .frame(width: 1)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
@@ -953,7 +1148,7 @@ private struct MissionRunDetailView: View {
             }
 
             if (run.status == .running || run.status == .paused), runControlsSidebarVisible {
-                Color.black.opacity(0.45)
+                GuardianDynamicColors.backgroundBase.opacity(0.45)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Rectangle())
                     .onTapGesture {
@@ -969,7 +1164,7 @@ private struct MissionRunDetailView: View {
                     HStack {
                         Text("Run controls")
                             .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(GuardianDynamicColors.textPrimary)
                         Spacer(minLength: 8)
                         Button {
                             withAnimation(rosterPickerSpring) {
@@ -986,7 +1181,7 @@ private struct MissionRunDetailView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Loop schedule")
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.95))
+                            .foregroundStyle(GuardianDynamicColors.textPrimary.opacity(0.95))
 
                         Divider().opacity(0.18)
 
@@ -999,10 +1194,10 @@ private struct MissionRunDetailView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("Loop")
                                     .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(.white)
+                                    .foregroundStyle(GuardianDynamicColors.textPrimary)
                                 Text("When off, the current cycle finishes and the run ends.")
                                     .font(.system(size: 10))
-                                    .foregroundStyle(.gray)
+                                    .foregroundStyle(GuardianDynamicColors.textSecondary)
                             }
                         }
                         .toggleStyle(.switch)
@@ -1015,7 +1210,7 @@ private struct MissionRunDetailView: View {
                                 Spacer(minLength: 8)
                                 Text(run.loopRepeatCount == 0 ? "Unlimited" : "\(run.loopRepeatCount)")
                                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(runLoopEnabled ? .white : .gray.opacity(0.8))
+                                    .foregroundStyle(runLoopEnabled ? GuardianDynamicColors.textPrimary : GuardianDynamicColors.textSecondary.opacity(0.8))
                                 Stepper(
                                     "",
                                     value: Binding(
@@ -1039,7 +1234,7 @@ private struct MissionRunDetailView: View {
                                 Spacer(minLength: 8)
                                 Text("\(run.loopDelayMinutesClamped) min")
                                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(runLoopEnabled ? .white : .gray.opacity(0.8))
+                                    .foregroundStyle(runLoopEnabled ? GuardianDynamicColors.textPrimary : GuardianDynamicColors.textSecondary.opacity(0.8))
                                 Stepper(
                                     "",
                                     value: Binding(
@@ -1059,7 +1254,7 @@ private struct MissionRunDetailView: View {
                             }
                         }
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(runLoopEnabled ? .white : .gray)
+                        .foregroundStyle(runLoopEnabled ? GuardianDynamicColors.textPrimary : GuardianDynamicColors.textSecondary)
                         .disabled(!runLoopEnabled)
                     }
 
@@ -1068,10 +1263,10 @@ private struct MissionRunDetailView: View {
                 .padding(16)
                 .frame(width: 360)
                 .frame(maxHeight: .infinity)
-                .background(Color(red: 0.11, green: 0.11, blue: 0.12))
+                .background(GuardianDynamicColors.backgroundElevated)
                 .overlay(alignment: .leading) {
                     Rectangle()
-                        .fill(Color.white.opacity(0.08))
+                        .fill(GuardianDynamicColors.borderSubtle)
                         .frame(width: 1)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
@@ -1079,7 +1274,7 @@ private struct MissionRunDetailView: View {
                 .zIndex(4)
             }
         }
-        .background(Color(red: 0.07, green: 0.07, blue: 0.08))
+        .background(GuardianDynamicColors.backgroundBase)
         .confirmationDialog(
             "Delete “\(run.missionName)”?",
             isPresented: $confirmDeleteRun,
@@ -1145,6 +1340,7 @@ private struct MissionRunDetailView: View {
         .onAppear {
             syncRunFromStore()
             mapModel.recenter()
+            syncSimBatteryDrainForRunStatus()
             if run.status == .setup {
                 pruneStaleRosterFleetAssignmentsIfNeeded()
             }
@@ -1163,11 +1359,24 @@ private struct MissionRunDetailView: View {
             }
         }
         .onChange(of: run.status) { new in
+            syncSimBatteryDrainForRunStatus()
             if new == .setup {
                 pruneStaleRosterFleetAssignmentsIfNeeded()
             }
         }
+        .onChange(of: run.assignments) { _ in
+            syncSimBatteryDrainForRunStatus()
+        }
         .onDisappear {
+            for vehicleID in assignedSimulationVehicleIDs {
+                fleetLink.setSimBatteryDrainEnabled(
+                    vehicleID: vehicleID,
+                    enabled: false,
+                    rate: generalSettings.defaultSimBatteryDrainRate,
+                    source: "missionControl.viewDisappear",
+                    onResult: nil
+                )
+            }
             onUpdate(run)
         }
     }
@@ -1298,7 +1507,7 @@ private struct MissionRunDetailView: View {
                 "Finishing the current run — when it completes, this mission stops. No further loop or continuous cycles will be scheduled."
             )
             .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(.gray)
+            .foregroundStyle(GuardianDynamicColors.textSecondary)
             .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
@@ -1348,7 +1557,7 @@ private struct MissionRunDetailView: View {
                         "Execution begins \(deferred.executeAt.guardianScheduleOnAtPhrase) — in \(formattedOneOffCountdown(seconds: remaining))."
                     )
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 8)
@@ -1398,8 +1607,8 @@ private struct MissionRunDetailView: View {
         return String(format: "%d:%02d", m, sec)
     }
 
-    private let liveConsoleCardFill = Color(red: 0.10, green: 0.10, blue: 0.11)
-    private let liveConsoleCardStroke = Color.white.opacity(0.06)
+    private let liveConsoleCardFill = GuardianDynamicColors.backgroundElevated
+    private let liveConsoleCardStroke = GuardianDynamicColors.borderSubtle
     /// Map + camera row: 50% taller than the previous 220pt baseline.
     private let liveConsoleMapCameraRowMinHeight: CGFloat = 330
 
@@ -1464,7 +1673,7 @@ private struct MissionRunDetailView: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text("Progress")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.gray)
+                        .foregroundStyle(GuardianDynamicColors.textSecondary)
                     Spacer(minLength: 8)
                     missionLiveScheduleCounter
                 }
@@ -1481,13 +1690,13 @@ private struct MissionRunDetailView: View {
                 } else {
                     Text("No mission template")
                         .font(.system(size: 11))
-                        .foregroundStyle(.gray)
+                        .foregroundStyle(GuardianDynamicColors.textSecondary)
                 }
             }
         }
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .background(GuardianDynamicColors.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(
             RoundedRectangle(cornerRadius: 10)
@@ -1501,16 +1710,16 @@ private struct MissionRunDetailView: View {
         case .oneOff:
             Text("—")
                 .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.gray.opacity(0.55))
+                .foregroundStyle(GuardianDynamicColors.textTertiary)
         case .loop, .continuous:
             if run.loopRepeatCount > 0 {
                 Text("Runs \(controlStore.completedAutopilotCycles(for: run.id))/\(run.loopRepeatCount)")
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
             } else {
                 Text("Runs \(controlStore.completedAutopilotCycles(for: run.id))")
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
             }
         }
     }
@@ -1559,7 +1768,7 @@ private struct MissionRunDetailView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(path.name)
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(path.enabled ? .white : .gray)
+                    .foregroundStyle(path.enabled ? GuardianDynamicColors.textPrimary : GuardianDynamicColors.textSecondary)
                 Spacer(minLength: 6)
                 Group {
                     if inPathStartDeferral, let pathStartDef {
@@ -1583,15 +1792,15 @@ private struct MissionRunDetailView: View {
                     } else if path.id == mavlinkPathId, let hub, let tot = hub.missionProgressTotal, tot > 0, let cur = hub.missionProgressCurrent {
                         Text("\(cur)/\(tot)")
                             .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.gray)
+                            .foregroundStyle(GuardianDynamicColors.textSecondary)
                     } else if !path.enabled {
                         Text("Off")
                             .font(.system(size: 10))
-                            .foregroundStyle(.gray)
+                            .foregroundStyle(GuardianDynamicColors.textSecondary)
                     } else {
                         Text("—")
                             .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.gray.opacity(0.45))
+                            .foregroundStyle(GuardianDynamicColors.textSecondary.opacity(0.45))
                     }
                 }
             }
@@ -1761,7 +1970,27 @@ private struct MissionRunDetailView: View {
     private var missionLiveOverviewMap: some View {
         Group {
             if resolvedMission != nil {
-                GuardianMapView(model: mapModel)
+                GuardianMapView(
+                    model: mapModel,
+                    contextMenuPolicy: GuardianMapContextMenuPolicy(
+                        vehicleActions: [.followVehicle, .stopFollowingVehicle, .centerMarker],
+                        waypointActions: [],
+                        homeActions: []
+                    ),
+                    onContextAction: { event in
+                        guard event.markerType == .vehicle else { return }
+                        switch event.action {
+                        case .followVehicle:
+                            if let markerID = event.markerID, !markerID.isEmpty {
+                                mapModel.followedVehicleMarkerID = markerID
+                            }
+                        case .stopFollowingVehicle:
+                            mapModel.followedVehicleMarkerID = nil
+                        case .centerMarker, .deleteWaypoint:
+                            break
+                        }
+                    }
+                )
                 .task(id: liveOverviewMapSignature) {
                     if let mission = resolvedMission {
                         mapModel.home = mission.routeMacro.home
@@ -1773,6 +2002,10 @@ private struct MissionRunDetailView: View {
                     mapModel.selectedPathWaypoints = []
                     mapModel.selectedWaypointIndex = nil
                     mapModel.vehicleMarkers = missionLiveVehicleMarkers
+                    if let followID = mapModel.followedVehicleMarkerID,
+                       !missionLiveVehicleMarkers.contains(where: { $0.id == followID }) {
+                        mapModel.followedVehicleMarkerID = nil
+                    }
                     mapModel.headingPreview = nil
                     mapModel.cameraPreview = nil
                     mapModel.isEditingPath = false
@@ -1863,7 +2096,7 @@ private struct MissionRunDetailView: View {
             HStack(alignment: .center, spacing: 10) {
                 Text("Paladin")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(GuardianDynamicColors.textPrimary)
 
                 if let session = controlStore.paladinSessionsByRunID[run.id] {
                     let phaseStyle = GuardianSemanticColors.paladinPhaseBadgeStyle(for: session.phase)
@@ -1877,7 +2110,7 @@ private struct MissionRunDetailView: View {
                             .clipShape(Capsule())
                         Text(paladinCondensedHeaderMetadata(session: session))
                             .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.gray.opacity(0.92))
+                            .foregroundStyle(GuardianDynamicColors.textTertiary)
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
@@ -1914,7 +2147,7 @@ private struct MissionRunDetailView: View {
             } else {
                 Text("No Paladin session for this run yet.")
                     .font(.system(size: 11))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
             }
         }
         .padding(12)
@@ -1982,7 +2215,7 @@ private struct MissionRunDetailView: View {
         let speakerColor: Color = {
             switch event.speaker {
             case .paladin:
-                return .white
+                return GuardianDynamicColors.textPrimary
             case .vehicleSlot(let slot):
                 guard let a = run.assignments.first(where: { $0.slotName == slot }),
                       let vid = resolvedFleetStreamVehicleID(assignment: a, fleetLink: fleetLink, sitl: sitl)
@@ -2037,7 +2270,7 @@ private struct MissionRunDetailView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text("Mission report")
                     .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(GuardianDynamicColors.textPrimary)
                 Spacer()
                 MissionRunStatusBadge(status: .completed)
             }
@@ -2055,10 +2288,10 @@ private struct MissionRunDetailView: View {
         return completedReportCardChrome(title: "Outcome", accent: accent) {
             Text(completedOutcomeTitle)
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(GuardianDynamicColors.textPrimary)
             Text(completedOutcomeDetail)
                 .font(.system(size: 13))
-                .foregroundStyle(.gray)
+                .foregroundStyle(GuardianDynamicColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -2174,14 +2407,14 @@ private struct MissionRunDetailView: View {
             if run.assignments.isEmpty {
                 Text("No roster slots.")
                     .font(.system(size: 13))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
             } else {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(run.assignments) { a in
                         let bound = a.attachedFleetVehicleToken != nil || !a.attachedDevice.isEmpty
                         Text("• \(a.slotName)\(bound ? "" : " — unassigned")")
                             .font(.system(size: 13, design: .monospaced))
-                            .foregroundStyle(.gray)
+                            .foregroundStyle(GuardianDynamicColors.textSecondary)
                     }
                 }
             }
@@ -2196,7 +2429,7 @@ private struct MissionRunDetailView: View {
             if controlStore.paladinSessionsByRunID[run.id] == nil {
                 Text("No Paladin session is stored for this run.")
                     .font(.system(size: 13))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
             } else {
                 let events = controlStore.paladinSessionsByRunID[run.id]?.events.count ?? 0
                 labeledReportRow("Events recorded", "\(events)")
@@ -2205,7 +2438,7 @@ private struct MissionRunDetailView: View {
                 if errs == 0, warns == 0 {
                     Text("No warnings or errors in the Paladin log.")
                         .font(.system(size: 12))
-                        .foregroundStyle(.gray.opacity(0.9))
+                        .foregroundStyle(GuardianDynamicColors.textTertiary)
                         .padding(.top, 4)
                 }
             }
@@ -2227,7 +2460,7 @@ private struct MissionRunDetailView: View {
             HStack {
                 Text("Paladin log")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(GuardianDynamicColors.textPrimary)
                 Spacer()
                 Button("Copy") {
                     copyCompletedPaladinLog()
@@ -2254,28 +2487,28 @@ private struct MissionRunDetailView: View {
             if session == nil {
                 Text("No Paladin session for this run.")
                     .font(.system(size: 13))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
             } else {
                 ScrollView {
                     Text(text)
                         .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.gray.opacity(0.92))
+                        .foregroundStyle(GuardianDynamicColors.textTertiary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
                 }
                 .frame(minHeight: 220, idealHeight: 320, maxHeight: 480)
                 .padding(10)
-                .background(Color(red: 0.09, green: 0.09, blue: 0.1))
+                .background(GuardianDynamicColors.backgroundElevated)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+                        .strokeBorder(GuardianDynamicColors.borderSubtle, lineWidth: 1)
                 )
             }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .background(GuardianDynamicColors.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
@@ -2291,7 +2524,7 @@ private struct MissionRunDetailView: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text(title)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(GuardianDynamicColors.textPrimary)
                 content()
             }
             .padding(.leading, 12)
@@ -2299,7 +2532,7 @@ private struct MissionRunDetailView: View {
             .padding(.trailing, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .background(GuardianDynamicColors.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
@@ -2307,11 +2540,11 @@ private struct MissionRunDetailView: View {
         HStack(alignment: .firstTextBaseline) {
             Text(label)
                 .font(.system(size: 12))
-                .foregroundStyle(.gray)
+                .foregroundStyle(GuardianDynamicColors.textSecondary)
             Spacer(minLength: 12)
             Text(value)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white)
+                .foregroundStyle(GuardianDynamicColors.textPrimary)
                 .multilineTextAlignment(.trailing)
         }
     }
@@ -2376,7 +2609,7 @@ private struct MissionRunDetailView: View {
         }
         .padding(MissionRunPrepLayout.scheduleCardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .background(GuardianDynamicColors.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: MissionRunPrepLayout.pathCardCornerRadius))
     }
 
@@ -2403,12 +2636,12 @@ private struct MissionRunDetailView: View {
         VStack(alignment: .leading, spacing: MissionRunPrepLayout.scheduleCardSpacing) {
             Text("Mission start delays")
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.92))
+                .foregroundStyle(GuardianDynamicColors.textPrimary.opacity(0.92))
             Text(
                 "After Paladin finishes staging at execution start, each path’s MAVLink mission upload/start waits this many minutes (0 = start with the run)."
             )
             .font(.system(size: 11))
-            .foregroundStyle(.gray)
+            .foregroundStyle(GuardianDynamicColors.textSecondary)
             .fixedSize(horizontal: false, vertical: true)
 
             if let mission = resolvedMission {
@@ -2416,7 +2649,7 @@ private struct MissionRunDetailView: View {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(path.name)
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(path.enabled ? .white : Color.gray.opacity(0.72))
+                            .foregroundStyle(path.enabled ? GuardianDynamicColors.textPrimary : GuardianDynamicColors.textSecondary.opacity(0.72))
                             .lineLimit(2)
                             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                         Text("Delay")
@@ -2436,7 +2669,7 @@ private struct MissionRunDetailView: View {
             } else {
                 Text("Mission template unavailable for this run.")
                     .font(.system(size: 12))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
             }
         }
     }
@@ -2446,7 +2679,7 @@ private struct MissionRunDetailView: View {
         return VStack(alignment: .leading, spacing: MissionRunPrepLayout.scheduleCardSpacing) {
             Text("Timing")
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.92))
+                .foregroundStyle(GuardianDynamicColors.textPrimary.opacity(0.92))
 
             Toggle(
                 "Start immediately",
@@ -2507,7 +2740,7 @@ private struct MissionRunDetailView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text("Times")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(GuardianDynamicColors.textPrimary)
                     HStack(spacing: 6) {
                         StrictNumberField(
                             value: Binding(
@@ -2539,7 +2772,7 @@ private struct MissionRunDetailView: View {
                 }
                 Text("Mission cycles before the run completes (0 = repeat until you stop the run).")
                     .font(.system(size: 11))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Stepper(
@@ -2555,7 +2788,7 @@ private struct MissionRunDetailView: View {
                 )
                 Text("Wait between autopilot mission cycles (0 = start the next cycle immediately).")
                     .font(.system(size: 11))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -2585,7 +2818,7 @@ private struct MissionRunDetailView: View {
         VStack(alignment: .leading, spacing: MissionRunPrepLayout.pathsOuterSpacing) {
             if run.assignments.isEmpty {
                 Text("No roster slots on this mission template.")
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
             } else if let mission = resolvedMission {
                 ForEach(mission.routeMacro.paths) { path in
                     pathRosterCard(path: path, mission: mission)
@@ -2601,11 +2834,11 @@ private struct MissionRunDetailView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Vehicle staging map")
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(GuardianDynamicColors.textPrimary)
 
             Text(stagingMapInstructionText)
                 .font(.system(size: 12))
-                .foregroundStyle(.gray)
+                .foregroundStyle(GuardianDynamicColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             GuardianMapView(
@@ -2636,12 +2869,12 @@ private struct MissionRunDetailView: View {
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay(
                 RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+                    .strokeBorder(GuardianDynamicColors.borderSubtle, lineWidth: 1)
             )
         }
         .padding(MissionRunPrepLayout.pathCardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .background(GuardianDynamicColors.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: MissionRunPrepLayout.pathCardCornerRadius))
     }
 
@@ -2773,12 +3006,12 @@ private struct MissionRunDetailView: View {
         return VStack(alignment: .leading, spacing: MissionRunPrepLayout.pathCardInnerSpacing) {
             Text(path.name)
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(GuardianDynamicColors.textPrimary)
 
             if indices.isEmpty {
                 Text("No roster slots linked to this path. Link devices to the path in Missions → Roster.")
                     .font(.system(size: 12))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 LazyVGrid(
@@ -2799,7 +3032,7 @@ private struct MissionRunDetailView: View {
         }
         .padding(MissionRunPrepLayout.pathCardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .background(GuardianDynamicColors.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: MissionRunPrepLayout.pathCardCornerRadius))
     }
 
@@ -2810,7 +3043,7 @@ private struct MissionRunDetailView: View {
             VStack(alignment: .leading, spacing: MissionRunPrepLayout.pathCardInnerSpacing) {
                 Text("Mission roster")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(GuardianDynamicColors.textPrimary)
                 LazyVGrid(
                     columns: [
                         GridItem(
@@ -2828,7 +3061,7 @@ private struct MissionRunDetailView: View {
             }
             .padding(MissionRunPrepLayout.pathCardPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+            .background(GuardianDynamicColors.backgroundRaised)
             .clipShape(RoundedRectangle(cornerRadius: MissionRunPrepLayout.pathCardCornerRadius))
         }
     }
@@ -2837,10 +3070,10 @@ private struct MissionRunDetailView: View {
         VStack(alignment: .leading, spacing: MissionRunPrepLayout.pathCardInnerSpacing) {
             Text("Roster")
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(GuardianDynamicColors.textPrimary)
             Text("Mission template not found — roster slots are frozen from when the run was created.")
                 .font(.system(size: 12))
-                .foregroundStyle(.gray)
+                .foregroundStyle(GuardianDynamicColors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             LazyVGrid(
                 columns: [
@@ -2859,7 +3092,7 @@ private struct MissionRunDetailView: View {
         }
         .padding(MissionRunPrepLayout.pathCardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .background(GuardianDynamicColors.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: MissionRunPrepLayout.pathCardCornerRadius))
     }
 
@@ -2971,8 +3204,8 @@ private struct MissionLiveVehicleHealthCard: View {
     let simulationImageBasenames: [String]?
     let vehicleModel: FleetVehicleOperationalModel
 
-    private let cardFill = Color(red: 0.10, green: 0.10, blue: 0.11)
-    private let cardStrokeNeutral = Color.white.opacity(0.06)
+    private let cardFill = GuardianDynamicColors.backgroundElevated
+    private let cardStrokeNeutral = GuardianDynamicColors.borderSubtle
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -2983,11 +3216,11 @@ private struct MissionLiveVehicleHealthCard: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(slotTitle)
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(GuardianDynamicColors.textPrimary)
                             .lineLimit(1)
                         Text(rosterSubtitle)
                             .font(.system(size: 10))
-                            .foregroundStyle(.gray)
+                            .foregroundStyle(GuardianDynamicColors.textSecondary)
                             .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -2996,7 +3229,7 @@ private struct MissionLiveVehicleHealthCard: View {
                 if let vehicleID {
                     Text(displayVehicleID(vehicleID))
                         .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.gray.opacity(0.75))
+                        .foregroundStyle(GuardianDynamicColors.textTertiary)
                         .lineLimit(1)
                         .help("Bridge vehicle key: \(vehicleID)")
                 }
@@ -3009,7 +3242,7 @@ private struct MissionLiveVehicleHealthCard: View {
                     Spacer(minLength: 0)
                     Text("No telemetry")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.gray.opacity(0.8))
+                        .foregroundStyle(GuardianDynamicColors.textSecondary)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -3077,34 +3310,34 @@ private struct MissionLiveVehicleHealthCard: View {
                         .help(batteryHoverText)
                     Text(batteryPercentText)
                         .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.94))
+                        .foregroundStyle(GuardianDynamicColors.textPrimary.opacity(0.94))
                         .lineLimit(1)
                 }
                 Text(vehicleModel.battery.trendText)
                     .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Text(vehicleModel.battery.etaText)
                     .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Rectangle()
-                .fill(Color.white.opacity(0.12))
+                .fill(GuardianDynamicColors.borderSubtle.opacity(0.9))
                 .frame(width: 1, height: 58)
 
             VStack(alignment: .trailing, spacing: 4) {
                 Text(vehicleModel.gps.titleText)
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.92))
+                    .foregroundStyle(GuardianDynamicColors.textPrimary.opacity(0.92))
                     .lineLimit(1)
                 Text(vehicleModel.movement.titleText)
                     .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
@@ -3163,6 +3396,9 @@ private struct AddMissionRunSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var missionStore: MissionStore
     let onCreateRun: (Mission) -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
         GuardianModalTemplate(
@@ -3177,7 +3413,7 @@ private struct AddMissionRunSheet: View {
                 VStack(alignment: .leading, spacing: 12) {
                     if missionStore.missions.isEmpty {
                         Text("No mission templates available.")
-                            .foregroundStyle(.gray)
+                            .foregroundStyle(theme.textSecondary)
                     } else {
                         ScrollView {
                             VStack(alignment: .leading, spacing: 8) {
@@ -3189,10 +3425,10 @@ private struct AddMissionRunSheet: View {
                                         HStack {
                                             VStack(alignment: .leading, spacing: 2) {
                                                 Text(mission.name)
-                                                    .foregroundStyle(.white)
+                                                    .foregroundStyle(theme.textPrimary)
                                                 Text(mission.description.isEmpty ? "No description" : mission.description)
                                                     .font(.system(size: 11))
-                                                    .foregroundStyle(.gray)
+                                                    .foregroundStyle(theme.textSecondary)
                                                     .lineLimit(1)
                                             }
                                             Spacer()
@@ -3200,7 +3436,7 @@ private struct AddMissionRunSheet: View {
                                         }
                                         .padding(10)
                                         .frame(maxWidth: .infinity, alignment: .leading)
-                                        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+                                        .background(theme.backgroundRaised)
                                         .clipShape(RoundedRectangle(cornerRadius: 8))
                                     }
                                     .buttonStyle(.plain)

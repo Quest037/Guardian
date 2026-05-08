@@ -14,7 +14,10 @@ struct VehicleTelemetryInfoSheet: View {
     let model: FleetVehicleModel?
     let hub: FleetHubVehicleTelemetry?
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
     @State private var mode: Mode = .summary
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
         GuardianModalTemplate(
@@ -53,7 +56,7 @@ struct VehicleTelemetryInfoSheet: View {
                         } else {
                             Text("No telemetry available for this vehicle stream.")
                                 .font(.system(size: 12))
-                                .foregroundStyle(.gray)
+                                .foregroundStyle(theme.textSecondary)
                         }
                     }
                 }
@@ -66,7 +69,7 @@ struct VehicleTelemetryInfoSheet: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(theme.textPrimary)
             ForEach(rows, id: \.0) { row in
                 telemetryRow(name: row.0, value: row.1)
             }
@@ -78,11 +81,11 @@ struct VehicleTelemetryInfoSheet: View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(name)
                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.gray)
+                .foregroundStyle(theme.textSecondary)
                 .frame(width: 240, alignment: .leading)
             Text(value)
                 .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.95))
+                .foregroundStyle(theme.textPrimary.opacity(0.95))
             Spacer(minLength: 0)
         }
     }

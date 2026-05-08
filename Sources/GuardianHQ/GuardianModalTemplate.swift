@@ -7,6 +7,9 @@ struct GuardianModalTemplate<BodyContent: View, HeaderActions: View>: View {
     let subtitle: String?
     @ViewBuilder let headerActions: () -> HeaderActions
     @ViewBuilder let bodyContent: () -> BodyContent
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     init(
         title: String,
@@ -26,11 +29,11 @@ struct GuardianModalTemplate<BodyContent: View, HeaderActions: View>: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title)
                         .font(.title3.bold())
-                        .foregroundStyle(.white)
+                        .foregroundStyle(theme.textPrimary)
                     if let subtitle, !subtitle.isEmpty {
                         Text(subtitle)
                             .font(.system(size: 12))
-                            .foregroundStyle(Color.gray.opacity(0.92))
+                            .foregroundStyle(theme.textTertiary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -47,6 +50,6 @@ struct GuardianModalTemplate<BodyContent: View, HeaderActions: View>: View {
             bodyContent()
                 .padding(18)
         }
-        .background(Color(red: 0.08, green: 0.08, blue: 0.09))
+        .background(theme.backgroundBase)
     }
 }

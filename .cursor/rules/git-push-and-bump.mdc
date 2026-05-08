@@ -1,0 +1,16 @@
+---
+description: Handle "git push and bump" as full source push plus version bump
+alwaysApply: true
+---
+
+# Git Push And Bump Command
+
+When the user says `git push and bump`, interpret it as:
+
+1. Bump the app version using the policy in `versioning-policy.mdc`.
+2. Update the source-of-truth app version in `Sources/GuardianHQ/AppMetadata.swift`.
+3. If release/build metadata files are already being maintained, keep them aligned with the bumped version.
+4. Commit the requested source changes (not just the version file) unless the user explicitly scopes otherwise.
+5. Push the current branch to the Guardian GitHub repository.
+
+If current version is `x.y.100`, bump to `(x).(y+1).0`; otherwise bump micro by 1.

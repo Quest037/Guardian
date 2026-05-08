@@ -17,10 +17,13 @@ struct MissionsView: View {
     @ObservedObject var store: MissionStore
     @ObservedObject var generalSettings: GeneralSettingsStore
     @EnvironmentObject private var toastCenter: ToastCenter
+    @Environment(\.colorScheme) private var colorScheme
     @State private var showingAddMission = false
     @State private var displayMode: DisplayMode = .list
     @State private var sortMode: SortMode = .newest
     @State private var selectedMissionID: UUID?
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -76,16 +79,16 @@ struct MissionsView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity)
-            .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+            .background(theme.backgroundRaised)
 
             if sortedMissions.isEmpty {
                 VStack {
                     Spacer()
                     Text("No missions yet")
                         .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(theme.textPrimary)
                     Text("Use Add Mission to create your first mission template.")
-                        .foregroundStyle(.gray)
+                        .foregroundStyle(theme.textSecondary)
                     Spacer()
                 }
             } else if displayMode == .list {
@@ -104,7 +107,7 @@ struct MissionsView: View {
                     }
                     .padding(16)
                 }
-                .background(Color(red: 0.07, green: 0.07, blue: 0.08))
+                .background(theme.backgroundBase)
             } else {
                 ScrollView {
                     LazyVGrid(
@@ -124,7 +127,7 @@ struct MissionsView: View {
                     }
                     .padding(16)
                 }
-                .background(Color(red: 0.07, green: 0.07, blue: 0.08))
+                .background(theme.backgroundBase)
             }
         }
     }
@@ -188,11 +191,14 @@ private struct MissionWorkspaceView: View {
     @State private var focusedTransitionCameraFieldKey: String?
     @State private var suppressNextMapClick = false
     @State private var detailsDescriptionEditorHeight: CGFloat = 96
+    @Environment(\.colorScheme) private var colorScheme
 
     let onBack: () -> Void
     let onDelete: (Mission) -> Void
     let onSave: (Mission) -> Void
     let onToast: (String, ToastStyle) -> Void
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     init(
         mission: Mission,
@@ -264,7 +270,7 @@ private struct MissionWorkspaceView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity)
-            .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+            .background(theme.backgroundRaised)
 
             if activeTab == .route {
                 routeTab
@@ -284,10 +290,10 @@ private struct MissionWorkspaceView: View {
                     .padding(.vertical, 18)
                     .frame(maxWidth: .infinity)
                 }
-                .background(Color(red: 0.07, green: 0.07, blue: 0.08))
+                .background(theme.backgroundBase)
             }
         }
-        .background(Color(red: 0.07, green: 0.07, blue: 0.08))
+        .background(theme.backgroundBase)
         .onChange(of: editingPathIndex) { _ in
             clearPreviewFocusState()
         }
@@ -345,20 +351,20 @@ private struct MissionWorkspaceView: View {
                 card("Roster") {
                     Text("Devices per path")
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(theme.textPrimary)
                     Text(
                         "Each route path can carry one or more expected devices. Use labels and roles for planning; "
                             + "you will bind real drones or payloads later in Mission Control."
                     )
                     .font(.system(size: 12))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if draft.routeMacro.paths.isEmpty {
                     card("Paths") {
                         Text("No paths yet. Add paths on the Route tab, then assign devices to each path here.")
-                            .foregroundStyle(.gray)
+                            .foregroundStyle(theme.textSecondary)
                     }
                 } else {
                     ForEach(Array(draft.routeMacro.paths.enumerated()), id: \.element.id) { pathIndex, _ in
@@ -383,28 +389,28 @@ private struct MissionWorkspaceView: View {
                 )
                 .textFieldStyle(.plain)
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(theme.textPrimary)
 
                 Spacer(minLength: 8)
 
                 Text("\(path.waypoints.count) waypoints")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(red: 0.10, green: 0.10, blue: 0.11))
+            .background(theme.backgroundElevated)
 
             VStack(alignment: .leading, spacing: 10) {
                 Text("Devices on this path")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
 
                 if path.rosterDeviceIds.isEmpty {
                     Text("None yet — add one below.")
                         .font(.system(size: 11))
-                        .foregroundStyle(.gray.opacity(0.9))
+                        .foregroundStyle(theme.textTertiary)
                 } else {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(path.rosterDeviceIds, id: \.self) { deviceId in
@@ -413,10 +419,10 @@ private struct MissionWorkspaceView: View {
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(device.name)
                                             .font(.system(size: 13, weight: .semibold))
-                                            .foregroundStyle(.white)
+                                            .foregroundStyle(theme.textPrimary)
                                         Text(deviceSubtitle(device))
                                             .font(.system(size: 11))
-                                            .foregroundStyle(.gray)
+                                            .foregroundStyle(theme.textSecondary)
                                     }
                                     Spacer(minLength: 8)
                                     Button {
@@ -436,11 +442,11 @@ private struct MissionWorkspaceView: View {
                     }
                 }
 
-                Divider().overlay(Color.white.opacity(0.08))
+                Divider().overlay(theme.borderSubtle)
 
                 Text("Add device")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
 
                 HStack(spacing: 8) {
                     TextField(
@@ -467,13 +473,13 @@ private struct MissionWorkspaceView: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(red: 0.10, green: 0.10, blue: 0.11))
+            .background(theme.backgroundElevated)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                .stroke(theme.borderSubtle, lineWidth: 1)
         )
     }
 
@@ -503,6 +509,11 @@ private struct MissionWorkspaceView: View {
                 HStack(spacing: 0) {
                     GuardianMapView(
                         model: mapModel,
+                        contextMenuPolicy: GuardianMapContextMenuPolicy(
+                            vehicleActions: [],
+                            waypointActions: [.deleteWaypoint],
+                            homeActions: []
+                        ),
                         onMapClick: { lat, lon in
                             if suppressNextMapClick {
                                 suppressNextMapClick = false
@@ -531,6 +542,21 @@ private struct MissionWorkspaceView: View {
                             selectedPathIndex = pathIndex
                             selectedWaypointIndex = draft.routeMacro.paths[pathIndex].waypoints.count - 1
                             onToast("Waypoint added", .success)
+                        },
+                        onContextAction: { event in
+                            guard event.markerType == .waypoint,
+                                  event.action == .deleteWaypoint,
+                                  let markerID = event.markerID,
+                                  let idx = Int(markerID),
+                                  let pathIndex = editingPathIndex,
+                                  draft.routeMacro.paths.indices.contains(pathIndex),
+                                  draft.routeMacro.paths[pathIndex].waypoints.indices.contains(idx)
+                            else { return }
+                            draft.routeMacro.paths[pathIndex].waypoints.remove(at: idx)
+                            refreshAutoHeadings(for: pathIndex)
+                            if let selectedWaypointIndex, selectedWaypointIndex == idx {
+                                self.selectedWaypointIndex = nil
+                            }
                         },
                         onWaypointClick: { idx in
                             selectedWaypointIndex = idx
@@ -598,7 +624,7 @@ private struct MissionWorkspaceView: View {
                                     Image(systemName: hasHome ? "mappin.circle.fill" : "mappin.slash.circle")
                                         .foregroundStyle(hasHome ? .green : .red)
                                     Text(hasHome ? homeCoordText : "Not set")
-                                        .foregroundStyle(.gray)
+                                        .foregroundStyle(theme.textSecondary)
                                 }
 
                                 Spacer(minLength: 0)
@@ -693,7 +719,7 @@ private struct MissionWorkspaceView: View {
                             .uniformIconButton()
                         }) {
                             if draft.routeMacro.paths.isEmpty {
-                                Text("No paths yet").foregroundStyle(.gray)
+                                Text("No paths yet").foregroundStyle(theme.textSecondary)
                             } else {
                                 ForEach(Array(draft.routeMacro.paths.enumerated()), id: \.offset) { index, path in
                                     HStack {
@@ -707,11 +733,11 @@ private struct MissionWorkspaceView: View {
                                             )
                                         )
                                         .textFieldStyle(.plain)
-                                        .foregroundStyle(.white)
+                                        .foregroundStyle(theme.textPrimary)
 
-                                        Text("• \(path.waypoints.count) wp").foregroundStyle(.gray)
-                                        Text("• \(distanceLabel(for: path))").foregroundStyle(.gray)
-                                        Text("• \(durationLabel(for: path))").foregroundStyle(.gray)
+                                        Text("• \(path.waypoints.count) wp").foregroundStyle(theme.textSecondary)
+                                        Text("• \(distanceLabel(for: path))").foregroundStyle(theme.textSecondary)
+                                        Text("• \(durationLabel(for: path))").foregroundStyle(theme.textSecondary)
                                         Spacer()
 
                                         if editingPathIndex == index {
@@ -1018,10 +1044,10 @@ private struct MissionWorkspaceView: View {
                 HStack {
                     Text("Waypoints")
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(theme.textPrimary)
                     Text("\(draft.routeMacro.paths[pathIndex].waypoints.count)")
                         .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(.gray)
+                        .foregroundStyle(theme.textSecondary)
                     Spacer()
                     Button {
                         openBulkWaypointEditor(pathIndex: pathIndex)
@@ -1076,10 +1102,10 @@ private struct MissionWorkspaceView: View {
                 }
             }
         }
-        .background(Color(red: 0.10, green: 0.10, blue: 0.11))
+        .background(theme.backgroundElevated)
         .overlay(
             Rectangle()
-                .fill(Color.white.opacity(0.08))
+                .fill(theme.borderSubtle)
                 .frame(width: 1),
             alignment: .leading
         )
@@ -1093,7 +1119,7 @@ private struct MissionWorkspaceView: View {
             HStack {
                 Text("Waypoint \(idx + 1)")
                     .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.textPrimary)
                 Spacer()
                 if isSelected {
                     Text("Selected")
@@ -1105,7 +1131,7 @@ private struct MissionWorkspaceView: View {
             HStack(spacing: 8) {
                 Text("Altitude")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
                     .frame(width: 78, alignment: .leading)
                 numericInput(
                     value: Binding(
@@ -1151,7 +1177,7 @@ private struct MissionWorkspaceView: View {
             HStack(spacing: 8) {
                 Text("Heading")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
                     .frame(width: 78, alignment: .leading)
                 Picker(
                     "Preset",
@@ -1201,7 +1227,7 @@ private struct MissionWorkspaceView: View {
             HStack(spacing: 8) {
                 Text("Delay")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
                     .frame(width: 78, alignment: .leading)
                 numericInput(
                     value: Binding(
@@ -1233,7 +1259,7 @@ private struct MissionWorkspaceView: View {
             HStack(spacing: 8) {
                 Text("Action")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
                     .frame(width: 78, alignment: .leading)
                 Picker(
                     "Action",
@@ -1258,7 +1284,7 @@ private struct MissionWorkspaceView: View {
             HStack(spacing: 8) {
                 Text("Camera")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
                     .frame(width: 78, alignment: .leading)
                 Picker(
                     "Camera Mode",
@@ -1315,7 +1341,7 @@ private struct MissionWorkspaceView: View {
             HStack(spacing: 8) {
                 Text("Transition")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
                     .frame(width: 78, alignment: .leading)
                 Picker(
                     "Mode",
@@ -1360,7 +1386,7 @@ private struct MissionWorkspaceView: View {
             HStack(spacing: 8) {
                 Text("Cam During")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
                     .frame(width: 78, alignment: .leading)
                 Picker(
                     "Transition Camera Mode",
@@ -2026,13 +2052,13 @@ private struct MissionWorkspaceView: View {
         }
         .padding(16)
         .frame(minWidth: 700, minHeight: 520)
-        .background(Color(red: 0.10, green: 0.10, blue: 0.11))
+        .background(theme.backgroundElevated)
     }
 
     private func bulkRowLabel(_ text: String) -> some View {
         Text(text)
             .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(.gray)
+                .foregroundStyle(theme.textSecondary)
             .frame(width: 132, alignment: .leading)
     }
 
@@ -2049,7 +2075,7 @@ private struct MissionWorkspaceView: View {
             HStack {
                 Text(title)
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.textPrimary)
                 Spacer()
                 trailing()
             }
@@ -2057,7 +2083,7 @@ private struct MissionWorkspaceView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .background(theme.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
@@ -2070,57 +2096,61 @@ private struct MissionWorkspaceView: View {
 
 private struct MissionRow: View {
     let mission: Mission
+    @Environment(\.colorScheme) private var colorScheme
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(mission.name)
                     .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.textPrimary)
                 Spacer()
                 Text(mission.type.rawValue.capitalized)
                     .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
             }
             Text(mission.description.isEmpty ? "No description" : mission.description)
-                .foregroundStyle(.gray)
+                .foregroundStyle(theme.textSecondary)
             Text("Count: \(mission.count)  Duration: \(mission.duration)")
                 .font(.system(size: 12))
-                .foregroundStyle(.gray)
+                .foregroundStyle(theme.textSecondary)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .background(theme.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 }
 
 private struct MissionCard: View {
     let mission: Mission
+    @Environment(\.colorScheme) private var colorScheme
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
                 Text(mission.name)
                     .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.textPrimary)
                 Spacer()
                 Text(mission.type.rawValue.capitalized)
                     .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
             }
             Text(mission.description.isEmpty ? "No description" : mission.description)
-                .foregroundStyle(.gray)
+                .foregroundStyle(theme.textSecondary)
                 .lineLimit(2)
             Divider().overlay(.gray.opacity(0.25))
             Text("Count: \(mission.count)")
-                .foregroundStyle(.gray)
+                .foregroundStyle(theme.textSecondary)
             Text("Duration: \(mission.duration)")
-                .foregroundStyle(.gray)
+                .foregroundStyle(theme.textSecondary)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .background(theme.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 }

@@ -4,9 +4,8 @@ struct SettingsView: View {
     @Binding var selectedPane: SettingsPane
     @ObservedObject var generalSettings: GeneralSettingsStore
     @ObservedObject var manualControlSettings: ManualControlSettingsStore
-
-    private let bgBar = Color(red: 0.12, green: 0.12, blue: 0.13)
-    private let bgMain = Color(red: 0.07, green: 0.07, blue: 0.08)
+    @Environment(\.colorScheme) private var colorScheme
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
     @State private var isLocationPickerPresented = false
     @State private var draftSimLatitudeDeg = 0.0
     @State private var draftSimLongitudeDeg = 0.0
@@ -28,7 +27,7 @@ struct SettingsView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(bgBar)
+            .background(theme.backgroundRaised)
 
             Group {
                 switch selectedPane {
@@ -41,7 +40,7 @@ struct SettingsView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(bgMain)
+            .background(theme.backgroundBase)
         }
         .sheet(isPresented: $isLocationPickerPresented) {
             simLocationPickerSheet
@@ -53,21 +52,21 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 0) {
                 Text("General")
                     .font(.system(size: 22, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.textPrimary)
                     .padding(.bottom, 16)
 
                 settingsRow(
-                    title: "Default simulation platform",
-                    description: "Default flight controller stack for simulated vehicles."
+                    title: "Appearance",
+                    description: "Default app theme. System follows your macOS appearance."
                 ) {
-                    Picker("Default simulation platform", selection: $generalSettings.defaultSimulationPlatform) {
-                        ForEach(SimulationPlatform.allCases) { platform in
-                            Text(platform.displayName).tag(platform)
+                    Picker("Appearance", selection: $generalSettings.appearanceMode) {
+                        ForEach(AppAppearanceMode.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
                         }
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    .frame(minWidth: 320, alignment: .trailing)
+                    .frame(minWidth: 280, alignment: .trailing)
                 }
 
                 rowDivider
@@ -104,7 +103,7 @@ struct SettingsView: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(bgMain)
+        .background(theme.backgroundBase)
     }
 
     private var simsPane: some View {
@@ -112,8 +111,24 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 0) {
                 Text("SIMs")
                     .font(.system(size: 22, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.textPrimary)
                     .padding(.bottom, 16)
+
+                settingsRow(
+                    title: "Default simulation platform",
+                    description: "Default flight controller stack for simulated vehicles."
+                ) {
+                    Picker("Default simulation platform", selection: $generalSettings.defaultSimulationPlatform) {
+                        ForEach(SimulationPlatform.allCases) { platform in
+                            Text(platform.displayName).tag(platform)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(minWidth: 320, alignment: .trailing)
+                }
+
+                rowDivider
 
                 settingsRow(
                     title: "Default SIM spawn location",
@@ -123,7 +138,7 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Latitude")
                                 .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.gray)
+                                .foregroundStyle(theme.textSecondary)
                             TextField(
                                 "Latitude",
                                 value: $generalSettings.simSpawnDefaults.latitudeDeg,
@@ -135,7 +150,7 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Longitude")
                                 .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.gray)
+                                .foregroundStyle(theme.textSecondary)
                             TextField(
                                 "Longitude",
                                 value: $generalSettings.simSpawnDefaults.longitudeDeg,
@@ -147,7 +162,7 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Altitude")
                                 .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.gray)
+                                .foregroundStyle(theme.textSecondary)
                             TextField("Altitude", value: .constant(0), format: .number)
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 72)
@@ -196,7 +211,7 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Percent")
                                 .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.gray)
+                                .foregroundStyle(theme.textSecondary)
                             TextField(
                                 "Percent",
                                 value: $generalSettings.simSpawnDefaults.batteryPercent,
@@ -208,7 +223,7 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Voltage (V)")
                                 .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.gray)
+                                .foregroundStyle(theme.textSecondary)
                             TextField(
                                 "Voltage",
                                 value: $generalSettings.simSpawnDefaults.batteryVoltageV,
@@ -220,7 +235,7 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Current (A)")
                                 .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.gray)
+                                .foregroundStyle(theme.textSecondary)
                             TextField(
                                 "Current",
                                 value: $generalSettings.simSpawnDefaults.batteryCurrentA,
@@ -231,11 +246,27 @@ struct SettingsView: View {
                         }
                     }
                 }
+
+                rowDivider
+
+                settingsRow(
+                    title: "Default SIM battery drain rate",
+                    description: "Fallback when LiveDrive / Mission Control Running enable SIM drain."
+                ) {
+                    Picker("Default SIM battery drain rate", selection: $generalSettings.defaultSimBatteryDrainRate) {
+                        ForEach(SimBatteryDrainRate.allCases) { rate in
+                            Text(rate.displayName).tag(rate)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(minWidth: 220, alignment: .trailing)
+                }
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(bgMain)
+        .background(theme.backgroundBase)
     }
 
     private var rowDivider: some View {
@@ -250,7 +281,7 @@ struct SettingsView: View {
                 HStack {
                     Text("Controls")
                         .font(.system(size: 22, weight: .bold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(theme.textPrimary)
                     Spacer(minLength: 12)
                     Button("Reset Defaults") {
                         manualControlSettings.resetDefaults()
@@ -261,7 +292,7 @@ struct SettingsView: View {
 
                 Text("Live Drive keyboard command bindings (single key or named key: Space / Return / Delete).")
                     .font(.system(size: 12))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
                     .padding(.bottom, 12)
 
                 ForEach(ManualControlAction.allCases) { action in
@@ -288,7 +319,7 @@ struct SettingsView: View {
 
                 Text("Per-vehicle-class keyboard bump tuning")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.textPrimary)
                     .padding(.top, 2)
                     .padding(.bottom, 10)
 
@@ -297,7 +328,7 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(vehicleClass.displayName)
                             .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(theme.textPrimary)
                         HStack(spacing: 10) {
                             controlNumberField(
                                 title: "Fwd/Back (m)",
@@ -339,7 +370,7 @@ struct SettingsView: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(bgMain)
+        .background(theme.backgroundBase)
     }
 
     private func settingsRow<Trailing: View>(
@@ -351,10 +382,10 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.textPrimary)
                 Text(description)
                     .font(.system(size: 12))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -368,7 +399,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.gray)
+                .foregroundStyle(theme.textSecondary)
             TextField("", value: value, format: .number.precision(.fractionLength(3)))
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 118)

@@ -16,6 +16,20 @@ enum ManualControlAction: String, Codable, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// True for held-axis inputs (forward/back/left/right/yaw/up/down) that should
+    /// stream body-frame velocity through `ManualControlStream`. False for one-shot
+    /// discrete actions (toggleArm/engage/terminate) that still go through
+    /// `FleetLinkService.executeVehicleCommand(.manualControl(_))`.
+    var isAxisInput: Bool {
+        switch self {
+        case .moveForward, .moveLeft, .moveBackward, .moveRight,
+             .yawLeft, .yawRight, .ascend, .descend:
+            return true
+        case .toggleArm, .engage, .terminate:
+            return false
+        }
+    }
+
     var title: String {
         switch self {
         case .moveForward: return "Move forward"
@@ -134,12 +148,35 @@ final class ManualControlSettingsStore: ObservableObject {
         .terminate: "Delete",
     ]
 
+    /// Per-class manual control profile.
+    ///
+    /// `move…M` / `yawDeg` / `verticalM` are the legacy discrete bump amounts (used by the
+    /// `gotoLocation`-based engage / recovery path).
+    ///
+    /// `max…MS` / `maxYawRateDegS` are the body-frame velocity setpoints streamed at full
+    /// keyboard or stick deflection through `ManualControlStream` (Offboard / ManualControl).
+    /// Defaults are intentionally gentle so first-time SITL flights are predictable.
     static let defaultStepProfilesByVehicleClass: [UniversalVehicleClass: ManualControlStepProfile] = [
-        .uav: .init(moveForwardBackwardM: 0.05, moveLeftRightM: 0.05, yawDeg: 1.0, verticalM: 0.1),
-        .ugv: .init(moveForwardBackwardM: 0.05, moveLeftRightM: 0.05, yawDeg: 1.0, verticalM: 0.0),
-        .usv: .init(moveForwardBackwardM: 0.05, moveLeftRightM: 0.05, yawDeg: 1.0, verticalM: 0.0),
-        .uuv: .init(moveForwardBackwardM: 0.05, moveLeftRightM: 0.05, yawDeg: 1.0, verticalM: 0.1),
-        .unknown: .init(moveForwardBackwardM: 0.05, moveLeftRightM: 0.05, yawDeg: 1.0, verticalM: 0.0),
+        .uav: .init(
+            moveForwardBackwardM: 0.05, moveLeftRightM: 0.05, yawDeg: 1.0, verticalM: 0.1,
+            maxForwardMS: 1.5, maxStrafeMS: 1.5, maxVerticalMS: 0.8, maxYawRateDegS: 30
+        ),
+        .ugv: .init(
+            moveForwardBackwardM: 0.05, moveLeftRightM: 0.05, yawDeg: 1.0, verticalM: 0.0,
+            maxForwardMS: 1.0, maxStrafeMS: 0, maxVerticalMS: 0, maxYawRateDegS: 25
+        ),
+        .usv: .init(
+            moveForwardBackwardM: 0.05, moveLeftRightM: 0.05, yawDeg: 1.0, verticalM: 0.0,
+            maxForwardMS: 1.0, maxStrafeMS: 0, maxVerticalMS: 0, maxYawRateDegS: 20
+        ),
+        .uuv: .init(
+            moveForwardBackwardM: 0.05, moveLeftRightM: 0.05, yawDeg: 1.0, verticalM: 0.1,
+            maxForwardMS: 0.8, maxStrafeMS: 0.5, maxVerticalMS: 0.4, maxYawRateDegS: 20
+        ),
+        .unknown: .init(
+            moveForwardBackwardM: 0.05, moveLeftRightM: 0.05, yawDeg: 1.0, verticalM: 0.0,
+            maxForwardMS: 1.0, maxStrafeMS: 0, maxVerticalMS: 0, maxYawRateDegS: 20
+        ),
     ]
 
     private func save(userDefaults: UserDefaults = .standard) {
@@ -201,7 +238,11 @@ final class ManualControlSettingsStore: ObservableObject {
             moveForwardBackwardM: min(5, max(0.001, p.moveForwardBackwardM)),
             moveLeftRightM: min(5, max(0.001, p.moveLeftRightM)),
             yawDeg: min(45, max(0.1, p.yawDeg)),
-            verticalM: min(5, max(0, p.verticalM))
+            verticalM: min(5, max(0, p.verticalM)),
+            maxForwardMS: min(15, max(0, p.maxForwardMS)),
+            maxStrafeMS: min(15, max(0, p.maxStrafeMS)),
+            maxVerticalMS: min(8, max(0, p.maxVerticalMS)),
+            maxYawRateDegS: min(180, max(0, p.maxYawRateDegS))
         )
     }
 

@@ -1,5 +1,57 @@
 import SwiftUI
 
+enum GuardianMapMarkerType: String, Codable {
+    case vehicle
+    case waypoint
+    case home
+}
+
+enum GuardianMapContextAction: String, Codable, CaseIterable {
+    case followVehicle
+    case stopFollowingVehicle
+    case centerMarker
+    case deleteWaypoint
+
+    var title: String {
+        switch self {
+        case .followVehicle:
+            return "Follow marker"
+        case .stopFollowingVehicle:
+            return "Stop following"
+        case .centerMarker:
+            return "Center map here"
+        case .deleteWaypoint:
+            return "Delete waypoint"
+        }
+    }
+}
+
+struct GuardianMapContextActionEvent {
+    let action: GuardianMapContextAction
+    let markerType: GuardianMapMarkerType
+    let markerID: String?
+    let lat: Double
+    let lon: Double
+}
+
+struct GuardianMapContextMenuPolicy {
+    var vehicleActions: [GuardianMapContextAction]
+    var waypointActions: [GuardianMapContextAction]
+    var homeActions: [GuardianMapContextAction]
+
+    init(
+        vehicleActions: [GuardianMapContextAction] = [],
+        waypointActions: [GuardianMapContextAction] = [],
+        homeActions: [GuardianMapContextAction] = []
+    ) {
+        self.vehicleActions = vehicleActions
+        self.waypointActions = waypointActions
+        self.homeActions = homeActions
+    }
+
+    static let disabled = GuardianMapContextMenuPolicy()
+}
+
 /// Shared, observable state for a Leaflet-backed `OSMMapView`. One source of truth
 /// for tile style, content (home / paths / waypoints / vehicle markers / previews),
 /// and recenter requests, so call sites can `pull in` a single model instead of
@@ -17,6 +69,7 @@ final class GuardianMapModel: ObservableObject {
     @Published var vehicleMarkers: [MapVehicleMarker]
     @Published var headingPreview: HeadingPreview?
     @Published var cameraPreview: CameraPreview?
+    @Published var followedVehicleMarkerID: String?
 
     /// Bumping this nonce asks `OSMMapView`'s JS side to re-fit / recenter on the
     /// next render even when `preserveView` is `true`.
@@ -32,7 +85,8 @@ final class GuardianMapModel: ObservableObject {
         selectedWaypointIndex: Int? = nil,
         vehicleMarkers: [MapVehicleMarker] = [],
         headingPreview: HeadingPreview? = nil,
-        cameraPreview: CameraPreview? = nil
+        cameraPreview: CameraPreview? = nil,
+        followedVehicleMarkerID: String? = nil
     ) {
         self.mapStyle = mapStyle
         self.preserveView = preserveView
@@ -44,6 +98,7 @@ final class GuardianMapModel: ObservableObject {
         self.vehicleMarkers = vehicleMarkers
         self.headingPreview = headingPreview
         self.cameraPreview = cameraPreview
+        self.followedVehicleMarkerID = followedVehicleMarkerID
     }
 
     /// Force the next map update to re-fit bounds / recenter (used by the toolbar
@@ -115,8 +170,10 @@ struct GuardianMapToolbarOptions {
 struct GuardianMapView: View {
     @ObservedObject var model: GuardianMapModel
     var toolbar: GuardianMapToolbarOptions
+    var contextMenuPolicy: GuardianMapContextMenuPolicy
     var onMapClick: (Double, Double) -> Void
     var onVehicleMarkerMoved: (String, Double, Double) -> Void
+    var onContextAction: (GuardianMapContextActionEvent) -> Void
     var onWaypointClick: (Int) -> Void
     var onWaypointMoved: (Int, Double, Double) -> Void
     var onWaypointDelete: (Int) -> Void
@@ -125,8 +182,10 @@ struct GuardianMapView: View {
     init(
         model: GuardianMapModel,
         toolbar: GuardianMapToolbarOptions = GuardianMapToolbarOptions(),
+        contextMenuPolicy: GuardianMapContextMenuPolicy = .disabled,
         onMapClick: @escaping (Double, Double) -> Void = { _, _ in },
         onVehicleMarkerMoved: @escaping (String, Double, Double) -> Void = { _, _, _ in },
+        onContextAction: @escaping (GuardianMapContextActionEvent) -> Void = { _ in },
         onWaypointClick: @escaping (Int) -> Void = { _ in },
         onWaypointMoved: @escaping (Int, Double, Double) -> Void = { _, _, _ in },
         onWaypointDelete: @escaping (Int) -> Void = { _ in },
@@ -134,8 +193,10 @@ struct GuardianMapView: View {
     ) {
         self.model = model
         self.toolbar = toolbar
+        self.contextMenuPolicy = contextMenuPolicy
         self.onMapClick = onMapClick
         self.onVehicleMarkerMoved = onVehicleMarkerMoved
+        self.onContextAction = onContextAction
         self.onWaypointClick = onWaypointClick
         self.onWaypointMoved = onWaypointMoved
         self.onWaypointDelete = onWaypointDelete
@@ -154,10 +215,13 @@ struct GuardianMapView: View {
                 recenterNonce: model.recenterNonce,
                 headingPreview: model.headingPreview,
                 cameraPreview: model.cameraPreview,
+                followedVehicleMarkerID: model.followedVehicleMarkerID,
                 preserveView: model.preserveView,
                 isEditingPath: model.isEditingPath,
+                contextMenuPolicy: contextMenuPolicy,
                 onMapClick: onMapClick,
                 onVehicleMarkerMoved: onVehicleMarkerMoved,
+                onContextAction: onContextAction,
                 onWaypointClick: onWaypointClick,
                 onWaypointMoved: onWaypointMoved,
                 onWaypointDelete: onWaypointDelete,

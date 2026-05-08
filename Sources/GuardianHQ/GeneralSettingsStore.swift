@@ -17,6 +17,57 @@ enum LogRetentionProfile: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum AppAppearanceMode: String, Codable, CaseIterable, Identifiable {
+    case system
+    case light
+    case dark
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .system: return "System"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+}
+
+enum SimBatteryDrainRate: String, Codable, CaseIterable, Identifiable {
+    case slow
+    case normal
+    case fast
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .slow: return "Slow"
+        case .normal: return "Normal"
+        case .fast: return "Fast"
+        }
+    }
+
+    /// PX4 `SIM_BAT_DRAIN`: full-discharge time in seconds **while armed** (`0` disables). Disarmed = always 100% in stock PX4 SITL.
+    var px4FullDischargeSeconds: Float {
+        switch self {
+        case .slow: return 3600
+        case .normal: return 1800
+        case .fast: return 900
+        }
+    }
+
+    /// ArduPilot `SIM_BATT_CAP_AH`: effective simulated pack size.
+    /// Smaller pack drains faster for the same current draw profile.
+    var ardupilotCapacityAh: Float {
+        switch self {
+        case .slow: return 10.0
+        case .normal: return 5.0
+        case .fast: return 2.5
+        }
+    }
+}
+
 struct SimSpawnDefaults: Equatable, Codable {
     var latitudeDeg: Double
     var longitudeDeg: Double
@@ -98,6 +149,22 @@ final class GeneralSettingsStore: ObservableObject {
         }
     }
 
+    /// Preferred app appearance; `.system` follows macOS setting.
+    @Published var appearanceMode: AppAppearanceMode {
+        didSet {
+            guard appearanceMode != oldValue else { return }
+            save()
+        }
+    }
+
+    /// Default simulated battery drain rate used by LD/MC-R when enabling drain.
+    @Published var defaultSimBatteryDrainRate: SimBatteryDrainRate {
+        didSet {
+            guard defaultSimBatteryDrainRate != oldValue else { return }
+            save()
+        }
+    }
+
     /// Default spawn location for newly added simulated vehicles.
     @Published var simSpawnDefaults: SimSpawnDefaults {
         didSet {
@@ -124,11 +191,15 @@ final class GeneralSettingsStore: ObservableObject {
             defaultSimulationPlatform = loaded.defaultSimulationPlatform
             defaultMapTileStyle = loaded.defaultMapTileStyle ?? .standard
             logRetentionProfile = loaded.logRetentionProfile ?? .default
+            appearanceMode = loaded.appearanceMode ?? .system
+            defaultSimBatteryDrainRate = loaded.defaultSimBatteryDrainRate ?? .normal
             simSpawnDefaults = loaded.simSpawnDefaults ?? .default
         } else {
             defaultSimulationPlatform = .ardupilot
             defaultMapTileStyle = .standard
             logRetentionProfile = .default
+            appearanceMode = .system
+            defaultSimBatteryDrainRate = .normal
             simSpawnDefaults = .default
         }
     }
@@ -138,6 +209,8 @@ final class GeneralSettingsStore: ObservableObject {
             defaultSimulationPlatform: defaultSimulationPlatform,
             defaultMapTileStyle: defaultMapTileStyle,
             logRetentionProfile: logRetentionProfile,
+            appearanceMode: appearanceMode,
+            defaultSimBatteryDrainRate: defaultSimBatteryDrainRate,
             simSpawnDefaults: simSpawnDefaults
         )
         if let data = try? JSONEncoder().encode(snapshot) {
@@ -156,6 +229,10 @@ final class GeneralSettingsStore: ObservableObject {
         var defaultMapTileStyle: MapTileStyle?
         /// Omitted in older saves; treated as `.default`.
         var logRetentionProfile: LogRetentionProfile?
+        /// Omitted in older saves; treated as `.system`.
+        var appearanceMode: AppAppearanceMode?
+        /// Omitted in older saves; treated as `.normal`.
+        var defaultSimBatteryDrainRate: SimBatteryDrainRate?
         /// Omitted in older saves; treated as `.default`.
         var simSpawnDefaults: SimSpawnDefaults?
     }

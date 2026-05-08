@@ -59,6 +59,7 @@ struct GuardianHQApp: App {
     @StateObject private var toastCenter = ToastCenter()
     @StateObject private var fleetLinkService = FleetLinkService()
     @StateObject private var sitlService = SitlService()
+    @StateObject private var generalSettingsStore = GeneralSettingsStore()
 
     init() {
         NSWindow.allowsAutomaticWindowTabbing = false
@@ -72,7 +73,12 @@ struct GuardianHQApp: App {
                 if showingSplash {
                     TacticalSplashView()
                 } else {
-                    RootView(selection: $selection, fleetLinkService: fleetLinkService, sitlService: sitlService)
+                    RootView(
+                        selection: $selection,
+                        fleetLinkService: fleetLinkService,
+                        sitlService: sitlService,
+                        generalSettingsStore: generalSettingsStore
+                    )
                         .withToasts()
                         .environmentObject(toastCenter)
                         .onAppear {
@@ -81,7 +87,6 @@ struct GuardianHQApp: App {
                         }
                 }
             }
-            .preferredColorScheme(.dark)
             .onChange(of: showingSplash) { stillShowingSplash in
                 guard !stillShowingSplash else { return }
                 Task { @MainActor in
@@ -98,9 +103,21 @@ struct GuardianHQApp: App {
                     showingSplash = false
                 }
             }
+            .preferredColorScheme(preferredColorScheme)
         }
         .windowResizability(.contentSize)
         .defaultSize(width: 1320, height: 860)
+    }
+
+    private var preferredColorScheme: ColorScheme? {
+        switch generalSettingsStore.appearanceMode {
+        case .system:
+            return nil
+        case .light:
+            return .light
+        case .dark:
+            return .dark
+        }
     }
 }
 

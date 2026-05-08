@@ -46,10 +46,13 @@ struct OSMMapView: NSViewRepresentable {
     var recenterNonce: Int
     var headingPreview: HeadingPreview?
     var cameraPreview: CameraPreview?
+    var followedVehicleMarkerID: String?
     var preserveView: Bool
     var isEditingPath: Bool
+    var contextMenuPolicy: GuardianMapContextMenuPolicy
     var onMapClick: (Double, Double) -> Void
     var onVehicleMarkerMoved: (String, Double, Double) -> Void
+    var onContextAction: (GuardianMapContextActionEvent) -> Void
     var onWaypointClick: (Int) -> Void
     var onWaypointMoved: (Int, Double, Double) -> Void
     var onWaypointDelete: (Int) -> Void
@@ -59,6 +62,7 @@ struct OSMMapView: NSViewRepresentable {
         Coordinator(
             onMapClick: onMapClick,
             onVehicleMarkerMoved: onVehicleMarkerMoved,
+            onContextAction: onContextAction,
             onWaypointClick: onWaypointClick,
             onWaypointMoved: onWaypointMoved,
             onWaypointDelete: onWaypointDelete,
@@ -74,6 +78,7 @@ struct OSMMapView: NSViewRepresentable {
         controller.add(context.coordinator, name: "waypointMove")
         controller.add(context.coordinator, name: "waypointDelete")
         controller.add(context.coordinator, name: "routeInsert")
+        controller.add(context.coordinator, name: "markerContextAction")
 
         let config = WKWebViewConfiguration()
         config.userContentController = controller
@@ -126,7 +131,11 @@ struct OSMMapView: NSViewRepresentable {
         } else {
             cameraPreviewJSON = "null"
         }
-        let js = "setMissionData(\(homeJSON), [\(allPathsJSON)], [\(waypointsJSON)], \(selectedWaypointIndexJS), [\(vehicleMarkersJSON)], \"\(mapStyle.rawValue)\", \(recenterNonce), \(headingPreviewJSON), \(cameraPreviewJSON), \(preserveView ? "true" : "false"), \(isEditingPath ? "true" : "false"));"
+        let followedVehicleMarkerIDJSON = followedVehicleMarkerID.map(Self.jsStringLiteral) ?? "null"
+        let contextMenuPolicyJSON = """
+        {"vehicleActions":[\(contextMenuPolicy.vehicleActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"waypointActions":[\(contextMenuPolicy.waypointActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"homeActions":[\(contextMenuPolicy.homeActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))]}
+        """
+        let js = "setMissionData(\(homeJSON), [\(allPathsJSON)], [\(waypointsJSON)], \(selectedWaypointIndexJS), [\(vehicleMarkersJSON)], \"\(mapStyle.rawValue)\", \(recenterNonce), \(headingPreviewJSON), \(cameraPreviewJSON), \(followedVehicleMarkerIDJSON), \(contextMenuPolicyJSON), \(preserveView ? "true" : "false"), \(isEditingPath ? "true" : "false"));"
         context.coordinator.apply(script: js)
     }
 }
@@ -149,6 +158,7 @@ extension OSMMapView {
         private var didFinishInitialLoad = false
         private let onMapClick: (Double, Double) -> Void
         private let onVehicleMarkerMoved: (String, Double, Double) -> Void
+        private let onContextAction: (GuardianMapContextActionEvent) -> Void
         private let onWaypointClick: (Int) -> Void
         private let onWaypointMoved: (Int, Double, Double) -> Void
         private let onWaypointDelete: (Int) -> Void
@@ -157,6 +167,7 @@ extension OSMMapView {
         init(
             onMapClick: @escaping (Double, Double) -> Void,
             onVehicleMarkerMoved: @escaping (String, Double, Double) -> Void,
+            onContextAction: @escaping (GuardianMapContextActionEvent) -> Void,
             onWaypointClick: @escaping (Int) -> Void,
             onWaypointMoved: @escaping (Int, Double, Double) -> Void,
             onWaypointDelete: @escaping (Int) -> Void,
@@ -164,6 +175,7 @@ extension OSMMapView {
         ) {
             self.onMapClick = onMapClick
             self.onVehicleMarkerMoved = onVehicleMarkerMoved
+            self.onContextAction = onContextAction
             self.onWaypointClick = onWaypointClick
             self.onWaypointMoved = onWaypointMoved
             self.onWaypointDelete = onWaypointDelete
@@ -228,6 +240,25 @@ extension OSMMapView {
                 onVehicleMarkerMoved(id, lat, lon)
             }
 
+            if message.name == "markerContextAction",
+               let payload = message.body as? [String: Any],
+               let actionRaw = payload["action"] as? String,
+               let markerTypeRaw = payload["markerType"] as? String,
+               let action = GuardianMapContextAction(rawValue: actionRaw),
+               let markerType = GuardianMapMarkerType(rawValue: markerTypeRaw),
+               let lat = payload["lat"] as? Double,
+               let lon = payload["lon"] as? Double {
+                onContextAction(
+                    GuardianMapContextActionEvent(
+                        action: action,
+                        markerType: markerType,
+                        markerID: payload["markerID"] as? String,
+                        lat: lat,
+                        lon: lon
+                    )
+                )
+            }
+
         }
     }
 }
@@ -243,6 +274,31 @@ private extension OSMMapView {
   <style>
     html, body, #map { height: 100%; margin: 0; background: #111; }
     .leaflet-container { background: #111; }
+    .guardian-context-menu {
+      position: absolute;
+      z-index: 4000;
+      min-width: 170px;
+      background: rgba(24, 26, 31, 0.98);
+      border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 8px;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.45);
+      overflow: hidden;
+      user-select: none;
+    }
+    .guardian-context-item {
+      display: block;
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      border: 0;
+      color: #e5e7eb;
+      padding: 8px 10px;
+      font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      cursor: pointer;
+    }
+    .guardian-context-item:hover {
+      background: rgba(59,130,246,0.28);
+    }
   </style>
 </head>
 <body>
@@ -268,13 +324,91 @@ private extension OSMMapView {
     const vehicleMarkers = [];
     const pathLines = [];
     const state = { lastDataSignature: null, lastRecenterNonce: -1 };
+    let contextMenuEl = null;
+    let followedVehicleMarkerID = null;
+    let contextMenuPolicy = { vehicleActions: [], waypointActions: [], homeActions: [] };
 
     map.on('click', function(e) {
+      hideContextMenu();
       window.webkit.messageHandlers.mapClick.postMessage({
         lat: e.latlng.lat,
         lon: e.latlng.lng
       });
     });
+    map.on('movestart zoomstart', hideContextMenu);
+
+    function contextActionTitle(action) {
+      switch (action) {
+        case 'followVehicle': return 'Follow marker';
+        case 'stopFollowingVehicle': return 'Stop following';
+        case 'centerMarker': return 'Center map here';
+        case 'deleteWaypoint': return 'Delete waypoint';
+        default: return action;
+      }
+    }
+
+    function hideContextMenu() {
+      if (contextMenuEl && contextMenuEl.parentNode) {
+        contextMenuEl.parentNode.removeChild(contextMenuEl);
+      }
+      contextMenuEl = null;
+    }
+
+    function markerActionsForType(markerType) {
+      if (markerType === 'vehicle') {
+        const base = contextMenuPolicy.vehicleActions || [];
+        return base.filter((action) => {
+          if (action === 'followVehicle') return !followedVehicleMarkerID;
+          if (action === 'stopFollowingVehicle') return !!followedVehicleMarkerID;
+          return true;
+        });
+      }
+      if (markerType === 'waypoint') return contextMenuPolicy.waypointActions || [];
+      if (markerType === 'home') return contextMenuPolicy.homeActions || [];
+      return [];
+    }
+
+    function openContextMenu(e, markerType, markerID, lat, lon) {
+      const actions = markerActionsForType(markerType);
+      if (!actions || actions.length === 0) return;
+      hideContextMenu();
+      if (e.originalEvent) L.DomEvent.preventDefault(e.originalEvent);
+
+      const container = map.getContainer();
+      const menu = document.createElement('div');
+      menu.className = 'guardian-context-menu';
+      actions.forEach((action) => {
+        const item = document.createElement('button');
+        item.className = 'guardian-context-item';
+        item.type = 'button';
+        item.textContent = contextActionTitle(action);
+        item.addEventListener('click', () => {
+          if (action === 'centerMarker') {
+            map.panTo([lat, lon], { animate: true, duration: 0.25 });
+          }
+          hideContextMenu();
+          window.webkit.messageHandlers.markerContextAction.postMessage({
+            action: action,
+            markerType: markerType,
+            markerID: markerID || null,
+            lat: lat,
+            lon: lon
+          });
+        });
+        menu.appendChild(item);
+      });
+      container.appendChild(menu);
+      contextMenuEl = menu;
+
+      const point = map.latLngToContainerPoint([lat, lon]);
+      const rect = container.getBoundingClientRect();
+      const maxLeft = Math.max(0, rect.width - menu.offsetWidth - 8);
+      const maxTop = Math.max(0, rect.height - menu.offsetHeight - 8);
+      const left = Math.min(maxLeft, Math.max(6, point.x + 6));
+      const top = Math.min(maxTop, Math.max(6, point.y + 6));
+      menu.style.left = `${left}px`;
+      menu.style.top = `${top}px`;
+    }
 
     function applyStyle(style) {
       if (style === 'satellite') {
@@ -352,7 +486,9 @@ private extension OSMMapView {
 
     const defaultSinglePointZoom = 15;
 
-    function setMissionData(home, allPathsCoords, selectedWaypoints, selectedWaypointIndex, missionVehicleMarkers, mapStyle, recenterNonce, headingPreview, cameraPreview, preserveView, isEditingPath) {
+    function setMissionData(home, allPathsCoords, selectedWaypoints, selectedWaypointIndex, missionVehicleMarkers, mapStyle, recenterNonce, headingPreview, cameraPreview, followVehicleMarkerID, menuPolicy, preserveView, isEditingPath) {
+      followedVehicleMarkerID = followVehicleMarkerID || null;
+      contextMenuPolicy = menuPolicy || { vehicleActions: [], waypointActions: [], homeActions: [] };
       if (homeMarker) { map.removeLayer(homeMarker); homeMarker = null; }
       if (headingCone) { map.removeLayer(headingCone); headingCone = null; }
       if (cameraCone) { map.removeLayer(cameraCone); cameraCone = null; }
@@ -390,6 +526,9 @@ private extension OSMMapView {
           fillColor: '#3b82f6',
           fillOpacity: 0.9
         }).addTo(map);
+        homeMarker.on('contextmenu', function(e) {
+          openContextMenu(e, 'home', 'home', home.lat, home.lon);
+        });
         points.push([home.lat, home.lon]);
       }
 
@@ -449,8 +588,8 @@ private extension OSMMapView {
                 lon: pos.lng
               });
             });
-            marker.on('contextmenu', function() {
-              window.webkit.messageHandlers.waypointDelete.postMessage({ idx: wp.idx });
+            marker.on('contextmenu', function(e) {
+              openContextMenu(e, 'waypoint', String(wp.idx), wp.lat, wp.lon);
             });
           }
           waypointMarkers.push(marker);
@@ -507,10 +646,20 @@ private extension OSMMapView {
               });
             });
           }
+          marker.on('contextmenu', function(e) {
+            openContextMenu(e, 'vehicle', vm.id || null, vm.lat, vm.lon);
+          });
           vehicleMarkers.push(marker);
           points.push([vm.lat, vm.lon]);
           // Heading wedge removed for vehicle markers (arrow already shows heading).
         });
+      }
+
+      if (followedVehicleMarkerID) {
+        const followMarker = (missionVehicleMarkers || []).find((m) => m.id === followedVehicleMarkerID);
+        if (followMarker && Number.isFinite(followMarker.lat) && Number.isFinite(followMarker.lon)) {
+          map.panTo([followMarker.lat, followMarker.lon], { animate: true, duration: 0.25 });
+        }
       }
 
       if (headingPreview && Number.isFinite(headingPreview.lat) && Number.isFinite(headingPreview.lon) && Number.isFinite(headingPreview.heading)) {

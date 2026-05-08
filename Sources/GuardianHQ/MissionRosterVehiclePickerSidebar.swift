@@ -8,15 +8,15 @@ struct MissionRosterVehiclePickerSidebar: View {
     let onSelect: (MissionPickableFleetVehicle) -> Void
     let onClose: () -> Void
 
-    private let bgHeader = Color(red: 0.10, green: 0.10, blue: 0.11)
-    private let cardBg = Color(red: 0.12, green: 0.12, blue: 0.13)
+    @Environment(\.colorScheme) private var colorScheme
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .center, spacing: 12) {
                 Text("Assign vehicle")
                     .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)
                 Spacer(minLength: 8)
                 Button {
@@ -33,13 +33,13 @@ struct MissionRosterVehiclePickerSidebar: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
-            .background(bgHeader)
+            .background(theme.backgroundElevated)
 
             if vehicles.isEmpty {
                 Spacer()
                 Text("No vehicles in the fleet. Add a live link or spawn a sim from Vehicles.")
                     .font(.system(size: 13))
-                    .foregroundStyle(.gray)
+                    .foregroundStyle(theme.textSecondary)
                     .multilineTextAlignment(.center)
                     .padding(24)
                 Spacer()
@@ -75,7 +75,7 @@ struct MissionRosterVehiclePickerSidebar: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(vehicle.title)
                                 .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(enabled ? .white : .gray)
+                                .foregroundStyle(enabled ? theme.textPrimary : theme.textSecondary)
                                 .multilineTextAlignment(.leading)
                             Text(vehicle.lifecycleStatus.mediumLabel)
                                 .font(.system(size: 11, weight: .semibold))
@@ -83,7 +83,7 @@ struct MissionRosterVehiclePickerSidebar: View {
                                 .lineLimit(1)
                             Text(vehicle.vehicleShortID)
                                 .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                .foregroundStyle(.gray)
+                                .foregroundStyle(theme.textSecondary)
                                 .lineLimit(1)
                         }
                         Spacer(minLength: 0)
@@ -104,7 +104,7 @@ struct MissionRosterVehiclePickerSidebar: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(cardBg)
+            .background(theme.backgroundRaised)
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay(
                 RoundedRectangle(cornerRadius: 10)
@@ -128,7 +128,7 @@ struct MissionRosterVehiclePickerSidebar: View {
                 )
                 Image(systemName: "antenna.radiowaves.left.and.right")
                     .font(.system(size: 28, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.35))
+                    .foregroundStyle(theme.textPrimary.opacity(0.35))
             }
         }
     }

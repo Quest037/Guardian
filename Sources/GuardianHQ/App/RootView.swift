@@ -244,7 +244,11 @@ struct RootView: View {
                     sitl: sitlService
                 )
             case .missions:
-                MissionsView(store: missionStore, generalSettings: generalSettingsStore)
+                MissionsView(
+                    store: missionStore,
+                    missionControlStore: missionControlStore,
+                    generalSettings: generalSettingsStore
+                )
             case .missionControl:
                 MissionControlView(
                     missionStore: missionStore,

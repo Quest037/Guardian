@@ -37,6 +37,35 @@ final class MissionStore: ObservableObject {
         syncPaladinMissionDomainSnapshot()
     }
 
+    func setMissionArchived(id: UUID, archived: Bool) {
+        guard let idx = missions.firstIndex(where: { $0.id == id }) else { return }
+        missions[idx].isArchived = archived
+        save()
+        syncPaladinMissionDomainSnapshot()
+    }
+
+    @discardableResult
+    func cloneMission(id: UUID, newName: String) -> Mission? {
+        guard let source = missions.first(where: { $0.id == id }) else { return nil }
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let cloned = Mission(
+            name: trimmed,
+            description: source.description,
+            type: source.type,
+            isArchived: false,
+            count: source.count,
+            duration: source.duration,
+            deviceIDs: source.deviceIDs,
+            rosterDevices: source.rosterDevices,
+            routeMacro: source.routeMacro
+        )
+        missions.insert(cloned, at: 0)
+        save()
+        syncPaladinMissionDomainSnapshot()
+        return cloned
+    }
+
     private func load() {
         do {
             let data = try Data(contentsOf: fileURL)

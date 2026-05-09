@@ -22,6 +22,7 @@
        - **Per-SIM "Drive tune" sheet** off the vehicle card or LiveDrive subbar (Settings cog icon, only visible when the vehicle is a SIM). Pulls current values from the live drone (`Param.getParamFloat`), shows them next to the abstract knobs with a "modified" diff indicator, and writes via `applyTuningProfile`. Add **Pull from vehicle** / **Push defaults** / **Reset to stock** buttons.
   - **SIM-only initially; live hardware extension later.** The first slice is intentionally SIM-only because (a) we control spawn and can guarantee param push timing, (b) bricking a SIM tune is recoverable in 5 seconds via respawn, and (c) we want to validate the abstract-knob mapping table on something disposable before pointing it at someone's $50k aircraft. Live hardware adds a "Pull from vehicle / Push to vehicle / Save as profile" UX layer on top of the same model — log as a follow-up.
   - **Don't build speculatively.** Wait until keyboard polish and controller integration give us concrete "this knob feels wrong" signal — building speculative knobs is how tuning UIs become unmaintainable graveyards.
+  - **Vehicle Controls Acceleration/Speed:** - use a qualifier (Shift?) to adjust acceleration speed.
 
 ## App System
 
@@ -29,6 +30,7 @@
 - **Turn project into real .app:** this allows us to access lots of systems and permissions that our current swift build cannot.
 - **UserNotifications:** hook into MacOS user notifications system so that MC-R can keep user updated if app is running in background. Include **MissionRunEnvironment → operator prompts** (see **Operator prompts subsystem** under `### MissionRunEnvironment`) when replacing the prompt stub with delivered notifications.
 - **Internationalization (i18n):** expand localization coverage beyond Paladin log templates to full UI copy, formatting rules, and locale-aware defaults.
+- **Extended Display Mode:** - convert app into extended display mode aware to allow user to have different main tabs on different displays (vehicles, logs, missions), and to allow them to do the same for MC-R.
 
 ## Utilities System
 
@@ -41,7 +43,7 @@
 ## Map System
 
 - **CesiumJS 3D map spike (LiveDrive + MC Running):** evaluate replacing the current Leaflet 2D map in **LiveDrive** and **Mission Control Running** with a CesiumJS-based 3D map mode (camera follow/tracked entity, per-marker context menu parity, route/vehicle overlays, and acceptable telemetry update performance in `WKWebView`). Keep **Settings → default SIM coords** and mission authoring maps on lightweight 2D for now; this spike is for operational views first.
-- Fix reset button gogin to a fixed zoom (it should use a bbox for everything)
+- Fix reset button going to a fixed zoom (it should use a bbox for everything)
 
 ## Live Drive
 
@@ -57,12 +59,20 @@ The Live Drive system allows a user to manually take control of a connected vehi
 
 Missions are the templates created by users that involve telling one or more vehicles what, when where and how to do what it needs to do.
 
-- **Mission Path Rosters:** Figure out how to design rosters so that you can do tag-teams, back-ups, leader+followers etc. Also, look at fixed values for roster card "role", so that Paladin knows what to do with a vehicle by default. 
-- **Custom Popup Mission Templates:** E.g. quick circle radius patrol with x vehicles & tag-team.
-- **Grid Card:** 
-  - Change Count/Duration counters to Tasks/Vehicles counters instead.
-  - Make static/mobile text a badge
+- **Convoy Task Design:** - Hook into OSM Routing system so that we can build convoy routes for tasks.
+- **Custom Popup Mission Templates:** E.g. quick circle radius patrol with x vehicles.
+- **Grid Card/List Card:** 
   - Get a map image snapshot as grid card image
+
+
+### Mission Mechanics
+- **Points:** - Add a points system for Tasks/Missions.
+  - **Rally Points:** - Extend points with rally points for Tasks/Missions.
+  - **Extraction Points:** - Extend points with extraction points for Tasks/Missions.
+- **Mission Task.staggerDelay:** - Add a field (or fields) to control a tasks stagger delay between drone groups when method is staggered. (duration + time style e.g. 30+seconds, 10+mins, 1+hour)
+- **Mission Task.timings:** - currently all fixed in minutes, allow variant of secs/mins/hrs
+- **Mission Task.geofence:** - Add a geofence limit around a MissionTask to say drones cannot exit it.
+- **Mission Task.betweenCycles:** - Add a between cycles param to tell squads what to do between task cycles. These are actions.
 
 ## Mission Control
 
@@ -74,30 +84,60 @@ Mission Control: Environment is the world environment that mission control uses 
 
 ### Mission Control: Simulate Mode (Paladin Only)
 - **Mission Control Simulate mode:** add a simulation mode where live vehicle(s) test-run mission paths and feed results back into route refinement via trial-and-error updates. This is run by Paladin, but with operator standing by so that they can take over if a vehicle gets stuck and reroute so that the mission paths can be updated to account for it. This is basically mission testflighting.
-- **Failure injection:** ordered `[SimFailureInjection]` script. Start with a fixed enum (`.batteryFailsafeAt(percent:)`, `.gpsLossAt(seconds:)`, `.linkDropAt(seconds:)`, `.simulatedReturnToLaunch`); resist building a DSL until pain demands it.
+- **Failure injection:** - build in intentional failure injections so that MissionControl/Paladin can react.
 
 ### Mission Control: Setup
-- MC-Setup is the authoring surface; the policy/fixture model it edits lives under **MC-E** below. (Slot↔vehicle binding, scheduling, and `simStartOverrideCoord` UX continue to live on the MC-Setup screens.)
+- **Rosters:** - Allow user to add a pool of reserves to Task rosters by default.
+- **AbortPolicy:** - Extend the abort policy system to allow other choices besides the default.
+- **AbortPolicy:** - Extend the abort policy to allow tasks to override mission.
+- **AbortPolicy:** - Extend the abort policy to allow roster cards to override task/mission.
 
 ### Mission Control: Running
+
+**Tasks List:** - selectable and triggers expanded view of card with more data. Also shows all vehicles attached to task in health, and moves map (if necessary) to view task.
+
+- **Tasks:** - can increment delays and cancel them, but cannot decrement delays. Also, it's tied to minutes but that should be seconds,minutes,hours as a second part of the choice.
 - **Tasks:** - add ability for operator to start a task that is marked as operatorTriggered.
 - **Tasks:** - add functionality for tasks that use onceAtStart, twiceStartEnd.
+- **Abort:** - Remove stopAtEndOfCycle (if it still exists) and replace with stopAtEndOfCurrentCycles. This means that the mission winds itself down, making sure that the current cycle for each task is its last.
+- **Map:** - Integrate CesiumJS system to offer 3D map version as well as Leaflet 2D map.
+- **RoE Updates:** - Allow the operator to update the RoE on the fly via a modal/overlay.
 
-- **Command accountability:** `MissionRunIssuedCommand` carries `issuer` + `issuerKey`; operator aborts use `MissionRunCommandIssuerKey.localOperator` until HQ has a stable operator identity (account/session), then re-stamp `issuerKey` from that id. Same for LiveDrive / other surfaces issuing fleet commands.
-- Integrate CesiumJS system to offer 3D map version as well as Leaflet 2D map.
-- **MRE generic execution/projections:** remove single-drone / single-path assumptions across `MissionRunEnvironment` subsystems (especially planner/projections/executor) so runtime and UI fully support multi-path and multi-vehicle missions.
-- **MC-R Paladin reserve + handover orchestration:** (depends on **MC-E** rollout slices 3–4 for handover thresholds + role eligibility — this ticket is the *behaviour*; MC-E is the *config*.)
-  - send reserve vehicles to take over when an active vehicle fails (when roster defines reserves),
-  - perform path roster switchovers for low-battery tag-team operations when partner is ready,
-  - analyze ahead of time (and continuously at runtime) to prepare handovers before thresholds are reached,
-  - improve fault handling lifecycle: retry policy, give-up criteria, contingency triggers, and explicit operator intervention prompts.
-  - If mission is stopped early by operator determine if user should wait for vehicles to handle that or not. (Return to launch y/n etc.) Offer user choice. If it's a sim-only mission then allow them not to, otherwise if live that running screen should continue to be there until all drones have been accounted for. (User should see visuals about shutting the mission down).
-  - **RoE Updates:** - Allow the operator to update the RoE on the fly via a modal/overlay.
+#### Vehicle Groups (Primary + wingmen)
+- **Formations:** - allow user to define a formation for the VG to use. This overrides pattern behaviour.
 
+- **Command accountability:** `MissionRunIssuedCommand` carries `issuer` + `issuerKey`; operator aborts use `MissionRunCommandIssuerKey.localOperator` until HQ has a stable operator identity (account/session), then re-stamp `issuerKey` from that id. Same for LiveDrive / other surfaces issuing fleet commands.  
 
 ### MissionRunEnvironment
 
-- **MRE Planner** - mission builder not respecting heading: "follow path" when it is selected. Example mission had drone pointing in wrong direction. (Test Operation Themistokles) (Or drone not understanding)
+#### Executor
+
+#### Commander
+
+#### Logging
+- **MRE Policies Abort:** - make sure that range of options are viable for all vehicle types. "Land", doesn't work for anything but UAVs. Hold position is the same. "Park" would make more sense as all UVs can adhere to this concept.
+
+#### Planner
+- **MissionTask Squad Formations:** - defaults to patrol (cluster) and convoy (line), but add other formations later and allow incoming changes on the fly.
+
+- **MissionTask Squad StaggerDelay:** - defaults to duration to first waypoint. Other options should be possible.
+ - Value from MissionTask.staggerDelay object
+ - Message from previous squad (squad primary radios in, next squad triggered) (fallback needed)
+
+- **Squad vehicle replacement:** - build logic for swap in  a reserve to primary/wingman (same macro logic, different micro logic)
+- **Squad vehicle promotion:** - build logic for wingman to be promoted to leader, and squad to update accordingly.
+ - this is an RoE, that can be autonomous, ask etc.
+
+- **Testing:** - test working with RoE.
+- **Testing:** - test working with prompts.
+- **Bug:** - mission builder not respecting heading: "follow path" when it is selected. Example mission had drone pointing in wrong direction. (Test Operation Themistokles) (Or drone not understanding)
+
+#### Scheduling
+- **MRE Scheduling:** - handle scheduling of tasks that are operatorTriggered.
+- **MRE Scheduling:** - handle scheduling of tasks that are onceAtStart, twiceStartEnd.
+- **MRE Scheduling:** - Remove stopAtEndOfCycle (if it still exists) and replace with stopAtEndOfCurrentCycles. This means that the mission winds itself down, making sure that the current cycle for each task is its last.
+
+#### Logging
 - **MRE Logging:** - When vehicles talk make sure to use their title (callsign) to identify them, if not already.
 - **MRE Logging:** - Add a sub-system of Logging called Humanizing. It takes in log items and humanizes them for operators to understand better. (Makes it look like vehicles and assistants are actually speaking)
 
@@ -116,11 +156,8 @@ Mission Control: Environment is the world environment that mission control uses 
 ## Paladin System
 Paladin is Guardian's mission running brain. It takes a mission template into mission control: running and executes it according to the specs and rules it is given.
 
-
-- **Paladin: staging override execution:** during **Start Run**, apply each setup `simStartOverrideCoord` directly to the assigned SIM vehicle before path execution begins (authoritative pre-stage reposition step), emit Paladin events for success/failure per slot, and surface failures as setup blockers with actionable operator messaging. (Once **MC-E** lands, this generalises to "apply each slot's resolved `SimFixtureEnvironment` — pose, battery %, drain rate, scheduled failures — as one cohesive staging step." Keep this ticket as the active path until MC-E rollout slice 2 supersedes it.)
-- **Paladin log copy / i18n:** every `PaladinEvent` carries a stable **`templateKey`** (see `PaladinLogTemplateKey` in `PaladinLogTemplates.swift`) plus **`templateParams`**; **`message`** stays the default English. To ship **our own wording** (or another language) without changing call sites, register format strings on **`PaladinLogTemplateRegistry.shared`** (e.g. `setTemplate(_:pattern:)` or `setTemplates`) using **`{{param}}`** placeholders that match the keys in `templateParams` for that event. Unregistered keys fall back to **`message`**. Next steps when we prioritize this: load patterns from **UserDefaults / JSON in the app bundle / `.lproj` string tables** keyed by `templateKey`, wire **locale** into the resolver, and optionally add a **Settings** UI to edit overrides. The live Paladin log and **`plainTextLine()`** export both resolve through the same registry.
-- **Paladin Fleet readiness autopopulation:** wire `PaladinFleetPreflightBridge` into real preflight result callsites in `MissionControlStore` and `VehiclesView` flow so `PaladinFleetDomain` readiness updates automatically from probe outcomes.
-- **Paladin MissionRunAssistant on-demand vehicle telemetry queries (MAVSDK/MAVLink):** add a Paladin-specific active-query path so `MissionRunAssistant` can request immediate values (e.g. battery now, link health now, GPS/attitude now) rather than waiting for passive subscription refresh. Route as `MissionRunAssistant -> MissionRunEnvironment command interface -> FleetLinkService -> MAVSDK/MAVLink` and back as a typed response into Paladin decision logic. `FleetLinkService` needs a stack-aware request strategy per `FleetAutopilotStack` (PX4 vs ArduPilot vs unknown): prefer plugin/cache read when freshness SLA is satisfied, otherwise issue explicit MAVLink request(s) (`MAV_CMD_REQUEST_MESSAGE` / interval controls where appropriate), normalize to one Guardian response model, and include timeout/retry/error reason semantics so MissionRun decisions can degrade safely.
+- **Paladin Fleet readiness autopopulation:** wire `PaladinFleetPreflightBridge` into real preflight result callsites in `MissionControlStore` and `VehiclesView` flow so `PaladinFleetDomain` readiness updates automatically from probe outcomes. Allow Paladin to auto-calibrate vehicles if possible.
+- **Paladin MissionRunAssistant on-demand vehicle telemetry queries (MAVSDK/MAVLink):** add a Paladin-specific active-query path so `MissionRunAssistant` can request immediate values (e.g. battery now, link health now, GPS/attitude now) rather than waiting for passive subscription refresh.
 
 ## Controllers System
 - **Game controller / joystick integration:** add support for wired/wireless **game controllers** (Xbox, PS4/PS5, MFi, Stadia, Joy-Cons) and **HID joysticks / HOTAS** (Logitech Extreme 3D, T.16000M, Thrustmaster, etc.) as a first-class input alongside the existing `KeyboardEventMonitor` in `LiveDriveView`. Macos-only today; both transports (USB + Bluetooth) covered by system frameworks with no third-party deps.

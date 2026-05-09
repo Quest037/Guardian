@@ -260,7 +260,8 @@ struct VehiclesView: View {
                         testArmDisabledReason: testArmBlock,
                         onStopSim: nil,
                         stopSimDisabledReason: nil,
-                        onDismissSim: nil
+                        onDismissSim: nil,
+                        onCloneSim: nil
                     )
                 case .sim(let inst):
                     let systemID = inst.stackInstanceIndex + 1
@@ -310,7 +311,15 @@ struct VehiclesView: View {
                             )
                         },
                         stopSimDisabledReason: fleetVehicleLiveMissionLockReason(vehicleID: resolvedVehicleID),
-                        onDismissSim: { sitl.dismiss(id: inst.id) }
+                        onDismissSim: { sitl.dismiss(id: inst.id) },
+                        onCloneSim: {
+                            sitl.spawn(
+                                preset: inst.preset,
+                                platform: inst.platform,
+                                defaults: generalSettings.simSpawnDefaults
+                            )
+                            toastCenter.show("Cloning simulator…", style: .info, duration: 2)
+                        }
                     )
                 }
             }

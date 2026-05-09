@@ -112,6 +112,7 @@ final class MissionControlStore: ObservableObject {
         cancelScheduledMissionCycle(for: id)
         cancelScheduledTaskMissionStarts(for: id)
         let run = runs[idx]
+        run.updateTemplate(mission)
         let ctx = MissionRunExecutionContext(
             mission: mission,
             fleetLink: fleetLink,
@@ -146,6 +147,27 @@ final class MissionControlStore: ObservableObject {
         runs.removeAll { $0.id == id }
     }
 
+    /// Returns true when any run for this mission is currently active and should block mission deletion.
+    func hasLiveRun(forMissionID missionID: UUID) -> Bool {
+        runs.contains {
+            $0.missionId == missionID
+                && ($0.status == .running || $0.status == .paused || $0.status == .recovery)
+        }
+    }
+
+    /// Deletes non-live runs bound to a mission template. Live runs are preserved.
+    func deleteNonLiveRuns(forMissionID missionID: UUID) {
+        let removable = runs
+            .filter {
+                $0.missionId == missionID
+                    && !($0.status == .running || $0.status == .paused || $0.status == .recovery)
+            }
+            .map(\.id)
+        for runID in removable {
+            deleteRun(id: runID)
+        }
+    }
+
     /// Move a completed run back to setup for another configured launch.
     func resetRunToSetup(id: UUID) {
         guard let idx = runs.firstIndex(where: { $0.id == id }) else { return }
@@ -170,7 +192,7 @@ final class MissionControlStore: ObservableObject {
         sitl: SitlService,
         missionsProvider: @escaping @MainActor () -> [Mission]
     ) {
-        for run in runs where run.status == .running {
+        for run in runs where run.status == .running || run.status == .recovery {
             let ctx = MissionRunExecutionContext(
                 mission: nil,
                 fleetLink: fleetLink,
@@ -189,6 +211,7 @@ final class MissionControlStore: ObservableObject {
         mission: Mission,
         fleetVehicles: [MissionPickableFleetVehicle]
     ) {
+        run.updateTemplate(mission)
         guard let planningResult = run.systems.planner.compileInitialPlan(
             mission: mission,
             fleetVehicles: fleetVehicles
@@ -221,14 +244,14 @@ final class MissionControlStore: ObservableObject {
         fleetLink: FleetLinkService,
         sitl: SitlService
     ) {
-        for run in runs where run.status == .running || run.status == .paused {
+        for run in runs where run.status == .running || run.status == .paused || run.status == .recovery {
             run.systems.logging.appendFleetMirrorLine(vehicleID: vehicleID, line: line, fleetLink: fleetLink, sitl: sitl)
         }
     }
 
     /// A vehicle already committed to another **running or paused** mission cannot be picked again.
     func isFleetVehicleLockedByOtherLiveMission(tokenKey: String, excludingRunId: UUID) -> Bool {
-        for r in runs where r.id != excludingRunId && (r.status == .running || r.status == .paused) {
+        for r in runs where r.id != excludingRunId && (r.status == .running || r.status == .paused || r.status == .recovery) {
             if r.assignments.contains(where: { $0.attachedFleetVehicleToken == tokenKey }) {
                 return true
             }
@@ -310,7 +333,7 @@ final class MissionControlStore: ObservableObject {
 
     /// True when this bridge vehicle id is bound to any **running or paused** Mission Control run roster slot.
     func isVehicleStreamUsedInLiveMission(vehicleID: String, fleetLink: FleetLinkService, sitl: SitlService) -> Bool {
-        for r in runs where r.status == .running || r.status == .paused {
+        for r in runs where r.status == .running || r.status == .paused || r.status == .recovery {
             for a in r.assignments {
                 guard let vid = resolvedFleetStreamVehicleID(assignment: a, fleetLink: fleetLink, sitl: sitl) else { continue }
                 if vid == vehicleID { return true }

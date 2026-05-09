@@ -76,6 +76,10 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     @Published private(set) var events: [MissionRunEvent] = []
     @Published private(set) var template: Mission?
     @Published private(set) var compiledPlan: MissionControlPlan?
+    @Published private(set) var finishedMissionCycleVehicleIDs: Set<String> = []
+    @Published private(set) var activeCycleTaskIDs: Set<UUID> = []
+    /// Completed autopilot cycles per task this run (continuous / continuous-with-delay). Used with ``MissionTask/cycles``.
+    private(set) var taskCyclesCompletedByTaskID: [UUID: Int] = [:]
 
     fileprivate weak var fleetLink: FleetLinkService?
     fileprivate weak var sitl: SitlService?
@@ -241,6 +245,32 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         events.removeAll()
     }
 
+    fileprivate func clearFinishedMissionCycleVehicleIDs() {
+        finishedMissionCycleVehicleIDs.removeAll()
+    }
+
+    fileprivate func markFinishedMissionCycleVehicleID(_ vehicleID: String) {
+        finishedMissionCycleVehicleIDs.insert(vehicleID)
+    }
+
+    fileprivate func clearActiveCycleTasks() {
+        activeCycleTaskIDs.removeAll()
+    }
+
+    fileprivate func markTaskActiveInCurrentCycle(_ taskID: UUID) {
+        activeCycleTaskIDs.insert(taskID)
+    }
+
+    fileprivate func clearTaskCycleCompletionCounts() {
+        taskCyclesCompletedByTaskID.removeAll()
+    }
+
+    fileprivate func recordTaskCycleCompletions(forTaskIDs taskIDs: Set<UUID>) {
+        for id in taskIDs {
+            taskCyclesCompletedByTaskID[id, default: 0] += 1
+        }
+    }
+
     fileprivate func setOneOffDeferredExecution(_ value: MissionOneOffDeferredExecution?) {
         oneOffDeferredExecution = value
     }
@@ -339,6 +369,19 @@ final class MissionRunSystems {
 
 @MainActor
 final class MissionRunPlannerSubsystem {
+    struct MissionTaskSquad: Equatable {
+        let primaryAssignment: MissionRunAssignment
+        let primaryRosterDevice: RosterDevice
+        let wingmanRosterDevices: [RosterDevice]
+    }
+
+    struct PlannedTaskSquadMission: Equatable {
+        let task: MissionTask
+        let squadIndex: Int
+        let squad: MissionTaskSquad
+        let missionItems: [Mavsdk.Mission.MissionItem]
+    }
+
     typealias PlanningCallback = @MainActor (
         _ run: MissionRunEnvironment,
         _ mission: Mission,
@@ -568,58 +611,76 @@ final class MissionRunPlannerSubsystem {
         revisionHistory.removeAll()
     }
 
-    func buildDroneTaskMission(
+    func buildTaskSquadMissions(
         mission: Mission,
         taskId: UUID
-    ) -> (assignment: MissionRunAssignment, items: [Mavsdk.Mission.MissionItem])? {
-        guard let environment else { return nil }
+    ) -> [PlannedTaskSquadMission] {
+        guard let environment else { return [] }
         guard let task = mission.routeMacro.tasks.first(where: { $0.id == taskId && $0.enabled }),
               !task.waypoints.isEmpty
-        else { return nil }
+        else { return [] }
         let enabledTasks = mission.routeMacro.tasks.filter(\.enabled)
         let assignmentsForTask = environment.assignments.filter { assignment in
             if assignment.taskId == task.id { return true }
             if assignment.taskId == nil, enabledTasks.count == 1 { return true }
             return false
         }
-        guard assignmentsForTask.count == 1,
-              let assignment = assignmentsForTask.first,
-              assignment.attachedFleetVehicleToken != nil
-        else { return nil }
-        var items: [Mavsdk.Mission.MissionItem] = []
-        if let staging = assignment.simStartOverrideCoord, let firstWP = task.waypoints.first {
-            items.append(
-                Utilities.mission.path.waypoint.mavItem(
-                    coord: staging,
-                    waypoint: firstWP,
-                    useWaypointHeadingForYaw: true
+        let rosterByID = Dictionary(uniqueKeysWithValues: mission.rosterDevices.map { ($0.id, $0) })
+        let primaryAssignments = assignmentsForTask.compactMap { assignment -> (MissionRunAssignment, RosterDevice)? in
+            guard assignment.attachedFleetVehicleToken != nil else { return nil }
+            guard let rosterDevice = rosterByID[assignment.rosterDeviceId] else { return nil }
+            guard rosterDevice.slot == .primary else { return nil }
+            return (assignment, rosterDevice)
+        }
+        let rosterOrder = Dictionary(uniqueKeysWithValues: task.rosterDeviceIds.enumerated().map { ($1, $0) })
+        let orderedPrimaries = primaryAssignments.sorted { lhs, rhs in
+            let li = rosterOrder[lhs.1.id] ?? Int.max
+            let ri = rosterOrder[rhs.1.id] ?? Int.max
+            if li != ri { return li < ri }
+            return lhs.0.id.uuidString < rhs.0.id.uuidString
+        }
+        return orderedPrimaries.enumerated().map { idx, tuple in
+            let assignment = tuple.0
+            let primary = tuple.1
+            let wingmen = mission.rosterDevices.filter { rd in
+                rd.slot == .wingman && rd.leaderRosterDeviceId == primary.id
+            }
+            var items: [Mavsdk.Mission.MissionItem] = []
+            if let staging = assignment.simStartOverrideCoord, let firstWP = task.waypoints.first {
+                items.append(
+                    Utilities.mission.path.waypoint.mavItem(
+                        coord: staging,
+                        waypoint: firstWP,
+                        useWaypointHeadingForYaw: true
+                    )
                 )
+            }
+            for (index, wp) in task.waypoints.enumerated() {
+                let ignoreDelay = Utilities.mission.path.waypoint.shouldIgnoreClosingWaypointDelay(
+                    path: task,
+                    index: index,
+                    waypoint: wp
+                )
+                items.append(
+                    Utilities.mission.path.waypoint.mavItem(
+                        coord: wp.coord,
+                        waypoint: wp,
+                        useWaypointHeadingForYaw: true,
+                        loiterOverrideSeconds: ignoreDelay ? 0 : nil
+                    )
+                )
+            }
+            return PlannedTaskSquadMission(
+                task: task,
+                squadIndex: idx,
+                squad: MissionTaskSquad(
+                    primaryAssignment: assignment,
+                    primaryRosterDevice: primary,
+                    wingmanRosterDevices: wingmen
+                ),
+                missionItems: items
             )
         }
-        for (index, wp) in task.waypoints.enumerated() {
-            let ignoreDelay = Utilities.mission.path.waypoint.shouldIgnoreClosingWaypointDelay(
-                path: task,
-                index: index,
-                waypoint: wp
-            )
-            items.append(
-                Utilities.mission.path.waypoint.mavItem(
-                    coord: wp.coord,
-                    waypoint: wp,
-                    useWaypointHeadingForYaw: true,
-                    loiterOverrideSeconds: ignoreDelay ? 0 : nil
-                )
-            )
-        }
-        return (assignment, items)
-    }
-
-    func buildSingleDroneTaskMission(
-        mission: Mission
-    ) -> (assignment: MissionRunAssignment, items: [Mavsdk.Mission.MissionItem])? {
-        let enabledTasks = mission.routeMacro.tasks.filter(\.enabled)
-        guard enabledTasks.count == 1, let task = enabledTasks.first else { return nil }
-        return buildDroneTaskMission(mission: mission, taskId: task.id)
     }
 
     private func vetMutation(
@@ -792,6 +853,8 @@ final class MissionRunExecutionSubsystem {
             return .staging
         case .executing:
             return environment.status == .paused ? .paused : .running
+        case .recovery:
+            return .teardown
         case .completed:
             return .completed
         case .failed:
@@ -808,6 +871,9 @@ final class MissionRunExecutionSubsystem {
         guard let environment else { return .noOp }
         clearCommandQueue()
         environment.captureExecutionContext(context)
+        environment.clearFinishedMissionCycleVehicleIDs()
+        environment.clearActiveCycleTasks()
+        environment.clearTaskCycleCompletionCounts()
         environment.systems.scheduling.cancelScheduledMissionCycle()
         environment.systems.scheduling.cancelScheduledTaskMissionStarts()
         environment.systems.scheduling.clearDeferredOneOffExecution()
@@ -1077,15 +1143,23 @@ final class MissionRunExecutionSubsystem {
         context: MissionRunExecutionContext
     ) -> MissionRunExecutionDecision {
         guard let environment, environment.status == .running else { return .noOp }
-        guard let mission = context.missionProvider(),
-              let built = environment.systems.planner.buildSingleDroneTaskMission(mission: mission),
-              let missionVehicleID = resolvedFleetStreamVehicleID(
-                  assignment: built.assignment,
-                  fleetLink: context.fleetLink,
-                  sitl: context.sitl
-              ),
-              missionVehicleID == vehicleID
-        else { return .noOp }
+        guard let mission = context.missionProvider() else { return .noOp }
+        let activeMissionVehicleIDs = activePrimaryMissionVehicleIDs(
+            mission: mission,
+            restrictToTaskIDs: environment.activeCycleTaskIDs,
+            fleetLink: context.fleetLink,
+            sitl: context.sitl
+        )
+        guard activeMissionVehicleIDs.contains(vehicleID) else { return .noOp }
+        environment.markFinishedMissionCycleVehicleID(vehicleID)
+        let allActiveCyclesFinished = !activeMissionVehicleIDs.isEmpty
+            && activeMissionVehicleIDs.isSubset(of: environment.finishedMissionCycleVehicleIDs)
+        guard allActiveCyclesFinished else { return .progressed }
+        environment.setMissionCycleCount(environment.cyclesCompleted + 1)
+        let completedCycleTaskIDs = environment.activeCycleTaskIDs
+        environment.clearFinishedMissionCycleVehicleIDs()
+        environment.clearActiveCycleTasks()
+        environment.recordTaskCycleCompletions(forTaskIDs: completedCycleTaskIDs)
 
         if environment.pendingGracefulCycleStop {
             let hadQueuedAbortCommands = environment.systems.executor.dispatchAfterMissionCycleBatchesIfPending(context: context)
@@ -1099,6 +1173,45 @@ final class MissionRunExecutionSubsystem {
             return .completed(.operatorStoppedAfterCycle)
         }
 
+        let nextPlan = planNextAutoCycleStarts(
+            mission: mission,
+            completedCycleTaskIDs: completedCycleTaskIDs
+        )
+        if !nextPlan.immediateTaskIDs.isEmpty || !nextPlan.delayedTaskIDs.isEmpty {
+            if !nextPlan.betweenCyclesCommands.isEmpty {
+                for issued in nextPlan.betweenCyclesCommands {
+                    environment.appendEvent(environment.systems.commands.dispatchCommand(issued, fleetLink: context.fleetLink, sitl: context.sitl))
+                }
+            }
+            for taskID in nextPlan.immediateTaskIDs {
+                startTaskExecution(taskID: taskID, mission: mission, context: context)
+            }
+            for taskID in nextPlan.delayedTaskIDs {
+                let task = mission.routeMacro.tasks.first(where: { $0.id == taskID })
+                let mins = max(1, task?.regularityDelayMinutes ?? 1)
+                let delaySeconds = Double(mins) * 60
+                let startAt = Date().addingTimeInterval(delaySeconds)
+                environment.systems.scheduling.setTaskStartDeferral(
+                    MissionTaskStartDeferral(startAt: startAt, totalDelay: delaySeconds),
+                    forTaskID: taskID
+                )
+                environment.systems.scheduling.armTaskMissionStartTask(taskID: taskID, startAt: startAt) { [weak self] in
+                    guard let self else { return }
+                    _ = self.handleEvent(.deferredTaskStartDue(taskID: taskID), context: context)
+                }
+            }
+            return .progressed
+        }
+
+        if !missionHasOnlyBoundedTasks(mission) {
+            environment.systems.logging.appendLogEvent(
+                level: .info,
+                speaker: .paladin,
+                message: "Mission remains running (unbounded task regularity). Stop manually when ready."
+            )
+            return .progressed
+        }
+
         completeRun(
             context: context,
             message: "Mission cycle finished; run complete - returning to launch / home.",
@@ -1107,6 +1220,110 @@ final class MissionRunExecutionSubsystem {
             skipImplicitReturnToLaunch: false
         )
         return .completed(.oneOffAutopilotFinished)
+    }
+
+    private func missionHasOnlyBoundedTasks(_ mission: Mission) -> Bool {
+        let enabled = mission.routeMacro.tasks.filter(\.enabled)
+        guard !enabled.isEmpty else { return true }
+        return enabled.allSatisfy { task in
+            switch task.regularity {
+            case .continuous, .continuousWithDelay:
+                return task.cycles > 0
+            case .onceAtStart, .twiceStartEnd, .operatorTriggered:
+                return false
+            }
+        }
+    }
+
+    private func activePrimaryMissionVehicleIDs(
+        mission: Mission,
+        restrictToTaskIDs: Set<UUID>,
+        fleetLink: FleetLinkService,
+        sitl: SitlService
+    ) -> Set<String> {
+        guard let environment else { return [] }
+        let enabledTasks = mission.routeMacro.tasks.filter(\.enabled).filter { task in
+            restrictToTaskIDs.isEmpty || restrictToTaskIDs.contains(task.id)
+        }
+        var ids: Set<String> = []
+        for task in enabledTasks {
+            let squads = environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: task.id)
+            for squadMission in squads {
+                guard let resolvedID = resolvedFleetStreamVehicleID(
+                    assignment: squadMission.squad.primaryAssignment,
+                    fleetLink: fleetLink,
+                    sitl: sitl
+                ) else { continue }
+                ids.insert(resolvedID)
+            }
+        }
+        return ids
+    }
+
+    private struct NextCycleStartPlan {
+        var immediateTaskIDs: [UUID] = []
+        var delayedTaskIDs: [UUID] = []
+        var betweenCyclesCommands: [MissionRunIssuedCommand] = []
+    }
+
+    private func planNextAutoCycleStarts(
+        mission: Mission,
+        completedCycleTaskIDs: Set<UUID>
+    ) -> NextCycleStartPlan {
+        guard let environment else { return NextCycleStartPlan() }
+        var plan = NextCycleStartPlan()
+        let tasksByID = Dictionary(uniqueKeysWithValues: mission.routeMacro.tasks.map { ($0.id, $0) })
+        for taskID in completedCycleTaskIDs {
+            guard let task = tasksByID[taskID], task.enabled else { continue }
+            switch task.regularity {
+            case .continuous:
+                let done = environment.taskCyclesCompletedByTaskID[task.id] ?? 0
+                let shouldStart = task.cycles == 0 || done < task.cycles
+                if shouldStart {
+                    plan.immediateTaskIDs.append(task.id)
+                }
+            case .continuousWithDelay:
+                let done = environment.taskCyclesCompletedByTaskID[task.id] ?? 0
+                let shouldStart = task.cycles == 0 || done < task.cycles
+                if shouldStart {
+                    plan.delayedTaskIDs.append(task.id)
+                    plan.betweenCyclesCommands.append(contentsOf: betweenCyclesCommands(for: task, mission: mission))
+                }
+            case .onceAtStart, .twiceStartEnd, .operatorTriggered:
+                // Non-continuous regularities do not auto-start next cycles.
+                break
+            }
+        }
+        return plan
+    }
+
+    private func betweenCyclesCommands(for task: MissionTask, mission: Mission) -> [MissionRunIssuedCommand] {
+        guard let environment else { return [] }
+        let command: FleetVehicleCommand?
+        switch task.betweenCycles {
+        case .returnToLaunch:
+            command = .returnToLaunch
+        case .holdPosition:
+            command = .holdPosition
+        case .land:
+            command = .land
+        case .none:
+            command = nil
+        }
+        guard let command else { return [] }
+        let squads = environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: task.id)
+        return squads.compactMap { squad in
+            guard let tokenKey = squad.squad.primaryAssignment.attachedFleetVehicleToken else { return nil }
+            return MissionRunIssuedCommand(
+                assignmentID: squad.squad.primaryAssignment.id,
+                slotName: squad.squad.primaryAssignment.slotName,
+                vehicleTokenKey: tokenKey,
+                command: command,
+                issuer: .missionControl,
+                issuerKey: MissionRunCommandIssuerKey.missionExecute,
+                category: .paladin
+            )
+        }
     }
 
     private func startDeferredTask(taskID: UUID, context: MissionRunExecutionContext) {
@@ -1133,11 +1350,14 @@ final class MissionRunExecutionSubsystem {
         missionProvider: @escaping @MainActor () -> Mission?
     ) {
         guard let environment else { return }
-        let orderedEnabled = mission.routeMacro.tasks.filter(\.enabled)
+        let orderedEnabled = mission.routeMacro.tasks.filter(\.enabled).filter {
+            $0.regularity != .operatorTriggered
+        }
         struct BuildEntry { let taskId: UUID; let assignment: MissionRunAssignment }
         let buildable: [BuildEntry] = orderedEnabled.compactMap { path in
-            guard let built = environment.systems.planner.buildDroneTaskMission(mission: mission, taskId: path.id) else { return nil }
-            return BuildEntry(taskId: path.id, assignment: built.assignment)
+            let squads = environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: path.id)
+            guard let first = squads.first else { return nil }
+            return BuildEntry(taskId: path.id, assignment: first.squad.primaryAssignment)
         }
         if buildable.isEmpty {
             environment.systems.logging.appendLogEvent(
@@ -1149,7 +1369,7 @@ final class MissionRunExecutionSubsystem {
             return
         }
         for entry in buildable {
-            let mins = environment.startDelayMinutes(forTask: entry.taskId)
+            let mins = environment.startDelayMinutes(forTask: entry.taskId, mission: mission)
             guard mins > 0 else {
                 startTaskExecution(taskID: entry.taskId, mission: mission, context: .init(mission: mission, fleetLink: fleetLink, sitl: sitl, missionProvider: missionProvider))
                 continue
@@ -1187,9 +1407,15 @@ final class MissionRunExecutionSubsystem {
     private func startTaskExecution(taskID: UUID, mission: Mission, context: MissionRunExecutionContext) {
         guard let environment, environment.sessionPhase == .executing else { return }
         let pass = buildPrimaryMissionPass(mission: mission, explicitTaskId: taskID)
+        if !pass.immediateCommands.isEmpty || !pass.queuedBatches.isEmpty {
+            environment.markTaskActiveInCurrentCycle(taskID)
+        }
         pass.events.forEach { environment.appendEvent($0) }
-        for issued in pass.commands {
+        for issued in pass.immediateCommands {
             environment.appendEvent(environment.systems.commands.dispatchCommand(issued, fleetLink: context.fleetLink, sitl: context.sitl))
+        }
+        for batch in pass.queuedBatches {
+            environment.systems.executor.enqueueCommandBatch(batch, context: context, replacingTags: [])
         }
     }
 
@@ -1204,7 +1430,11 @@ final class MissionRunExecutionSubsystem {
                 templateKey: PaladinLogTemplateKey.stagingPassStarted
             )
         )
-        let skipRelocate = (mission.flatMap { environment.systems.planner.buildSingleDroneTaskMission(mission: $0) } != nil)
+        let skipRelocate = mission.map { mission in
+            mission.routeMacro.tasks.filter(\.enabled).contains { task in
+                !environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: task.id).isEmpty
+            }
+        } ?? false
         for assignment in environment.assignments {
             let slot = assignment.slotName
             let pc = MissionControlTaskTagName.taskContext(for: assignment, mission: mission)
@@ -1302,53 +1532,137 @@ final class MissionRunExecutionSubsystem {
         return MissionRunPassResult(events: events, commands: commands)
     }
 
-    private func buildPrimaryMissionPass(mission: Mission, explicitTaskId: UUID? = nil) -> MissionRunPassResult {
-        guard let environment else { return MissionRunPassResult(events: [], commands: []) }
+    private struct TaskMissionLaunchPass {
+        var events: [MissionRunEvent]
+        var immediateCommands: [MissionRunIssuedCommand]
+        var queuedBatches: [MissionRunQueuedCommandBatch]
+    }
+
+    private enum TaskFormationIntent {
+        case cluster
+        case line
+    }
+
+    private func buildPrimaryMissionPass(mission: Mission, explicitTaskId: UUID? = nil) -> TaskMissionLaunchPass {
+        guard let environment else { return TaskMissionLaunchPass(events: [], immediateCommands: [], queuedBatches: []) }
         var events: [MissionRunEvent] = []
-        var commands: [MissionRunIssuedCommand] = []
+        var immediateCommands: [MissionRunIssuedCommand] = []
+        var queuedBatches: [MissionRunQueuedCommandBatch] = []
         let resolvedTaskId: UUID? = {
             if let explicitTaskId { return explicitTaskId }
             let enabledTasks = mission.routeMacro.tasks.filter(\.enabled)
             return enabledTasks.count == 1 ? enabledTasks.first?.id : nil
         }()
         guard let pid = resolvedTaskId,
-              let built = environment.systems.planner.buildDroneTaskMission(mission: mission, taskId: pid),
-              let tokenKey = built.assignment.attachedFleetVehicleToken
+              let task = mission.routeMacro.tasks.first(where: { $0.id == pid })
         else {
             events.append(
                 MissionRunEvent(
                     level: .warning,
                     speaker: .missionControl,
-                    message: "MAVLink mission not started (need one enabled path, one assigned vehicle, >=1 waypoint).",
+                    message: "MAVLink mission not started (need enabled path with assigned primary vehicle(s) and waypoints).",
                     templateKey: PaladinLogTemplateKey.missionNotStarted
                 )
             )
-            return MissionRunPassResult(events: events, commands: commands)
+            return TaskMissionLaunchPass(events: events, immediateCommands: immediateCommands, queuedBatches: queuedBatches)
         }
-        let pc = MissionControlTaskTagName.taskContext(for: built.assignment, mission: mission)
-        events.append(
-            MissionRunEvent(
-                level: .info,
-                taskID: pc?.id,
-                taskLabel: pc?.label,
-                speaker: .missionControl,
-                message: "Executing MAVLink mission for \"\(built.assignment.slotName)\" (\(built.items.count) item(s)).",
-                templateKey: PaladinLogTemplateKey.missionExecuting,
-                templateParams: ["slot": built.assignment.slotName, "itemCount": String(built.items.count)]
+        let squads = environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: pid)
+        guard !squads.isEmpty else {
+            events.append(
+                MissionRunEvent(
+                    level: .warning,
+                    speaker: .missionControl,
+                    message: "MAVLink mission not started (task has no assigned primaries).",
+                    templateKey: PaladinLogTemplateKey.missionNotStarted
+                )
             )
-        )
-        commands.append(
-            MissionRunIssuedCommand(
-                assignmentID: built.assignment.id,
-                slotName: built.assignment.slotName,
+            return TaskMissionLaunchPass(events: events, immediateCommands: immediateCommands, queuedBatches: queuedBatches)
+        }
+
+        let formation: TaskFormationIntent = (task.pattern == .convoy) ? .line : .cluster
+        let fallbackStep = fallbackStaggerStepSeconds(task: task, squads: squads, mission: mission)
+        let staggerStep = task.executionMethod == .staggered ? fallbackStep : 0
+        let now = Date()
+
+        for squad in squads {
+            guard let tokenKey = squad.squad.primaryAssignment.attachedFleetVehicleToken else { continue }
+            let issued = MissionRunIssuedCommand(
+                assignmentID: squad.squad.primaryAssignment.id,
+                slotName: squad.squad.primaryAssignment.slotName,
                 vehicleTokenKey: tokenKey,
-                command: .uploadAndStartMission(items: built.items),
+                command: .uploadAndStartMission(items: squad.missionItems),
                 issuer: .missionControl,
                 issuerKey: MissionRunCommandIssuerKey.missionExecute,
                 category: .paladin
             )
-        )
-        return MissionRunPassResult(events: events, commands: commands)
+            let offset = Double(squad.squadIndex) * staggerStep
+            let dispatchAt = now.addingTimeInterval(offset)
+            let pc = MissionControlTaskTagName.taskContext(for: squad.squad.primaryAssignment, mission: mission)
+            let formationLabel = (formation == .line) ? "line" : "cluster"
+            let timingLabel = offset > 0 ? "stagger +\(Int(offset))s" : "start now"
+            events.append(
+                MissionRunEvent(
+                    level: .info,
+                    taskID: pc?.id,
+                    taskLabel: pc?.label,
+                    speaker: .missionControl,
+                    message: "Executing MAVLink mission for \"\(squad.squad.primaryAssignment.slotName)\" (\(squad.missionItems.count) item(s), \(formationLabel), \(timingLabel)).",
+                    templateKey: PaladinLogTemplateKey.missionExecuting,
+                    templateParams: ["slot": squad.squad.primaryAssignment.slotName, "itemCount": String(squad.missionItems.count)]
+                )
+            )
+            if offset <= 0 {
+                immediateCommands.append(issued)
+            } else {
+                queuedBatches.append(
+                    MissionRunQueuedCommandBatch(
+                        tag: .missionStart,
+                        dispatch: .at(dispatchAt),
+                        commands: [issued]
+                    )
+                )
+            }
+        }
+        return TaskMissionLaunchPass(events: events, immediateCommands: immediateCommands, queuedBatches: queuedBatches)
+    }
+
+    private func fallbackStaggerStepSeconds(
+        task: MissionTask,
+        squads: [MissionRunPlannerSubsystem.PlannedTaskSquadMission],
+        mission: Mission
+    ) -> TimeInterval {
+        guard task.executionMethod == .staggered else { return 0 }
+        guard let firstWaypoint = task.waypoints.first else { return 20 }
+        let startCoord = squads.compactMap { $0.squad.primaryAssignment.simStartOverrideCoord }.first
+        let distanceM: Double = {
+            if let startCoord {
+                return MissionTelemetryGeo.horizontalDistanceM(
+                    lat1: startCoord.lat,
+                    lon1: startCoord.lon,
+                    lat2: firstWaypoint.coord.lat,
+                    lon2: firstWaypoint.coord.lon
+                )
+            }
+            if task.waypoints.count > 1 {
+                let second = task.waypoints[1]
+                return MissionTelemetryGeo.horizontalDistanceM(
+                    lat1: firstWaypoint.coord.lat,
+                    lon1: firstWaypoint.coord.lon,
+                    lat2: second.coord.lat,
+                    lon2: second.coord.lon
+                )
+            }
+            return 100
+        }()
+        let speedMps: Double = {
+            let maybeWaypoint = firstWaypoint.transition.targetSpeed
+            let waypointUnit = firstWaypoint.transition.speedUnit
+            let fromWaypoint = waypointUnit == .kilometersPerHour ? (maybeWaypoint * 1000 / 3600) : maybeWaypoint
+            let fallback = mission.routeMacro.rules.defaultSpeed
+            return max(1, fromWaypoint > 0 ? fromWaypoint : fallback)
+        }()
+        let estimate = distanceM / speedMps
+        return min(300, max(5, estimate))
     }
 
     private func completeRun(
@@ -1366,13 +1680,15 @@ final class MissionRunExecutionSubsystem {
         if kind == .oneOffAutopilotFinished {
             cycleSnap = max(1, cycleSnap)
         }
-        environment.setMissionCycleCount(0)
-        environment.status = .completed
-        environment.completedAt = Date()
+        environment.clearFinishedMissionCycleVehicleIDs()
+        environment.clearActiveCycleTasks()
+        environment.clearTaskCycleCompletionCounts()
+        environment.status = .recovery
+        environment.completedAt = nil
         environment.pendingGracefulCycleStop = false
         environment.reportCyclesCompleted = cycleSnap
         environment.completionKind = kind
-        environment.setSessionPhase(.completed)
+        environment.setSessionPhase(.recovery)
         environment.systems.logging.appendLogEvent(
             level: .info,
             speaker: .paladin,
@@ -1383,11 +1699,6 @@ final class MissionRunExecutionSubsystem {
         if !skipImplicitReturnToLaunch {
             issueReturnToLaunchForAllAssignments()
         }
-        UserNotificationService.shared.notifyPaladinRunCompleted(
-            runID: environment.id,
-            missionName: environment.missionName,
-            summary: message
-        )
     }
 }
 
@@ -1400,20 +1711,14 @@ final class MissionRunProjectionsSubsystem {
     func mavlinkMissionProgressContext(
         mission: Mission
     ) -> (task: RoutePath, missionItemCount: Int)? {
-        guard let environment,
-              let (assignment, items) = environment.systems.planner.buildSingleDroneTaskMission(mission: mission)
-        else {
-            return nil
+        guard let environment else { return nil }
+        for task in mission.routeMacro.tasks where task.enabled {
+            let squads = environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: task.id)
+            if let first = squads.first {
+                return (task, first.missionItems.count)
+            }
         }
-        let task: RoutePath?
-        if let pid = assignment.taskId {
-            task = mission.routeMacro.tasks.first { $0.id == pid }
-        } else {
-            let enabledTasks = mission.routeMacro.tasks.filter(\.enabled)
-            task = enabledTasks.count == 1 ? enabledTasks.first : nil
-        }
-        guard let task else { return nil }
-        return (task, items.count)
+        return nil
     }
 }
 
@@ -1537,6 +1842,18 @@ final class MissionRunSchedulingSubsystem {
         beginDeferredOneOffNow()
     }
 
+    /// Operator-triggered task run (manual fire while mission is running).
+    func triggerOperatorTaskStart(taskID: UUID) {
+        guard let environment else { return }
+        guard let mission = environment.lastExecutionContext?.missionProvider(),
+              let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }),
+              task.enabled,
+              task.regularity == .operatorTriggered
+        else { return }
+        guard let ctx = environment.lastExecutionContext else { return }
+        _ = environment.systems.executor.handleEvent(.deferredTaskStartDue(taskID: taskID), context: ctx)
+    }
+
     /// Mission runs no longer schedule a follow-on autopilot cycle.
     func cancelScheduledMissionCycle(forTaskID _: UUID? = nil) {}
 
@@ -1569,16 +1886,15 @@ final class MissionRunSchedulingSubsystem {
         deferredOneOffStartTask = nil
     }
 
-    func skipMissionTaskStartDeferral(taskID: UUID, onStartNow: @escaping @MainActor () -> Void) {
+    func skipMissionTaskStartDeferral(taskID: UUID) {
         guard environment?.taskStartDeferralByTaskID[taskID] != nil else { return }
         cancelScheduledTaskMissionStarts(forTaskID: taskID)
-        onStartNow()
+        startDeferredTaskNow(taskID: taskID)
     }
 
     func extendMissionTaskStartDeferralByMinutes(
         taskID: UUID,
-        additionalMinutes: Int,
-        onStartNow: @escaping @MainActor () -> Void
+        additionalMinutes: Int
     ) {
         guard let environment, let def = environment.taskStartDeferralByTaskID[taskID] else { return }
         let mins = min(30, max(1, additionalMinutes))
@@ -1587,7 +1903,22 @@ final class MissionRunSchedulingSubsystem {
         let newStart = def.startAt.addingTimeInterval(addSec)
         let newTotal = def.totalDelay + addSec
         setTaskStartDeferral(MissionTaskStartDeferral(startAt: newStart, totalDelay: newTotal), forTaskID: taskID)
-        armTaskMissionStartTask(taskID: taskID, startAt: newStart, onStartNow: onStartNow)
+        armTaskMissionStartTask(taskID: taskID, startAt: newStart) { [weak self] in
+            self?.startDeferredTaskNow(taskID: taskID)
+        }
+    }
+
+    private func startDeferredTaskNow(taskID: UUID) {
+        guard let environment else { return }
+        guard let ctx = environment.lastExecutionContext else {
+            environment.systems.logging.appendLogEvent(
+                level: .warning,
+                speaker: .missionControl,
+                message: "Task start-now skipped — no execution context."
+            )
+            return
+        }
+        _ = environment.systems.executor.handleEvent(.deferredTaskStartDue(taskID: taskID), context: ctx)
     }
 
     func armTaskMissionStartTask(taskID: UUID, startAt: Date, onStartNow: @escaping @MainActor () -> Void) {
@@ -1670,10 +2001,17 @@ final class MissionRunLifecycleSubsystem {
         guard let environment else { return }
         environment.status = .completed
         environment.completedAt = Date()
-        environment.completionKind = kind
-        environment.reportCyclesCompleted = environment.cyclesCompleted
+        if let kind {
+            environment.completionKind = kind
+        }
+        environment.reportCyclesCompleted = environment.reportCyclesCompleted ?? environment.cyclesCompleted
         environment.setSessionPhase(.completed)
         environment.systems.scheduling.cancelAllScheduledTasks()
+        UserNotificationService.shared.notifyPaladinRunCompleted(
+            runID: environment.id,
+            missionName: environment.missionName,
+            summary: "Mission run completed."
+        )
     }
 
     func markFailed(detail: String? = nil) {
@@ -1699,6 +2037,9 @@ final class MissionRunLifecycleSubsystem {
         environment.reportCyclesCompleted = nil
         environment.completionKind = nil
         environment.setMissionCycleCount(0)
+        environment.clearFinishedMissionCycleVehicleIDs()
+        environment.clearActiveCycleTasks()
+        environment.clearTaskCycleCompletionCounts()
         environment.clearEvents()
         environment.systems.planner.clearCompiledPlan()
         environment.systems.logging.clearState()

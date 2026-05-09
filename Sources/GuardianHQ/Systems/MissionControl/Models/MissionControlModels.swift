@@ -6,6 +6,7 @@ enum MissionRunSessionPhase: String, Equatable {
     /// Plan is ready; waiting for a scheduled execution instant (e.g. one-off future start) before staging/mission passes run.
     case staging
     case executing
+    case recovery
     case completed
     case failed
 }
@@ -14,6 +15,7 @@ enum MissionRunStatus: String, Codable, CaseIterable, Identifiable {
     case setup
     case running
     case paused
+    case recovery
     case completed
 
     var id: String { rawValue }
@@ -37,6 +39,21 @@ enum MissionRunAbortPolicy: String, Codable, Equatable, CaseIterable, Identifiab
     case none
 
     var id: String { rawValue }
+
+    /// MC Setup **Rules** tab menu labels.
+    var setupMenuLabel: String {
+        switch self {
+        case .returnToLaunch: return "Return to Launch"
+        case .holdPosition: return "Hold Position"
+        case .land: return "Land"
+        case .none: return "None"
+        }
+    }
+
+    /// MC Setup **Rules** abort dropdown ordering (**Return to Launch** first; includes all planner-backed values).
+    static var setupPickerCases: [MissionRunAbortPolicy] {
+        [.returnToLaunch, .holdPosition, .land, .none]
+    }
 }
 
 // MARK: - Rules of engagement (run-level; not part of compiled plan)
@@ -406,6 +423,7 @@ struct MissionRunAbortPlan: Equatable {
 /// Queue bucket; **when** is ``MissionRunQueuedCommandDispatch`` on each batch.
 enum MissionRunCommandQueueTag: String, CaseIterable, Hashable {
     case abort = "missionControl.queue.abort"
+    case missionStart = "missionControl.queue.missionStart"
 }
 
 /// When a ``MissionRunQueuedCommandBatch`` should be delivered to the fleet.

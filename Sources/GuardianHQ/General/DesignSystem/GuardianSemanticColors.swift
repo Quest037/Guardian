@@ -28,6 +28,8 @@ enum GuardianSemanticColors {
             return (warningBackground, warningForeground)
         case .executing:
             return (successBackground, successForeground)
+        case .recovery:
+            return (infoBackground, infoForeground)
         case .completed:
             return (infoBackground, infoForeground)
         case .failed:

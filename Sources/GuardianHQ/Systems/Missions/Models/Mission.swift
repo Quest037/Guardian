@@ -472,6 +472,16 @@ enum MissionTaskRegularity: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// Autopilot action for a squad between scheduled task cycles (e.g. while waiting for a delayed next run).
+enum MissionTaskBetweenCyclesAction: String, Codable, CaseIterable, Identifiable {
+    case returnToLaunch
+    case holdPosition
+    case land
+    case none
+
+    var id: String { rawValue }
+}
+
 /// High-level formation / route pattern for planner and authoring (distinct from waypoint loop geometry).
 enum MissionTaskPattern: String, Codable, CaseIterable, Identifiable {
     case patrol
@@ -494,14 +504,16 @@ struct MissionTask: Identifiable, Codable, Equatable {
     var enabled: Bool
     var waypoints: [RouteWaypoint]
     var loopMode: String
-    /// Meaningful when ``regularity`` is ``continuous`` or ``continuousWithDelay`` (planner / MC). Clamped to 0...100.
-    var repeatCount: Int
+    /// For ``regularity`` ``continuous`` / ``continuousWithDelay``: exact number of task cycles to run. ``0`` means unlimited. Clamped 0...100.
+    var cycles: Int
     /// Minutes between continuous repeats when ``regularity`` is ``continuousWithDelay``. Clamped to 1...60.
     var regularityDelayMinutes: Int
     /// Autopilot / planner execution strategy for this task.
     var executionMethod: MissionTaskExecutionMethod
     /// Cadence / scheduling intent for this task within the mission.
     var regularity: MissionTaskRegularity
+    /// What a squad should do between cycles when this task is not immediately continuous.
+    var betweenCycles: MissionTaskBetweenCyclesAction
     /// Formation / pattern intent (e.g. patrol vs convoy column).
     var pattern: MissionTaskPattern
     /// Device slots assigned to this task (IDs into `Mission.rosterDevices`).
@@ -510,8 +522,9 @@ struct MissionTask: Identifiable, Codable, Equatable {
     var startDelay: Int
 
     enum CodingKeys: String, CodingKey {
-        case id, name, enabled, waypoints, loopMode, repeatCount
-        case executionMethod, regularity, pattern, regularityDelayMinutes, startDelay
+        case id, name, enabled, waypoints, loopMode, cycles
+        case legacyRepeatCount = "repeatCount"
+        case executionMethod, regularity, betweenCycles, pattern, regularityDelayMinutes, startDelay
         case rosterDeviceIds = "spaceBindings"
         case legacyScheduleRefs = "scheduleRefs"
     }
@@ -522,10 +535,11 @@ struct MissionTask: Identifiable, Codable, Equatable {
         enabled: Bool = true,
         waypoints: [RouteWaypoint] = [],
         loopMode: String = "none",
-        repeatCount: Int = 1,
+        cycles: Int = 1,
         regularityDelayMinutes: Int = 1,
         executionMethod: MissionTaskExecutionMethod = .group,
         regularity: MissionTaskRegularity = .onceAtStart,
+        betweenCycles: MissionTaskBetweenCyclesAction = .returnToLaunch,
         pattern: MissionTaskPattern = .patrol,
         rosterDeviceIds: [UUID] = [],
         startDelay: Int = 0
@@ -535,10 +549,11 @@ struct MissionTask: Identifiable, Codable, Equatable {
         self.enabled = enabled
         self.waypoints = waypoints
         self.loopMode = loopMode
-        self.repeatCount = min(100, max(0, repeatCount))
+        self.cycles = min(100, max(0, cycles))
         self.regularityDelayMinutes = min(60, max(1, regularityDelayMinutes))
         self.executionMethod = executionMethod
         self.regularity = regularity
+        self.betweenCycles = betweenCycles
         self.pattern = pattern
         self.rosterDeviceIds = rosterDeviceIds
         self.startDelay = min(59, max(0, startDelay))
@@ -551,8 +566,13 @@ struct MissionTask: Identifiable, Codable, Equatable {
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         waypoints = try c.decodeIfPresent([RouteWaypoint].self, forKey: .waypoints) ?? []
         loopMode = try c.decodeIfPresent(String.self, forKey: .loopMode) ?? "none"
-        let decodedRepeat = try c.decodeIfPresent(Int.self, forKey: .repeatCount) ?? 1
-        repeatCount = min(100, max(0, decodedRepeat))
+        if let decodedCycles = try c.decodeIfPresent(Int.self, forKey: .cycles) {
+            cycles = min(100, max(0, decodedCycles))
+        } else if let legacy = try c.decodeIfPresent(Int.self, forKey: .legacyRepeatCount) {
+            cycles = min(100, max(0, legacy))
+        } else {
+            cycles = 1
+        }
         let decodedDelay = try c.decodeIfPresent(Int.self, forKey: .regularityDelayMinutes) ?? 1
         regularityDelayMinutes = min(60, max(1, decodedDelay))
         rosterDeviceIds = try c.decodeIfPresent([UUID].self, forKey: .rosterDeviceIds) ?? []
@@ -571,6 +591,7 @@ struct MissionTask: Identifiable, Codable, Equatable {
         } else {
             regularity = .onceAtStart
         }
+        betweenCycles = try c.decodeIfPresent(MissionTaskBetweenCyclesAction.self, forKey: .betweenCycles) ?? .returnToLaunch
 
         pattern = try c.decodeIfPresent(MissionTaskPattern.self, forKey: .pattern) ?? .patrol
         let decodedStartDelay = try c.decodeIfPresent(Int.self, forKey: .startDelay) ?? 0
@@ -584,10 +605,11 @@ struct MissionTask: Identifiable, Codable, Equatable {
         try c.encode(enabled, forKey: .enabled)
         try c.encode(waypoints, forKey: .waypoints)
         try c.encode(loopMode, forKey: .loopMode)
-        try c.encode(repeatCount, forKey: .repeatCount)
+        try c.encode(cycles, forKey: .cycles)
         try c.encode(regularityDelayMinutes, forKey: .regularityDelayMinutes)
         try c.encode(executionMethod, forKey: .executionMethod)
         try c.encode(regularity, forKey: .regularity)
+        try c.encode(betweenCycles, forKey: .betweenCycles)
         try c.encode(pattern, forKey: .pattern)
         try c.encode(rosterDeviceIds, forKey: .rosterDeviceIds)
         try c.encode(startDelay, forKey: .startDelay)
@@ -674,6 +696,7 @@ struct Mission: Identifiable, Codable {
     var name: String
     var description: String
     var type: MissionType
+    var isArchived: Bool
     var count: Int
     var duration: Int
     var deviceIDs: [String]
@@ -686,6 +709,7 @@ struct Mission: Identifiable, Codable {
         name: String,
         description: String,
         type: MissionType,
+        isArchived: Bool = false,
         count: Int = 0,
         duration: Int = 0,
         deviceIDs: [String] = [],
@@ -697,6 +721,7 @@ struct Mission: Identifiable, Codable {
         self.name = name
         self.description = description
         self.type = type
+        self.isArchived = isArchived
         self.count = count
         self.duration = duration
         self.deviceIDs = deviceIDs
@@ -706,7 +731,7 @@ struct Mission: Identifiable, Codable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, description, type, count, duration, schedule, deviceIDs, routeMacro, createdAt
+        case id, name, description, type, isArchived, count, duration, schedule, deviceIDs, routeMacro, createdAt
         case rosterDevices = "spaces"
         case mapRegion, routePlan // legacy
     }
@@ -717,6 +742,7 @@ struct Mission: Identifiable, Codable {
         name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
         description = try container.decodeIfPresent(String.self, forKey: .description) ?? ""
         type = try container.decodeIfPresent(MissionType.self, forKey: .type) ?? .mobile
+        isArchived = try container.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
         count = try container.decodeIfPresent(Int.self, forKey: .count) ?? 0
         duration = try container.decodeIfPresent(Int.self, forKey: .duration) ?? 0
         _ = try? container.decodeIfPresent([String].self, forKey: .schedule)
@@ -744,6 +770,7 @@ struct Mission: Identifiable, Codable {
         try container.encode(name, forKey: .name)
         try container.encode(description, forKey: .description)
         try container.encode(type, forKey: .type)
+        try container.encode(isArchived, forKey: .isArchived)
         try container.encode(count, forKey: .count)
         try container.encode(duration, forKey: .duration)
         try container.encode(deviceIDs, forKey: .deviceIDs)

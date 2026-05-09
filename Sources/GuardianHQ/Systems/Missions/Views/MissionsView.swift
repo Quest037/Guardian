@@ -15,6 +15,7 @@ struct MissionsView: View {
     }
 
     @ObservedObject var store: MissionStore
+    @ObservedObject var missionControlStore: MissionControlStore
     @ObservedObject var generalSettings: GeneralSettingsStore
     @EnvironmentObject private var toastCenter: ToastCenter
     @Environment(\.colorScheme) private var colorScheme
@@ -22,6 +23,10 @@ struct MissionsView: View {
     @State private var displayMode: DisplayMode = .list
     @State private var sortMode: SortMode = .newest
     @State private var selectedMissionID: UUID?
+    @State private var showArchivedMissions = false
+    @State private var pendingDeleteMission: Mission?
+    @State private var showingDeleteMissionConfirm = false
+    @State private var cloneMissionContext: CloneMissionContext?
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
@@ -36,6 +41,36 @@ struct MissionsView: View {
         .sheet(isPresented: $showingAddMission) {
             AddMissionSheet(store: store)
         }
+        .sheet(item: $cloneMissionContext) { context in
+            CloneMissionSheet(
+                sourceMissionName: context.sourceMissionName,
+                onCancel: { cloneMissionContext = nil },
+                onClone: { newName in
+                    guard let cloned = store.cloneMission(id: context.sourceMissionID, newName: newName) else {
+                        toastCenter.show("Clone failed", style: .error)
+                        return
+                    }
+                    cloneMissionContext = nil
+                    selectedMissionID = cloned.id
+                    toastCenter.show("Mission cloned", style: .success)
+                }
+            )
+        }
+        .alert("Delete Mission?", isPresented: $showingDeleteMissionConfirm) {
+            Button("Cancel", role: .cancel) {
+                pendingDeleteMission = nil
+            }
+            Button("Delete", role: .destructive) {
+                if let mission = pendingDeleteMission {
+                    performDeleteMission(mission)
+                }
+                pendingDeleteMission = nil
+            }
+        } message: {
+            if let mission = pendingDeleteMission {
+                Text("Delete “\(mission.name)”? This removes the mission template and non-running Mission Control runs for this mission.")
+            }
+        }
     }
 
     private var selectedMission: Mission? {
@@ -44,11 +79,12 @@ struct MissionsView: View {
     }
 
     private var sortedMissions: [Mission] {
+        let visible = store.missions.filter { showArchivedMissions || !$0.isArchived }
         switch sortMode {
         case .newest:
-            return store.missions.sorted { $0.createdAt > $1.createdAt }
+            return visible.sorted { $0.createdAt > $1.createdAt }
         case .oldest:
-            return store.missions.sorted { $0.createdAt < $1.createdAt }
+            return visible.sorted { $0.createdAt < $1.createdAt }
         }
     }
 
@@ -57,6 +93,11 @@ struct MissionsView: View {
             HStack {
                 Button(displayMode == .list ? "Grid View" : "List View") {
                     displayMode = displayMode == .list ? .grid : .list
+                }
+                .buttonStyle(.bordered)
+
+                Button(showArchivedMissions ? "Hide Archived" : "Show Archived") {
+                    showArchivedMissions.toggle()
                 }
                 .buttonStyle(.bordered)
 
@@ -95,14 +136,26 @@ struct MissionsView: View {
                 ScrollView {
                     LazyVStack(spacing: 12) {
                         ForEach(sortedMissions) { mission in
-                            Button {
-                                selectedMissionID = mission.id
-                            } label: {
-                                MissionRow(mission: mission)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .cursorOnHover()
+                            MissionRow(
+                                mission: mission,
+                                onOpen: { selectedMissionID = mission.id },
+                                onArchiveToggle: {
+                                    store.setMissionArchived(id: mission.id, archived: !mission.isArchived)
+                                    toastCenter.show(
+                                        mission.isArchived ? "Mission unarchived" : "Mission archived",
+                                        style: .success
+                                    )
+                                },
+                                onClone: {
+                                    cloneMissionContext = CloneMissionContext(
+                                        sourceMissionID: mission.id,
+                                        sourceMissionName: mission.name
+                                    )
+                                },
+                                onDelete: {
+                                    requestDeleteMission(mission)
+                                }
+                            )
                         }
                     }
                     .padding(16)
@@ -115,14 +168,26 @@ struct MissionsView: View {
                         spacing: 12
                     ) {
                         ForEach(sortedMissions) { mission in
-                            Button {
-                                selectedMissionID = mission.id
-                            } label: {
-                                MissionCard(mission: mission)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .cursorOnHover()
+                            MissionCard(
+                                mission: mission,
+                                onOpen: { selectedMissionID = mission.id },
+                                onArchiveToggle: {
+                                    store.setMissionArchived(id: mission.id, archived: !mission.isArchived)
+                                    toastCenter.show(
+                                        mission.isArchived ? "Mission unarchived" : "Mission archived",
+                                        style: .success
+                                    )
+                                },
+                                onClone: {
+                                    cloneMissionContext = CloneMissionContext(
+                                        sourceMissionID: mission.id,
+                                        sourceMissionName: mission.name
+                                    )
+                                },
+                                onDelete: {
+                                    requestDeleteMission(mission)
+                                }
+                            )
                         }
                     }
                     .padding(16)
@@ -138,9 +203,7 @@ struct MissionsView: View {
             defaultMapTileStyle: generalSettings.defaultMapTileStyle,
             onBack: { selectedMissionID = nil },
             onDelete: { missionToDelete in
-                store.deleteMission(id: missionToDelete.id)
-                selectedMissionID = nil
-                toastCenter.show("Mission deleted", style: .success)
+                performConfirmedDeleteMission(missionToDelete)
             },
             persistMission: { updatedMission in
                 store.updateMission(updatedMission)
@@ -150,6 +213,38 @@ struct MissionsView: View {
             }
         )
     }
+
+    private func requestDeleteMission(_ mission: Mission) {
+        if missionControlStore.hasLiveRun(forMissionID: mission.id) {
+            toastCenter.show("Cannot delete a mission with a live Mission Control run.", style: .error)
+            return
+        }
+        pendingDeleteMission = mission
+        showingDeleteMissionConfirm = true
+    }
+
+    private func performConfirmedDeleteMission(_ mission: Mission) {
+        if missionControlStore.hasLiveRun(forMissionID: mission.id) {
+            toastCenter.show("Cannot delete a mission with a live Mission Control run.", style: .error)
+            return
+        }
+        performDeleteMission(mission)
+    }
+
+    private func performDeleteMission(_ mission: Mission) {
+        missionControlStore.deleteNonLiveRuns(forMissionID: mission.id)
+        store.deleteMission(id: mission.id)
+        if selectedMissionID == mission.id {
+            selectedMissionID = nil
+        }
+        toastCenter.show("Mission deleted", style: .success)
+    }
+}
+
+private struct CloneMissionContext: Identifiable {
+    let id = UUID()
+    let sourceMissionID: UUID
+    let sourceMissionName: String
 }
 
 private struct RouteTabMapSignature: Equatable {
@@ -2679,7 +2774,7 @@ private struct MissionTaskSettingsSidebar: View {
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
-    private var showsRepeatCount: Bool {
+    private var showsCycles: Bool {
         task.regularity == .continuous || task.regularity == .continuousWithDelay
     }
 
@@ -2786,10 +2881,10 @@ private struct MissionTaskSettingsSidebar: View {
         )
     }
 
-    private var missionTaskRepeatCountRow: some View {
+    private var missionTaskCyclesRow: some View {
         missionTaskIntStepperFieldRow(
-            label: "Repeat Count",
-            value: $task.repeatCount,
+            label: "Cycles",
+            value: $task.cycles,
             range: 0...100,
             unitSuffix: nil
         )
@@ -2804,8 +2899,8 @@ private struct MissionTaskSettingsSidebar: View {
         if showsRegularityDelay {
             missionTaskRegularityDelayRow
         }
-        if showsRepeatCount {
-            missionTaskRepeatCountRow
+        if showsCycles {
+            missionTaskCyclesRow
         }
     }
 
@@ -2855,39 +2950,129 @@ private struct MissionTaskSettingsSidebar: View {
     }
 }
 
+/// Static (success) vs mobile (info) — shared by list and grid mission cards.
+private struct MissionTypeCapsuleBadge: View {
+    let type: MissionType
+
+    var body: some View {
+        let bg: Color
+        let fg: Color
+        switch type {
+        case .staticType:
+            bg = GuardianSemanticColors.successBackground
+            fg = GuardianSemanticColors.successForeground
+        case .mobile:
+            bg = GuardianSemanticColors.infoBackground
+            fg = GuardianSemanticColors.infoForeground
+        }
+        return Text(type.rawValue.capitalized)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(fg)
+            .lineLimit(1)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(bg)
+            .clipShape(Capsule())
+    }
+}
+
 private struct MissionRow: View {
     let mission: Mission
+    let onOpen: () -> Void
+    let onArchiveToggle: () -> Void
+    let onClone: () -> Void
+    let onDelete: () -> Void
     @Environment(\.colorScheme) private var colorScheme
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
+    private var taskCount: Int { mission.routeMacro.tasks.count }
+    private var vehicleCount: Int { mission.rosterDevices.count }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
+            HStack(alignment: .firstTextBaseline) {
                 Text(mission.name)
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(theme.textPrimary)
                 Spacer()
-                Text(mission.type.rawValue.capitalized)
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(theme.textSecondary)
+                if mission.isArchived {
+                    Text("Archived")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(theme.textSecondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(theme.backgroundElevated)
+                        .clipShape(Capsule())
+                }
+                MissionTypeCapsuleBadge(type: mission.type)
             }
             Text(mission.description.isEmpty ? "No description" : mission.description)
                 .foregroundStyle(theme.textSecondary)
-            Text("Count: \(mission.count)  Duration: \(mission.duration)")
+                .lineLimit(2)
+            Divider().overlay(.gray.opacity(0.25))
+            Text("Tasks: \(taskCount)")
                 .font(.system(size: 12))
                 .foregroundStyle(theme.textSecondary)
+            Text("Vehicles: \(vehicleCount)")
+                .font(.system(size: 12))
+                .foregroundStyle(theme.textSecondary)
+            HStack(spacing: 8) {
+                Spacer(minLength: 0)
+                Button {
+                    onArchiveToggle()
+                } label: {
+                    Image(systemName: mission.isArchived ? "archivebox.fill" : "archivebox")
+                        .appIconGlyph()
+                }
+                .buttonStyle(.bordered)
+                .uniformIconButton(width: 30, height: 26)
+                .help(mission.isArchived ? "Unarchive mission" : "Archive mission")
+
+                Button {
+                    onClone()
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .appIconGlyph()
+                }
+                .buttonStyle(.bordered)
+                .uniformIconButton(width: 30, height: 26)
+                .help("Clone mission")
+
+                Button {
+                    onDelete()
+                } label: {
+                    Image(systemName: "trash")
+                        .appIconGlyph()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .uniformIconButton(width: 30, height: 26)
+                .help("Delete mission")
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(theme.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 10))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onOpen()
+        }
+        .cursorOnHover()
     }
 }
 
 private struct MissionCard: View {
     let mission: Mission
+    let onOpen: () -> Void
+    let onArchiveToggle: () -> Void
+    let onClone: () -> Void
+    let onDelete: () -> Void
     @Environment(\.colorScheme) private var colorScheme
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
+    private var taskCount: Int { mission.routeMacro.tasks.count }
+    private var vehicleCount: Int { mission.rosterDevices.count }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -2896,23 +3081,70 @@ private struct MissionCard: View {
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(theme.textPrimary)
                 Spacer()
-                Text(mission.type.rawValue.capitalized)
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(theme.textSecondary)
+                if mission.isArchived {
+                    Text("Archived")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(theme.textSecondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(theme.backgroundElevated)
+                        .clipShape(Capsule())
+                }
+                MissionTypeCapsuleBadge(type: mission.type)
             }
             Text(mission.description.isEmpty ? "No description" : mission.description)
                 .foregroundStyle(theme.textSecondary)
                 .lineLimit(2)
             Divider().overlay(.gray.opacity(0.25))
-            Text("Count: \(mission.count)")
+            Text("Tasks: \(taskCount)")
+                .font(.system(size: 12))
                 .foregroundStyle(theme.textSecondary)
-            Text("Duration: \(mission.duration)")
+            Text("Vehicles: \(vehicleCount)")
+                .font(.system(size: 12))
                 .foregroundStyle(theme.textSecondary)
+            HStack(spacing: 8) {
+                Spacer(minLength: 0)
+                Button {
+                    onArchiveToggle()
+                } label: {
+                    Image(systemName: mission.isArchived ? "archivebox.fill" : "archivebox")
+                        .appIconGlyph()
+                }
+                .buttonStyle(.bordered)
+                .uniformIconButton(width: 30, height: 26)
+                .help(mission.isArchived ? "Unarchive mission" : "Archive mission")
+
+                Button {
+                    onClone()
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .appIconGlyph()
+                }
+                .buttonStyle(.bordered)
+                .uniformIconButton(width: 30, height: 26)
+                .help("Clone mission")
+
+                Button {
+                    onDelete()
+                } label: {
+                    Image(systemName: "trash")
+                        .appIconGlyph()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .uniformIconButton(width: 30, height: 26)
+                .help("Delete mission")
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(theme.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 10))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onOpen()
+        }
+        .cursorOnHover()
     }
 }
 
@@ -2973,6 +3205,63 @@ private struct AddMissionSheet: View {
                         Text("static").tag(MissionType.staticType)
                     }
                     .pickerStyle(.segmented)
+                }
+            }
+        )
+        .frame(width: 460)
+    }
+}
+
+private struct CloneMissionSheet: View {
+    let sourceMissionName: String
+    let onCancel: () -> Void
+    let onClone: (String) -> Void
+
+    @State private var cloneName: String
+
+    init(sourceMissionName: String, onCancel: @escaping () -> Void, onClone: @escaping (String) -> Void) {
+        self.sourceMissionName = sourceMissionName
+        self.onCancel = onCancel
+        self.onClone = onClone
+        _cloneName = State(initialValue: "\(sourceMissionName) Copy")
+    }
+
+    private var canClone: Bool {
+        !cloneName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        Modal(
+            title: "Clone Mission",
+            headerActions: {
+                HStack(spacing: 8) {
+                    Button("Cancel") {
+                        onCancel()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+
+                    Button("Clone Mission") {
+                        onClone(cloneName)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
+                    .disabled(!canClone)
+                }
+            },
+            bodyContent: {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Source mission")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(sourceMissionName)
+                        .font(.system(size: 14, weight: .medium))
+
+                    Text("New mission name")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    TextField("Mission name", text: $cloneName)
+                        .textFieldStyle(.roundedBorder)
                 }
             }
         )

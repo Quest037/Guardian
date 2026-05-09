@@ -202,6 +202,8 @@ private struct MissionRunStatusBadge: View {
             return GuardianSemanticColors.successBackground
         case .setup:
             return GuardianSemanticColors.warningBackground
+        case .recovery:
+            return GuardianSemanticColors.infoBackground
         case .paused, .completed:
             return GuardianSemanticColors.neutralBadgeBackground
         }
@@ -213,6 +215,8 @@ private struct MissionRunStatusBadge: View {
             return GuardianSemanticColors.successForeground
         case .setup:
             return GuardianSemanticColors.warningForeground
+        case .recovery:
+            return GuardianSemanticColors.infoForeground
         case .paused, .completed:
             return GuardianSemanticColors.neutralBadgeForeground
         }
@@ -336,6 +340,8 @@ private struct MissionRunCard: View {
             return GuardianDynamicColors.textSecondary.opacity(0.85)
         case .paused:
             return GuardianDynamicColors.textSecondary.opacity(0.9)
+        case .recovery:
+            return GuardianSemanticColors.infoForeground.opacity(0.95)
         case .completed:
             return GuardianSemanticColors.infoForeground.opacity(0.95)
         }
@@ -350,6 +356,11 @@ private struct MissionRunCard: View {
                 return "Started \(startedAt.formatted(date: .abbreviated, time: .shortened))"
             }
             return "Created \(run.createdAt.formatted(date: .abbreviated, time: .shortened))"
+        case .recovery:
+            if let startedAt = run.startedAt {
+                return "Recovery after run started \(startedAt.formatted(date: .abbreviated, time: .shortened))"
+            }
+            return "Recovery in progress"
         case .completed:
             let completedText = run.completedAt?.formatted(date: .abbreviated, time: .shortened) ?? "Unknown"
             if let startedAt = run.startedAt, let completedAt = run.completedAt {
@@ -976,6 +987,15 @@ private struct MissionRunDetailView: View {
                                 .buttonStyle(.borderedProminent)
                                 .tint(.red)
                                 .controlSize(.regular)
+                            } else if run.status == .recovery {
+                                Button("Mark Completed") {
+                                    run.systems.lifecycle.markCompleted(kind: run.completionKind)
+                                    syncRunFromStore()
+                                    onUpdate(run)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.blue)
+                                .controlSize(.regular)
                             } else if run.status == .completed {
                                 Button("Back to setup") {
                                     applyResetToSetup()
@@ -1046,10 +1066,7 @@ private struct MissionRunDetailView: View {
                 ) {
                     Button("Start now") {
                         if let taskID = confirmSkipTaskStartDeferralTaskID {
-                            run.systems.scheduling.skipMissionTaskStartDeferral(
-                                taskID: taskID,
-                                onStartNow: { onStart(run) }
-                            )
+                            run.systems.scheduling.skipMissionTaskStartDeferral(taskID: taskID)
                         }
                         confirmSkipTaskStartDeferralTaskID = nil
                         syncRunFromStore()
@@ -1101,10 +1118,18 @@ private struct MissionRunDetailView: View {
                     }
                 } else {
                     ScrollView {
-                        missionLiveConsole
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 18)
-                            .frame(maxWidth: .infinity)
+                        VStack(alignment: .leading, spacing: 10) {
+                            if run.status == .recovery {
+                                Text("Recovery in progress. When fleet recovery actions are finished, mark this run completed.")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(GuardianSemanticColors.infoForeground)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            missionLiveConsole
+                        }
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 18)
+                        .frame(maxWidth: .infinity)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .onChange(of: fleetLink.hubTelemetry?.lastUpdate) { _ in
@@ -1621,8 +1646,7 @@ private struct MissionRunDetailView: View {
                     Button("Go") {
                         run.systems.scheduling.extendMissionTaskStartDeferralByMinutes(
                             taskID: task.id,
-                            additionalMinutes: taskStartDeferralPostponeMinutes,
-                            onStartNow: { onStart(run) }
+                            additionalMinutes: taskStartDeferralPostponeMinutes
                         )
                         syncRunFromStore()
                         onUpdate(run)
@@ -1648,6 +1672,19 @@ private struct MissionRunDetailView: View {
                 }
                 .fixedSize(horizontal: true, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.top, 2)
+            } else if run.status == .running && task.enabled && task.regularity == .operatorTriggered {
+                HStack {
+                    Spacer(minLength: 0)
+                    Button("Trigger") {
+                        run.systems.scheduling.triggerOperatorTaskStart(taskID: task.id)
+                        syncRunFromStore()
+                        onUpdate(run)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
+                    .controlSize(.small)
+                }
                 .padding(.top, 2)
             }
         }
@@ -2612,6 +2649,38 @@ private struct MissionRunDetailView: View {
 
     private var setupRulesTabContent: some View {
         VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Abort Policy")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(GuardianDynamicColors.textPrimary)
+                Text(
+                    "The global mission abort policy tells vehicles what to do if mission is aborted."
+                )
+                .font(.system(size: 12))
+                .foregroundStyle(GuardianDynamicColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+                HStack(alignment: .center, spacing: 12) {
+                    Text("Abort Policy")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(GuardianDynamicColors.textPrimary)
+                    Spacer(minLength: 12)
+                    Picker("", selection: runAbortPolicyBinding) {
+                        ForEach(MissionRunAbortPolicy.setupPickerCases, id: \.self) { policy in
+                            Text(policy.setupMenuLabel).tag(policy)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(minWidth: 160, alignment: .trailing)
+                }
+                .padding(.vertical, 4)
+            }
+            .padding(MissionRunPrepLayout.scheduleCardPadding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(GuardianDynamicColors.backgroundRaised)
+            .clipShape(RoundedRectangle(cornerRadius: MissionRunPrepLayout.taskCardCornerRadius))
+
             Text("Rules of engagement")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(GuardianDynamicColors.textPrimary)
@@ -2651,6 +2720,16 @@ private struct MissionRunDetailView: View {
             .background(GuardianDynamicColors.backgroundRaised)
             .clipShape(RoundedRectangle(cornerRadius: MissionRunPrepLayout.taskCardCornerRadius))
         }
+    }
+
+    private var runAbortPolicyBinding: Binding<MissionRunAbortPolicy> {
+        Binding(
+            get: { run.policies.abort },
+            set: { newValue in
+                run.policies = MissionRunPolicies(abort: newValue, engagement: run.policies.engagement)
+                onUpdate(run)
+            }
+        )
     }
 
     private func engagementDispositionBinding(for action: MissionRunEngagementAction) -> Binding<MissionRunEngagementDisposition> {

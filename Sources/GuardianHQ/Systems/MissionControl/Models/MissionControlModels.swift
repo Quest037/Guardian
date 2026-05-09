@@ -19,21 +19,11 @@ enum MissionRunStatus: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-enum MissionRunScheduleMode: String, Codable, CaseIterable, Identifiable {
-    case oneOff = "One-Off"
-    case loop = "Loop"
-    /// Legacy persisted value; decoded runs normalize to ``loop`` with `loopIntervalMinutes == 0`.
-    case continuous = "Continuous"
-
-    var id: String { rawValue }
-}
-
 /// How the run reached **completed** status (for Mission Control report).
 enum MissionRunCompletionKind: String, Codable, Equatable {
     case operatorStoppedImmediate
     case operatorStoppedAfterCycle
     case oneOffAutopilotFinished
-    case loopCompletedAllRepeats
 }
 
 // MARK: - Abort (scheduling → planner → fleet commands)
@@ -49,12 +39,63 @@ enum MissionRunAbortPolicy: String, Codable, Equatable, CaseIterable, Identifiab
     var id: String { rawValue }
 }
 
+// MARK: - Rules of engagement (run-level; not part of compiled plan)
+
+enum MissionRunEngagementAction: String, Codable, CaseIterable, Equatable, Hashable {
+    case rtl
+    case land
+    case forceDisarm
+    case swapInReserve
+}
+
+enum MissionRunEngagementDisposition: String, Codable, CaseIterable, Equatable, Hashable {
+    case autonomous
+    case ask
+    case `defer`
+    case forbidden
+    case handoff
+}
+
+struct MissionRunEngagementRule: Codable, Equatable {
+    var disposition: MissionRunEngagementDisposition
+
+    init(disposition: MissionRunEngagementDisposition) {
+        self.disposition = disposition
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case disposition
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        disposition = try c.decode(MissionRunEngagementDisposition.self, forKey: .disposition)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(disposition, forKey: .disposition)
+    }
+}
+
+struct MissionRunEngagementRules: Codable, Equatable {
+    var perAction: [MissionRunEngagementAction: MissionRunEngagementRule]
+
+    init(perAction: [MissionRunEngagementAction: MissionRunEngagementRule] = [:]) {
+        self.perAction = perAction
+    }
+
+    static let `default` = MissionRunEngagementRules()
+}
+
 /// Run-level policy bundle for ``MissionRunEnvironment``.
 struct MissionRunPolicies: Equatable {
     var abort: MissionRunAbortPolicy
+    var engagement: MissionRunEngagementRules
 
-    init(abort: MissionRunAbortPolicy = .returnToLaunch) {
+    init(abort: MissionRunAbortPolicy = .returnToLaunch, engagement: MissionRunEngagementRules = .default) {
         self.abort = abort
+        self.engagement = engagement
     }
 }
 
@@ -73,33 +114,41 @@ enum MissionRunAbortTrigger: String, Equatable {
     case afterCycle
 }
 
-/// Loop / continuous schedule is waiting before starting the next autopilot mission cycle.
-struct MissionCycleIntermission: Equatable {
-    /// When the delayed restart task is due to fire.
-    let restartAt: Date
-    /// Length of this wait (seconds), for progress fill.
-    let totalDelay: TimeInterval
-    let scheduleMode: MissionRunScheduleMode
-}
-
-/// Per-path loop delay (minutes between full autopilot cycles). **MC Setup** will edit these; when a path is absent, the run uses ``MissionRunEnvironment/loopIntervalMinutes``.
-struct PathLoopTiming: Codable, Equatable, Identifiable {
-    var id: UUID { pathId }
-    var pathId: UUID
-    /// Clamped 0…59 like run-level loop delay; **0** means start the next cycle immediately for this path.
-    var intervalMinutes: Int
-}
-
-/// Per-path delay (minutes) after Paladin begins execution before this path’s MAVLink mission upload/start. **0** = start with the first batch (after staging). MC Setup **Paths** tab.
-struct PathStartDelay: Codable, Equatable, Identifiable {
-    var id: UUID { pathId }
-    var pathId: UUID
-    /// Clamped 0…59; **0** is equivalent to omitting this path from the list.
+/// Per-run override (minutes) after Paladin begins execution before this task’s MAVLink mission upload/start. When absent, the mission template’s ``MissionTask/startDelay`` applies. MC Setup **Timing** tab **Tasks** card.
+struct TaskStartDelay: Codable, Equatable, Identifiable {
+    var id: UUID { taskId }
+    var taskId: UUID
+    /// Clamped 0…59; **0** is equivalent to omitting this task from the list.
     var startDelayMinutes: Int
+
+    enum CodingKeys: String, CodingKey {
+        case taskId
+        case legacyJSONTaskUUID = "pathId"
+        case startDelayMinutes
+    }
+
+    init(taskId: UUID, startDelayMinutes: Int) {
+        self.taskId = taskId
+        self.startDelayMinutes = startDelayMinutes
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        taskId = try c.decodeIfPresent(UUID.self, forKey: .taskId)
+            ?? c.decodeIfPresent(UUID.self, forKey: .legacyJSONTaskUUID)
+            ?? UUID()
+        startDelayMinutes = try c.decodeIfPresent(Int.self, forKey: .startDelayMinutes) ?? 0
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(taskId, forKey: .taskId)
+        try c.encode(startDelayMinutes, forKey: .startDelayMinutes)
+    }
 }
 
-/// Initial mission start for a path is waiting on `startAt` (after ``PathStartDelay``).
-struct MissionPathStartDeferral: Equatable {
+/// Initial mission start for a path is waiting on `startAt` (after ``TaskStartDelay``).
+struct MissionTaskStartDeferral: Equatable {
     let startAt: Date
     let totalDelay: TimeInterval
 }
@@ -113,8 +162,8 @@ struct MissionOneOffDeferredExecution: Equatable {
 
 struct MissionRunAssignment: Identifiable, Codable, Equatable {
     let id: UUID
-    /// Path this slot belongs to; `nil` for legacy runs created before path grouping.
-    var pathId: UUID?
+    /// Mission task this slot belongs to; `nil` for legacy runs created before task grouping.
+    var taskId: UUID?
     var rosterDeviceId: UUID
     var slotName: String
     var attachedDevice: String
@@ -126,7 +175,7 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
 
     init(
         id: UUID = UUID(),
-        pathId: UUID? = nil,
+        taskId: UUID? = nil,
         rosterDeviceId: UUID,
         slotName: String,
         attachedDevice: String = "",
@@ -135,7 +184,7 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         policies: MissionRunAssignmentPolicies = MissionRunAssignmentPolicies()
     ) {
         self.id = id
-        self.pathId = pathId
+        self.taskId = taskId
         self.rosterDeviceId = rosterDeviceId
         self.slotName = slotName
         self.attachedDevice = attachedDevice
@@ -145,7 +194,7 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, pathId, rosterDeviceId, slotName, attachedDevice, attachedFleetVehicleToken, simStartOverrideCoord
+        case id, taskId, legacyAssignmentTaskUUID = "pathId", rosterDeviceId, slotName, attachedDevice, attachedFleetVehicleToken, simStartOverrideCoord
         case policies
         case abortPolicy
     }
@@ -153,7 +202,8 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
-        pathId = try c.decodeIfPresent(UUID.self, forKey: .pathId)
+        taskId = try c.decodeIfPresent(UUID.self, forKey: .taskId)
+            ?? c.decodeIfPresent(UUID.self, forKey: .legacyAssignmentTaskUUID)
         rosterDeviceId = try c.decode(UUID.self, forKey: .rosterDeviceId)
         slotName = try c.decode(String.self, forKey: .slotName)
         attachedDevice = try c.decodeIfPresent(String.self, forKey: .attachedDevice) ?? ""
@@ -171,7 +221,7 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(id, forKey: .id)
-        try c.encodeIfPresent(pathId, forKey: .pathId)
+        try c.encodeIfPresent(taskId, forKey: .taskId)
         try c.encode(rosterDeviceId, forKey: .rosterDeviceId)
         try c.encode(slotName, forKey: .slotName)
         try c.encode(attachedDevice, forKey: .attachedDevice)
@@ -235,10 +285,10 @@ struct MissionRunEvent: Identifiable, Equatable {
     let id: UUID
     let at: Date
     let level: MissionRunEventLevel
-    /// Route path id (map tint); optional when mission-wide.
-    let pathID: UUID?
-    /// Path name for `[Name]` tag and plain-text export.
-    let pathLabel: String?
+    /// Mission task id (map tint); optional when mission-wide.
+    let taskID: UUID?
+    /// Task name for `[Name]` tag and plain-text export.
+    let taskLabel: String?
     let speaker: MissionRunEventSpeaker
     /// Default English (or raw vehicle text); used when no template override is registered for `templateKey`.
     let message: String
@@ -250,8 +300,8 @@ struct MissionRunEvent: Identifiable, Equatable {
         id: UUID = UUID(),
         at: Date = Date(),
         level: MissionRunEventLevel = .info,
-        pathID: UUID? = nil,
-        pathLabel: String? = nil,
+        taskID: UUID? = nil,
+        taskLabel: String? = nil,
         speaker: MissionRunEventSpeaker = .missionControl,
         message: String,
         templateKey: String? = nil,
@@ -260,8 +310,8 @@ struct MissionRunEvent: Identifiable, Equatable {
         self.id = id
         self.at = at
         self.level = level
-        self.pathID = pathID
-        self.pathLabel = pathLabel
+        self.taskID = taskID
+        self.taskLabel = taskLabel
         self.speaker = speaker
         self.message = message
         self.templateKey = templateKey
@@ -386,18 +436,18 @@ struct MissionRunPassResult: Equatable {
     var commands: [MissionRunIssuedCommand]
 }
 
-enum MissionControlPathTopology: String, Equatable {
-    case singlePath
-    case multiPath
+enum MissionControlTaskTopology: String, Equatable {
+    case singleTask = "singlePath"
+    case multiTask = "multiPath"
 }
 
 enum MissionControlTeamTopology: String, Equatable {
-    case singleVehiclePerPath
+    case singleVehiclePerTask = "singleVehiclePerPath"
     case multiVehicleTeam
 }
 
 enum MissionControlWorkPartitionMode: String, Equatable {
-    case pathOwned
+    case taskOwned = "pathOwned"
     case segmentOwned
     case waypointOwned
 }
@@ -417,8 +467,8 @@ struct MissionControlVehicleBinding: Equatable {
 
 struct MissionControlRoleTrack: Identifiable, Equatable {
     let id: UUID
-    let pathID: UUID?
-    let pathDisplayName: String?
+    let taskID: UUID?
+    let taskDisplayName: String?
     let assignmentID: UUID
     let rosterDeviceID: UUID
     let slotName: String
@@ -429,11 +479,8 @@ struct MissionControlPlan: Equatable {
     let missionID: UUID
     let runID: UUID
     let missionName: String
-    let scheduleMode: MissionRunScheduleMode
-    let loopIntervalMinutes: Int
-    let loopRepeatCount: Int
     let createdAt: Date
-    let pathTopology: MissionControlPathTopology
+    let taskTopology: MissionControlTaskTopology
     let teamTopology: MissionControlTeamTopology
     let workPartitionMode: MissionControlWorkPartitionMode
     let handoffMode: MissionControlHandoffMode
@@ -441,13 +488,10 @@ struct MissionControlPlan: Equatable {
 }
 
 enum MissionControlPlanMutation: Equatable {
-    case setScheduleMode(MissionRunScheduleMode)
-    case setLoopIntervalMinutes(Int)
-    case setLoopRepeatCount(Int)
-    case upsertPathStartDelay(pathID: UUID, startDelayMinutes: Int)
-    case removePathStartDelay(pathID: UUID)
+    case upsertTaskStartDelay(taskID: UUID, startDelayMinutes: Int)
+    case removeTaskStartDelay(taskID: UUID)
     case replaceAssignmentVehicleToken(assignmentID: UUID, vehicleTokenKey: String?)
-    case updateAssignmentPath(assignmentID: UUID, pathID: UUID?)
+    case updateAssignmentTask(assignmentID: UUID, taskID: UUID?)
     case updateAssignmentSimStartOverride(assignmentID: UUID, coordinate: RouteCoordinate?)
 }
 
@@ -457,7 +501,7 @@ struct MissionControlPlanChangeSet: Equatable {
     let addedAssignmentIDs: [UUID]
     let removedAssignmentIDs: [UUID]
     let changedAssignmentIDs: [UUID]
-    let changedPathIDs: [UUID]
+    let changedTaskIDs: [UUID]
 }
 
 struct MissionControlPlanChangeResult: Equatable {
@@ -493,20 +537,20 @@ struct MissionControlPlanRevisionRecord: Equatable, Identifiable {
     }
 }
 
-enum MissionControlPathTagName {
-    static func pathContext(for assignment: MissionRunAssignment, mission: Mission?) -> (id: UUID, label: String)? {
+enum MissionControlTaskTagName {
+    static func taskContext(for assignment: MissionRunAssignment, mission: Mission?) -> (id: UUID, label: String)? {
         guard let mission else { return nil }
-        if let pid = assignment.pathId,
-           let path = mission.routeMacro.paths.first(where: { $0.id == pid }) {
-            let t = path.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let pid = assignment.taskId,
+           let path = mission.routeMacro.tasks.first(where: { $0.id == pid }) {
+            let t = path.name.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             if !t.isEmpty { return (path.id, t) }
         }
-        if let path = mission.routeMacro.paths.first(where: { $0.enabled }) {
-            let t = path.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let path = mission.routeMacro.tasks.first(where: { $0.enabled }) {
+            let t = path.name.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             if !t.isEmpty { return (path.id, t) }
         }
-        if let path = mission.routeMacro.paths.first {
-            let t = path.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let path = mission.routeMacro.tasks.first {
+            let t = path.name.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             if !t.isEmpty { return (path.id, t) }
         }
         return nil
@@ -520,8 +564,8 @@ enum MissionControlPlanCompiler {
         mission: Mission,
         fleetVehicles: [MissionPickableFleetVehicle]
     ) -> MissionControlPlan {
-        let enabledPaths = mission.routeMacro.paths.filter(\.enabled)
-        let pathTopology: MissionControlPathTopology = enabledPaths.count <= 1 ? .singlePath : .multiPath
+        let enabledTasks = mission.routeMacro.tasks.filter(\.enabled)
+        let taskTopology: MissionControlTaskTopology = enabledTasks.count <= 1 ? .singleTask : .multiTask
 
         var boundByToken: [String: MissionPickableFleetVehicle] = [:]
         for vehicle in fleetVehicles {
@@ -539,11 +583,11 @@ enum MissionControlPlanCompiler {
                     )
                 }
             }
-            let ctx = MissionControlPathTagName.pathContext(for: assignment, mission: mission)
+            let ctx = MissionControlTaskTagName.taskContext(for: assignment, mission: mission)
             return MissionControlRoleTrack(
                 id: UUID(),
-                pathID: ctx?.id ?? assignment.pathId,
-                pathDisplayName: ctx?.label,
+                taskID: ctx?.id ?? assignment.taskId,
+                taskDisplayName: ctx?.label,
                 assignmentID: assignment.id,
                 rosterDeviceID: assignment.rosterDeviceId,
                 slotName: assignment.slotName,
@@ -551,21 +595,18 @@ enum MissionControlPlanCompiler {
             )
         }
 
-        let roleCountByPath = Dictionary(grouping: roleTracks, by: \.pathID).mapValues(\.count)
-        let hasTeamPath = roleCountByPath.values.contains { $0 > 1 }
-        let teamTopology: MissionControlTeamTopology = hasTeamPath ? .multiVehicleTeam : .singleVehiclePerPath
-        let workPartitionMode: MissionControlWorkPartitionMode = hasTeamPath ? .segmentOwned : .pathOwned
-        let handoffMode: MissionControlHandoffMode = run.paladinTightCycleHandoff ? .thresholdDriven : .none
+        let roleCountByTask = Dictionary(grouping: roleTracks, by: \.taskID).mapValues(\.count)
+        let hasMultiVehicleTask = roleCountByTask.values.contains { $0 > 1 }
+        let teamTopology: MissionControlTeamTopology = hasMultiVehicleTask ? .multiVehicleTeam : .singleVehiclePerTask
+        let workPartitionMode: MissionControlWorkPartitionMode = hasMultiVehicleTask ? .segmentOwned : .taskOwned
+        let handoffMode: MissionControlHandoffMode = .none
 
         return MissionControlPlan(
             missionID: mission.id,
             runID: run.id,
             missionName: run.missionName,
-            scheduleMode: run.scheduleMode,
-            loopIntervalMinutes: run.loopIntervalMinutes,
-            loopRepeatCount: run.loopRepeatCount,
             createdAt: Date(),
-            pathTopology: pathTopology,
+            taskTopology: taskTopology,
             teamTopology: teamTopology,
             workPartitionMode: workPartitionMode,
             handoffMode: handoffMode,

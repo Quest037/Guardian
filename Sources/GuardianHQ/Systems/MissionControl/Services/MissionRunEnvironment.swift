@@ -49,12 +49,8 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     @Published var missionId: UUID
     @Published var missionName: String
     @Published var status: MissionRunStatus
-    @Published var scheduleMode: MissionRunScheduleMode
     @Published var oneOffStartAt: Date?
-    @Published var loopIntervalMinutes: Int
-    @Published var loopRepeatCount: Int
-    @Published var pathLoopTimings: [PathLoopTiming]
-    @Published var pathStartDelays: [PathStartDelay]
+    @Published var taskStartDelays: [TaskStartDelay]
     @Published var assignments: [MissionRunAssignment]
     @Published var createdAt: Date
     @Published var startedAt: Date?
@@ -70,11 +66,8 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     /// Substatus of MC runtime execution while a run is active.
     @Published private(set) var sessionPhase: MissionRunSessionPhase = .draft
 
-    /// Per-path delayed restart windows (loop / continuous).
-    @Published private(set) var cycleIntermissionByPathID: [UUID: MissionCycleIntermission] = [:]
-
     /// Per-path delayed initial mission starts.
-    @Published private(set) var pathStartDeferralByPathID: [UUID: MissionPathStartDeferral] = [:]
+    @Published private(set) var taskStartDeferralByTaskID: [UUID: MissionTaskStartDeferral] = [:]
 
     /// One-off deferred start countdown.
     @Published private(set) var oneOffDeferredExecution: MissionOneOffDeferredExecution?
@@ -92,12 +85,8 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     init(
         id: UUID = UUID(),
         mission: Mission,
-        scheduleMode: MissionRunScheduleMode = .oneOff,
         oneOffStartAt: Date? = nil,
-        loopIntervalMinutes: Int = 15,
-        loopRepeatCount: Int = 0,
-        pathLoopTimings: [PathLoopTiming] = [],
-        pathStartDelays: [PathStartDelay] = [],
+        taskStartDelays: [TaskStartDelay] = [],
         assignments: [MissionRunAssignment] = [],
         createdAt: Date = Date()
     ) {
@@ -114,12 +103,8 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         self.missionId = mission.id
         self.missionName = mission.name
         self.status = .setup
-        self.scheduleMode = scheduleMode
         self.oneOffStartAt = oneOffStartAt
-        self.loopIntervalMinutes = loopIntervalMinutes
-        self.loopRepeatCount = loopRepeatCount
-        self.pathLoopTimings = pathLoopTimings
-        self.pathStartDelays = pathStartDelays
+        self.taskStartDelays = taskStartDelays
         self.assignments = assignments
         self.createdAt = createdAt
         self.startedAt = nil
@@ -142,12 +127,8 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         missionId: UUID,
         missionName: String,
         status: MissionRunStatus = .setup,
-        scheduleMode: MissionRunScheduleMode = .oneOff,
         oneOffStartAt: Date? = nil,
-        loopIntervalMinutes: Int = 15,
-        loopRepeatCount: Int = 0,
-        pathLoopTimings: [PathLoopTiming] = [],
-        pathStartDelays: [PathStartDelay] = [],
+        taskStartDelays: [TaskStartDelay] = [],
         assignments: [MissionRunAssignment] = [],
         createdAt: Date = Date(),
         startedAt: Date? = nil,
@@ -165,12 +146,8 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         self.init(
             id: id,
             mission: placeholder,
-            scheduleMode: scheduleMode,
             oneOffStartAt: oneOffStartAt,
-            loopIntervalMinutes: loopIntervalMinutes,
-            loopRepeatCount: loopRepeatCount,
-            pathLoopTimings: pathLoopTimings,
-            pathStartDelays: pathStartDelays,
+            taskStartDelays: taskStartDelays,
             assignments: assignments,
             createdAt: createdAt
         )
@@ -268,35 +245,19 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         oneOffDeferredExecution = value
     }
 
-    fileprivate func mutateCycleIntermission(forPathID pathID: UUID, value: MissionCycleIntermission?) {
+    fileprivate func mutateTaskStartDeferral(forTaskID taskID: UUID, value: MissionTaskStartDeferral?) {
         if let value {
-            cycleIntermissionByPathID[pathID] = value
+            taskStartDeferralByTaskID[taskID] = value
         } else {
-            cycleIntermissionByPathID.removeValue(forKey: pathID)
+            taskStartDeferralByTaskID.removeValue(forKey: taskID)
         }
     }
 
-    fileprivate func clearCycleIntermission(forPathID pathID: UUID? = nil) {
-        if let pathID {
-            cycleIntermissionByPathID.removeValue(forKey: pathID)
+    fileprivate func clearTaskStartDeferral(forTaskID taskID: UUID? = nil) {
+        if let taskID {
+            taskStartDeferralByTaskID.removeValue(forKey: taskID)
         } else {
-            cycleIntermissionByPathID.removeAll()
-        }
-    }
-
-    fileprivate func mutatePathStartDeferral(forPathID pathID: UUID, value: MissionPathStartDeferral?) {
-        if let value {
-            pathStartDeferralByPathID[pathID] = value
-        } else {
-            pathStartDeferralByPathID.removeValue(forKey: pathID)
-        }
-    }
-
-    fileprivate func clearPathStartDeferral(forPathID pathID: UUID? = nil) {
-        if let pathID {
-            pathStartDeferralByPathID.removeValue(forKey: pathID)
-        } else {
-            pathStartDeferralByPathID.removeAll()
+            taskStartDeferralByTaskID.removeAll()
         }
     }
 
@@ -309,33 +270,19 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         }
     }
 
-    var repeatsAutopilotMissionCycles: Bool {
-        scheduleMode == .loop || scheduleMode == .continuous
-    }
-
-    var loopDelayMinutesClamped: Int {
-        min(59, max(0, loopIntervalMinutes))
-    }
-
-    var paladinTightCycleHandoff: Bool {
-        repeatsAutopilotMissionCycles && (scheduleMode == .continuous || loopDelayMinutesClamped == 0)
-    }
-
     func oneOffScheduledTimeTooFarInPast(referenceNow: Date) -> Bool {
         guard let t = oneOffStartAt else { return false }
         return t.timeIntervalSince(referenceNow) < -Self.oneOffScheduleTimeTolerance
     }
 
-    func loopDelayMinutes(forPath pathId: UUID) -> Int {
-        if let t = pathLoopTimings.first(where: { $0.pathId == pathId }) {
-            return min(59, max(0, t.intervalMinutes))
-        }
-        return loopDelayMinutesClamped
-    }
-
-    func startDelayMinutes(forPath pathId: UUID) -> Int {
-        if let t = pathStartDelays.first(where: { $0.pathId == pathId }) {
+    func startDelayMinutes(forTask taskId: UUID, mission: Mission? = nil) -> Int {
+        if let t = taskStartDelays.first(where: { $0.taskId == taskId }) {
             return min(59, max(0, t.startDelayMinutes))
+        }
+        let source = mission ?? template
+        if let mission = source,
+           let task = mission.routeMacro.tasks.first(where: { $0.id == taskId }) {
+            return min(59, max(0, task.startDelay))
         }
         return 0
     }
@@ -595,20 +542,14 @@ final class MissionRunPlannerSubsystem {
         reason: String? = nil
     ) -> MissionControlPlanChangeResult? {
         guard let environment else { return nil }
-        let originalScheduleMode = environment.scheduleMode
-        let originalLoopIntervalMinutes = environment.loopIntervalMinutes
-        let originalLoopRepeatCount = environment.loopRepeatCount
-        let originalPathStartDelays = environment.pathStartDelays
+        let originalTaskStartDelays = environment.taskStartDelays
         let originalAssignments = environment.assignments
 
         for mutation in mutations {
             guard let vetted = vetMutation(mutation, mission: mission, fleetVehicles: fleetVehicles),
                   apply(vetted, on: environment)
             else {
-                environment.scheduleMode = originalScheduleMode
-                environment.loopIntervalMinutes = originalLoopIntervalMinutes
-                environment.loopRepeatCount = originalLoopRepeatCount
-                environment.pathStartDelays = originalPathStartDelays
+                environment.taskStartDelays = originalTaskStartDelays
                 environment.assignments = originalAssignments
                 return nil
             }
@@ -627,39 +568,37 @@ final class MissionRunPlannerSubsystem {
         revisionHistory.removeAll()
     }
 
-    func buildDronePathMission(
+    func buildDroneTaskMission(
         mission: Mission,
-        pathId: UUID
+        taskId: UUID
     ) -> (assignment: MissionRunAssignment, items: [Mavsdk.Mission.MissionItem])? {
         guard let environment else { return nil }
-        guard let path = mission.routeMacro.paths.first(where: { $0.id == pathId && $0.enabled }),
-              !path.waypoints.isEmpty
+        guard let task = mission.routeMacro.tasks.first(where: { $0.id == taskId && $0.enabled }),
+              !task.waypoints.isEmpty
         else { return nil }
-        let enabledPaths = mission.routeMacro.paths.filter(\.enabled)
-        let assignmentsForPath = environment.assignments.filter { assignment in
-            if assignment.pathId == path.id { return true }
-            if assignment.pathId == nil, enabledPaths.count == 1 { return true }
+        let enabledTasks = mission.routeMacro.tasks.filter(\.enabled)
+        let assignmentsForTask = environment.assignments.filter { assignment in
+            if assignment.taskId == task.id { return true }
+            if assignment.taskId == nil, enabledTasks.count == 1 { return true }
             return false
         }
-        guard assignmentsForPath.count == 1,
-              let assignment = assignmentsForPath.first,
+        guard assignmentsForTask.count == 1,
+              let assignment = assignmentsForTask.first,
               assignment.attachedFleetVehicleToken != nil
         else { return nil }
-        let home = mission.routeMacro.home
         var items: [Mavsdk.Mission.MissionItem] = []
-        if let staging = assignment.simStartOverrideCoord, let firstWP = path.waypoints.first {
+        if let staging = assignment.simStartOverrideCoord, let firstWP = task.waypoints.first {
             items.append(
                 Utilities.mission.path.waypoint.mavItem(
                     coord: staging,
                     waypoint: firstWP,
-                    home: home,
                     useWaypointHeadingForYaw: true
                 )
             )
         }
-        for (index, wp) in path.waypoints.enumerated() {
+        for (index, wp) in task.waypoints.enumerated() {
             let ignoreDelay = Utilities.mission.path.waypoint.shouldIgnoreClosingWaypointDelay(
-                path: path,
+                path: task,
                 index: index,
                 waypoint: wp
             )
@@ -667,7 +606,6 @@ final class MissionRunPlannerSubsystem {
                 Utilities.mission.path.waypoint.mavItem(
                     coord: wp.coord,
                     waypoint: wp,
-                    home: home,
                     useWaypointHeadingForYaw: true,
                     loiterOverrideSeconds: ignoreDelay ? 0 : nil
                 )
@@ -676,12 +614,12 @@ final class MissionRunPlannerSubsystem {
         return (assignment, items)
     }
 
-    func buildSingleDronePathMission(
+    func buildSingleDroneTaskMission(
         mission: Mission
     ) -> (assignment: MissionRunAssignment, items: [Mavsdk.Mission.MissionItem])? {
-        let enabledPaths = mission.routeMacro.paths.filter(\.enabled)
-        guard enabledPaths.count == 1, let path = enabledPaths.first else { return nil }
-        return buildDronePathMission(mission: mission, pathId: path.id)
+        let enabledTasks = mission.routeMacro.tasks.filter(\.enabled)
+        guard enabledTasks.count == 1, let task = enabledTasks.first else { return nil }
+        return buildDroneTaskMission(mission: mission, taskId: task.id)
     }
 
     private func vetMutation(
@@ -700,35 +638,26 @@ final class MissionRunPlannerSubsystem {
 
     private func apply(_ mutation: MissionControlPlanMutation, on environment: MissionRunEnvironment) -> Bool {
         switch mutation {
-        case let .setScheduleMode(mode):
-            environment.scheduleMode = mode
-            return true
-        case let .setLoopIntervalMinutes(minutes):
-            environment.loopIntervalMinutes = min(59, max(0, minutes))
-            return true
-        case let .setLoopRepeatCount(count):
-            environment.loopRepeatCount = max(0, count)
-            return true
-        case let .upsertPathStartDelay(pathID, startDelayMinutes):
+        case let .upsertTaskStartDelay(taskID, startDelayMinutes):
             let clamped = min(59, max(0, startDelayMinutes))
-            var delays = environment.pathStartDelays
-            if let idx = delays.firstIndex(where: { $0.pathId == pathID }) {
+            var delays = environment.taskStartDelays
+            if let idx = delays.firstIndex(where: { $0.taskId == taskID }) {
                 delays[idx].startDelayMinutes = clamped
             } else {
-                delays.append(PathStartDelay(pathId: pathID, startDelayMinutes: clamped))
+                delays.append(TaskStartDelay(taskId: taskID, startDelayMinutes: clamped))
             }
-            environment.pathStartDelays = delays
+            environment.taskStartDelays = delays
             return true
-        case let .removePathStartDelay(pathID):
-            environment.pathStartDelays.removeAll { $0.pathId == pathID }
+        case let .removeTaskStartDelay(taskID):
+            environment.taskStartDelays.removeAll { $0.taskId == taskID }
             return true
         case let .replaceAssignmentVehicleToken(assignmentID, vehicleTokenKey):
             guard let idx = environment.assignments.firstIndex(where: { $0.id == assignmentID }) else { return false }
             environment.assignments[idx].attachedFleetVehicleToken = vehicleTokenKey
             return true
-        case let .updateAssignmentPath(assignmentID, pathID):
+        case let .updateAssignmentTask(assignmentID, taskID):
             guard let idx = environment.assignments.firstIndex(where: { $0.id == assignmentID }) else { return false }
-            environment.assignments[idx].pathId = pathID
+            environment.assignments[idx].taskId = taskID
             return true
         case let .updateAssignmentSimStartOverride(assignmentID, coordinate):
             guard let idx = environment.assignments.firstIndex(where: { $0.id == assignmentID }) else { return false }
@@ -743,7 +672,7 @@ final class MissionRunPlannerSubsystem {
         reason: String?,
         changeSet: MissionControlPlanChangeSet
     ) {
-        let summary = "Assignments +\(changeSet.addedAssignmentIDs.count) / -\(changeSet.removedAssignmentIDs.count) / ~\(changeSet.changedAssignmentIDs.count), paths changed: \(changeSet.changedPathIDs.count)."
+        let summary = "Assignments +\(changeSet.addedAssignmentIDs.count) / -\(changeSet.removedAssignmentIDs.count) / ~\(changeSet.changedAssignmentIDs.count), paths changed: \(changeSet.changedTaskIDs.count)."
         revisionHistory.append(
             MissionControlPlanRevisionRecord(
                 revision: revision,
@@ -765,7 +694,7 @@ final class MissionRunPlannerSubsystem {
                 addedAssignmentIDs: currentPlan.roleTracks.map(\.assignmentID),
                 removedAssignmentIDs: [],
                 changedAssignmentIDs: [],
-                changedPathIDs: Array(Set(currentPlan.roleTracks.compactMap(\.pathID))).sorted { $0.uuidString < $1.uuidString }
+                changedTaskIDs: Array(Set(currentPlan.roleTracks.compactMap(\.taskID))).sorted { $0.uuidString < $1.uuidString }
             )
         }
 
@@ -778,9 +707,9 @@ final class MissionRunPlannerSubsystem {
         let removed = Array(previousIDs.subtracting(currentIDs)).sorted { $0.uuidString < $1.uuidString }
         let common = previousIDs.intersection(currentIDs)
         let changed = Array(common.filter { previousByAssignment[$0] != currentByAssignment[$0] }).sorted { $0.uuidString < $1.uuidString }
-        let changedPathIDs = Array(
+        let changedTaskIDs = Array(
             Set(
-                changed.compactMap { currentByAssignment[$0]?.pathID ?? previousByAssignment[$0]?.pathID }
+                changed.compactMap { currentByAssignment[$0]?.taskID ?? previousByAssignment[$0]?.taskID }
             )
         ).sorted { $0.uuidString < $1.uuidString }
 
@@ -790,7 +719,7 @@ final class MissionRunPlannerSubsystem {
             addedAssignmentIDs: added,
             removedAssignmentIDs: removed,
             changedAssignmentIDs: changed,
-            changedPathIDs: changedPathIDs
+            changedTaskIDs: changedTaskIDs
         )
     }
 }
@@ -807,7 +736,7 @@ enum MissionRunExecutionStage: Equatable {
 }
 
 struct MissionRunExecutionCursor: Equatable {
-    let activePathID: UUID?
+    let activeTaskID: UUID?
     let cycleCount: Int
 }
 
@@ -831,8 +760,7 @@ struct MissionRunExecutionContext {
 
 enum MissionRunExecutionEvent: Equatable {
     case missionCycleFinished(vehicleID: String)
-    case deferredPathStartDue(pathID: UUID)
-    case scheduledCycleRestartDue(pathID: UUID)
+    case deferredTaskStartDue(taskID: UUID)
 }
 
 enum MissionRunExecutionDecision: Equatable {
@@ -872,7 +800,7 @@ final class MissionRunExecutionSubsystem {
     }
 
     var cursor: MissionRunExecutionCursor {
-        MissionRunExecutionCursor(activePathID: nil, cycleCount: environment?.cyclesCompleted ?? 0)
+        MissionRunExecutionCursor(activeTaskID: nil, cycleCount: environment?.cyclesCompleted ?? 0)
     }
 
     @discardableResult
@@ -881,7 +809,7 @@ final class MissionRunExecutionSubsystem {
         clearCommandQueue()
         environment.captureExecutionContext(context)
         environment.systems.scheduling.cancelScheduledMissionCycle()
-        environment.systems.scheduling.cancelScheduledPathMissionStarts()
+        environment.systems.scheduling.cancelScheduledTaskMissionStarts()
         environment.systems.scheduling.clearDeferredOneOffExecution()
         environment.setMissionCycleCount(0)
         environment.systems.logging.clearState()
@@ -954,11 +882,8 @@ final class MissionRunExecutionSubsystem {
         switch event {
         case .missionCycleFinished(let vehicleID):
             return processMissionCycleFinished(vehicleID: vehicleID, context: context)
-        case .deferredPathStartDue(let pathID):
-            startDeferredPath(pathID: pathID, context: context)
-            return .progressed
-        case .scheduledCycleRestartDue(let pathID):
-            restartScheduledCycle(pathID: pathID, context: context)
+        case .deferredTaskStartDue(let taskID):
+            startDeferredTask(taskID: taskID, context: context)
             return .progressed
         }
     }
@@ -1153,7 +1078,7 @@ final class MissionRunExecutionSubsystem {
     ) -> MissionRunExecutionDecision {
         guard let environment, environment.status == .running else { return .noOp }
         guard let mission = context.missionProvider(),
-              let built = environment.systems.planner.buildSingleDronePathMission(mission: mission),
+              let built = environment.systems.planner.buildSingleDroneTaskMission(mission: mission),
               let missionVehicleID = resolvedFleetStreamVehicleID(
                   assignment: built.assignment,
                   fleetLink: context.fleetLink,
@@ -1162,114 +1087,32 @@ final class MissionRunExecutionSubsystem {
               missionVehicleID == vehicleID
         else { return .noOp }
 
-        if environment.pendingGracefulCycleStop || environment.scheduleMode == .oneOff {
-            let kind: MissionRunCompletionKind = environment.pendingGracefulCycleStop ? .operatorStoppedAfterCycle : .oneOffAutopilotFinished
-            let hadQueuedAbortCommands = environment.pendingGracefulCycleStop
-                ? environment.systems.executor.dispatchAfterMissionCycleBatchesIfPending(context: context)
-                : false
+        if environment.pendingGracefulCycleStop {
+            let hadQueuedAbortCommands = environment.systems.executor.dispatchAfterMissionCycleBatchesIfPending(context: context)
             completeRun(
                 context: context,
-                message: environment.pendingGracefulCycleStop
-                    ? "Current mission cycle finished; graceful stop - returning to launch / home."
-                    : "One-off mission cycle finished; run complete - returning to launch / home.",
-                templateKey: environment.pendingGracefulCycleStop
-                    ? PaladinLogTemplateKey.runGracefulAfterCycle
-                    : PaladinLogTemplateKey.runOneOffFinished,
-                kind: kind,
+                message: "Current mission cycle finished; graceful stop - returning to launch / home.",
+                templateKey: PaladinLogTemplateKey.runGracefulAfterCycle,
+                kind: .operatorStoppedAfterCycle,
                 skipImplicitReturnToLaunch: hadQueuedAbortCommands
             )
-            return .completed(kind)
+            return .completed(.operatorStoppedAfterCycle)
         }
 
-        if environment.repeatsAutopilotMissionCycles {
-            let next = environment.cyclesCompleted + 1
-            environment.setMissionCycleCount(next)
-            let limit = environment.loopRepeatCount
-            if limit > 0, next >= limit {
-                completeRun(
-                    context: context,
-                    message: "Loop schedule finished (\(limit) mission run(s)); returning to launch / home.",
-                    templateKey: PaladinLogTemplateKey.runLoopAllRepeatsDone,
-                    templateParams: ["limit": String(limit)],
-                    kind: .loopCompletedAllRepeats
-                )
-                return .completed(.loopCompletedAllRepeats)
-            }
-        }
-
-        let finishedPathID: UUID
-        if let pid = built.assignment.pathId {
-            finishedPathID = pid
-        } else {
-            let enabledPaths = mission.routeMacro.paths.filter(\.enabled)
-            guard enabledPaths.count == 1, let p = enabledPaths.first else { return .noOp }
-            finishedPathID = p.id
-        }
-
-        environment.systems.scheduling.cancelScheduledMissionCycle(forPathID: finishedPathID)
-        let delayMinutes: Int
-        switch environment.scheduleMode {
-        case .oneOff:
-            return .noOp
-        case .continuous:
-            delayMinutes = 0
-        case .loop:
-            delayMinutes = environment.loopDelayMinutes(forPath: finishedPathID)
-        }
-
-        let delaySeconds = Double(delayMinutes) * 60
-        let restartAt = Date().addingTimeInterval(delaySeconds)
-        environment.systems.scheduling.setCycleIntermission(
-            MissionCycleIntermission(restartAt: restartAt, totalDelay: delaySeconds, scheduleMode: environment.scheduleMode),
-            forPathID: finishedPathID
+        completeRun(
+            context: context,
+            message: "Mission cycle finished; run complete - returning to launch / home.",
+            templateKey: PaladinLogTemplateKey.runOneOffFinished,
+            kind: .oneOffAutopilotFinished,
+            skipImplicitReturnToLaunch: false
         )
-        let pathContext = environment.systems.logging.pathContextForAssignment(built.assignment.id)
-        environment.systems.logging.appendLogEvent(
-            level: .info,
-            pathID: pathContext.0,
-            pathLabel: pathContext.1,
-            speaker: .paladin,
-            message: delayMinutes <= 0
-                ? "Mission cycle complete; starting the next cycle immediately."
-                : "Mission cycle complete; next cycle in \(delayMinutes) minute(s) (loop).",
-            templateKey: delayMinutes <= 0 ? PaladinLogTemplateKey.scheduleContinuousRestart : PaladinLogTemplateKey.scheduleLoopNextIn,
-            templateParams: delayMinutes <= 0 ? [:] : ["minutes": String(delayMinutes)]
-        )
-        environment.systems.scheduling.armMissionCycleRestartTask(
-            pathID: finishedPathID,
-            restartAt: restartAt,
-            onRestartNow: { [weak self] in
-                guard let self else { return }
-                _ = self.handleEvent(
-                    .scheduledCycleRestartDue(pathID: finishedPathID),
-                    context: context
-                )
-            }
-        )
-        return .progressed
+        return .completed(.oneOffAutopilotFinished)
     }
 
-    private func restartScheduledCycle(pathID: UUID, context: MissionRunExecutionContext) {
+    private func startDeferredTask(taskID: UUID, context: MissionRunExecutionContext) {
         guard let environment else { return }
-        environment.systems.scheduling.registerCycleRestartTask(nil, forPathID: pathID)
-        environment.systems.scheduling.clearMissionCycleIntermission(forPathID: pathID)
-        guard environment.status == .running else { return }
-        guard let mission = context.missionProvider() else {
-            environment.systems.logging.appendLogEvent(
-                level: .warning,
-                speaker: .paladin,
-                message: "Scheduled mission cycle skipped - mission template not found in store.",
-                templateKey: PaladinLogTemplateKey.scheduleSkipNoMission
-            )
-            return
-        }
-        startPathExecution(pathID: pathID, mission: mission, context: context)
-    }
-
-    private func startDeferredPath(pathID: UUID, context: MissionRunExecutionContext) {
-        guard let environment else { return }
-        environment.systems.scheduling.registerDeferredPathStartTask(nil, forPathID: pathID)
-        environment.systems.scheduling.clearMissionPathStartDeferral(forPathID: pathID)
+        environment.systems.scheduling.registerDeferredTaskStartTask(nil, forTaskID: taskID)
+        environment.systems.scheduling.clearMissionTaskStartDeferral(forTaskID: taskID)
         guard environment.status == .running else { return }
         guard let mission = context.missionProvider() else {
             environment.systems.logging.appendLogEvent(
@@ -1280,7 +1123,7 @@ final class MissionRunExecutionSubsystem {
             )
             return
         }
-        startPathExecution(pathID: pathID, mission: mission, context: context)
+        startTaskExecution(taskID: taskID, mission: mission, context: context)
     }
 
     private func launchInitialMissionBatches(
@@ -1290,11 +1133,11 @@ final class MissionRunExecutionSubsystem {
         missionProvider: @escaping @MainActor () -> Mission?
     ) {
         guard let environment else { return }
-        let orderedEnabled = mission.routeMacro.paths.filter(\.enabled)
-        struct BuildEntry { let pathId: UUID; let assignment: MissionRunAssignment }
+        let orderedEnabled = mission.routeMacro.tasks.filter(\.enabled)
+        struct BuildEntry { let taskId: UUID; let assignment: MissionRunAssignment }
         let buildable: [BuildEntry] = orderedEnabled.compactMap { path in
-            guard let built = environment.systems.planner.buildDronePathMission(mission: mission, pathId: path.id) else { return nil }
-            return BuildEntry(pathId: path.id, assignment: built.assignment)
+            guard let built = environment.systems.planner.buildDroneTaskMission(mission: mission, taskId: path.id) else { return nil }
+            return BuildEntry(taskId: path.id, assignment: built.assignment)
         }
         if buildable.isEmpty {
             environment.systems.logging.appendLogEvent(
@@ -1306,34 +1149,34 @@ final class MissionRunExecutionSubsystem {
             return
         }
         for entry in buildable {
-            let mins = environment.startDelayMinutes(forPath: entry.pathId)
+            let mins = environment.startDelayMinutes(forTask: entry.taskId)
             guard mins > 0 else {
-                startPathExecution(pathID: entry.pathId, mission: mission, context: .init(mission: mission, fleetLink: fleetLink, sitl: sitl, missionProvider: missionProvider))
+                startTaskExecution(taskID: entry.taskId, mission: mission, context: .init(mission: mission, fleetLink: fleetLink, sitl: sitl, missionProvider: missionProvider))
                 continue
             }
             let delaySeconds = Double(mins) * 60
             let startAt = Date().addingTimeInterval(delaySeconds)
-            environment.systems.scheduling.setPathStartDeferral(
-                MissionPathStartDeferral(startAt: startAt, totalDelay: delaySeconds),
-                forPathID: entry.pathId
+            environment.systems.scheduling.setTaskStartDeferral(
+                MissionTaskStartDeferral(startAt: startAt, totalDelay: delaySeconds),
+                forTaskID: entry.taskId
             )
-            let pathContext = environment.systems.logging.pathContextForAssignment(entry.assignment.id)
+            let taskContext = environment.systems.logging.taskContextForAssignment(entry.assignment.id)
             environment.systems.logging.appendLogEvent(
                 level: .info,
-                pathID: pathContext.0,
-                pathLabel: pathContext.1,
+                taskID: taskContext.0,
+                taskLabel: taskContext.1,
                 speaker: .paladin,
                 message: "MAVLink mission start for this path deferred \(mins) minute(s).",
-                templateKey: PaladinLogTemplateKey.schedulePathMissionStartDeferred,
+                templateKey: PaladinLogTemplateKey.scheduleTaskMissionStartDeferred,
                 templateParams: ["minutes": String(mins)]
             )
-            environment.systems.scheduling.armPathMissionStartTask(
-                pathID: entry.pathId,
+            environment.systems.scheduling.armTaskMissionStartTask(
+                taskID: entry.taskId,
                 startAt: startAt,
                 onStartNow: { [weak self] in
                     guard let self else { return }
                     _ = self.handleEvent(
-                        .deferredPathStartDue(pathID: entry.pathId),
+                        .deferredTaskStartDue(taskID: entry.taskId),
                         context: .init(mission: mission, fleetLink: fleetLink, sitl: sitl, missionProvider: missionProvider)
                     )
                 }
@@ -1341,9 +1184,9 @@ final class MissionRunExecutionSubsystem {
         }
     }
 
-    private func startPathExecution(pathID: UUID, mission: Mission, context: MissionRunExecutionContext) {
+    private func startTaskExecution(taskID: UUID, mission: Mission, context: MissionRunExecutionContext) {
         guard let environment, environment.sessionPhase == .executing else { return }
-        let pass = buildPrimaryMissionPass(mission: mission, pathId: pathID)
+        let pass = buildPrimaryMissionPass(mission: mission, explicitTaskId: taskID)
         pass.events.forEach { environment.appendEvent($0) }
         for issued in pass.commands {
             environment.appendEvent(environment.systems.commands.dispatchCommand(issued, fleetLink: context.fleetLink, sitl: context.sitl))
@@ -1361,20 +1204,20 @@ final class MissionRunExecutionSubsystem {
                 templateKey: PaladinLogTemplateKey.stagingPassStarted
             )
         )
-        let skipRelocate = (mission.flatMap { environment.systems.planner.buildSingleDronePathMission(mission: $0) } != nil)
+        let skipRelocate = (mission.flatMap { environment.systems.planner.buildSingleDroneTaskMission(mission: $0) } != nil)
         for assignment in environment.assignments {
             let slot = assignment.slotName
-            let pc = MissionControlPathTagName.pathContext(for: assignment, mission: mission)
-            let pathID = pc?.id
-            let pathLabel = pc?.label
+            let pc = MissionControlTaskTagName.taskContext(for: assignment, mission: mission)
+            let taskID = pc?.id
+            let taskLabel = pc?.label
             guard let tokenKey = assignment.attachedFleetVehicleToken,
                   let token = FleetMissionVehicleToken(storageKey: tokenKey)
             else {
                 events.append(
                     MissionRunEvent(
                         level: .warning,
-                        pathID: pathID,
-                        pathLabel: pathLabel,
+                        taskID: taskID,
+                        taskLabel: taskLabel,
                         speaker: .missionControl,
                         message: "No fleet vehicle token; skipping staging.",
                         templateKey: PaladinLogTemplateKey.stagingNoToken
@@ -1401,8 +1244,8 @@ final class MissionRunExecutionSubsystem {
                         events.append(
                             MissionRunEvent(
                                 level: .info,
-                                pathID: pathID,
-                                pathLabel: pathLabel,
+                                taskID: taskID,
+                                taskLabel: taskLabel,
                                 speaker: .missionControl,
                                 message: "SIM staging location folded into MAVLink mission (no separate goto).",
                                 templateKey: PaladinLogTemplateKey.stagingSimFoldedMission
@@ -1412,8 +1255,8 @@ final class MissionRunExecutionSubsystem {
                     events.append(
                         MissionRunEvent(
                             level: .info,
-                            pathID: pathID,
-                            pathLabel: pathLabel,
+                            taskID: taskID,
+                            taskLabel: taskLabel,
                             speaker: .missionControl,
                             message: String(format: "SIM staging target set to %.6f, %.6f.", coord.lat, coord.lon),
                             templateKey: PaladinLogTemplateKey.stagingSimTarget,
@@ -1427,8 +1270,8 @@ final class MissionRunExecutionSubsystem {
                     events.append(
                         MissionRunEvent(
                             level: .warning,
-                            pathID: pathID,
-                            pathLabel: pathLabel,
+                            taskID: taskID,
+                            taskLabel: taskLabel,
                             speaker: .missionControl,
                             message: "SIM has no staging override; default spawn position will be used.",
                             templateKey: PaladinLogTemplateKey.stagingSimNoOverride
@@ -1439,8 +1282,8 @@ final class MissionRunExecutionSubsystem {
                 events.append(
                     MissionRunEvent(
                         level: .info,
-                        pathID: pathID,
-                        pathLabel: pathLabel,
+                        taskID: taskID,
+                        taskLabel: taskLabel,
                         speaker: .missionControl,
                         message: "Live vehicle staging is telemetry-driven (read-only).",
                         templateKey: PaladinLogTemplateKey.stagingLiveReadonly
@@ -1459,17 +1302,17 @@ final class MissionRunExecutionSubsystem {
         return MissionRunPassResult(events: events, commands: commands)
     }
 
-    private func buildPrimaryMissionPass(mission: Mission, pathId: UUID? = nil) -> MissionRunPassResult {
+    private func buildPrimaryMissionPass(mission: Mission, explicitTaskId: UUID? = nil) -> MissionRunPassResult {
         guard let environment else { return MissionRunPassResult(events: [], commands: []) }
         var events: [MissionRunEvent] = []
         var commands: [MissionRunIssuedCommand] = []
-        let resolvedPathId: UUID? = {
-            if let pathId { return pathId }
-            let enabledPaths = mission.routeMacro.paths.filter(\.enabled)
-            return enabledPaths.count == 1 ? enabledPaths.first?.id : nil
+        let resolvedTaskId: UUID? = {
+            if let explicitTaskId { return explicitTaskId }
+            let enabledTasks = mission.routeMacro.tasks.filter(\.enabled)
+            return enabledTasks.count == 1 ? enabledTasks.first?.id : nil
         }()
-        guard let pid = resolvedPathId,
-              let built = environment.systems.planner.buildDronePathMission(mission: mission, pathId: pid),
+        guard let pid = resolvedTaskId,
+              let built = environment.systems.planner.buildDroneTaskMission(mission: mission, taskId: pid),
               let tokenKey = built.assignment.attachedFleetVehicleToken
         else {
             events.append(
@@ -1482,12 +1325,12 @@ final class MissionRunExecutionSubsystem {
             )
             return MissionRunPassResult(events: events, commands: commands)
         }
-        let pc = MissionControlPathTagName.pathContext(for: built.assignment, mission: mission)
+        let pc = MissionControlTaskTagName.taskContext(for: built.assignment, mission: mission)
         events.append(
             MissionRunEvent(
                 level: .info,
-                pathID: pc?.id,
-                pathLabel: pc?.label,
+                taskID: pc?.id,
+                taskLabel: pc?.label,
                 speaker: .missionControl,
                 message: "Executing MAVLink mission for \"\(built.assignment.slotName)\" (\(built.items.count) item(s)).",
                 templateKey: PaladinLogTemplateKey.missionExecuting,
@@ -1552,33 +1395,32 @@ final class MissionRunExecutionSubsystem {
 final class MissionRunProjectionsSubsystem {
     weak var environment: MissionRunEnvironment?
 
-    /// Temporary projection for MC-R path progress UI.
-    /// TODO: Expand to multi-path / multi-vehicle progress projections.
+    /// Temporary projection for MC-R task progress UI.
+    /// TODO: Expand to multi-task / multi-vehicle progress projections.
     func mavlinkMissionProgressContext(
         mission: Mission
-    ) -> (path: RoutePath, missionItemCount: Int)? {
+    ) -> (task: RoutePath, missionItemCount: Int)? {
         guard let environment,
-              let (assignment, items) = environment.systems.planner.buildSingleDronePathMission(mission: mission)
+              let (assignment, items) = environment.systems.planner.buildSingleDroneTaskMission(mission: mission)
         else {
             return nil
         }
-        let path: RoutePath?
-        if let pid = assignment.pathId {
-            path = mission.routeMacro.paths.first { $0.id == pid }
+        let task: RoutePath?
+        if let pid = assignment.taskId {
+            task = mission.routeMacro.tasks.first { $0.id == pid }
         } else {
-            let enabledPaths = mission.routeMacro.paths.filter(\.enabled)
-            path = enabledPaths.count == 1 ? enabledPaths.first : nil
+            let enabledTasks = mission.routeMacro.tasks.filter(\.enabled)
+            task = enabledTasks.count == 1 ? enabledTasks.first : nil
         }
-        guard let path else { return nil }
-        return (path, items.count)
+        guard let task else { return nil }
+        return (task, items.count)
     }
 }
 
 @MainActor
 final class MissionRunSchedulingSubsystem {
     weak var environment: MissionRunEnvironment?
-    private var cycleRestartTasks: [UUID: Task<Void, Never>] = [:]
-    private var deferredPathStartTasks: [UUID: Task<Void, Never>] = [:]
+    private var deferredTaskStartTasks: [UUID: Task<Void, Never>] = [:]
     private var deferredOneOffStartTask: Task<Void, Never>?
 
     /// Operator intent: abort after the current autopilot mission cycle. Queues a tagged batch (replaceable/revocable).
@@ -1640,24 +1482,14 @@ final class MissionRunSchedulingSubsystem {
         environment?.setOneOffDeferredExecution(value)
     }
 
-    func setCycleIntermission(_ value: MissionCycleIntermission?, forPathID pathID: UUID) {
+    func setTaskStartDeferral(_ value: MissionTaskStartDeferral?, forTaskID taskID: UUID) {
         guard let environment else { return }
-        environment.mutateCycleIntermission(forPathID: pathID, value: value)
+        environment.mutateTaskStartDeferral(forTaskID: taskID, value: value)
     }
 
-    func clearMissionCycleIntermission(forPathID pathID: UUID? = nil) {
+    func clearMissionTaskStartDeferral(forTaskID taskID: UUID? = nil) {
         guard let environment else { return }
-        environment.clearCycleIntermission(forPathID: pathID)
-    }
-
-    func setPathStartDeferral(_ value: MissionPathStartDeferral?, forPathID pathID: UUID) {
-        guard let environment else { return }
-        environment.mutatePathStartDeferral(forPathID: pathID, value: value)
-    }
-
-    func clearMissionPathStartDeferral(forPathID pathID: UUID? = nil) {
-        guard let environment else { return }
-        environment.clearPathStartDeferral(forPathID: pathID)
+        environment.clearTaskStartDeferral(forTaskID: taskID)
     }
 
     func scheduleDeferredOneOffExecution(executeAt: Date) {
@@ -1705,37 +1537,23 @@ final class MissionRunSchedulingSubsystem {
         beginDeferredOneOffNow()
     }
 
-    func registerCycleRestartTask(_ task: Task<Void, Never>?, forPathID pathID: UUID) {
-        cycleRestartTasks[pathID]?.cancel()
-        cycleRestartTasks[pathID] = task
+    /// Mission runs no longer schedule a follow-on autopilot cycle.
+    func cancelScheduledMissionCycle(forTaskID _: UUID? = nil) {}
+
+    func registerDeferredTaskStartTask(_ task: Task<Void, Never>?, forTaskID taskID: UUID) {
+        deferredTaskStartTasks[taskID]?.cancel()
+        deferredTaskStartTasks[taskID] = task
     }
 
-    func cancelScheduledMissionCycle(forPathID pathID: UUID? = nil) {
-        if let pathID {
-            cycleRestartTasks[pathID]?.cancel()
-            cycleRestartTasks.removeValue(forKey: pathID)
-            clearMissionCycleIntermission(forPathID: pathID)
+    func cancelScheduledTaskMissionStarts(forTaskID taskID: UUID? = nil) {
+        if let taskID {
+            deferredTaskStartTasks[taskID]?.cancel()
+            deferredTaskStartTasks.removeValue(forKey: taskID)
+            clearMissionTaskStartDeferral(forTaskID: taskID)
         } else {
-            cycleRestartTasks.values.forEach { $0.cancel() }
-            cycleRestartTasks.removeAll()
-            clearMissionCycleIntermission()
-        }
-    }
-
-    func registerDeferredPathStartTask(_ task: Task<Void, Never>?, forPathID pathID: UUID) {
-        deferredPathStartTasks[pathID]?.cancel()
-        deferredPathStartTasks[pathID] = task
-    }
-
-    func cancelScheduledPathMissionStarts(forPathID pathID: UUID? = nil) {
-        if let pathID {
-            deferredPathStartTasks[pathID]?.cancel()
-            deferredPathStartTasks.removeValue(forKey: pathID)
-            clearMissionPathStartDeferral(forPathID: pathID)
-        } else {
-            deferredPathStartTasks.values.forEach { $0.cancel() }
-            deferredPathStartTasks.removeAll()
-            clearMissionPathStartDeferral()
+            deferredTaskStartTasks.values.forEach { $0.cancel() }
+            deferredTaskStartTasks.removeAll()
+            clearMissionTaskStartDeferral()
         }
     }
 
@@ -1746,81 +1564,34 @@ final class MissionRunSchedulingSubsystem {
 
     func cancelAllScheduledTasks() {
         cancelScheduledMissionCycle()
-        cancelScheduledPathMissionStarts()
+        cancelScheduledTaskMissionStarts()
         deferredOneOffStartTask?.cancel()
         deferredOneOffStartTask = nil
     }
 
-    func skipMissionPathStartDeferralForPath(pathID: UUID, onStartNow: @escaping @MainActor () -> Void) {
-        guard environment?.pathStartDeferralByPathID[pathID] != nil else { return }
-        cancelScheduledPathMissionStarts(forPathID: pathID)
+    func skipMissionTaskStartDeferral(taskID: UUID, onStartNow: @escaping @MainActor () -> Void) {
+        guard environment?.taskStartDeferralByTaskID[taskID] != nil else { return }
+        cancelScheduledTaskMissionStarts(forTaskID: taskID)
         onStartNow()
     }
 
-    func extendMissionPathStartDeferralForPathByMinutes(
-        pathID: UUID,
+    func extendMissionTaskStartDeferralByMinutes(
+        taskID: UUID,
         additionalMinutes: Int,
         onStartNow: @escaping @MainActor () -> Void
     ) {
-        guard let environment, let def = environment.pathStartDeferralByPathID[pathID] else { return }
+        guard let environment, let def = environment.taskStartDeferralByTaskID[taskID] else { return }
         let mins = min(30, max(1, additionalMinutes))
-        cancelScheduledPathMissionStarts(forPathID: pathID)
+        cancelScheduledTaskMissionStarts(forTaskID: taskID)
         let addSec = Double(mins) * 60
         let newStart = def.startAt.addingTimeInterval(addSec)
         let newTotal = def.totalDelay + addSec
-        setPathStartDeferral(MissionPathStartDeferral(startAt: newStart, totalDelay: newTotal), forPathID: pathID)
-        armPathMissionStartTask(pathID: pathID, startAt: newStart, onStartNow: onStartNow)
+        setTaskStartDeferral(MissionTaskStartDeferral(startAt: newStart, totalDelay: newTotal), forTaskID: taskID)
+        armTaskMissionStartTask(taskID: taskID, startAt: newStart, onStartNow: onStartNow)
     }
 
-    func skipMissionCycleIntermissionForPath(pathID: UUID, onRestartNow: @escaping @MainActor () -> Void) {
-        guard environment?.cycleIntermissionByPathID[pathID] != nil else { return }
-        cancelScheduledMissionCycle(forPathID: pathID)
-        onRestartNow()
-    }
-
-    func extendMissionCycleIntermissionForPathByMinutes(
-        pathID: UUID,
-        additionalMinutes: Int,
-        onRestartNow: @escaping @MainActor () -> Void
-    ) {
-        guard let inter = environment?.cycleIntermissionByPathID[pathID] else { return }
-        let mins = min(30, max(1, additionalMinutes))
-        cancelScheduledMissionCycle(forPathID: pathID)
-        let addSec = Double(mins) * 60
-        let newRestart = inter.restartAt.addingTimeInterval(addSec)
-        let newTotal = inter.totalDelay + addSec
-        setCycleIntermission(
-            MissionCycleIntermission(restartAt: newRestart, totalDelay: newTotal, scheduleMode: inter.scheduleMode),
-            forPathID: pathID
-        )
-        armMissionCycleRestartTask(pathID: pathID, restartAt: newRestart, onRestartNow: onRestartNow)
-    }
-
-    func armMissionCycleRestartTask(pathID: UUID, restartAt: Date, onRestartNow: @escaping @MainActor () -> Void) {
-        registerCycleRestartTask(nil, forPathID: pathID)
-        let captured = restartAt
-        let task = Task { @MainActor [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                let remaining = captured.timeIntervalSince(Date())
-                if remaining <= 0.05 { break }
-                let chunk = min(remaining, 3600)
-                let rawNs = chunk * 1_000_000_000
-                guard rawNs.isFinite, rawNs > 0 else { break }
-                let ns = UInt64(min(Double(UInt64.max), max(1_000_000, rawNs)))
-                try? await Task.sleep(nanoseconds: ns)
-            }
-            guard !Task.isCancelled else { return }
-            guard let stored = self.environment?.cycleIntermissionByPathID[pathID],
-                  abs(stored.restartAt.timeIntervalSince(captured)) < 0.5
-            else { return }
-            onRestartNow()
-        }
-        registerCycleRestartTask(task, forPathID: pathID)
-    }
-
-    func armPathMissionStartTask(pathID: UUID, startAt: Date, onStartNow: @escaping @MainActor () -> Void) {
-        registerDeferredPathStartTask(nil, forPathID: pathID)
+    func armTaskMissionStartTask(taskID: UUID, startAt: Date, onStartNow: @escaping @MainActor () -> Void) {
+        registerDeferredTaskStartTask(nil, forTaskID: taskID)
         let captured = startAt
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -1834,12 +1605,12 @@ final class MissionRunSchedulingSubsystem {
                 try? await Task.sleep(nanoseconds: ns)
             }
             guard !Task.isCancelled else { return }
-            guard let stored = self.environment?.pathStartDeferralByPathID[pathID],
+            guard let stored = self.environment?.taskStartDeferralByTaskID[taskID],
                   abs(stored.startAt.timeIntervalSince(captured)) < 0.5
             else { return }
             onStartNow()
         }
-        registerDeferredPathStartTask(task, forPathID: pathID)
+        registerDeferredTaskStartTask(task, forTaskID: taskID)
     }
 
     private func armDeferredOneOffExecutionTask(
@@ -1954,13 +1725,13 @@ final class MissionRunLoggingSubsystem {
     }
 
     weak var environment: MissionRunEnvironment?
-    private var pathContextByAssignmentID: [UUID: (pathID: UUID?, pathLabel: String?)] = [:]
+    private var taskContextByAssignmentID: [UUID: (taskID: UUID?, taskLabel: String?)] = [:]
     private var vehicleVoiceSnapshots: [UUID: VehicleVoiceSnapshot] = [:]
 
     func appendLogEvent(
         level: MissionRunEventLevel,
-        pathID: UUID? = nil,
-        pathLabel: String? = nil,
+        taskID: UUID? = nil,
+        taskLabel: String? = nil,
         speaker: MissionRunEventSpeaker = .missionControl,
         message: String,
         templateKey: String? = nil,
@@ -1969,8 +1740,8 @@ final class MissionRunLoggingSubsystem {
         environment?.appendEvent(
             MissionRunEvent(
                 level: level,
-                pathID: pathID,
-                pathLabel: pathLabel,
+                taskID: taskID,
+                taskLabel: taskLabel,
                 speaker: speaker,
                 message: message,
                 templateKey: templateKey,
@@ -1979,22 +1750,22 @@ final class MissionRunLoggingSubsystem {
         )
     }
 
-    func setPathContextFromRoleTracks(_ tracks: [MissionControlRoleTrack]) {
-        var context: [UUID: (pathID: UUID?, pathLabel: String?)] = [:]
+    func setTaskContextFromRoleTracks(_ tracks: [MissionControlRoleTrack]) {
+        var context: [UUID: (taskID: UUID?, taskLabel: String?)] = [:]
         for track in tracks {
-            context[track.assignmentID] = (track.pathID, track.pathDisplayName)
+            context[track.assignmentID] = (track.taskID, track.taskDisplayName)
         }
-        pathContextByAssignmentID = context
+        taskContextByAssignmentID = context
     }
 
-    func pathContextForAssignment(_ assignmentID: UUID) -> (UUID?, String?) {
-        let ctx = pathContextByAssignmentID[assignmentID] ?? (nil, nil)
-        return (ctx.pathID, ctx.pathLabel)
+    func taskContextForAssignment(_ assignmentID: UUID) -> (UUID?, String?) {
+        let ctx = taskContextByAssignmentID[assignmentID] ?? (nil, nil)
+        return (ctx.taskID, ctx.taskLabel)
     }
 
     func clearState() {
         vehicleVoiceSnapshots.removeAll()
-        pathContextByAssignmentID.removeAll()
+        taskContextByAssignmentID.removeAll()
     }
 
     func appendFleetMirrorLine(
@@ -2018,12 +1789,12 @@ final class MissionRunLoggingSubsystem {
         } else {
             level = .info
         }
-        let ctx = pathContextForAssignment(assignment.id)
+        let ctx = taskContextForAssignment(assignment.id)
         let classified = PaladinFleetMirrorLineClassifier.classify(line)
         appendLogEvent(
             level: level,
-            pathID: ctx.0,
-            pathLabel: ctx.1,
+            taskID: ctx.0,
+            taskLabel: ctx.1,
             speaker: .vehicleSlot(assignment.slotName),
             message: classified.message,
             templateKey: classified.templateKey,
@@ -2044,7 +1815,7 @@ final class MissionRunLoggingSubsystem {
                   let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID)
             else { continue }
             let slot = assignment.slotName
-            let pathFields = pathContextForAssignment(assignment.id)
+            let taskFields = taskContextForAssignment(assignment.id)
             let prev = vehicleVoiceSnapshots[assignment.id]
             var lastTrack = prev?.lastTrackLogAt
             var lastTrackLoggedLat = prev?.lastTrackLoggedLat
@@ -2058,8 +1829,8 @@ final class MissionRunLoggingSubsystem {
                 let alt = hub.relativeAltM.map { String(format: "%.1f m", $0) } ?? "-"
                 appendLogEvent(
                     level: .info,
-                    pathID: pathFields.0,
-                    pathLabel: pathFields.1,
+                    taskID: taskFields.0,
+                    taskLabel: taskFields.1,
                     speaker: .vehicleSlot(slot),
                     message: "Autopilot: mode \(mode), \(arm), rel alt \(alt).",
                     templateKey: PaladinLogTemplateKey.telemetryAutopilotSnapshot,
@@ -2068,8 +1839,8 @@ final class MissionRunLoggingSubsystem {
             } else if prev!.flightMode != hub.flightMode, !hub.flightMode.isEmpty {
                 appendLogEvent(
                     level: .info,
-                    pathID: pathFields.0,
-                    pathLabel: pathFields.1,
+                    taskID: taskFields.0,
+                    taskLabel: taskFields.1,
                     speaker: .vehicleSlot(slot),
                     message: "Flight mode: \(prev!.flightMode) -> \(hub.flightMode).",
                     templateKey: PaladinLogTemplateKey.telemetryFlightModeChange,
@@ -2078,8 +1849,8 @@ final class MissionRunLoggingSubsystem {
             } else if prev!.isArmed != hub.isArmed {
                 appendLogEvent(
                     level: .info,
-                    pathID: pathFields.0,
-                    pathLabel: pathFields.1,
+                    taskID: taskFields.0,
+                    taskLabel: taskFields.1,
                     speaker: .vehicleSlot(slot),
                     message: hub.isArmed ? "Armed." : "Disarmed.",
                     templateKey: hub.isArmed ? PaladinLogTemplateKey.telemetryArmed : PaladinLogTemplateKey.telemetryDisarmed
@@ -2087,8 +1858,8 @@ final class MissionRunLoggingSubsystem {
             } else if let was = prev!.inAir, let now = hub.inAir, was != now {
                 appendLogEvent(
                     level: .info,
-                    pathID: pathFields.0,
-                    pathLabel: pathFields.1,
+                    taskID: taskFields.0,
+                    taskLabel: taskFields.1,
                     speaker: .vehicleSlot(slot),
                     message: now ? "Airborne." : "On ground (in-air flag cleared).",
                     templateKey: now ? PaladinLogTemplateKey.telemetryAirborne : PaladinLogTemplateKey.telemetryOnGround
@@ -2101,8 +1872,8 @@ final class MissionRunLoggingSubsystem {
                     let trend = delta > 0 ? "Climbing" : "Descending"
                     appendLogEvent(
                         level: .info,
-                        pathID: pathFields.0,
-                        pathLabel: pathFields.1,
+                        taskID: taskFields.0,
+                        taskLabel: taskFields.1,
                         speaker: .vehicleSlot(slot),
                         message: "\(trend) - rel alt ~\(String(format: "%.1f", r)) m (delta \(String(format: "%.1f", delta)) m).",
                         templateKey: PaladinLogTemplateKey.telemetryAltTrend,
@@ -2122,8 +1893,8 @@ final class MissionRunLoggingSubsystem {
                         let mode = hub.flightMode.isEmpty ? "-" : hub.flightMode
                         appendLogEvent(
                             level: .info,
-                            pathID: pathFields.0,
-                            pathLabel: pathFields.1,
+                            taskID: taskFields.0,
+                            taskLabel: taskFields.1,
                             speaker: .vehicleSlot(slot),
                             message: "Track - \(String(format: "%.5f", lat)) deg, \(String(format: "%.5f", lon)) deg · rel alt \(alt) · \(mode).",
                             templateKey: PaladinLogTemplateKey.telemetryTrack,
@@ -2148,8 +1919,8 @@ final class MissionRunLoggingSubsystem {
                     let mode = hub.flightMode.isEmpty ? "-" : hub.flightMode
                     appendLogEvent(
                         level: .info,
-                        pathID: pathFields.0,
-                        pathLabel: pathFields.1,
+                        taskID: taskFields.0,
+                        taskLabel: taskFields.1,
                         speaker: .vehicleSlot(slot),
                         message: "Approaching first waypoint - ~\(Int(dist)) m out, mode \(mode).",
                         templateKey: PaladinLogTemplateKey.telemetryApproachWP1,
@@ -2161,8 +1932,8 @@ final class MissionRunLoggingSubsystem {
                     if turn > 28, dist > 22 {
                         appendLogEvent(
                             level: .info,
-                            pathID: pathFields.0,
-                            pathLabel: pathFields.1,
+                            taskID: taskFields.0,
+                            taskLabel: taskFields.1,
                             speaker: .vehicleSlot(slot),
                             message: "Turning toward leg - heading ~\(Int(heading)) deg, bearing to WP1 ~\(Int(bear)) deg (~\(Int(dist)) m).",
                             templateKey: PaladinLogTemplateKey.telemetryTurningLeg,
@@ -2172,8 +1943,8 @@ final class MissionRunLoggingSubsystem {
                     } else if dist > 45 {
                         appendLogEvent(
                             level: .info,
-                            pathID: pathFields.0,
-                            pathLabel: pathFields.1,
+                            taskID: taskFields.0,
+                            taskLabel: taskFields.1,
                             speaker: .vehicleSlot(slot),
                             message: "Moving toward WP1 - ~\(Int(dist)) m, aligned within ~\(Int(turn)) deg.",
                             templateKey: PaladinLogTemplateKey.telemetryMovingWP1,
@@ -2201,16 +1972,16 @@ final class MissionRunLoggingSubsystem {
     }
 
     private static func firstMissionWaypoint(for assignment: MissionRunAssignment, mission: Mission) -> RouteCoordinate? {
-        if let pid = assignment.pathId,
-           let path = mission.routeMacro.paths.first(where: { $0.id == pid }),
-           let coord = path.waypoints.first?.coord {
+        if let pid = assignment.taskId,
+           let task = mission.routeMacro.tasks.first(where: { $0.id == pid }),
+           let coord = task.waypoints.first?.coord {
             return coord
         }
-        if let path = mission.routeMacro.paths.first(where: { $0.enabled }),
-           let coord = path.waypoints.first?.coord {
+        if let task = mission.routeMacro.tasks.first(where: { $0.enabled }),
+           let coord = task.waypoints.first?.coord {
             return coord
         }
-        return mission.routeMacro.paths.first?.waypoints.first?.coord
+        return mission.routeMacro.tasks.first?.waypoints.first?.coord
     }
 }
 
@@ -2223,12 +1994,12 @@ final class MissionRunCommandSubsystem {
         fleetLink: FleetLinkService,
         sitl: SitlService
     ) -> MissionRunEvent {
-        let ctx = environment?.systems.logging.pathContextForAssignment(issued.assignmentID) ?? (nil, nil)
+        let ctx = environment?.systems.logging.taskContextForAssignment(issued.assignmentID) ?? (nil, nil)
         guard let token = FleetMissionVehicleToken(storageKey: issued.vehicleTokenKey) else {
             return MissionRunEvent(
                 level: .error,
-                pathID: ctx.0,
-                pathLabel: ctx.1,
+                taskID: ctx.0,
+                taskLabel: ctx.1,
                 speaker: .paladin,
                 message: "Invalid vehicle token for slot \(issued.slotName); command dropped.",
                 templateKey: PaladinLogTemplateKey.commandInvalidToken,
@@ -2238,8 +2009,8 @@ final class MissionRunCommandSubsystem {
         guard let vehicleID = resolvedFleetStreamVehicleID(token: token, fleetLink: fleetLink, sitl: sitl) else {
             return MissionRunEvent(
                 level: .error,
-                pathID: ctx.0,
-                pathLabel: ctx.1,
+                taskID: ctx.0,
+                taskLabel: ctx.1,
                 speaker: .paladin,
                 message: "Vehicle unavailable for slot \(issued.slotName); command dropped.",
                 templateKey: PaladinLogTemplateKey.commandVehicleUnavailable,
@@ -2256,11 +2027,11 @@ final class MissionRunCommandSubsystem {
                 guard let self, let environment = self.environment else { return }
                 switch outcome {
                 case .succeeded:
-                    let ackCtx = environment.systems.logging.pathContextForAssignment(issued.assignmentID)
+                    let ackCtx = environment.systems.logging.taskContextForAssignment(issued.assignmentID)
                     environment.systems.logging.appendLogEvent(
                         level: .info,
-                        pathID: ackCtx.0,
-                        pathLabel: ackCtx.1,
+                        taskID: ackCtx.0,
+                        taskLabel: ackCtx.1,
                         speaker: .paladin,
                         message: "Fleet acknowledged: \(summary) on \(vehicleID).",
                         templateKey: PaladinLogTemplateKey.fleetAckSuccess,
@@ -2272,11 +2043,11 @@ final class MissionRunCommandSubsystem {
                         ]
                     )
                 case .failed(let reason):
-                    let ackCtx = environment.systems.logging.pathContextForAssignment(issued.assignmentID)
+                    let ackCtx = environment.systems.logging.taskContextForAssignment(issued.assignmentID)
                     environment.systems.logging.appendLogEvent(
                         level: .error,
-                        pathID: ackCtx.0,
-                        pathLabel: ackCtx.1,
+                        taskID: ackCtx.0,
+                        taskLabel: ackCtx.1,
                         speaker: .paladin,
                         message: "Fleet command failed: \(summary) - \(reason)",
                         templateKey: PaladinLogTemplateKey.fleetAckFailed,
@@ -2293,8 +2064,8 @@ final class MissionRunCommandSubsystem {
         if commandID != nil {
             return MissionRunEvent(
                 level: .info,
-                pathID: ctx.0,
-                pathLabel: ctx.1,
+                taskID: ctx.0,
+                taskLabel: ctx.1,
                 speaker: .paladin,
                 message: "Command dispatched to \(vehicleID).",
                 templateKey: PaladinLogTemplateKey.commandDispatched,
@@ -2307,8 +2078,8 @@ final class MissionRunCommandSubsystem {
         }
         return MissionRunEvent(
             level: .error,
-            pathID: ctx.0,
-            pathLabel: ctx.1,
+            taskID: ctx.0,
+            taskLabel: ctx.1,
             speaker: .paladin,
             message: "Command not sent to \(vehicleID) (no session, blocked by authority gate, or dispatch error).",
             templateKey: PaladinLogTemplateKey.commandNotSent,

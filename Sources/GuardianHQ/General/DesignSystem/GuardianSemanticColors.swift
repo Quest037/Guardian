@@ -6,9 +6,9 @@ enum GuardianSemanticColors {
     static let successBackground = Color.green.opacity(0.22)
     static let successForeground = Color.green
 
-    /// Warning — darker amber pair to keep setup/caution badges legible in light mode.
+    /// Warning — amber-tinted surface; foreground stays **dark** so text stays legible on the yellow/amber fill in every appearance (badges, pills, banners).
     static let warningBackground = Color(red: 0.98, green: 0.86, blue: 0.42).opacity(0.36)
-    static let warningForeground = Color(red: 0.48, green: 0.33, blue: 0.00)
+    static let warningForeground = Color.black.opacity(0.88)
 
     /// Info (e.g. completed / neutral-positive emphasis).
     static let infoBackground = Color.blue.opacity(0.22)

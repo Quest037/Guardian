@@ -40,7 +40,7 @@ struct VehiclePreflightSheet: View {
     }
 
     var body: some View {
-        GuardianModalTemplate(
+        Modal(
             title: "Preflight check",
             subtitle: vehicleTitle,
             headerActions: {

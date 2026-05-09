@@ -12,8 +12,8 @@ struct PaladinEvent: Identifiable, Equatable {
             id: missionRunEvent.id,
             at: missionRunEvent.at,
             level: missionRunEvent.level,
-            pathID: missionRunEvent.pathID,
-            pathLabel: missionRunEvent.pathLabel,
+            taskID: missionRunEvent.taskID,
+            taskLabel: missionRunEvent.taskLabel,
             speaker: .paladin,
             message: missionRunEvent.message,
             templateKey: missionRunEvent.templateKey,
@@ -25,8 +25,8 @@ struct PaladinEvent: Identifiable, Equatable {
         id: UUID = UUID(),
         at: Date = Date(),
         level: MissionRunEventLevel = .info,
-        pathID: UUID? = nil,
-        pathLabel: String? = nil,
+        taskID: UUID? = nil,
+        taskLabel: String? = nil,
         message: String,
         templateKey: String? = nil,
         templateParams: [String: String] = [:]
@@ -35,8 +35,8 @@ struct PaladinEvent: Identifiable, Equatable {
             id: id,
             at: at,
             level: level,
-            pathID: pathID,
-            pathLabel: pathLabel,
+            taskID: taskID,
+            taskLabel: taskLabel,
             speaker: .paladin,
             message: message,
             templateKey: templateKey,
@@ -71,9 +71,24 @@ final class PaladinMissionAssistant {
     static let assistantKey = "paladin.missionAssistant"
 
     let runID: UUID
+    weak var missionControlStore: MissionControlStore?
+    var missionControlObserverToken: UUID?
 
     init(runID: UUID) {
         self.runID = runID
+    }
+
+    /// Raises a swap-in-reserve operator prompt when the store token has ``MissionRunObserverPermissions/act``.
+    @discardableResult
+    func raiseSwapInReservePrompt(primaryAssignmentID: UUID, reserveAssignmentID: UUID) -> Bool {
+        guard let store = missionControlStore, let token = missionControlObserverToken else { return false }
+        return store.raiseOperatorPromptSwapInReserve(
+            runID: runID,
+            primaryAssignmentID: primaryAssignmentID,
+            reserveAssignmentID: reserveAssignmentID,
+            issuerKey: MissionRunCommandIssuerKey.paladin,
+            observerToken: token
+        )
     }
 
     func engageRunStart(

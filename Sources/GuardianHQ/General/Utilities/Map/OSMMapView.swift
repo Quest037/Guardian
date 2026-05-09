@@ -38,8 +38,8 @@ struct MapVehicleMarker: Equatable {
 
 struct OSMMapView: NSViewRepresentable {
     var home: RouteHome?
-    var allPathsCoords: [[RouteCoordinate]]
-    var selectedPathWaypoints: [RouteWaypoint]
+    var allTasksCoords: [[RouteCoordinate]]
+    var selectedTaskWaypoints: [RouteWaypoint]
     var selectedWaypointIndex: Int?
     var vehicleMarkers: [MapVehicleMarker]
     var mapStyle: MapTileStyle
@@ -48,7 +48,7 @@ struct OSMMapView: NSViewRepresentable {
     var cameraPreview: CameraPreview?
     var followedVehicleMarkerID: String?
     var preserveView: Bool
-    var isEditingPath: Bool
+    var isEditingTask: Bool
     var contextMenuPolicy: GuardianMapContextMenuPolicy
     var onMapClick: (Double, Double) -> Void
     var onVehicleMarkerMoved: (String, Double, Double) -> Void
@@ -56,7 +56,7 @@ struct OSMMapView: NSViewRepresentable {
     var onWaypointClick: (Int) -> Void
     var onWaypointMoved: (Int, Double, Double) -> Void
     var onWaypointDelete: (Int) -> Void
-    var onPathInsert: (Int, Double, Double) -> Void
+    var onTaskMapInsert: (Int, Double, Double) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -66,7 +66,7 @@ struct OSMMapView: NSViewRepresentable {
             onWaypointClick: onWaypointClick,
             onWaypointMoved: onWaypointMoved,
             onWaypointDelete: onWaypointDelete,
-            onPathInsert: onPathInsert
+            onTaskMapInsert: onTaskMapInsert
         )
     }
 
@@ -102,10 +102,10 @@ struct OSMMapView: NSViewRepresentable {
             homeJSON = "null"
         }
 
-        let allPathsJSON = allPathsCoords.map { path in
+        let allPathsJSON = allTasksCoords.map { path in
             "[\(path.map { "{\"lat\":\($0.lat),\"lon\":\($0.lon)}" }.joined(separator: ","))]"
         }.joined(separator: ",")
-        let waypointsJSON = selectedPathWaypoints.enumerated().map { idx, wp in
+        let waypointsJSON = selectedTaskWaypoints.enumerated().map { idx, wp in
             "{\"idx\":\(idx),\"lat\":\(wp.coord.lat),\"lon\":\(wp.coord.lon)}"
         }.joined(separator: ",")
         let selectedWaypointIndexJS = selectedWaypointIndex.map(String.init) ?? "null"
@@ -135,7 +135,7 @@ struct OSMMapView: NSViewRepresentable {
         let contextMenuPolicyJSON = """
         {"vehicleActions":[\(contextMenuPolicy.vehicleActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"waypointActions":[\(contextMenuPolicy.waypointActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"homeActions":[\(contextMenuPolicy.homeActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))]}
         """
-        let js = "setMissionData(\(homeJSON), [\(allPathsJSON)], [\(waypointsJSON)], \(selectedWaypointIndexJS), [\(vehicleMarkersJSON)], \"\(mapStyle.rawValue)\", \(recenterNonce), \(headingPreviewJSON), \(cameraPreviewJSON), \(followedVehicleMarkerIDJSON), \(contextMenuPolicyJSON), \(preserveView ? "true" : "false"), \(isEditingPath ? "true" : "false"));"
+        let js = "setMissionData(\(homeJSON), [\(allPathsJSON)], [\(waypointsJSON)], \(selectedWaypointIndexJS), [\(vehicleMarkersJSON)], \"\(mapStyle.rawValue)\", \(recenterNonce), \(headingPreviewJSON), \(cameraPreviewJSON), \(followedVehicleMarkerIDJSON), \(contextMenuPolicyJSON), \(preserveView ? "true" : "false"), \(isEditingTask ? "true" : "false"));"
         context.coordinator.apply(script: js)
     }
 }
@@ -162,7 +162,7 @@ extension OSMMapView {
         private let onWaypointClick: (Int) -> Void
         private let onWaypointMoved: (Int, Double, Double) -> Void
         private let onWaypointDelete: (Int) -> Void
-        private let onPathInsert: (Int, Double, Double) -> Void
+        private let onTaskMapInsert: (Int, Double, Double) -> Void
 
         init(
             onMapClick: @escaping (Double, Double) -> Void,
@@ -171,7 +171,7 @@ extension OSMMapView {
             onWaypointClick: @escaping (Int) -> Void,
             onWaypointMoved: @escaping (Int, Double, Double) -> Void,
             onWaypointDelete: @escaping (Int) -> Void,
-            onPathInsert: @escaping (Int, Double, Double) -> Void
+            onTaskMapInsert: @escaping (Int, Double, Double) -> Void
         ) {
             self.onMapClick = onMapClick
             self.onVehicleMarkerMoved = onVehicleMarkerMoved
@@ -179,7 +179,7 @@ extension OSMMapView {
             self.onWaypointClick = onWaypointClick
             self.onWaypointMoved = onWaypointMoved
             self.onWaypointDelete = onWaypointDelete
-            self.onPathInsert = onPathInsert
+            self.onTaskMapInsert = onTaskMapInsert
         }
 
         func apply(script: String) {
@@ -229,7 +229,7 @@ extension OSMMapView {
                let idx = payload["idx"] as? Int,
                let lat = payload["lat"] as? Double,
                let lon = payload["lon"] as? Double {
-                onPathInsert(idx, lat, lon)
+                onTaskMapInsert(idx, lat, lon)
             }
 
             if message.name == "vehicleMove",
@@ -354,6 +354,19 @@ private extension OSMMapView {
       contextMenuEl = null;
     }
 
+    /** Leaflet listens on the map container; menu is inside that container, so
+     *  pointer events would bubble and trigger map click (e.g. new waypoint).
+     *  Stop bubble on the menu subtree and defer removal so the menu is not
+     *  torn down mid-dispatch (avoids click-through on WebKit). */
+    function shieldContextMenuFromMapPointerEvents(menuEl) {
+      const stopBubble = (ev) => {
+        ev.stopPropagation();
+      };
+      ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'wheel', 'contextmenu'].forEach((type) => {
+        menuEl.addEventListener(type, stopBubble, false);
+      });
+    }
+
     function markerActionsForType(markerType) {
       if (markerType === 'vehicle') {
         const base = contextMenuPolicy.vehicleActions || [];
@@ -382,11 +395,11 @@ private extension OSMMapView {
         item.className = 'guardian-context-item';
         item.type = 'button';
         item.textContent = contextActionTitle(action);
-        item.addEventListener('click', () => {
+        item.addEventListener('click', (ev) => {
+          L.DomEvent.stop(ev);
           if (action === 'centerMarker') {
             map.panTo([lat, lon], { animate: true, duration: 0.25 });
           }
-          hideContextMenu();
           window.webkit.messageHandlers.markerContextAction.postMessage({
             action: action,
             markerType: markerType,
@@ -394,9 +407,13 @@ private extension OSMMapView {
             lat: lat,
             lon: lon
           });
+          queueMicrotask(() => {
+            hideContextMenu();
+          });
         });
         menu.appendChild(item);
       });
+      shieldContextMenuFromMapPointerEvents(menu);
       container.appendChild(menu);
       contextMenuEl = menu;
 
@@ -486,7 +503,7 @@ private extension OSMMapView {
 
     const defaultSinglePointZoom = 15;
 
-    function setMissionData(home, allPathsCoords, selectedWaypoints, selectedWaypointIndex, missionVehicleMarkers, mapStyle, recenterNonce, headingPreview, cameraPreview, followVehicleMarkerID, menuPolicy, preserveView, isEditingPath) {
+    function setMissionData(home, allTasksCoords, selectedWaypoints, selectedWaypointIndex, missionVehicleMarkers, mapStyle, recenterNonce, headingPreview, cameraPreview, followVehicleMarkerID, menuPolicy, preserveView, isEditingTask) {
       followedVehicleMarkerID = followVehicleMarkerID || null;
       contextMenuPolicy = menuPolicy || { vehicleActions: [], waypointActions: [], homeActions: [] };
       if (homeMarker) { map.removeLayer(homeMarker); homeMarker = null; }
@@ -505,13 +522,13 @@ private extension OSMMapView {
         map.removeLayer(m);
       }
       applyStyle(mapStyle);
-      map.getContainer().style.cursor = isEditingPath ? 'pointer' : '';
+      map.getContainer().style.cursor = isEditingTask ? 'pointer' : '';
 
       const points = [];
-      const geometryPaths = (allPathsCoords || []).filter(path => path && path.length > 0);
+      const geometryTasks = (allTasksCoords || []).filter(path => path && path.length > 0);
       const dataSignature = JSON.stringify({
         home: home,
-        geometryPaths: geometryPaths,
+        geometryTasks: geometryTasks,
         missionVehicleMarkers: missionVehicleMarkers
       });
       const dataChanged = state.lastDataSignature !== dataSignature;
@@ -532,10 +549,10 @@ private extension OSMMapView {
         points.push([home.lat, home.lon]);
       }
 
-      if (allPathsCoords && allPathsCoords.length > 0) {
-        allPathsCoords.forEach(pathCoords => {
-          if (!pathCoords || pathCoords.length === 0) return;
-          const latlngs = pathCoords.map(p => [p.lat, p.lon]);
+      if (allTasksCoords && allTasksCoords.length > 0) {
+        allTasksCoords.forEach(taskCoords => {
+          if (!taskCoords || taskCoords.length === 0) return;
+          const latlngs = taskCoords.map(p => [p.lat, p.lon]);
           const idx = pathLines.length;
           const line = L.polyline(latlngs, { color: pathColor(idx), weight: 3 }).addTo(map);
           pathLines.push(line);
@@ -543,7 +560,7 @@ private extension OSMMapView {
         });
       }
 
-      if (isEditingPath && selectedWaypoints && selectedWaypoints.length > 0) {
+      if (isEditingTask && selectedWaypoints && selectedWaypoints.length > 0) {
         const selectedLatLngs = selectedWaypoints.map(wp => [wp.lat, wp.lon]);
         if (selectedLatLngs.length > 1) {
           const routeLine = L.polyline(selectedLatLngs, { color: '#ffffff', weight: 3, opacity: 0.25 }).addTo(map);
@@ -562,7 +579,7 @@ private extension OSMMapView {
         selectedWaypoints.forEach((wp) => {
           const isSelected = selectedWaypointIndex === wp.idx;
           const marker = L.marker([wp.lat, wp.lon], {
-            draggable: isEditingPath,
+            draggable: isEditingTask,
             zIndexOffset: isSelected ? 1000 : 0,
             icon: L.divIcon({
               className: 'wp-dot',
@@ -579,7 +596,7 @@ private extension OSMMapView {
           marker.on('click', function() {
             window.webkit.messageHandlers.waypointClick.postMessage({ idx: wp.idx });
           });
-          if (isEditingPath) {
+          if (isEditingTask) {
             marker.on('dragend', function(e) {
               const pos = e.target.getLatLng();
               window.webkit.messageHandlers.waypointMove.postMessage({

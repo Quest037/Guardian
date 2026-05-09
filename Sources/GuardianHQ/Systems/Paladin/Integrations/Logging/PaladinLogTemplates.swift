@@ -19,25 +19,15 @@ enum PaladinLogTemplateKey {
     static let compileSummary = "paladin.compile.summary"
     static let sessionStaging = "paladin.session.staging"
 
-    // Schedule / cycle
-    static let scheduleLoopNextIn = "paladin.schedule.loop_next_in"
-    static let scheduleOneOffDeferred = "paladin.schedule.one_off_deferred"
-    static let scheduleOneOffPostponed = "paladin.schedule.one_off_postponed"
-    static let scheduleOneOffStartedImmediately = "paladin.schedule.one_off_started_immediately"
-    static let scheduleContinuousRestart = "paladin.schedule.continuous_restart"
+    // Schedule (deferred task starts, skip guards)
     static let scheduleSkipNoMission = "paladin.schedule.skip_no_mission"
-    static let scheduleLoopIntermissionSkipped = "paladin.schedule.loop_intermission_skipped"
-    static let scheduleLoopIntermissionExtended = "paladin.schedule.loop_intermission_extended"
-    /// First mission upload/start for a path is delayed after execution begins (``PathStartDelay``).
-    static let schedulePathMissionStartDeferred = "paladin.schedule.path_mission_start_deferred"
-    static let schedulePathMissionStartSkipped = "paladin.schedule.path_mission_start_skipped"
-    static let schedulePathMissionStartExtended = "paladin.schedule.path_mission_start_extended"
+    /// First mission upload/start for a task is delayed after execution begins (``TaskStartDelay``).
+    static let scheduleTaskMissionStartDeferred = "paladin.schedule.task_mission_start_deferred"
 
     // Run completion
     static let runStoppedImmediate = "paladin.run.stopped_immediate"
     static let runOneOffFinished = "paladin.run.one_off_finished"
     static let runGracefulAfterCycle = "paladin.run.graceful_after_cycle"
-    static let runLoopAllRepeatsDone = "paladin.run.loop_all_repeats_done"
 
     // Telemetry narrative
     static let telemetryAutopilotSnapshot = "paladin.telemetry.autopilot_snapshot"
@@ -174,7 +164,7 @@ extension MissionRunEvent {
     @MainActor
     func plainTextLine(templateRegistry: PaladinLogTemplateRegistry = .shared) -> String {
         let body = templateRegistry.resolveDisplayBody(for: self)
-        let pathPart = pathLabel.map { "[\($0)]" } ?? ""
+        let pathPart = taskLabel.map { "[\($0)]" } ?? ""
         let speakerPart: String
         switch speaker {
         case .missionControl: speakerPart = "[MissionControl]"

@@ -20,7 +20,7 @@ struct VehicleTelemetryInfoSheet: View {
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
-        GuardianModalTemplate(
+        Modal(
             title: title,
             headerActions: {
                 Picker("", selection: $mode) {

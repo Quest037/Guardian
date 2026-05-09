@@ -27,7 +27,7 @@
 
 - Make clicking non-input UI areas unfocus the currently focused input field (desktop blur-on-background-click behavior).
 - **Turn project into real .app:** this allows us to access lots of systems and permissions that our current swift build cannot.
-- **UserNotifications:** hook into MacOS user notifications system so that MC-R can keep user updated if app is running in background.
+- **UserNotifications:** hook into MacOS user notifications system so that MC-R can keep user updated if app is running in background. Include **MissionRunEnvironment → operator prompts** (see **Operator prompts subsystem** under `### MissionRunEnvironment`) when replacing the prompt stub with delivered notifications.
 - **Internationalization (i18n):** expand localization coverage beyond Paladin log templates to full UI copy, formatting rules, and locale-aware defaults.
 
 ## Utilities System
@@ -59,6 +59,10 @@ Missions are the templates created by users that involve telling one or more veh
 
 - **Mission Path Rosters:** Figure out how to design rosters so that you can do tag-teams, back-ups, leader+followers etc. Also, look at fixed values for roster card "role", so that Paladin knows what to do with a vehicle by default. 
 - **Custom Popup Mission Templates:** E.g. quick circle radius patrol with x vehicles & tag-team.
+- **Grid Card:** 
+  - Change Count/Duration counters to Tasks/Vehicles counters instead.
+  - Make static/mobile text a badge
+  - Get a map image snapshot as grid card image
 
 ## Mission Control
 
@@ -70,11 +74,15 @@ Mission Control: Environment is the world environment that mission control uses 
 
 ### Mission Control: Simulate Mode (Paladin Only)
 - **Mission Control Simulate mode:** add a simulation mode where live vehicle(s) test-run mission paths and feed results back into route refinement via trial-and-error updates. This is run by Paladin, but with operator standing by so that they can take over if a vehicle gets stuck and reroute so that the mission paths can be updated to account for it. This is basically mission testflighting.
+- **Failure injection:** ordered `[SimFailureInjection]` script. Start with a fixed enum (`.batteryFailsafeAt(percent:)`, `.gpsLossAt(seconds:)`, `.linkDropAt(seconds:)`, `.simulatedReturnToLaunch`); resist building a DSL until pain demands it.
 
 ### Mission Control: Setup
 - MC-Setup is the authoring surface; the policy/fixture model it edits lives under **MC-E** below. (Slot↔vehicle binding, scheduling, and `simStartOverrideCoord` UX continue to live on the MC-Setup screens.)
 
 ### Mission Control: Running
+- **Tasks:** - add ability for operator to start a task that is marked as operatorTriggered.
+- **Tasks:** - add functionality for tasks that use onceAtStart, twiceStartEnd.
+
 - **Command accountability:** `MissionRunIssuedCommand` carries `issuer` + `issuerKey`; operator aborts use `MissionRunCommandIssuerKey.localOperator` until HQ has a stable operator identity (account/session), then re-stamp `issuerKey` from that id. Same for LiveDrive / other surfaces issuing fleet commands.
 - Integrate CesiumJS system to offer 3D map version as well as Leaflet 2D map.
 - **MRE generic execution/projections:** remove single-drone / single-path assumptions across `MissionRunEnvironment` subsystems (especially planner/projections/executor) so runtime and UI fully support multi-path and multi-vehicle missions.
@@ -84,69 +92,31 @@ Mission Control: Environment is the world environment that mission control uses 
   - analyze ahead of time (and continuously at runtime) to prepare handovers before thresholds are reached,
   - improve fault handling lifecycle: retry policy, give-up criteria, contingency triggers, and explicit operator intervention prompts.
   - If mission is stopped early by operator determine if user should wait for vehicles to handle that or not. (Return to launch y/n etc.) Offer user choice. If it's a sim-only mission then allow them not to, otherwise if live that running screen should continue to be there until all drones have been accounted for. (User should see visuals about shutting the mission down).
+  - **RoE Updates:** - Allow the operator to update the RoE on the fly via a modal/overlay.
+
+
+### MissionRunEnvironment
+
+- **MRE Planner** - mission builder not respecting heading: "follow path" when it is selected. Example mission had drone pointing in wrong direction. (Test Operation Themistokles) (Or drone not understanding)
+- **MRE Logging:** - When vehicles talk make sure to use their title (callsign) to identify them, if not already.
+- **MRE Logging:** - Add a sub-system of Logging called Humanizing. It takes in log items and humanizes them for operators to understand better. (Makes it look like vehicles and assistants are actually speaking)
+
+- **Operator prompts subsystem (MC-R):** v1 ships `MissionRunPromptsSubsystem` + `.swapInReserve` only (stacked FIFO, act-gated raise, planner → immediate executor batch — batch is empty until real resolution lands). Follow-ups:
+  - **User Notifications:** replace `UserNotificationService.stubNotifyMissionRunOperatorPrompt` with real local notifications (category, thread by `runID`, copy for prompt kind + mission name + slot/path summary); align with **App System → UserNotifications** once the app runs as a proper `.app` and authorization is reliable. Optional notification actions (Accept/Decline) are a later UX decision — banner remains canonical while in-app.
+  - **Planner / executor resolution:** implement `buildSwapInReserveResolutionPlan` beyond the no-op batch (roster mutations, mission re-upload, staged commands, or handoff — whatever MC-E + fleet policy requires); stamp `MissionRunIssuedCommand` issuer/issuerKey consistently with other operator-approved automation.
+  - **Prompt taxonomy:** additional kinds beyond `.swapInReserve`;
+  - **UI:** refine stacked-prompt UX (peek next, reorder, snooze/deadline if product wants it); add `PaladinLogTemplateKey` for accept/dismiss/raise if logs should be template-driven.
+  - **Permissions / observers:** revisit whether any prompt operations beyond `.act` need finer gates once remote observers exist.
+  - **MRE Learn:** - MRE instance can learn from operator prompts with operator permission. Such as, "do this from now on", so it can update RoE on the fly.
 
 ### Mission Control: Completed
 - **Exporting:** export the mission report for outside app review. (Compact, Default, Full)
 
 
-### Mission Control: Environment (MC-E)
-
-- **Mission Control Environment (MC-E):** the authoritative artefact describing the conditions under which a `MissionRun` executes — the missing peer of **Plan** (route) and **Roster** (vehicles). Authored on the **MC-Setup** screens, consumed by **Paladin** at plan-compile and run time. This is what subsumes the previous scattered "set SIM battery %", "drain on/off per-SIM", "between-loop behavior policy", and "charging locations" tickets.
-  - **Two cohabiting structs (the SIM-vs-live split is structural, not conditional):**
-    1. `EnvironmentRules` — universal, applies to live + SIM (irrelevant fields are inert on the wrong side):
-       - **Engagement (Rules of Engagement):** per-action records `{ disposition, triggers }`, **not** flat `Bool`s. Action classes: `rtl`, `land`, `forceDisarm`, `takeoverFromOperator`, `requestOperatorHandoff`, plus a default for unenumerated commands. Dispositions:
-         - `.autonomous` — Paladin acts unilaterally.
-         - `.ask` — Paladin wants to act, requests operator confirmation first (yes/no roundtrip; Paladin is the actor).
-         - `.defer` — Paladin won't act until operator commands.
-         - `.forbidden` — Operator must do this; Paladin won't even ask.
-         - `.handoff` — **Paladin asks the operator to take over** (operator becomes the actor; Paladin steps back). Distinct from `.ask`: `.ask` is "may I do X?", `.handoff` is "you do X". Triggered by conditions like `.stuckForSeconds(60)`, `.geofenceBreachImminent`, `.batteryLowNoReserve`, `.gpsLostForSeconds(30)`.
-       - **Handover thresholds (roster-internal):** battery %, time-to-empty, distance-from-home at which Paladin should swap in a reserve / tag-team partner. **Naming note:** intra-roster *handover* (SIM A → reserve SIM B) is distinct from operator *handoff* (Paladin → operator) — the existing `PaladinHandoffMode` (`PaladinService.swift:30`) is intra-roster and keeps that name; operator handoff lives entirely in the engagement slice above.
-       - **Envelope:** geofence polygon, `maxAltitudeM`, `maxSpeedMS`, no-fly zones — Paladin refuses (or asks the operator) when commands would violate them. Envelope breaches are a primary trigger source for `.handoff` and `.ask` dispositions.
-       - **Role eligibility:** `mayBePrimary` / `mayBeReserve` / `mayBeTagTeamPartner` / `mayBeChargingBuddy`.
-    2. `SimFixtureEnvironment` — SIM-only, gated on `attachedFleetVehicleToken == .sitl`:
-       - **Start state:** `startBatteryPercent`, `startPose` (today's `simStartOverrideCoord` collapses into this).
-       - **Battery dynamics:** `drainEnabled` + `drainRate` (today's global `SimBatteryDrainRate` becomes the global default of this slice).
-       - **Failure injection:** ordered `[SimFailureInjection]` script. Start with a fixed enum (`.batteryFailsafeAt(percent:)`, `.gpsLossAt(seconds:)`, `.linkDropAt(seconds:)`, `.simulatedReturnToLaunch`); resist building a DSL until pain demands it.
-       - **Charging locations:** authored coordinates beyond mission home, persisted with the run.
-  - **3-layer resolution (mirrors `simStartOverrideCoord`'s precedent):**
-    - **Global default** in `GeneralSettingsStore`, optionally keyed by `(FleetVehicleType, FleetAutopilotStack)` so e.g. UGV-T and UAV-C carry different default envelopes.
-    - **Per-run override** on `MissionRun.environmentRunOverride: EnvironmentRules?` and `simFixtureRunOverride: SimFixtureEnvironment?`.
-    - **Per-slot override** on `MissionRunAssignment.environmentSlotOverride: EnvironmentRules?` and `simFixtureSlotOverride: SimFixtureEnvironment?`.
-    - Pure `EnvironmentResolver.resolve(...) -> ResolvedEnvironment` collapses the three layers at plan-compile time. `PaladinPlan` carries `effectiveEnvironment: [AssignmentID: ResolvedEnvironment]` so runtime never re-walks the hierarchy. `nil` at any layer means "inherit from below."
-  - **Architecture (5 slices):**
-    1. **Model layer.** New `Sources/GuardianHQ/MissionControlEnvironment.swift` — `EnvironmentRules`, `SimFixtureEnvironment`, `ResolvedEnvironment`, `EnvironmentResolver`, plus `enum PaladinEngagementDecision { case allow; case ask(prompt:); case defer_; case forbidden(reason:); case handoff(reason:) }` and `enum PaladinEngagementDisposition` / `enum PaladinEngagementTrigger`.
-    2. **Operator prompt channel.** New `Sources/GuardianHQ/PaladinOperatorPrompt.swift` — typed escalation channel parallel to `PaladinEvent`: `struct PaladinOperatorPrompt { id; severity; vehicleID; ask: PaladinPromptAsk; deadline: Date; autoAction: AutoAction }` where `PaladinPromptAsk` is `.confirmAction(...)` (for `.ask` disposition) / `.requestTakeover(reason:)` (for `.handoff` disposition) and `autoAction` says what happens if the operator doesn't respond by the deadline (`.continue` / `.rtl` / `.hold`). Routes through:
-       - **Inline:** mission console + the relevant vehicle card banner.
-       - **System:** macOS User Notifications (depends on the User Notifications TODO above).
-       - **Inbound:** when operator clicks "Take over" on a `.requestTakeover` prompt, the handler raises the manual-takeover gate against the prompted vehicle (`FleetLinkService.setCommandAuthorityGate(...)`, already plumbed at `LiveDriveView.swift:451`) and opens LiveDrive on it. The empty placeholder at `LiveDriveView.swift:522` is the natural landing for this. **Connects directly to** the LiveDrive takeover ticket above (operator-initiated takeover); together they're the two directions of the same UX.
-    3. **Model wiring.** Extend `MissionControlModels.swift` (add the optional override fields on `MissionRun` + `MissionRunAssignment`, with `Codable` migration tolerance for runs created before MC-E shipped), `GeneralSettingsStore.swift` (the global defaults), `PaladinService.swift` (`PaladinPlan` carries `effectiveEnvironment`, `PaladinRuntime.executeStagingPass` consumes `SimFixtureEnvironment`, plan-build consumes role eligibility).
-    4. **Paladin engagement gate.** New `Sources/GuardianHQ/PaladinEngagementGate.swift` — single entry point `shouldIssue(_ command:, under: ResolvedEnvironment, telemetry:) -> PaladinEngagementDecision`. Every `commands.append(...)` site in `PaladinService` routes through it. The gate evaluates `disposition` first, then walks `triggers` against current telemetry to decide whether to emit a `PaladinOperatorPrompt`. Without this gate, "may RTL?" sprawls into a forest of inline `if`s — that's the bug we're avoiding.
-    5. **UI.** Three surfaces, all reusing `settingsRow` + popover patterns we already have:
-       - **Settings → Mission Control → Environment defaults** — tabbed editor (`Engagement (RoE)` / `Handover` / `Envelope` / `Role eligibility` / `SIM fixtures`). SIM-fixture defaults keyed by `(FleetVehicleType, FleetAutopilotStack)` so per-class defaults Just Work. Engagement editor: per action-class row, disposition picker + a triggers builder.
-       - **MC-Setup run header → "Run environment overrides…"** sheet — same tabbed editor, only run-level fields, `"Inherits global"` badge on each unset field.
-       - **MC-Setup slot inspector → "Slot environment overrides…"** sheet alongside the existing `simStartOverrideCoord` editor. SIM-fixture sheet hides itself when the slot's token is `.live`.
-  - **Consumption points (single owner per slice — that's the litmus for whether the slice is well-shaped):**
-    - `SimFixtureEnvironment.startBatteryPercent` / `drainEnabled` / `drainRate` / `startPose` → `PaladinRuntime.executeStagingPass`. Already calls `FleetLinkService.setSimBatteryDrainEnabled(...)`; needs new `setSimBatteryStartPercent(...)` (ArduPilot `SIM_BATT_VOLTAGE`; PX4 SIH has no clean knob — pre-spawn parameter file is the likely workaround, document the asymmetry).
-    - `SimFixtureEnvironment.failureInjections` → new `Sources/GuardianHQ/PaladinFailureInjectionScheduler.swift` (run-lifetime, drains the script against wall-clock + telemetry triggers, emits `PaladinEvent`s on every injection).
-    - `EnvironmentRules.engagement` + `.envelope` → `PaladinEngagementGate` (sole consumer of both). Gate emits `PaladinOperatorPrompt`s for `.ask` and `.handoff` decisions.
-    - `EnvironmentRules.handover` → the runtime cycle planner that today produces `PaladinHandoffMode.thresholdDriven` (`PaladinService.swift`); replace the bool with the resolved threshold values.
-    - `EnvironmentRules.roleEligibility` → plan-build role-track assembler. Ineligible reserve = setup-time blocker, not a runtime surprise.
-  - **Live-vehicle scope:** `EnvironmentRules` applies universally; `SimFixtureEnvironment` is SIM-only. Live envelope enforcement is the most expensive bug surface — design the gate, ship the SIM path first, validate `.deny` on SITL before pointing it at a real aircraft.
-  - **Rollout sequence (ship-as-you-go):**
-    1. Model layer + resolver + plan-time integration. Empty UI. Verify resolved values land on `PaladinPlan` correctly via existing log surface (`PaladinEvent`). `PaladinOperatorPrompt` type lands here too (channel definition only — nothing emits or renders yet).
-    2. SIM fixtures slice end-to-end: `startBatteryPercent`, `drainEnabled`/`drainRate` per-SIM (the existing global drain rate setting moves into the resolver as the global default). Settings + per-slot UI. This delivers the user-visible "MC-S battery state" + "drain on/off per-SIM" tickets as a side-effect.
-    3. Engagement (RoE) + envelope through `PaladinEngagementGate`. Default every action class to `.autonomous` to start so no behaviour change; flip dispositions slice-by-slice as we validate. `.ask` rendering (mission console + vehicle card banner) lands here. `.handoff` triggers + system-notification rendering follow once macOS User Notifications ship.
-    4. Handover thresholds replace `paladinTightCycleHandoff`. Unblocks "MC-R Paladin reserve + handover orchestration" below.
-    5. Failure injection + charging locations.
-  - **Cross-references:**
-    - **Subsumes:** the standalone "SIM scenario commands" battery slice (top-of-file), "MC-S set battery state", "MC-S drain on/off per SIM", "MC-S between-loop behavior policy" + charging locations bullets.
-    - **Unblocks:** "MC-R Paladin reserve + handover orchestration", "MC-R Simulate Mode" (Simulate Mode is just MC-R with a synthetic environment — no separate config surface).
-    - **Independent (do NOT absorb):** vehicle autopilot tuning profile, LiveDrive controller integration, vehicle calibration flow. Tuning is "how the vehicle behaves on the wire"; environment is "the world it operates in."
-
 ## Paladin System
 Paladin is Guardian's mission running brain. It takes a mission template into mission control: running and executes it according to the specs and rules it is given.
 
-- **MC-E Vehicle API Key:** when Paladin runs a mission, it creates a secret API key for every vehicle involved. This key can be used by users to gain permission to take manual control of a vehicle during the mission to solve a problem.
+
 - **Paladin: staging override execution:** during **Start Run**, apply each setup `simStartOverrideCoord` directly to the assigned SIM vehicle before path execution begins (authoritative pre-stage reposition step), emit Paladin events for success/failure per slot, and surface failures as setup blockers with actionable operator messaging. (Once **MC-E** lands, this generalises to "apply each slot's resolved `SimFixtureEnvironment` — pose, battery %, drain rate, scheduled failures — as one cohesive staging step." Keep this ticket as the active path until MC-E rollout slice 2 supersedes it.)
 - **Paladin log copy / i18n:** every `PaladinEvent` carries a stable **`templateKey`** (see `PaladinLogTemplateKey` in `PaladinLogTemplates.swift`) plus **`templateParams`**; **`message`** stays the default English. To ship **our own wording** (or another language) without changing call sites, register format strings on **`PaladinLogTemplateRegistry.shared`** (e.g. `setTemplate(_:pattern:)` or `setTemplates`) using **`{{param}}`** placeholders that match the keys in `templateParams` for that event. Unregistered keys fall back to **`message`**. Next steps when we prioritize this: load patterns from **UserDefaults / JSON in the app bundle / `.lproj` string tables** keyed by `templateKey`, wire **locale** into the resolver, and optionally add a **Settings** UI to edit overrides. The live Paladin log and **`plainTextLine()`** export both resolve through the same registry.
 - **Paladin Fleet readiness autopopulation:** wire `PaladinFleetPreflightBridge` into real preflight result callsites in `MissionControlStore` and `VehiclesView` flow so `PaladinFleetDomain` readiness updates automatically from probe outcomes.

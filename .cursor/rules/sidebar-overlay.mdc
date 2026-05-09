@@ -1,0 +1,13 @@
+---
+description: Trailing sidebar overlays must use SidebarOverlay
+alwaysApply: true
+---
+
+# Sidebar overlay (slide-in panel + scrim)
+
+- **Do not** add local `ZStack` scrims + `transition(.move(edge: .trailing))` for app-wide trailing drawers.
+- **Do** use ``SidebarOverlay`` + ``View/withSidebarOverlay()`` (see ``Sources/GuardianHQ/General/Utilities/Templates/SidebarOverlay.swift``).
+- Inject ``@EnvironmentObject private var sidebarOverlay: SidebarOverlay`` and call ``present(title:preferredWidth:scrimTapDismisses:animation:content:)`` / ``dismiss()``.
+- Use ``title: nil`` when the content view already includes a full custom header (e.g. segmented control in the header). Use a non-nil ``title`` when the shared ``SidebarOverlayChrome`` (title + close) should wrap the body.
+- Dismiss overlays when leaving a screen if needed (e.g. ``onDisappear``); tab changes already call ``dismiss()`` from ``RootView``.
+- Modifier order on the window root: ``withToasts()`` **then** ``withSidebarOverlay()`` so drawers stack above toasts.

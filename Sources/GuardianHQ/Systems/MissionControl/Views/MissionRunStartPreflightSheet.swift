@@ -21,7 +21,7 @@ struct MissionRunStartPreflightSheet: View {
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
-        GuardianModalTemplate(
+        Modal(
             title: "Paladin preflight",
             subtitle: "Checking all vehicles are ready to be armed.",
             headerActions: {

@@ -55,16 +55,24 @@ final class PaladinMissionControlDomain: MissionControlRunObserver {
     @discardableResult
     private func attachAssistant(to run: MissionRunEnvironment) -> PaladinMissionAssistant {
         if let existing = assistantsByRunID[run.id] {
+            existing.missionControlStore = missionControlStore
+            existing.missionControlObserverToken = observerToken
             run.installAssistant(existing, key: PaladinMissionAssistant.assistantKey)
             return existing
         }
         let assistant = PaladinMissionAssistant(runID: run.id)
+        assistant.missionControlStore = missionControlStore
+        assistant.missionControlObserverToken = observerToken
         assistantsByRunID[run.id] = assistant
         run.installAssistant(assistant, key: PaladinMissionAssistant.assistantKey)
         return assistant
     }
 
     private func detachAssistant(from run: MissionRunEnvironment) {
+        if let assistant = assistantsByRunID[run.id] {
+            assistant.missionControlStore = nil
+            assistant.missionControlObserverToken = nil
+        }
         run.removeAssistant(forKey: PaladinMissionAssistant.assistantKey)
         assistantsByRunID.removeValue(forKey: run.id)
     }

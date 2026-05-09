@@ -7,18 +7,84 @@ enum MissionType: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// Mission behavioral / persona role for MRE and Paladin (e.g. scout); extend over time.
+enum RosterRole: String, Codable, CaseIterable, Identifiable {
+    case none
+
+    var id: String { rawValue }
+}
+
+/// Primary / wingman / reserve for a roster slot (mission template). Hardware binds in Mission Control.
+enum MissionRosterSlotRole: String, Codable, CaseIterable, Identifiable {
+    case primary
+    case wingman
+    case reserve
+
+    var id: String { rawValue }
+}
+
 /// A placeholder device slot on the mission roster (assign real hardware later).
 struct RosterDevice: Identifiable, Codable, Equatable {
     let id: UUID
     var name: String
-    var roleType: String
-    var positionHint: String
+    /// Behavioral / persona role for MRE and Paladin (scout, etc.); ``none`` until expanded.
+    var role: RosterRole
+    var slot: MissionRosterSlotRole
+    var vehicleClass: FleetVehicleType
+    /// When ``slot`` is ``wingman`` or ``reserve``, optional primary on this task to follow; if nil, MRE may infer.
+    var leaderRosterDeviceId: UUID?
 
-    init(id: UUID = UUID(), name: String, roleType: String, positionHint: String) {
+    init(
+        id: UUID = UUID(),
+        name: String,
+        role: RosterRole = .none,
+        slot: MissionRosterSlotRole = .primary,
+        vehicleClass: FleetVehicleType = .unknown,
+        leaderRosterDeviceId: UUID? = nil
+    ) {
         self.id = id
         self.name = name
-        self.roleType = roleType
-        self.positionHint = positionHint
+        self.role = role
+        self.slot = slot
+        self.vehicleClass = vehicleClass
+        self.leaderRosterDeviceId = leaderRosterDeviceId
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, role, slot, vehicleClass, leaderRosterDeviceId
+        case legacyWingmanPrimaryRosterDeviceId = "wingmanPrimaryRosterDeviceId"
+        case legacyCharacter = "character"
+        case legacySlotRole = "slotRole"
+        case positionHint
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        role = try c.decodeIfPresent(RosterRole.self, forKey: .role)
+            ?? (try c.decodeIfPresent(RosterRole.self, forKey: .legacyCharacter)) ?? .none
+        if let sr = try c.decodeIfPresent(MissionRosterSlotRole.self, forKey: .slot) {
+            slot = sr
+        } else if let sr = try c.decodeIfPresent(MissionRosterSlotRole.self, forKey: .legacySlotRole) {
+            slot = sr
+        } else {
+            slot = .primary
+        }
+        vehicleClass = try c.decodeIfPresent(FleetVehicleType.self, forKey: .vehicleClass) ?? .unknown
+        leaderRosterDeviceId = try c.decodeIfPresent(UUID.self, forKey: .leaderRosterDeviceId)
+            ?? (try c.decodeIfPresent(UUID.self, forKey: .legacyWingmanPrimaryRosterDeviceId))
+        _ = try? c.decodeIfPresent(String.self, forKey: .positionHint)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(role, forKey: .role)
+        try c.encode(slot, forKey: .slot)
+        try c.encode(vehicleClass, forKey: .vehicleClass)
+        try c.encodeIfPresent(leaderRosterDeviceId, forKey: .leaderRosterDeviceId)
     }
 }
 
@@ -112,7 +178,7 @@ enum DelayUnit: String, Codable, CaseIterable, Identifiable {
 }
 
 enum HeadingPreset: String, Codable, CaseIterable, Identifiable {
-    case followPath
+    case followCourse
     case perimeterOutward
     case perimeterInward
     case north
@@ -127,9 +193,9 @@ enum HeadingPreset: String, Codable, CaseIterable, Identifiable {
         let raw = (try? container.decode(String.self)) ?? ""
         switch raw {
         case "auto":
-            self = .followPath
-        case "followPath":
-            self = .followPath
+            self = .followCourse
+        case "followPath", "followCourse":
+            self = .followCourse
         case "perimeterOutward":
             self = .perimeterOutward
         case "perimeterInward":
@@ -143,7 +209,7 @@ enum HeadingPreset: String, Codable, CaseIterable, Identifiable {
         case "west":
             self = .west
         default:
-            self = .followPath
+            self = .followCourse
         }
     }
 
@@ -348,42 +414,188 @@ struct RouteWaypoint: Identifiable, Codable, Equatable {
     }
 }
 
-struct RoutePath: Identifiable, Codable, Equatable {
+/// How a ``MissionTask`` is executed on the autopilot stack (authoring; runtime may narrow further).
+enum MissionTaskExecutionMethod: String, Codable, CaseIterable, Identifiable {
+    case group
+    case staggered
+
+    var id: String { rawValue }
+
+    var displayTitle: String {
+        switch self {
+        case .group: return "Group"
+        case .staggered: return "Staggered"
+        }
+    }
+
+    /// Migrates legacy persisted `executionMethod` strings.
+    static func migrated(fromRaw raw: String) -> MissionTaskExecutionMethod {
+        switch raw.lowercased() {
+        case "staggered": return .staggered
+        case "group": return .group
+        case "mavlink", "manual_guided", "companion_offboard": return .group
+        default: return .group
+        }
+    }
+}
+
+/// How often this task is intended to run within a broader mission schedule.
+enum MissionTaskRegularity: String, Codable, CaseIterable, Identifiable {
+    case onceAtStart
+    case twiceStartEnd
+    case continuous
+    case continuousWithDelay
+    case operatorTriggered
+
+    var id: String { rawValue }
+
+    var displayTitle: String {
+        switch self {
+        case .onceAtStart: return "Once at start"
+        case .twiceStartEnd: return "Twice (start & end)"
+        case .continuous: return "Continuous"
+        case .continuousWithDelay: return "Continuous with delay"
+        case .operatorTriggered: return "Operator triggered"
+        }
+    }
+
+    /// Migrates legacy persisted `regularity` strings.
+    static func migrated(fromRaw raw: String) -> MissionTaskRegularity {
+        switch raw.lowercased() {
+        case "onceatstart", "once", "once_per_run", "onceperrun": return .onceAtStart
+        case "twicestartend", "twice_start_end": return .twiceStartEnd
+        case "continuous", "each_loop", "eachmissionloop": return .continuous
+        case "continuouswithdelay", "continuous_with_delay": return .continuousWithDelay
+        case "operatortriggered", "operator", "operator_keyed", "operatorkeyed": return .operatorTriggered
+        default: return .onceAtStart
+        }
+    }
+}
+
+/// High-level formation / route pattern for planner and authoring (distinct from waypoint loop geometry).
+enum MissionTaskPattern: String, Codable, CaseIterable, Identifiable {
+    case patrol
+    case convoy
+
+    var id: String { rawValue }
+
+    var displayTitle: String {
+        switch self {
+        case .patrol: return "Patrol"
+        case .convoy: return "Convoy"
+        }
+    }
+}
+
+/// One executable route + roster slice in a mission (formerly ``RoutePath``). JSON still uses the `paths` array key under ``RouteMacro``.
+struct MissionTask: Identifiable, Codable, Equatable {
     let id: UUID
     var name: String
     var enabled: Bool
     var waypoints: [RouteWaypoint]
     var loopMode: String
+    /// Meaningful when ``regularity`` is ``continuous`` or ``continuousWithDelay`` (planner / MC). Clamped to 0...100.
     var repeatCount: Int
-    var scheduleRefs: [String]
-    /// Device slots assigned to this path (IDs into `Mission.rosterDevices`).
+    /// Minutes between continuous repeats when ``regularity`` is ``continuousWithDelay``. Clamped to 1...60.
+    var regularityDelayMinutes: Int
+    /// Autopilot / planner execution strategy for this task.
+    var executionMethod: MissionTaskExecutionMethod
+    /// Cadence / scheduling intent for this task within the mission.
+    var regularity: MissionTaskRegularity
+    /// Formation / pattern intent (e.g. patrol vs convoy column).
+    var pattern: MissionTaskPattern
+    /// Device slots assigned to this task (IDs into `Mission.rosterDevices`).
     var rosterDeviceIds: [UUID]
+    /// Default minutes (0…59) to defer this task’s MAVLink mission upload/start after execution begins; MC Setup can override per run (``TaskStartDelay``).
+    var startDelay: Int
 
     enum CodingKeys: String, CodingKey {
-        case id, name, enabled, waypoints, loopMode, repeatCount, scheduleRefs
+        case id, name, enabled, waypoints, loopMode, repeatCount
+        case executionMethod, regularity, pattern, regularityDelayMinutes, startDelay
         case rosterDeviceIds = "spaceBindings"
+        case legacyScheduleRefs = "scheduleRefs"
     }
 
     init(
         id: UUID = UUID(),
-        name: String = "Path 1",
+        name: String = "Task 1",
         enabled: Bool = true,
         waypoints: [RouteWaypoint] = [],
         loopMode: String = "none",
         repeatCount: Int = 1,
-        scheduleRefs: [String] = [],
-        rosterDeviceIds: [UUID] = []
+        regularityDelayMinutes: Int = 1,
+        executionMethod: MissionTaskExecutionMethod = .group,
+        regularity: MissionTaskRegularity = .onceAtStart,
+        pattern: MissionTaskPattern = .patrol,
+        rosterDeviceIds: [UUID] = [],
+        startDelay: Int = 0
     ) {
         self.id = id
         self.name = name
         self.enabled = enabled
         self.waypoints = waypoints
         self.loopMode = loopMode
-        self.repeatCount = repeatCount
-        self.scheduleRefs = scheduleRefs
+        self.repeatCount = min(100, max(0, repeatCount))
+        self.regularityDelayMinutes = min(60, max(1, regularityDelayMinutes))
+        self.executionMethod = executionMethod
+        self.regularity = regularity
+        self.pattern = pattern
         self.rosterDeviceIds = rosterDeviceIds
+        self.startDelay = min(59, max(0, startDelay))
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        waypoints = try c.decodeIfPresent([RouteWaypoint].self, forKey: .waypoints) ?? []
+        loopMode = try c.decodeIfPresent(String.self, forKey: .loopMode) ?? "none"
+        let decodedRepeat = try c.decodeIfPresent(Int.self, forKey: .repeatCount) ?? 1
+        repeatCount = min(100, max(0, decodedRepeat))
+        let decodedDelay = try c.decodeIfPresent(Int.self, forKey: .regularityDelayMinutes) ?? 1
+        regularityDelayMinutes = min(60, max(1, decodedDelay))
+        rosterDeviceIds = try c.decodeIfPresent([UUID].self, forKey: .rosterDeviceIds) ?? []
+        _ = try? c.decodeIfPresent([String].self, forKey: .legacyScheduleRefs)
+
+        if let raw = try c.decodeIfPresent(String.self, forKey: .executionMethod) {
+            executionMethod = MissionTaskExecutionMethod(rawValue: raw)
+                ?? MissionTaskExecutionMethod.migrated(fromRaw: raw)
+        } else {
+            executionMethod = .group
+        }
+
+        if let raw = try c.decodeIfPresent(String.self, forKey: .regularity) {
+            regularity = MissionTaskRegularity(rawValue: raw)
+                ?? MissionTaskRegularity.migrated(fromRaw: raw)
+        } else {
+            regularity = .onceAtStart
+        }
+
+        pattern = try c.decodeIfPresent(MissionTaskPattern.self, forKey: .pattern) ?? .patrol
+        let decodedStartDelay = try c.decodeIfPresent(Int.self, forKey: .startDelay) ?? 0
+        startDelay = min(59, max(0, decodedStartDelay))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(enabled, forKey: .enabled)
+        try c.encode(waypoints, forKey: .waypoints)
+        try c.encode(loopMode, forKey: .loopMode)
+        try c.encode(repeatCount, forKey: .repeatCount)
+        try c.encode(regularityDelayMinutes, forKey: .regularityDelayMinutes)
+        try c.encode(executionMethod, forKey: .executionMethod)
+        try c.encode(regularity, forKey: .regularity)
+        try c.encode(pattern, forKey: .pattern)
+        try c.encode(rosterDeviceIds, forKey: .rosterDeviceIds)
+        try c.encode(startDelay, forKey: .startDelay)
     }
 }
+
+/// Legacy name used in Mission Control for a single executable route (``MissionTask``).
+typealias RoutePath = MissionTask
 
 struct RouteRules: Codable, Equatable {
     var defaultSpeed: Double
@@ -397,20 +609,63 @@ struct RouteRules: Codable, Equatable {
 
 struct RouteMacro: Codable, Equatable {
     var version: Int
-    var home: RouteHome?
-    var paths: [RoutePath]
+    /// Mission tasks (serialized as `paths` for backward compatibility).
+    var tasks: [MissionTask]
     var rules: RouteRules
+
+    enum CodingKeys: String, CodingKey {
+        case version, rules
+        case tasks = "paths"
+    }
 
     init(
         version: Int = 1,
-        home: RouteHome? = nil,
-        paths: [RoutePath] = [],
+        tasks: [MissionTask] = [],
         rules: RouteRules = RouteRules()
     ) {
         self.version = version
-        self.home = home
-        self.paths = paths
+        self.tasks = tasks
         self.rules = rules
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        tasks = try c.decodeIfPresent([MissionTask].self, forKey: .tasks) ?? []
+        rules = try c.decodeIfPresent(RouteRules.self, forKey: .rules) ?? RouteRules()
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(version, forKey: .version)
+        try c.encode(tasks, forKey: .tasks)
+        try c.encode(rules, forKey: .rules)
+    }
+}
+
+extension RouteMacro {
+    /// Launch / map reference derived from the first waypoint of an enabled task (or any task).
+    var home: RouteHome? {
+        for task in tasks where task.enabled {
+            guard let wp = task.waypoints.first else { continue }
+            return RouteHome(
+                coord: wp.coord,
+                altitude: wp.altitude,
+                heading: wp.heading,
+                radiusMeters: 3,
+                dockAllowed: true,
+                fallbackOnly: false
+            )
+        }
+        guard let wp = tasks.flatMap(\.waypoints).first else { return nil }
+        return RouteHome(
+            coord: wp.coord,
+            altitude: wp.altitude,
+            heading: wp.heading,
+            radiusMeters: 3,
+            dockAllowed: true,
+            fallbackOnly: false
+        )
     }
 }
 
@@ -473,12 +728,11 @@ struct Mission: Identifiable, Codable {
             let legacyMapRegion = try container.decodeIfPresent(String.self, forKey: .mapRegion) ?? ""
             let legacyRoutePlan = try container.decodeIfPresent(String.self, forKey: .routePlan) ?? ""
             routeMacro = RouteMacro(
-                home: RouteHome(),
-                paths: legacyRoutePlan.isEmpty ? [] : [RoutePath(name: "Imported Path")],
+                tasks: legacyRoutePlan.isEmpty ? [] : [MissionTask(name: "Imported task")],
                 rules: RouteRules()
             )
             if !legacyMapRegion.isEmpty {
-                routeMacro.paths = [RoutePath(name: legacyMapRegion)]
+                routeMacro.tasks = [MissionTask(name: legacyMapRegion)]
             }
         }
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()

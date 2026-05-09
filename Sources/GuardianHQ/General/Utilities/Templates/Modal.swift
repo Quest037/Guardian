@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Shared modal shell used across sheets/popovers for consistent visual structure:
 /// header (title + optional subtitle left, actions right) + body content.
-struct GuardianModalTemplate<BodyContent: View, HeaderActions: View>: View {
+struct Modal<BodyContent: View, HeaderActions: View>: View {
     let title: String
     let subtitle: String?
     @ViewBuilder let headerActions: () -> HeaderActions

@@ -9,6 +9,7 @@ struct LiveDriveView: View {
     @ObservedObject var manualControlSettings: ManualControlSettingsStore
     @ObservedObject var generalSettings: GeneralSettingsStore
     @EnvironmentObject private var toastCenter: ToastCenter
+    @EnvironmentObject private var sidebarOverlay: SidebarOverlay
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var mapModel = GuardianMapModel(preserveView: true)
     @State private var vehiclePickerVisible = false
@@ -36,130 +37,70 @@ struct LiveDriveView: View {
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
+    private var liveDriveSidebarAnimation: Animation {
+        .easeInOut(duration: 0.2)
+    }
+
     var body: some View {
-        ZStack {
-            VStack(spacing: 0) {
-                subBar
+        VStack(spacing: 0) {
+            subBar
 
-                GeometryReader { geo in
-                    let spacing: CGFloat = 14
-                    let outerPadding: CGFloat = 16
-                    let totalW = geo.size.width
-                    let totalH = geo.size.height
-                    let contentW = max(0, totalW - (outerPadding * 2))
-                    let contentH = max(0, totalH - (outerPadding * 2))
-                    // Left column is 70% of content area width (explicit requirement).
-                    let leftW = contentW * 0.7
-                    // Right column consumes remaining width after gutter.
-                    let rightW = max(0, contentW - leftW - spacing)
-                    // Left column vertical split is 70/30 (with gutter accounted for).
-                    let mediaH = max(220, (contentH - spacing) * 0.7)
-                    let telemetryH = max(120, (contentH - spacing) * 0.3)
+            GeometryReader { geo in
+                let spacing: CGFloat = 14
+                let outerPadding: CGFloat = 16
+                let totalW = geo.size.width
+                let totalH = geo.size.height
+                let contentW = max(0, totalW - (outerPadding * 2))
+                let contentH = max(0, totalH - (outerPadding * 2))
+                // Left column is 70% of content area width (explicit requirement).
+                let leftW = contentW * 0.7
+                // Right column consumes remaining width after gutter.
+                let rightW = max(0, contentW - leftW - spacing)
+                // Left column vertical split is 70/30 (with gutter accounted for).
+                let mediaH = max(220, (contentH - spacing) * 0.7)
+                let telemetryH = max(120, (contentH - spacing) * 0.3)
 
-                    HStack(alignment: .top, spacing: spacing) {
-                        VStack(spacing: spacing) {
-                            mediaCard
-                                .frame(maxWidth: .infinity)
-                                .frame(height: mediaH)
-                            telemetryCard
-                                .frame(height: telemetryH)
-                        }
-                        .frame(width: leftW)
-
-                        logCard
-                            .frame(width: rightW, height: contentH)
+                HStack(alignment: .top, spacing: spacing) {
+                    VStack(spacing: spacing) {
+                        mediaCard
+                            .frame(maxWidth: .infinity)
+                            .frame(height: mediaH)
+                        telemetryCard
+                            .frame(height: telemetryH)
                     }
-                    .padding(outerPadding)
-                    .frame(width: totalW, height: totalH, alignment: .topLeading)
+                    .frame(width: leftW)
+
+                    logCard
+                        .frame(width: rightW, height: contentH)
                 }
-            }
-            .background(
-                KeyboardEventMonitor(
-                    isEnabled: keyboardControlsEnabled,
-                    onKeyDown: { event in handleKeyboardKeyDown(event) },
-                    onKeyUp: { event in handleKeyboardKeyUp(event) }
-                )
-            )
-            // Safety net: if the user switches apps / windows while a key is held, the
-            // `keyUp` event never reaches us. Without this, the vehicle would keep streaming
-            // forward velocity in the background. Resigning key window flushes the held set,
-            // and the next stream tick pushes a zero setpoint (vehicle decelerates to hover).
-            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
-                handleWindowResignKey()
-            }
-
-            if vehiclePickerVisible {
-                theme.overlayScrim
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            vehiclePickerVisible = false
-                        }
-                    }
-                    .transition(.opacity)
-                    .zIndex(1)
-            }
-
-            if vehiclePickerVisible {
-                LiveDriveVehiclePickerSidebar(
-                    vehicles: pickableVehicles,
-                    selectedVehicleID: selectedVehicleID,
-                    onSelect: { vehicle in
-                        store.selectVehicle(resolvedVehicleID(for: vehicle))
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            vehiclePickerVisible = false
-                        }
-                        mapModel.recenter()
-                    },
-                    onClose: {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            vehiclePickerVisible = false
-                        }
-                    }
-                )
-                .frame(width: 380)
-                .frame(maxHeight: .infinity)
-                .background(theme.backgroundElevated)
-                .overlay(alignment: .leading) {
-                    Rectangle()
-                        .fill(theme.borderSubtle)
-                        .frame(width: 1)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
-                .transition(.move(edge: .trailing))
-                .zIndex(2)
-            }
-
-            if simControlsSidebarVisible {
-                theme.overlayScrim
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            simControlsSidebarVisible = false
-                        }
-                    }
-                    .transition(.opacity)
-                    .zIndex(3)
-            }
-
-            if simControlsSidebarVisible {
-                liveSimControlsSidebar
-                    .frame(width: 340)
-                    .frame(maxHeight: .infinity)
-                    .background(theme.backgroundElevated)
-                    .overlay(alignment: .leading) {
-                        Rectangle()
-                            .fill(theme.borderSubtle)
-                            .frame(width: 1)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
-                    .transition(.move(edge: .trailing))
-                    .zIndex(4)
+                .padding(outerPadding)
+                .frame(width: totalW, height: totalH, alignment: .topLeading)
             }
         }
+        .background(
+            KeyboardEventMonitor(
+                isEnabled: keyboardControlsEnabled,
+                onKeyDown: { event in handleKeyboardKeyDown(event) },
+                onKeyUp: { event in handleKeyboardKeyUp(event) }
+            )
+        )
+        // Safety net: if the user switches apps / windows while a key is held, the
+        // `keyUp` event never reaches us. Without this, the vehicle would keep streaming
+        // forward velocity in the background. Resigning key window flushes the held set,
+        // and the next stream tick pushes a zero setpoint (vehicle decelerates to hover).
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+            handleWindowResignKey()
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onChange(of: sidebarOverlay.presentationRevision) { _ in
+            if sidebarOverlay.presented == nil {
+                vehiclePickerVisible = false
+                simControlsSidebarVisible = false
+            }
+        }
+        .onDisappear {
+            sidebarOverlay.dismiss()
+        }
         .sheet(item: $preflightPurpose) { purpose in
             if let vehicle = selectedPickableVehicle,
                let vehicleID = selectedVehicleID {
@@ -296,8 +237,13 @@ struct LiveDriveView: View {
                 if let selectedVehicleID, isSimulationVehicle(vehicleID: selectedVehicleID) {
                     Button {
                         liveSimBatteryDrainRate = generalSettings.defaultSimBatteryDrainRate
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            simControlsSidebarVisible.toggle()
+                        if simControlsSidebarVisible {
+                            sidebarOverlay.dismiss(animation: liveDriveSidebarAnimation)
+                            simControlsSidebarVisible = false
+                        } else {
+                            vehiclePickerVisible = false
+                            simControlsSidebarVisible = true
+                            presentLiveDriveSimControlsSidebar()
                         }
                     } label: {
                         Image(systemName: "gearshape")
@@ -308,8 +254,13 @@ struct LiveDriveView: View {
             } else {
                 Spacer(minLength: 2)
                 Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        vehiclePickerVisible.toggle()
+                    if vehiclePickerVisible {
+                        sidebarOverlay.dismiss(animation: liveDriveSidebarAnimation)
+                        vehiclePickerVisible = false
+                    } else {
+                        simControlsSidebarVisible = false
+                        vehiclePickerVisible = true
+                        presentLiveDriveVehiclePickerSidebar()
                     }
                 } label: {
                     Label("Vehicle Picker", systemImage: "line.3.horizontal.decrease.circle")
@@ -342,28 +293,9 @@ struct LiveDriveView: View {
         .help(store.hasActiveSession ? "End the session to change input device" : "Choose keyboard or controller")
     }
 
-    private var liveSimControlsSidebar: some View {
+    /// Body only; title + close come from ``SidebarOverlay`` / ``SidebarOverlayChrome``.
+    private var liveSimControlsSidebarBody: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("SIM Live Settings")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(theme.textPrimary)
-                Spacer(minLength: 8)
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        simControlsSidebarVisible = false
-                    }
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 18, weight: .medium))
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .keyboardShortcut(.cancelAction)
-                .help("Close")
-            }
-
             Text("Battery drain")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(theme.textPrimary)
@@ -387,7 +319,41 @@ struct LiveDriveView: View {
 
             Spacer(minLength: 0)
         }
-        .padding(14)
+    }
+
+    private func presentLiveDriveVehiclePickerSidebar() {
+        sidebarOverlay.present(
+            title: nil,
+            preferredWidth: 380,
+            scrimTapDismisses: true,
+            animation: liveDriveSidebarAnimation
+        ) {
+            LiveDriveVehiclePickerSidebar(
+                vehicles: pickableVehicles,
+                selectedVehicleID: selectedVehicleID,
+                onSelect: { vehicle in
+                    store.selectVehicle(resolvedVehicleID(for: vehicle))
+                    sidebarOverlay.dismiss(animation: liveDriveSidebarAnimation)
+                    mapModel.recenter()
+                },
+                onClose: {
+                    sidebarOverlay.dismiss(animation: liveDriveSidebarAnimation)
+                }
+            )
+        }
+    }
+
+    private func presentLiveDriveSimControlsSidebar() {
+        sidebarOverlay.present(
+            title: "SIM Live Settings",
+            preferredWidth: 340,
+            scrimTapDismisses: true,
+            animation: liveDriveSidebarAnimation
+        ) {
+            liveSimControlsSidebarBody
+                .padding(14)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
     }
 
     private func startFreestyleSession() {
@@ -788,7 +754,7 @@ struct LiveDriveView: View {
             }) else { continue }
             let roleFromPlan = run.compiledPlan?.roleTracks
                 .first(where: { $0.assignmentID == assignment.id })?
-                .pathDisplayName
+                .taskDisplayName
             return (assignment.slotName, roleFromPlan)
         }
         return nil

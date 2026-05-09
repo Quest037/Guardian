@@ -142,9 +142,8 @@ struct MissionsView: View {
                 selectedMissionID = nil
                 toastCenter.show("Mission deleted", style: .success)
             },
-            onSave: { updatedMission in
+            persistMission: { updatedMission in
                 store.updateMission(updatedMission)
-                toastCenter.show("Mission saved", style: .success)
             },
             onToast: { message, style in
                 toastCenter.show(message, style: style)
@@ -154,58 +153,92 @@ struct MissionsView: View {
 }
 
 private struct RouteTabMapSignature: Equatable {
-    let homeCoord: RouteCoordinate?
-    let allPathsCoords: [[RouteCoordinate]]
+    let allTasksCoords: [[RouteCoordinate]]
     let selectedWaypoints: [RouteCoordinate]
     let selectedWaypointIndex: Int?
     let headingPreview: HeadingPreview?
     let cameraPreview: CameraPreview?
-    let isEditingPath: Bool
+    let isEditingTask: Bool
+}
+
+/// Drives ``View/sheet(item:onDismiss:content:)`` so bulk-edit content is never built as ``EmptyView`` on first open.
+private struct BulkWaypointEditorSheetContext: Identifiable {
+    let id = UUID()
+    let taskIndex: Int
 }
 
 private struct MissionWorkspaceView: View {
     enum WorkspaceTab: String, CaseIterable, Identifiable {
         case details = "Details"
         case roster = "Roster"
-        case route = "Route"
+        case tasks = "Tasks"
         var id: String { rawValue }
+    }
+
+    private struct RosterDeviceEditOverlayContext: Equatable {
+        let taskIndex: Int
+        let deviceId: UUID
+    }
+
+    /// One row in the Roster tab vehicle list (order may differ from ``MissionTask/rosterDeviceIds`` for grouped display).
+    private struct TaskRosterDisplayRow: Identifiable {
+        let deviceId: UUID
+        /// `0` = primary (or ungrouped slot); `1` = wingman / reserve shown under a primary.
+        let indentLevel: Int
+        var id: UUID { deviceId }
     }
 
     @State private var draft: Mission
     @State private var activeTab: WorkspaceTab = .details
-    @State private var selectedPathIndex = 0
-    @State private var editingPathIndex: Int?
+    @State private var selectedTaskIndex = 0
+    @State private var editingTaskIndex: Int?
     @State private var selectedWaypointIndex: Int?
     @StateObject private var mapModel: GuardianMapModel
-    @State private var setHomeFromMap = false
-    @State private var showingDeleteHomeConfirm = false
-    @State private var pendingDeletePathIndex: Int?
-    @State private var pendingCloseLoopPathIndex: Int?
+    @State private var pendingDeleteTaskIndex: Int?
+    @State private var pendingCloseLoopTaskIndex: Int?
     @State private var showingDeleteMissionConfirm = false
-    @State private var pathRosterDrafts: [UUID: PathRosterDraft] = [:]
-    @State private var showingBulkWaypointEditor = false
-    @State private var bulkEditPathIndex: Int?
+    @State private var taskRosterDrafts: [UUID: TaskRosterDraft] = [:]
+    @State private var bulkWaypointEditorSheetContext: BulkWaypointEditorSheetContext?
     @State private var bulkWaypointDraft = RouteWaypoint()
     @State private var focusedHeadingFieldKey: String?
     @State private var focusedWaypointCameraFieldKey: String?
     @State private var focusedTransitionCameraFieldKey: String?
     @State private var suppressNextMapClick = false
     @State private var detailsDescriptionEditorHeight: CGFloat = 96
+    /// Task settings panel hosted **inside** this view so `draft` updates refresh pickers (global ``SidebarOverlay`` does not re-run with mission `@State`).
+    @State private var taskSettingsOverlayTaskIndex: Int?
+    /// Roster-tab vehicle edit panel (same scrim + slide pattern as task settings).
+    @State private var rosterDeviceEditContext: RosterDeviceEditOverlayContext?
+    @State private var showingRosterDeleteConfirm = false
+    @State private var pendingRosterDelete: RosterDeviceEditOverlayContext?
+    /// Coalesces disk writes while typing mission name / description on the Details tab.
+    @State private var debouncedPersistMissionTask: Task<Void, Never>?
     @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var sidebarOverlay: SidebarOverlay
 
     let onBack: () -> Void
     let onDelete: (Mission) -> Void
-    let onSave: (Mission) -> Void
+    /// Writes the mission to persistent storage (no UI feedback).
+    let persistMission: (Mission) -> Void
     let onToast: (String, ToastStyle) -> Void
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
+    /// Matches wingman/reserve “Leader” label + menu footprint so the add row does not jump when Slot changes.
+    private static let rosterAddRowSupportsColumnWidth: CGFloat = 264
+    /// Leading inset per nesting level for wingmen / reserves under a primary.
+    private static let rosterSlotGroupIndentStep: CGFloat = 16
+
+    private var missionTaskSettingsSidebarAnimation: Animation {
+        .spring(response: 0.36, dampingFraction: 0.88)
+    }
 
     init(
         mission: Mission,
         defaultMapTileStyle: MapTileStyle,
         onBack: @escaping () -> Void,
         onDelete: @escaping (Mission) -> Void,
-        onSave: @escaping (Mission) -> Void,
+        persistMission: @escaping (Mission) -> Void,
         onToast: @escaping (String, ToastStyle) -> Void
     ) {
         _draft = State(initialValue: mission)
@@ -214,95 +247,122 @@ private struct MissionWorkspaceView: View {
         )
         self.onBack = onBack
         self.onDelete = onDelete
-        self.onSave = onSave
+        self.persistMission = persistMission
         self.onToast = onToast
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Picker("", selection: $activeTab) {
-                    ForEach(WorkspaceTab.allCases) { tab in
-                        Text(tab.rawValue).tag(tab)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 360, alignment: .leading)
-
-                Spacer()
-
-                Button {
-                    onBack()
-                } label: {
-                    Image(systemName: "arrow.left")
-                        .appIconGlyph()
-                }
-                .buttonStyle(.bordered)
-                .uniformIconButton()
-
-                Button {
-                    if editingPathIndex != nil {
-                        onToast("Finish path editing before saving mission", .info)
-                        return
-                    }
-                    onSave(draft)
-                } label: {
-                    Image(systemName: "externaldrive.fill")
-                        .appIconGlyph()
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.blue)
-                .help("Save Mission")
-                .uniformIconButton()
-
-                Button {
-                    showingDeleteMissionConfirm = true
-                } label: {
-                    Image(systemName: "trash")
-                        .appIconGlyph()
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .help("Delete Mission")
-                .uniformIconButton()
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .frame(maxWidth: .infinity)
-            .background(theme.backgroundRaised)
-
-            if activeTab == .route {
-                routeTab
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        switch activeTab {
-                        case .details:
-                            detailsTab
-                        case .roster:
-                            rosterTab
-                        case .route:
-                            EmptyView()
+        ZStack {
+            VStack(spacing: 0) {
+                HStack {
+                    Picker("", selection: $activeTab) {
+                        ForEach(WorkspaceTab.allCases) { tab in
+                            Text(tab.rawValue).tag(tab)
                         }
                     }
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 18)
-                    .frame(maxWidth: .infinity)
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 360, alignment: .leading)
+
+                    Spacer()
+
+                    Button {
+                        onBack()
+                    } label: {
+                        Image(systemName: "arrow.left")
+                            .appIconGlyph()
+                    }
+                    .buttonStyle(.bordered)
+                    .uniformIconButton()
+
+                    Button {
+                        showingDeleteMissionConfirm = true
+                    } label: {
+                        Image(systemName: "trash")
+                            .appIconGlyph()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .help("Delete Mission")
+                    .uniformIconButton()
                 }
-                .background(theme.backgroundBase)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity)
+                .background(theme.backgroundRaised)
+
+                if activeTab == .tasks {
+                    tasksTab
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 14) {
+                            switch activeTab {
+                            case .details:
+                                detailsTab
+                            case .roster:
+                                rosterTab
+                            case .tasks:
+                                EmptyView()
+                            }
+                        }
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 18)
+                        .frame(maxWidth: .infinity)
+                    }
+                    .background(theme.backgroundBase)
+                }
+            }
+            .background(theme.backgroundBase)
+
+            if taskSettingsOverlayValidatedIndex != nil {
+                theme.overlayScrim
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture { dismissMissionTaskSettingsOverlay() }
+                    .transition(.opacity)
+                    .zIndex(49)
+            }
+            if let taskIndex = taskSettingsOverlayValidatedIndex {
+                missionTaskSettingsOverlayPanel(taskIndex: taskIndex)
+                    .transition(.move(edge: .trailing))
+                    .zIndex(50)
+            }
+
+            if rosterDeviceEditValidatedContext != nil {
+                theme.overlayScrim
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture { dismissRosterDeviceEditOverlay() }
+                    .transition(.opacity)
+                    .zIndex(51)
+            }
+            if let ctx = rosterDeviceEditValidatedContext {
+                missionRosterDeviceEditOverlayPanel(context: ctx)
+                    .transition(.move(edge: .trailing))
+                    .zIndex(52)
             }
         }
-        .background(theme.backgroundBase)
-        .onChange(of: editingPathIndex) { _ in
+        .animation(missionTaskSettingsSidebarAnimation, value: taskSettingsOverlayTaskIndex)
+        .animation(missionTaskSettingsSidebarAnimation, value: rosterDeviceEditContext)
+        .onChange(of: editingTaskIndex) { newIndex in
             clearPreviewFocusState()
+            if newIndex != nil {
+                sidebarOverlay.dismiss()
+                taskSettingsOverlayTaskIndex = nil
+                rosterDeviceEditContext = nil
+            }
         }
-        .onChange(of: selectedPathIndex) { _ in
+        .onChange(of: selectedTaskIndex) { _ in
             clearPreviewFocusState()
         }
         .onChange(of: activeTab) { tab in
-            if tab != .route {
+            if tab != .tasks {
+                sidebarOverlay.dismiss()
+                taskSettingsOverlayTaskIndex = nil
                 clearPreviewFocusState()
+            }
+            if tab != .roster {
+                rosterDeviceEditContext = nil
             }
         }
         .alert("Delete Mission?", isPresented: $showingDeleteMissionConfirm) {
@@ -313,34 +373,83 @@ private struct MissionWorkspaceView: View {
         } message: {
             Text("This will permanently remove this mission.")
         }
-        .sheet(isPresented: $showingBulkWaypointEditor, onDismiss: {
-            bulkEditPathIndex = nil
-        }) {
-            if let pathIndex = bulkEditPathIndex, draft.routeMacro.paths.indices.contains(pathIndex) {
-                bulkWaypointEditorSheet(pathIndex: pathIndex)
-            } else {
-                EmptyView()
+        .alert("Remove vehicle?", isPresented: $showingRosterDeleteConfirm) {
+            Button("Cancel", role: .cancel) {
+                pendingRosterDelete = nil
             }
+            Button("Remove", role: .destructive) {
+                if let pending = pendingRosterDelete {
+                    performRemoveRosterDeviceFromTask(taskIndex: pending.taskIndex, deviceId: pending.deviceId)
+                    pendingRosterDelete = nil
+                }
+            }
+        } message: {
+            Text(rosterDeleteConfirmMessage)
         }
+        .sheet(item: $bulkWaypointEditorSheetContext) { ctx in
+            bulkWaypointEditorSheet(taskIndex: ctx.taskIndex)
+        }
+        .onChange(of: draft.name) { _ in scheduleDebouncedPersistMission() }
+        .onChange(of: draft.description) { _ in scheduleDebouncedPersistMission() }
+        .onChange(of: draft.type) { _ in persistMissionToStoreNow() }
+        .onDisappear {
+            debouncedPersistMissionTask?.cancel()
+            debouncedPersistMissionTask = nil
+            persistMission(draft)
+        }
+    }
+
+    private func scheduleDebouncedPersistMission() {
+        debouncedPersistMissionTask?.cancel()
+        debouncedPersistMissionTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            guard !Task.isCancelled else { return }
+            persistMission(draft)
+        }
+    }
+
+    private func persistMissionToStoreNow() {
+        debouncedPersistMissionTask?.cancel()
+        debouncedPersistMissionTask = nil
+        persistMission(draft)
     }
 
     private var detailsTab: some View {
         Group {
             card("Edit Mission") {
-                TextField("Name", text: $draft.name)
-                    .textFieldStyle(.roundedBorder)
-                AutoGrowingTextEditor(
-                    text: $draft.description,
-                    measuredHeight: $detailsDescriptionEditorHeight,
-                    placeholder: "Description",
-                    minHeight: 96,
-                    maxHeight: 220
-                )
-                Picker("Type", selection: $draft.type) {
-                    Text("mobile").tag(MissionType.mobile)
-                    Text("static").tag(MissionType.staticType)
+                VStack(alignment: .leading, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Mission Name")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(theme.textPrimary)
+                        TextField("", text: $draft.name, prompt: Text("Mission name").foregroundColor(theme.textTertiary))
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Mission Description")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(theme.textPrimary)
+                        AutoGrowingTextEditor(
+                            text: $draft.description,
+                            measuredHeight: $detailsDescriptionEditorHeight,
+                            placeholder: "Description",
+                            minHeight: 96,
+                            maxHeight: 220
+                        )
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Type")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(theme.textPrimary)
+                        Picker("", selection: $draft.type) {
+                            Text("mobile").tag(MissionType.mobile)
+                            Text("static").tag(MissionType.staticType)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                    }
                 }
-                .pickerStyle(.segmented)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -349,42 +458,42 @@ private struct MissionWorkspaceView: View {
         Group {
             VStack(alignment: .leading, spacing: 14) {
                 card("Roster") {
-                    Text("Devices per path")
+                    Text("Vehicles per task")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(theme.textPrimary)
                     Text(
-                        "Each route path can carry one or more expected devices. Use labels and roles for planning; "
-                            + "you will bind real drones or payloads later in Mission Control."
+                        "Each mission task lists the vehicles you expect on that route. Use callsigns and slots for planning; "
+                            + "you will bind real aircraft in Mission Control."
                     )
                     .font(.system(size: 12))
                     .foregroundStyle(theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 }
 
-                if draft.routeMacro.paths.isEmpty {
-                    card("Paths") {
-                        Text("No paths yet. Add paths on the Route tab, then assign devices to each path here.")
+                if draft.routeMacro.tasks.isEmpty {
+                    card("Tasks") {
+                        Text("No tasks yet. Add tasks on the Tasks tab, then assign vehicles to each task here.")
                             .foregroundStyle(theme.textSecondary)
                     }
                 } else {
-                    ForEach(Array(draft.routeMacro.paths.enumerated()), id: \.element.id) { pathIndex, _ in
-                        pathRosterCard(pathIndex: pathIndex)
+                    ForEach(Array(draft.routeMacro.tasks.enumerated()), id: \.element.id) { taskIndex, _ in
+                        taskRosterCard(taskIndex: taskIndex)
                     }
                 }
             }
         }
     }
 
-    private func pathRosterCard(pathIndex: Int) -> some View {
-        let path = draft.routeMacro.paths[pathIndex]
-        let pathId = path.id
+    private func taskRosterCard(taskIndex: Int) -> some View {
+        let path = draft.routeMacro.tasks[taskIndex]
+        let taskId = path.id
         return VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
                 TextField(
-                    "Path name",
+                    "Task name",
                     text: Binding(
-                        get: { draft.routeMacro.paths[pathIndex].name },
-                        set: { draft.routeMacro.paths[pathIndex].name = $0 }
+                        get: { draft.routeMacro.tasks[taskIndex].name },
+                        set: { draft.routeMacro.tasks[taskIndex].name = $0 }
                     )
                 )
                 .textFieldStyle(.plain)
@@ -392,6 +501,16 @@ private struct MissionWorkspaceView: View {
                 .foregroundStyle(theme.textPrimary)
 
                 Spacer(minLength: 8)
+
+                Button {
+                    presentTaskSettingsSidebar(taskIndex: taskIndex)
+                } label: {
+                    Image(systemName: "gearshape.fill")
+                        .appIconGlyph()
+                }
+                .buttonStyle(.bordered)
+                .uniformIconButton()
+                .help("Task settings")
 
                 Text("\(path.waypoints.count) waypoints")
                     .font(.system(size: 11, weight: .medium))
@@ -403,30 +522,44 @@ private struct MissionWorkspaceView: View {
             .background(theme.backgroundElevated)
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Devices on this path")
+                Text("Vehicles on this task")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(theme.textSecondary)
 
                 if path.rosterDeviceIds.isEmpty {
-                    Text("None yet — add one below.")
+                    Text("None yet — use the row below.")
                         .font(.system(size: 11))
                         .foregroundStyle(theme.textTertiary)
                 } else {
                     VStack(alignment: .leading, spacing: 6) {
-                        ForEach(path.rosterDeviceIds, id: \.self) { deviceId in
-                            if let device = draft.rosterDevices.first(where: { $0.id == deviceId }) {
-                                HStack(alignment: .center) {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(device.name)
-                                            .font(.system(size: 13, weight: .semibold))
-                                            .foregroundStyle(theme.textPrimary)
-                                        Text(deviceSubtitle(device))
-                                            .font(.system(size: 11))
-                                            .foregroundStyle(theme.textSecondary)
-                                    }
-                                    Spacer(minLength: 8)
+                        ForEach(taskRosterDisplayRows(for: path)) { row in
+                            if let device = draft.rosterDevices.first(where: { $0.id == row.deviceId }) {
+                                HStack(alignment: .center, spacing: 8) {
+                                    Text(device.name)
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(theme.textPrimary)
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
+
+                                    rosterDeviceInlineBadges(device: device)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.78)
+                                        .layoutPriority(0)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+
                                     Button {
-                                        removeRosterDeviceFromPath(pathIndex: pathIndex, deviceId: deviceId)
+                                        presentRosterDeviceEdit(taskIndex: taskIndex, deviceId: row.deviceId)
+                                    } label: {
+                                        Image(systemName: "pencil")
+                                            .appIconGlyph()
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                    .uniformIconButton(width: 30, height: 26)
+                                    .help("Edit vehicle")
+
+                                    Button {
+                                        requestRemoveRosterDevice(taskIndex: taskIndex, deviceId: row.deviceId)
                                     } label: {
                                         Image(systemName: "trash")
                                             .appIconGlyph()
@@ -435,8 +568,11 @@ private struct MissionWorkspaceView: View {
                                     .tint(.red)
                                     .controlSize(.small)
                                     .uniformIconButton(width: 30, height: 26)
+                                    .help("Remove vehicle")
                                 }
+                                .padding(.leading, CGFloat(row.indentLevel) * Self.rosterSlotGroupIndentStep)
                                 .padding(.vertical, 4)
+                                .accessibilityElement(children: .combine)
                             }
                         }
                     }
@@ -444,31 +580,136 @@ private struct MissionWorkspaceView: View {
 
                 Divider().overlay(theme.borderSubtle)
 
-                Text("Add device")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(theme.textSecondary)
+                HStack(alignment: .center, spacing: 8) {
+                    TextField(
+                        "Callsign",
+                        text: Binding(
+                            get: { taskRosterDrafts[taskId]?.name ?? "" },
+                            set: { v in
+                                var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
+                                d.name = v
+                                taskRosterDrafts[taskId] = d
+                            }
+                        )
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
+                    .layoutPriority(0)
 
-                HStack(spacing: 8) {
-                    TextField(
-                        "Device label",
-                        text: rosterDraftFieldBinding(pathId: pathId, keyPath: \.name)
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    TextField(
+                    Picker(
+                        "Class",
+                        selection: Binding(
+                            get: { taskRosterDrafts[taskId]?.vehicleClass ?? .unknown },
+                            set: { v in
+                                var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
+                                d.vehicleClass = v
+                                taskRosterDrafts[taskId] = d
+                            }
+                        )
+                    ) {
+                        ForEach(FleetVehicleType.allCases, id: \.self) { t in
+                            Text(t.classCode).tag(t)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(minWidth: 100, idealWidth: 120, maxWidth: 160, alignment: .leading)
+                    .layoutPriority(1)
+
+                    Picker(
                         "Role",
-                        text: rosterDraftFieldBinding(pathId: pathId, keyPath: \.role)
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    TextField(
-                        "Notes",
-                        text: rosterDraftFieldBinding(pathId: pathId, keyPath: \.hint)
-                    )
-                    .textFieldStyle(.roundedBorder)
+                        selection: Binding(
+                            get: { taskRosterDrafts[taskId]?.role ?? .none },
+                            set: { v in
+                                var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
+                                d.role = v
+                                taskRosterDrafts[taskId] = d
+                            }
+                        )
+                    ) {
+                        ForEach(RosterRole.allCases) { c in
+                            Text(c.rawValue.capitalized).tag(c)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(minWidth: 148, idealWidth: 168, maxWidth: 220, alignment: .leading)
+                    .layoutPriority(1)
+
+                    Picker(
+                        "Slot",
+                        selection: Binding(
+                            get: { taskRosterDrafts[taskId]?.slot ?? .primary },
+                            set: { v in
+                                var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
+                                d.slot = v
+                                if v != .wingman && v != .reserve { d.leaderRosterDeviceId = nil }
+                                taskRosterDrafts[taskId] = d
+                            }
+                        )
+                    ) {
+                        ForEach(MissionRosterSlotRole.allCases) { r in
+                            Text(r.rawValue.capitalized).tag(r)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(minWidth: 148, idealWidth: 168, maxWidth: 220, alignment: .leading)
+                    .layoutPriority(1)
+
+                    // Reserve width so switching Slot away from wingman/reserve does not collapse or jump the row.
+                    Group {
+                        let slotNeedsLeader = {
+                            let s = taskRosterDrafts[taskId]?.slot ?? .primary
+                            return s == .wingman || s == .reserve
+                        }()
+                        let primaries = primaryRosterDevices(on: path)
+                        if slotNeedsLeader {
+                            HStack(spacing: 8) {
+                                Text("Leader")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(theme.textSecondary)
+                                    .fixedSize()
+                                    .padding(.leading, 4)
+                                if primaries.isEmpty {
+                                    Text("—")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(theme.textTertiary)
+                                        .lineLimit(1)
+                                } else {
+                                    Picker(
+                                        "Leader",
+                                        selection: Binding(
+                                            get: { taskRosterDrafts[taskId]?.leaderRosterDeviceId },
+                                            set: { v in
+                                                var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
+                                                d.leaderRosterDeviceId = v
+                                                taskRosterDrafts[taskId] = d
+                                            }
+                                        )
+                                    ) {
+                                        Text("Auto").tag(UUID?.none)
+                                        ForEach(primaries) { p in
+                                            Text(p.name).tag(Optional(p.id))
+                                        }
+                                    }
+                                    .labelsHidden()
+                                    .pickerStyle(.menu)
+                                    .frame(minWidth: 120, idealWidth: 140, maxWidth: 200, alignment: .leading)
+                                    .accessibilityLabel("Leader")
+                                }
+                            }
+                        } else {
+                            Color.clear
+                                .accessibilityHidden(true)
+                        }
+                    }
+                    .frame(width: Self.rosterAddRowSupportsColumnWidth, alignment: .leading)
+                    .layoutPriority(1)
+
                     Button("Add") {
-                        addRosterDeviceToPath(pathIndex: pathIndex)
+                        addRosterDeviceToTask(taskIndex: taskIndex)
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(.blue)
+                    .layoutPriority(1)
                 }
             }
             .padding(12)
@@ -483,31 +724,301 @@ private struct MissionWorkspaceView: View {
         )
     }
 
-    private func deviceSubtitle(_ device: RosterDevice) -> String {
-        let role = device.roleType.trimmingCharacters(in: .whitespacesAndNewlines)
-        let hint = device.positionHint.trimmingCharacters(in: .whitespacesAndNewlines)
-        if role.isEmpty, hint.isEmpty { return "—" }
-        if role.isEmpty { return hint }
-        if hint.isEmpty { return role }
-        return "\(role) · \(hint)"
-    }
-
-    private func rosterDraftFieldBinding(pathId: UUID, keyPath: WritableKeyPath<PathRosterDraft, String>) -> Binding<String> {
-        Binding(
-            get: { (pathRosterDrafts[pathId] ?? PathRosterDraft())[keyPath: keyPath] },
-            set: { newValue in
-                var draftRow = pathRosterDrafts[pathId] ?? PathRosterDraft()
-                draftRow[keyPath: keyPath] = newValue
-                pathRosterDrafts[pathId] = draftRow
+    @ViewBuilder
+    private func rosterDeviceInlineBadges(device: RosterDevice) -> some View {
+        HStack(spacing: 6) {
+            rosterNeutralCapsuleBadge(device.vehicleClass.classCode)
+            rosterSlotSemanticCapsuleBadge(device.slot)
+            rosterNeutralCapsuleBadge(rosterBehaviorRoleLabel(device.role))
+            if device.slot == .wingman || device.slot == .reserve {
+                rosterNeutralCapsuleBadge(rosterLeaderBadgeCaption(device))
             }
-        )
+        }
     }
 
-    private var routeTab: some View {
-        ZStack {
-            VStack(spacing: 0) {
-                HStack(spacing: 0) {
-                    GuardianMapView(
+    @ViewBuilder
+    private func rosterNeutralCapsuleBadge(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(GuardianSemanticColors.neutralBadgeForeground)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(GuardianSemanticColors.neutralBadgeBackground)
+            .clipShape(Capsule())
+    }
+
+    private func rosterSlotSemanticColors(_ slot: MissionRosterSlotRole) -> (background: Color, foreground: Color) {
+        switch slot {
+        case .primary:
+            return (GuardianSemanticColors.infoBackground, GuardianSemanticColors.infoForeground)
+        case .wingman:
+            return (GuardianSemanticColors.successBackground, GuardianSemanticColors.successForeground)
+        case .reserve:
+            return (GuardianSemanticColors.warningBackground, GuardianSemanticColors.warningForeground)
+        }
+    }
+
+    @ViewBuilder
+    private func rosterSlotSemanticCapsuleBadge(_ slot: MissionRosterSlotRole) -> some View {
+        let pair = rosterSlotSemanticColors(slot)
+        Text(slot.rawValue.capitalized)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(pair.foreground)
+            .lineLimit(1)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(pair.background)
+            .clipShape(Capsule())
+    }
+
+    private func rosterBehaviorRoleLabel(_ role: RosterRole) -> String {
+        role == .none ? "None" : role.rawValue.capitalized
+    }
+
+    private func rosterLeaderBadgeCaption(_ device: RosterDevice) -> String {
+        if let pid = device.leaderRosterDeviceId,
+           let leader = draft.rosterDevices.first(where: { $0.id == pid }) {
+            return leader.name
+        }
+        return "Auto"
+    }
+
+    private func primaryRosterDevices(on path: MissionTask) -> [RosterDevice] {
+        path.rosterDeviceIds.compactMap { id in draft.rosterDevices.first { $0.id == id } }
+            .filter { $0.slot == .primary }
+    }
+
+    /// Primaries in mission roster order, then each primary’s wingmen and reserves (by roster order); trailing slots are supports without a matching primary leader or other edge cases.
+    private func taskRosterDisplayRows(for path: MissionTask) -> [TaskRosterDisplayRow] {
+        let ids = path.rosterDeviceIds
+        func device(for rosterId: UUID) -> RosterDevice? {
+            draft.rosterDevices.first { $0.id == rosterId }
+        }
+
+        var emitted = Set<UUID>()
+        var rows: [TaskRosterDisplayRow] = []
+
+        let primaryIds = ids.filter { device(for: $0)?.slot == .primary }
+        for pid in primaryIds {
+            guard device(for: pid)?.slot == .primary else { continue }
+            rows.append(TaskRosterDisplayRow(deviceId: pid, indentLevel: 0))
+            emitted.insert(pid)
+
+            let wingmanIds = ids.filter {
+                guard let d = device(for: $0), d.slot == .wingman, d.leaderRosterDeviceId == pid else { return false }
+                return true
+            }
+            let reserveIds = ids.filter {
+                guard let d = device(for: $0), d.slot == .reserve, d.leaderRosterDeviceId == pid else { return false }
+                return true
+            }
+            for wid in wingmanIds {
+                rows.append(TaskRosterDisplayRow(deviceId: wid, indentLevel: 1))
+                emitted.insert(wid)
+            }
+            for rid in reserveIds {
+                rows.append(TaskRosterDisplayRow(deviceId: rid, indentLevel: 1))
+                emitted.insert(rid)
+            }
+        }
+
+        for id in ids where !emitted.contains(id) {
+            let d = device(for: id)
+            let indent = (d?.slot == .wingman || d?.slot == .reserve) ? 1 : 0
+            rows.append(TaskRosterDisplayRow(deviceId: id, indentLevel: indent))
+            emitted.insert(id)
+        }
+
+        return rows
+    }
+
+    private func presentTaskSettingsSidebar(taskIndex: Int) {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex) else { return }
+        withAnimation(missionTaskSettingsSidebarAnimation) {
+            rosterDeviceEditContext = nil
+            taskSettingsOverlayTaskIndex = taskIndex
+        }
+    }
+
+    private func dismissMissionTaskSettingsOverlay() {
+        withAnimation(missionTaskSettingsSidebarAnimation) {
+            taskSettingsOverlayTaskIndex = nil
+        }
+    }
+
+    private func presentRosterDeviceEdit(taskIndex: Int, deviceId: UUID) {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex),
+              draft.rosterDevices.contains(where: { $0.id == deviceId }) else { return }
+        withAnimation(missionTaskSettingsSidebarAnimation) {
+            taskSettingsOverlayTaskIndex = nil
+            rosterDeviceEditContext = RosterDeviceEditOverlayContext(taskIndex: taskIndex, deviceId: deviceId)
+        }
+    }
+
+    private func dismissRosterDeviceEditOverlay() {
+        withAnimation(missionTaskSettingsSidebarAnimation) {
+            rosterDeviceEditContext = nil
+        }
+    }
+
+    /// Index for the task-settings overlay when it is allowed to show (avoids duplicate `if` guard drift).
+    private var taskSettingsOverlayValidatedIndex: Int? {
+        guard let i = taskSettingsOverlayTaskIndex,
+              draft.routeMacro.tasks.indices.contains(i) else { return nil }
+        return i
+    }
+
+    private var rosterDeviceEditValidatedContext: RosterDeviceEditOverlayContext? {
+        guard let ctx = rosterDeviceEditContext,
+              draft.routeMacro.tasks.indices.contains(ctx.taskIndex),
+              draft.rosterDevices.contains(where: { $0.id == ctx.deviceId }) else { return nil }
+        return ctx
+    }
+
+    private var rosterDeleteConfirmMessage: String {
+        guard let pending = pendingRosterDelete,
+              draft.routeMacro.tasks.indices.contains(pending.taskIndex) else {
+            return "This removes the vehicle from this task roster."
+        }
+        var parts = ["This removes the vehicle from this task roster."]
+        if let d = draft.rosterDevices.first(where: { $0.id == pending.deviceId }), d.slot == .primary {
+            let n = dependentLeaderSlotCount(primaryId: pending.deviceId, taskIndex: pending.taskIndex)
+            if n > 0 {
+                parts.append(
+                    "It will also remove \(n) wingman or reserve slot(s) on this task that follow this primary."
+                )
+            }
+        }
+        return parts.joined(separator: "\n\n")
+    }
+
+    private func dependentLeaderSlotCount(primaryId: UUID, taskIndex: Int) -> Int {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex) else { return 0 }
+        let taskIds = draft.routeMacro.tasks[taskIndex].rosterDeviceIds
+        return taskIds.filter { did in
+            guard did != primaryId,
+                  let d = draft.rosterDevices.first(where: { $0.id == did }) else { return false }
+            return (d.slot == .wingman || d.slot == .reserve) && d.leaderRosterDeviceId == primaryId
+        }.count
+    }
+
+    private func requestRemoveRosterDevice(taskIndex: Int, deviceId: UUID) {
+        pendingRosterDelete = RosterDeviceEditOverlayContext(taskIndex: taskIndex, deviceId: deviceId)
+        showingRosterDeleteConfirm = true
+    }
+
+    private func performRemoveRosterDeviceFromTask(taskIndex: Int, deviceId: UUID) {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex) else { return }
+        var idsToRemove: Set<UUID> = [deviceId]
+        if let device = draft.rosterDevices.first(where: { $0.id == deviceId }), device.slot == .primary {
+            let taskIds = draft.routeMacro.tasks[taskIndex].rosterDeviceIds
+            for did in taskIds where did != deviceId {
+                guard let d = draft.rosterDevices.first(where: { $0.id == did }) else { continue }
+                if (d.slot == .wingman || d.slot == .reserve), d.leaderRosterDeviceId == deviceId {
+                    idsToRemove.insert(did)
+                }
+            }
+        }
+        draft.routeMacro.tasks[taskIndex].rosterDeviceIds.removeAll { idsToRemove.contains($0) }
+        for id in idsToRemove {
+            let stillReferenced = draft.routeMacro.tasks.contains { $0.rosterDeviceIds.contains(id) }
+            if !stillReferenced {
+                draft.rosterDevices.removeAll { $0.id == id }
+            }
+        }
+        if let ctx = rosterDeviceEditContext, idsToRemove.contains(ctx.deviceId) {
+            rosterDeviceEditContext = nil
+        }
+        persistMissionToStoreNow()
+    }
+
+    /// Trailing task-settings column only. The scrim is a **sibling** view in the workspace `ZStack` so each layer’s
+    /// ``View/transition(_:)`` is a separate insertion root — nested transitions under one inserted `ZStack` do not animate reliably.
+    @ViewBuilder
+    private func missionTaskSettingsOverlayPanel(taskIndex: Int) -> some View {
+        let path = draft.routeMacro.tasks[taskIndex]
+        let trimmedName = path.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = trimmedName.isEmpty ? "Task settings" : "Task settings — \(trimmedName)"
+        let panelWidth = CGFloat(min(560, max(260, 400)))
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            SidebarOverlayChrome(title: title, onClose: dismissMissionTaskSettingsOverlay) {
+                MissionTaskSettingsSidebar(
+                    task: Binding(
+                        get: { draft.routeMacro.tasks[taskIndex] },
+                        set: { draft.routeMacro.tasks[taskIndex] = $0 }
+                    ),
+                    onSave: {
+                        persistMissionToStoreNow()
+                        dismissMissionTaskSettingsOverlay()
+                    }
+                )
+                .padding(16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            .frame(width: panelWidth)
+            .frame(maxHeight: .infinity, alignment: .top)
+            .background(theme.backgroundElevated)
+            .overlay(alignment: .leading) {
+                Rectangle()
+                    .fill(theme.borderSubtle)
+                    .frame(width: 1)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+        .onExitCommand { dismissMissionTaskSettingsOverlay() }
+    }
+
+    @ViewBuilder
+    private func missionRosterDeviceEditOverlayPanel(context: RosterDeviceEditOverlayContext) -> some View {
+        let taskIndex = context.taskIndex
+        let deviceId = context.deviceId
+        let path = draft.routeMacro.tasks[taskIndex]
+        let deviceName = draft.rosterDevices.first(where: { $0.id == deviceId })?.name ?? ""
+        let trimmed = deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = trimmed.isEmpty ? "Vehicle" : "Vehicle — \(trimmed)"
+        let panelWidth = CGFloat(min(560, max(260, 400)))
+        let primaries = primaryRosterDevices(on: path)
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            SidebarOverlayChrome(title: title, onClose: dismissRosterDeviceEditOverlay) {
+                if let deviceIndex = draft.rosterDevices.firstIndex(where: { $0.id == deviceId }) {
+                    MissionRosterDeviceSettingsSidebar(
+                        device: Binding(
+                            get: { draft.rosterDevices[deviceIndex] },
+                            set: { draft.rosterDevices[deviceIndex] = $0 }
+                        ),
+                        primariesOnTask: primaries,
+                        onSave: {
+                            persistMissionToStoreNow()
+                            dismissRosterDeviceEditOverlay()
+                        }
+                    )
+                    .padding(16)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+            }
+            .frame(width: panelWidth)
+            .frame(maxHeight: .infinity, alignment: .top)
+            .background(theme.backgroundElevated)
+            .overlay(alignment: .leading) {
+                Rectangle()
+                    .fill(theme.borderSubtle)
+                    .frame(width: 1)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+        .onExitCommand { dismissRosterDeviceEditOverlay() }
+    }
+
+    private var tasksTab: some View {
+        GeometryReader { geo in
+            let mapWidth = geo.size.width * 0.7
+            let listWidth = geo.size.width * 0.3
+            HStack(spacing: 0) {
+                GuardianMapView(
                         model: mapModel,
                         contextMenuPolicy: GuardianMapContextMenuPolicy(
                             vehicleActions: [],
@@ -519,216 +1030,126 @@ private struct MissionWorkspaceView: View {
                                 suppressNextMapClick = false
                                 return
                             }
-                            if setHomeFromMap {
-                                var home = draft.routeMacro.home ?? RouteHome()
-                                home.coord.lat = lat
-                                home.coord.lon = lon
-                                draft.routeMacro.home = home
-                                setHomeFromMap = false
-                                onToast("Home saved from map", .success)
-                                return
-                            }
 
-                            guard let pathIndex = editingPathIndex,
-                                  draft.routeMacro.paths.indices.contains(pathIndex) else { return }
+                            guard let taskIndex = editingTaskIndex,
+                                  draft.routeMacro.tasks.indices.contains(taskIndex) else { return }
 
-                            draft.routeMacro.paths[pathIndex].waypoints.append(
+                            draft.routeMacro.tasks[taskIndex].waypoints.append(
                                 RouteWaypoint(
                                     coord: RouteCoordinate(lat: lat, lon: lon),
-                                    headingPreset: .followPath
+                                    headingPreset: .followCourse
                                 )
                             )
-                            refreshAutoHeadings(for: pathIndex)
-                            selectedPathIndex = pathIndex
-                            selectedWaypointIndex = draft.routeMacro.paths[pathIndex].waypoints.count - 1
+                            refreshAutoHeadings(for: taskIndex)
+                            selectedTaskIndex = taskIndex
+                            selectedWaypointIndex = draft.routeMacro.tasks[taskIndex].waypoints.count - 1
                             onToast("Waypoint added", .success)
+                            persistMissionToStoreNow()
                         },
                         onContextAction: { event in
                             guard event.markerType == .waypoint,
                                   event.action == .deleteWaypoint,
                                   let markerID = event.markerID,
                                   let idx = Int(markerID),
-                                  let pathIndex = editingPathIndex,
-                                  draft.routeMacro.paths.indices.contains(pathIndex),
-                                  draft.routeMacro.paths[pathIndex].waypoints.indices.contains(idx)
+                                  let taskIndex = editingTaskIndex,
+                                  draft.routeMacro.tasks.indices.contains(taskIndex),
+                                  draft.routeMacro.tasks[taskIndex].waypoints.indices.contains(idx)
                             else { return }
-                            draft.routeMacro.paths[pathIndex].waypoints.remove(at: idx)
-                            refreshAutoHeadings(for: pathIndex)
+                            draft.routeMacro.tasks[taskIndex].waypoints.remove(at: idx)
+                            refreshAutoHeadings(for: taskIndex)
                             if let selectedWaypointIndex, selectedWaypointIndex == idx {
                                 self.selectedWaypointIndex = nil
                             }
+                            persistMissionToStoreNow()
                         },
                         onWaypointClick: { idx in
                             selectedWaypointIndex = idx
                         },
                         onWaypointMoved: { idx, lat, lon in
-                            guard let pathIndex = editingPathIndex,
-                                  draft.routeMacro.paths.indices.contains(pathIndex),
-                                  draft.routeMacro.paths[pathIndex].waypoints.indices.contains(idx) else { return }
-                            draft.routeMacro.paths[pathIndex].waypoints[idx].coord.lat = lat
-                            draft.routeMacro.paths[pathIndex].waypoints[idx].coord.lon = lon
-                            refreshAutoHeadings(for: pathIndex)
+                            guard let taskIndex = editingTaskIndex,
+                                  draft.routeMacro.tasks.indices.contains(taskIndex),
+                                  draft.routeMacro.tasks[taskIndex].waypoints.indices.contains(idx) else { return }
+                            draft.routeMacro.tasks[taskIndex].waypoints[idx].coord.lat = lat
+                            draft.routeMacro.tasks[taskIndex].waypoints[idx].coord.lon = lon
+                            refreshAutoHeadings(for: taskIndex)
+                            persistMissionToStoreNow()
                         },
                         onWaypointDelete: { idx in
-                            guard let pathIndex = editingPathIndex,
-                                  draft.routeMacro.paths.indices.contains(pathIndex),
-                                  draft.routeMacro.paths[pathIndex].waypoints.indices.contains(idx) else { return }
-                            draft.routeMacro.paths[pathIndex].waypoints.remove(at: idx)
-                            refreshAutoHeadings(for: pathIndex)
+                            guard let taskIndex = editingTaskIndex,
+                                  draft.routeMacro.tasks.indices.contains(taskIndex),
+                                  draft.routeMacro.tasks[taskIndex].waypoints.indices.contains(idx) else { return }
+                            draft.routeMacro.tasks[taskIndex].waypoints.remove(at: idx)
+                            refreshAutoHeadings(for: taskIndex)
                             if let selectedWaypointIndex, selectedWaypointIndex == idx {
                                 self.selectedWaypointIndex = nil
                             }
+                            persistMissionToStoreNow()
                         },
-                        onPathInsert: { idx, lat, lon in
-                            guard let pathIndex = editingPathIndex,
-                                  draft.routeMacro.paths.indices.contains(pathIndex) else { return }
+                        onTaskMapInsert: { idx, lat, lon in
+                            guard let taskIndex = editingTaskIndex,
+                                  draft.routeMacro.tasks.indices.contains(taskIndex) else { return }
                             suppressNextMapClick = true
                             let waypoint = RouteWaypoint(
                                 coord: RouteCoordinate(lat: lat, lon: lon),
-                                headingPreset: .followPath
+                                headingPreset: .followCourse
                             )
-                            let safeInsert = max(0, min(idx, draft.routeMacro.paths[pathIndex].waypoints.count))
-                            draft.routeMacro.paths[pathIndex].waypoints.insert(waypoint, at: safeInsert)
-                            refreshAutoHeadings(for: pathIndex)
-                            selectedPathIndex = pathIndex
+                            let safeInsert = max(0, min(idx, draft.routeMacro.tasks[taskIndex].waypoints.count))
+                            draft.routeMacro.tasks[taskIndex].waypoints.insert(waypoint, at: safeInsert)
+                            refreshAutoHeadings(for: taskIndex)
+                            selectedTaskIndex = taskIndex
                             selectedWaypointIndex = safeInsert
                             onToast("Waypoint inserted", .success)
+                            persistMissionToStoreNow()
                         }
                     )
                     .task(id: routeTabMapSignature) {
-                        mapModel.home = draft.routeMacro.home
-                        mapModel.allPathsCoords = allPathsCoords
-                        mapModel.selectedPathWaypoints = selectedPath?.waypoints ?? []
+                        mapModel.home = nil
+                        mapModel.allTasksCoords = allTasksCoords
+                        mapModel.selectedTaskWaypoints = selectedTask?.waypoints ?? []
                         mapModel.selectedWaypointIndex = selectedWaypointIndex
                         mapModel.headingPreview = headingPreview
                         mapModel.cameraPreview = cameraPreview
-                        mapModel.preserveView = editingPathIndex != nil
-                        mapModel.isEditingPath = editingPathIndex != nil
+                        mapModel.preserveView = editingTaskIndex != nil
+                        mapModel.isEditingTask = editingTaskIndex != nil
                     }
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 500)
+                    .frame(width: mapWidth, height: geo.size.height)
+                    .clipped()
 
-                    if let pathIndex = editingPathIndex,
-                       draft.routeMacro.paths.indices.contains(pathIndex) {
-                        waypointSidebar(pathIndex: pathIndex)
-                            .frame(width: 390, height: 500)
-                    }
-                }
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        card("Home") {
+                ZStack(alignment: .topTrailing) {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
                             HStack {
-                                HStack(spacing: 10) {
-                                    let hasHome = draft.routeMacro.home != nil
-                                    Image(systemName: hasHome ? "mappin.circle.fill" : "mappin.slash.circle")
-                                        .foregroundStyle(hasHome ? .green : .red)
-                                    Text(hasHome ? homeCoordText : "Not set")
-                                        .foregroundStyle(theme.textSecondary)
-                                }
-
+                                Text("Tasks")
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundStyle(theme.textPrimary)
                                 Spacer(minLength: 0)
-
-                                HStack(spacing: 12) {
-
-                                    Toggle(
-                                        "Dockable",
-                                        isOn: Binding(
-                                            get: { draft.routeMacro.home?.dockAllowed ?? false },
-                                            set: { newValue in
-                                                if draft.routeMacro.home == nil {
-                                                    draft.routeMacro.home = RouteHome(dockAllowed: newValue)
-                                                } else {
-                                                    draft.routeMacro.home?.dockAllowed = newValue
-                                                }
-                                            }
-                                        )
-                                    )
-                                    .toggleStyle(.switch)
-                                    
-                                    if setHomeFromMap {
-                                        Button {
-                                            setHomeFromMap = false
-                                            onToast("Home map-pick canceled", .info)
-                                        } label: {
-                                            Image(systemName: "pencil")
-                                                .appIconGlyph()
-                                        }
-                                        .buttonStyle(.borderedProminent)
-                                        .tint(.blue)
-                                        .uniformIconButton()
-                                    } else {
-                                        Button {
-                                            setHomeFromMap = true
-                                            onToast("Click map to save home", .info)
-                                        } label: {
-                                            Image(systemName: "pencil")
-                                                .appIconGlyph()
-                                        }
-                                        .buttonStyle(.bordered)
-                                        .uniformIconButton()
-                                    }
-
-                                    if draft.routeMacro.home == nil {
-                                        Button {
-                                            showingDeleteHomeConfirm = true
-                                        } label: {
-                                            Image(systemName: "trash")
-                                                .appIconGlyph()
-                                        }
-                                        .buttonStyle(.bordered)
-                                        .tint(.red)
-                                        .disabled(true)
-                                        .uniformIconButton()
-                                    } else {
-                                        Button {
-                                            showingDeleteHomeConfirm = true
-                                        } label: {
-                                            Image(systemName: "trash")
-                                                .appIconGlyph()
-                                        }
-                                        .buttonStyle(.borderedProminent)
-                                        .tint(.red)
-                                        .uniformIconButton()
-                                    }
+                                Button {
+                                    let nextNum = draft.routeMacro.tasks.count + 1
+                                    draft.routeMacro.tasks.append(MissionTask(name: "Task \(nextNum)"))
+                                    selectedTaskIndex = draft.routeMacro.tasks.count - 1
+                                    editingTaskIndex = nil
+                                    selectedWaypointIndex = nil
+                                } label: {
+                                    Image(systemName: "plus")
+                                        .appIconGlyph()
                                 }
+                                .buttonStyle(.bordered)
+                                .uniformIconButton()
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .alert("Delete Home?", isPresented: $showingDeleteHomeConfirm) {
-                            Button("Cancel", role: .cancel) {}
-                            Button("Delete", role: .destructive) {
-                                draft.routeMacro.home = nil
-                            }
-                        } message: {
-                            Text("This will remove the mission home point.")
-                        }
 
-                        card("Paths", trailing: {
-                            Button {
-                                let nextNum = draft.routeMacro.paths.count + 1
-                                draft.routeMacro.paths.append(RoutePath(name: "Path \(nextNum)"))
-                                selectedPathIndex = draft.routeMacro.paths.count - 1
-                                editingPathIndex = nil
-                                selectedWaypointIndex = nil
-                            } label: {
-                                Image(systemName: "plus")
-                                    .appIconGlyph()
-                            }
-                            .buttonStyle(.bordered)
-                            .uniformIconButton()
-                        }) {
-                            if draft.routeMacro.paths.isEmpty {
-                                Text("No paths yet").foregroundStyle(theme.textSecondary)
+                            if draft.routeMacro.tasks.isEmpty {
+                                Text("No tasks yet")
+                                    .foregroundStyle(theme.textSecondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                             } else {
-                                ForEach(Array(draft.routeMacro.paths.enumerated()), id: \.offset) { index, path in
+                                ForEach(Array(draft.routeMacro.tasks.enumerated()), id: \.offset) { index, path in
                                     HStack {
                                         TextField(
-                                            "Path Name",
+                                            "Task name",
                                             text: Binding(
                                                 get: { path.name },
                                                 set: { newValue in
-                                                    draft.routeMacro.paths[index].name = newValue
+                                                    draft.routeMacro.tasks[index].name = newValue
                                                 }
                                             )
                                         )
@@ -740,14 +1161,25 @@ private struct MissionWorkspaceView: View {
                                         Text("• \(durationLabel(for: path))").foregroundStyle(theme.textSecondary)
                                         Spacer()
 
-                                        if editingPathIndex == index {
+                                        Button {
+                                            presentTaskSettingsSidebar(taskIndex: index)
+                                        } label: {
+                                            Image(systemName: "gearshape.fill")
+                                                .appIconGlyph()
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .uniformIconButton()
+                                        .help("Task settings")
+
+                                        if editingTaskIndex == index {
                                             Button {
                                                 if shouldOfferCloseLoop(path) {
-                                                    pendingCloseLoopPathIndex = index
+                                                    pendingCloseLoopTaskIndex = index
                                                 } else {
-                                                    editingPathIndex = nil
+                                                    editingTaskIndex = nil
                                                     selectedWaypointIndex = nil
-                                                    onToast("Path edit mode disabled", .info)
+                                                    persistMissionToStoreNow()
+                                                    onToast("Task edit mode disabled", .info)
                                                 }
                                             } label: {
                                                 Image(systemName: "pencil")
@@ -758,9 +1190,9 @@ private struct MissionWorkspaceView: View {
                                             .uniformIconButton()
                                         } else {
                                             Button {
-                                                editingPathIndex = index
-                                                selectedPathIndex = index
-                                                onToast("Path edit mode enabled. Click map to add waypoints.", .info)
+                                                editingTaskIndex = index
+                                                selectedTaskIndex = index
+                                                onToast("Task edit mode enabled. Click map to add waypoints.", .info)
                                             } label: {
                                                 Image(systemName: "pencil")
                                                     .appIconGlyph()
@@ -770,7 +1202,7 @@ private struct MissionWorkspaceView: View {
                                         }
 
                                         Button {
-                                            pendingDeletePathIndex = index
+                                            pendingDeleteTaskIndex = index
                                         } label: {
                                             Image(systemName: "trash")
                                                 .appIconGlyph()
@@ -780,98 +1212,114 @@ private struct MissionWorkspaceView: View {
                                         .uniformIconButton()
                                     }
                                     .contentShape(Rectangle())
-                                    .onTapGesture { selectedPathIndex = index }
-                                    .padding(.vertical, 4)
+                                    .onTapGesture { selectedTaskIndex = index }
+                                    .padding(14)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(theme.backgroundRaised)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10))
                                 }
                             }
                         }
-                        .alert("Delete Path?", isPresented: Binding(
-                            get: { pendingDeletePathIndex != nil },
-                            set: { if !$0 { pendingDeletePathIndex = nil } }
+                        .alert("Delete task?", isPresented: Binding(
+                            get: { pendingDeleteTaskIndex != nil },
+                            set: { if !$0 { pendingDeleteTaskIndex = nil } }
                         )) {
                             Button("Cancel", role: .cancel) {}
                             Button("Delete", role: .destructive) {
-                                if let idx = pendingDeletePathIndex,
-                                   draft.routeMacro.paths.indices.contains(idx) {
-                                    draft.routeMacro.paths.remove(at: idx)
-                                    if editingPathIndex == idx {
-                                        editingPathIndex = nil
+                                if let idx = pendingDeleteTaskIndex,
+                                   draft.routeMacro.tasks.indices.contains(idx) {
+                                    draft.routeMacro.tasks.remove(at: idx)
+                                    if editingTaskIndex == idx {
+                                        editingTaskIndex = nil
                                         selectedWaypointIndex = nil
                                     }
-                                    if selectedPathIndex >= draft.routeMacro.paths.count {
-                                        selectedPathIndex = max(0, draft.routeMacro.paths.count - 1)
+                                    if selectedTaskIndex >= draft.routeMacro.tasks.count {
+                                        selectedTaskIndex = max(0, draft.routeMacro.tasks.count - 1)
                                     }
                                 }
-                                pendingDeletePathIndex = nil
+                                pendingDeleteTaskIndex = nil
+                                persistMissionToStoreNow()
                             }
                         } message: {
-                            Text("This will remove the path and all its waypoints.")
+                            Text("This will remove the task and all its waypoints.")
                         }
-                        .alert("Close loop for this path?", isPresented: Binding(
-                            get: { pendingCloseLoopPathIndex != nil },
-                            set: { if !$0 { pendingCloseLoopPathIndex = nil } }
+                        .alert("Close loop for this task?", isPresented: Binding(
+                            get: { pendingCloseLoopTaskIndex != nil },
+                            set: { if !$0 { pendingCloseLoopTaskIndex = nil } }
                         )) {
                             Button("No", role: .destructive) {
-                                editingPathIndex = nil
+                                editingTaskIndex = nil
                                 selectedWaypointIndex = nil
-                                pendingCloseLoopPathIndex = nil
-                                onToast("Path edit mode disabled", .info)
+                                pendingCloseLoopTaskIndex = nil
+                                persistMissionToStoreNow()
+                                onToast("Task edit mode disabled", .info)
                             }
                             Button("Close Loop") {
-                                if let idx = pendingCloseLoopPathIndex,
-                                   draft.routeMacro.paths.indices.contains(idx) {
+                                if let idx = pendingCloseLoopTaskIndex,
+                                   draft.routeMacro.tasks.indices.contains(idx) {
                                     closeLoop(for: idx)
-                                    editingPathIndex = nil
+                                    editingTaskIndex = nil
                                     selectedWaypointIndex = nil
                                     onToast("Loop closed", .success)
                                 }
-                                pendingCloseLoopPathIndex = nil
+                                pendingCloseLoopTaskIndex = nil
+                                persistMissionToStoreNow()
                             }
                         } message: {
-                            Text("Add the start waypoint to the end and mark this path as looped?")
+                            Text("Add the start waypoint to the end and mark this task as looped?")
                         }
-
                     }
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 18)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
                     .frame(maxWidth: .infinity)
+
+                    if let taskIndex = editingTaskIndex,
+                       draft.routeMacro.tasks.indices.contains(taskIndex) {
+                        waypointSidebar(taskIndex: taskIndex)
+                            .frame(width: listWidth, height: geo.size.height)
+                            .zIndex(1)
+                            .transition(.opacity.combined(with: .move(edge: .trailing)))
+                    }
                 }
+                .frame(width: listWidth, height: geo.size.height)
+                .background(theme.backgroundBase)
             }
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.easeInOut(duration: 0.22), value: editingTaskIndex)
+        .onChange(of: draft.routeMacro.tasks) { _ in
+            guard editingTaskIndex != nil else { return }
+            scheduleDebouncedPersistMission()
         }
     }
 
-    private var validPathIndex: Int {
-        guard !draft.routeMacro.paths.isEmpty else { return 0 }
-        return min(max(selectedPathIndex, 0), draft.routeMacro.paths.count - 1)
+    private var validTaskIndex: Int {
+        guard !draft.routeMacro.tasks.isEmpty else { return 0 }
+        return min(max(selectedTaskIndex, 0), draft.routeMacro.tasks.count - 1)
     }
 
-    private var allPathsCoords: [[RouteCoordinate]] {
-        draft.routeMacro.paths.map { $0.waypoints.map(\.coord) }
+    private var allTasksCoords: [[RouteCoordinate]] {
+        draft.routeMacro.tasks.map { $0.waypoints.map(\.coord) }
     }
 
     /// Equatable signature of every input the route-tab map cares about.
     /// Drives `.task(id:)` so the shared `mapModel` is re-pushed whenever the
-    /// home/paths/selection/preview/edit-state changes.
+    /// tasks/selection/preview/edit-state changes.
     private var routeTabMapSignature: RouteTabMapSignature {
         RouteTabMapSignature(
-            homeCoord: draft.routeMacro.home?.coord,
-            allPathsCoords: allPathsCoords,
-            selectedWaypoints: selectedPath?.waypoints.map(\.coord) ?? [],
+            allTasksCoords: allTasksCoords,
+            selectedWaypoints: selectedTask?.waypoints.map(\.coord) ?? [],
             selectedWaypointIndex: selectedWaypointIndex,
             headingPreview: headingPreview,
             cameraPreview: cameraPreview,
-            isEditingPath: editingPathIndex != nil
+            isEditingTask: editingTaskIndex != nil
         )
     }
 
-    private var selectedPath: RoutePath? {
-        guard !draft.routeMacro.paths.isEmpty else { return nil }
-        return draft.routeMacro.paths[validPathIndex]
-    }
-
-    private var homeCoordText: String {
-        guard let home = draft.routeMacro.home else { return "" }
-        return String(format: "%.6f, %.6f", home.coord.lat, home.coord.lon)
+    private var selectedTask: MissionTask? {
+        guard !draft.routeMacro.tasks.isEmpty else { return nil }
+        return draft.routeMacro.tasks[validTaskIndex]
     }
 
     private var headingPreview: HeadingPreview? {
@@ -880,11 +1328,11 @@ private struct MissionWorkspaceView: View {
         guard tokens.count == 4,
               tokens[0] == "p",
               tokens[2] == "w",
-              let pathIndex = Int(tokens[1]),
+              let taskIndex = Int(tokens[1]),
               let waypointIndex = Int(tokens[3]),
-              draft.routeMacro.paths.indices.contains(pathIndex),
-              draft.routeMacro.paths[pathIndex].waypoints.indices.contains(waypointIndex) else { return nil }
-        let waypoint = draft.routeMacro.paths[pathIndex].waypoints[waypointIndex]
+              draft.routeMacro.tasks.indices.contains(taskIndex),
+              draft.routeMacro.tasks[taskIndex].waypoints.indices.contains(waypointIndex) else { return nil }
+        let waypoint = draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex]
         return HeadingPreview(
             lat: waypoint.coord.lat,
             lon: waypoint.coord.lon,
@@ -898,11 +1346,11 @@ private struct MissionWorkspaceView: View {
             guard tokens.count == 4,
                   tokens[0] == "p",
                   tokens[2] == "w",
-                  let pathIndex = Int(tokens[1]),
+                  let taskIndex = Int(tokens[1]),
                   let waypointIndex = Int(tokens[3]),
-                  draft.routeMacro.paths.indices.contains(pathIndex),
-                  draft.routeMacro.paths[pathIndex].waypoints.indices.contains(waypointIndex) else { return nil }
-            let waypoint = draft.routeMacro.paths[pathIndex].waypoints[waypointIndex]
+                  draft.routeMacro.tasks.indices.contains(taskIndex),
+                  draft.routeMacro.tasks[taskIndex].waypoints.indices.contains(waypointIndex) else { return nil }
+            let waypoint = draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex]
             return CameraPreview(
                 lat: waypoint.coord.lat,
                 lon: waypoint.coord.lon,
@@ -916,12 +1364,12 @@ private struct MissionWorkspaceView: View {
             guard tokens.count == 4,
                   tokens[0] == "p",
                   tokens[2] == "w",
-                  let pathIndex = Int(tokens[1]),
+                  let taskIndex = Int(tokens[1]),
                   let waypointIndex = Int(tokens[3]),
-                  draft.routeMacro.paths.indices.contains(pathIndex),
-                  draft.routeMacro.paths[pathIndex].waypoints.indices.contains(waypointIndex),
-                  let anchor = transitionAnchorCoordinate(pathIndex: pathIndex, waypointIndex: waypointIndex) else { return nil }
-            let waypoint = draft.routeMacro.paths[pathIndex].waypoints[waypointIndex]
+                  draft.routeMacro.tasks.indices.contains(taskIndex),
+                  draft.routeMacro.tasks[taskIndex].waypoints.indices.contains(waypointIndex),
+                  let anchor = transitionAnchorCoordinate(taskIndex: taskIndex, waypointIndex: waypointIndex) else { return nil }
+            let waypoint = draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex]
             return CameraPreview(
                 lat: anchor.lat,
                 lon: anchor.lon,
@@ -933,7 +1381,7 @@ private struct MissionWorkspaceView: View {
         return nil
     }
 
-    private func distanceLabel(for path: RoutePath) -> String {
+    private func distanceLabel(for path: MissionTask) -> String {
         guard path.waypoints.count > 1 else { return "0 m" }
         var totalMeters: Double = 0
         for idx in 1..<path.waypoints.count {
@@ -950,7 +1398,7 @@ private struct MissionWorkspaceView: View {
         return String(format: "%.2f km", totalMeters / 1000)
     }
 
-    private func durationLabel(for path: RoutePath) -> String {
+    private func durationLabel(for path: MissionTask) -> String {
         let totalDelaySeconds = path.waypoints.reduce(0.0) { partial, waypoint in
             partial + delaySeconds(for: waypoint)
         }
@@ -1014,7 +1462,7 @@ private struct MissionWorkspaceView: View {
         return "\(remainingSeconds)s"
     }
 
-    private func shouldOfferCloseLoop(_ path: RoutePath) -> Bool {
+    private func shouldOfferCloseLoop(_ path: MissionTask) -> Bool {
         guard path.waypoints.count > 2 else { return false }
         guard let first = path.waypoints.first, let last = path.waypoints.last else { return false }
         let distance = CLLocation(latitude: first.coord.lat, longitude: first.coord.lon)
@@ -1023,8 +1471,8 @@ private struct MissionWorkspaceView: View {
     }
 
     private func closeLoop(for index: Int) {
-        guard draft.routeMacro.paths.indices.contains(index) else { return }
-        guard let first = draft.routeMacro.paths[index].waypoints.first else { return }
+        guard draft.routeMacro.tasks.indices.contains(index) else { return }
+        guard let first = draft.routeMacro.tasks[index].waypoints.first else { return }
         let closingWaypoint = RouteWaypoint(
             coord: first.coord,
             altitude: first.altitude,
@@ -1033,24 +1481,24 @@ private struct MissionWorkspaceView: View {
             action: "none",
             camera: first.camera
         )
-        draft.routeMacro.paths[index].waypoints.append(closingWaypoint)
-        draft.routeMacro.paths[index].loopMode = "loop"
+        draft.routeMacro.tasks[index].waypoints.append(closingWaypoint)
+        draft.routeMacro.tasks[index].loopMode = "loop"
         refreshAutoHeadings(for: index)
     }
 
-    private func waypointSidebar(pathIndex: Int) -> some View {
+    private func waypointSidebar(taskIndex: Int) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("Waypoints")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(theme.textPrimary)
-                    Text("\(draft.routeMacro.paths[pathIndex].waypoints.count)")
+                    Text("\(draft.routeMacro.tasks[taskIndex].waypoints.count)")
                         .font(.system(size: 12, weight: .bold))
                         .foregroundStyle(theme.textSecondary)
                     Spacer()
                     Button {
-                        openBulkWaypointEditor(pathIndex: pathIndex)
+                        openBulkWaypointEditor(taskIndex: taskIndex)
                     } label: {
                         Image(systemName: "gearshape")
                             .appIconGlyph()
@@ -1059,13 +1507,13 @@ private struct MissionWorkspaceView: View {
                     .help("Bulk edit all waypoints")
                     .uniformIconButton()
                     Button {
-                        finishEditingPathFromSidebar(pathIndex: pathIndex)
+                        finishEditingTaskFromSidebar(taskIndex: taskIndex)
                     } label: {
                         Image(systemName: "checkmark")
                             .appIconGlyph()
                     }
                     .buttonStyle(.borderedProminent)
-                    .help("Finish path editing")
+                    .help("Finish task editing")
                     .uniformIconButton()
                     
                 }
@@ -1077,8 +1525,8 @@ private struct MissionWorkspaceView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
-                        ForEach(Array(draft.routeMacro.paths[pathIndex].waypoints.enumerated()), id: \.element.id) { idx, _ in
-                            waypointEditorRow(pathIndex: pathIndex, idx: idx)
+                        ForEach(Array(draft.routeMacro.tasks[taskIndex].waypoints.enumerated()), id: \.element.id) { idx, _ in
+                            waypointEditorRow(taskIndex: taskIndex, idx: idx)
                                 .id("wp-\(idx)")
                                 .onTapGesture {
                                     selectedWaypointIndex = idx
@@ -1094,7 +1542,7 @@ private struct MissionWorkspaceView: View {
                         proxy.scrollTo("wp-\(idx)", anchor: .center)
                     }
                 }
-                .onChange(of: draft.routeMacro.paths[pathIndex].waypoints.count) { _ in
+                .onChange(of: draft.routeMacro.tasks[taskIndex].waypoints.count) { _ in
                     guard let idx = selectedWaypointIndex else { return }
                     withAnimation(.easeInOut(duration: 0.2)) {
                         proxy.scrollTo("wp-\(idx)", anchor: .center)
@@ -1111,10 +1559,10 @@ private struct MissionWorkspaceView: View {
         )
     }
 
-    private func waypointEditorRow(pathIndex: Int, idx: Int) -> some View {
-        let waypoint = draft.routeMacro.paths[pathIndex].waypoints[idx]
+    private func waypointEditorRow(taskIndex: Int, idx: Int) -> some View {
+        let waypoint = draft.routeMacro.tasks[taskIndex].waypoints[idx]
         let isSelected = selectedWaypointIndex == idx
-        let headingKey = headingFieldKey(pathIndex: pathIndex, waypointIndex: idx)
+        let headingKey = headingFieldKey(taskIndex: taskIndex, waypointIndex: idx)
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Waypoint \(idx + 1)")
@@ -1136,7 +1584,7 @@ private struct MissionWorkspaceView: View {
                 numericInput(
                     value: Binding(
                         get: { waypoint.altitude.value },
-                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].altitude.value = clamp($0, min: 0, max: 100_000) }
+                        set: { draft.routeMacro.tasks[taskIndex].waypoints[idx].altitude.value = clamp($0, min: 0, max: 100_000) }
                     ),
                     step: 1,
                     min: 0,
@@ -1147,7 +1595,7 @@ private struct MissionWorkspaceView: View {
                     "Alt Unit",
                     selection: Binding(
                         get: { waypoint.altitude.unit },
-                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].altitude.unit = $0 }
+                        set: { draft.routeMacro.tasks[taskIndex].waypoints[idx].altitude.unit = $0 }
                     )
                 ) {
                     ForEach(AltitudeUnit.allCases) { unit in
@@ -1162,7 +1610,7 @@ private struct MissionWorkspaceView: View {
                     "Alt Ref",
                     selection: Binding(
                         get: { waypoint.altitude.reference },
-                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].altitude.reference = $0 }
+                        set: { draft.routeMacro.tasks[taskIndex].waypoints[idx].altitude.reference = $0 }
                     )
                 ) {
                     ForEach(AltitudeReference.allCases) { reference in
@@ -1184,14 +1632,14 @@ private struct MissionWorkspaceView: View {
                     selection: Binding<HeadingPreset?>(
                         get: { waypoint.headingPreset },
                         set: { preset in
-                            draft.routeMacro.paths[pathIndex].waypoints[idx].headingPreset = preset
-                            applyHeadingPreset(pathIndex: pathIndex, waypointIndex: idx)
+                            draft.routeMacro.tasks[taskIndex].waypoints[idx].headingPreset = preset
+                            applyHeadingPreset(taskIndex: taskIndex, waypointIndex: idx)
                         }
                     )
                 ) {
                     Text("Manual").tag(HeadingPreset?.none)
-                    Text("Follow Path").tag(HeadingPreset?.some(.followPath))
-                    if pathIsLooped(pathIndex) {
+                    Text("Along route").tag(HeadingPreset?.some(.followCourse))
+                    if taskIsLooped(taskIndex) {
                         Text("Perimeter Outward").tag(HeadingPreset?.some(.perimeterOutward))
                         Text("Perimeter Inward").tag(HeadingPreset?.some(.perimeterInward))
                     }
@@ -1207,7 +1655,7 @@ private struct MissionWorkspaceView: View {
                 numericInput(
                     value: Binding(
                         get: { waypoint.heading },
-                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].heading = clamp(normalizeHeading($0), min: 0, max: 359.999) }
+                        set: { draft.routeMacro.tasks[taskIndex].waypoints[idx].heading = clamp(normalizeHeading($0), min: 0, max: 359.999) }
                     ),
                     step: 1,
                     min: 0,
@@ -1232,7 +1680,7 @@ private struct MissionWorkspaceView: View {
                 numericInput(
                     value: Binding(
                         get: { waypoint.delaySec },
-                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].delaySec = clamp($0, min: 0, max: 100_000) }
+                        set: { draft.routeMacro.tasks[taskIndex].waypoints[idx].delaySec = clamp($0, min: 0, max: 100_000) }
                     ),
                     step: 1,
                     min: 0,
@@ -1243,7 +1691,7 @@ private struct MissionWorkspaceView: View {
                     "Delay Unit",
                     selection: Binding(
                         get: { waypoint.delayUnit },
-                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].delayUnit = $0 }
+                        set: { draft.routeMacro.tasks[taskIndex].waypoints[idx].delayUnit = $0 }
                     )
                 ) {
                     ForEach(DelayUnit.allCases) { unit in
@@ -1268,7 +1716,7 @@ private struct MissionWorkspaceView: View {
                             WaypointActionOption(rawValue: waypoint.action) ?? .none
                         },
                         set: { option in
-                            draft.routeMacro.paths[pathIndex].waypoints[idx].action = option.rawValue
+                            draft.routeMacro.tasks[taskIndex].waypoints[idx].action = option.rawValue
                         }
                     )
                 ) {
@@ -1291,13 +1739,13 @@ private struct MissionWorkspaceView: View {
                     selection: Binding(
                         get: { waypoint.camera.mode },
                         set: { mode in
-                            draft.routeMacro.paths[pathIndex].waypoints[idx].camera.mode = mode
-                            applyCameraMode(pathIndex: pathIndex, waypointIndex: idx)
+                            draft.routeMacro.tasks[taskIndex].waypoints[idx].camera.mode = mode
+                            applyCameraMode(taskIndex: taskIndex, waypointIndex: idx)
                         }
                     )
                 ) {
                     Text("Follow Heading").tag(CameraMode.followHeading)
-                    if pathIsLooped(pathIndex) {
+                    if taskIsLooped(taskIndex) {
                         Text("Perimeter Outward").tag(CameraMode.perimeterOutward)
                         Text("Perimeter Inward").tag(CameraMode.perimeterInward)
                     }
@@ -1310,13 +1758,13 @@ private struct MissionWorkspaceView: View {
                 numericInput(
                     value: Binding(
                         get: { waypoint.camera.bearing },
-                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].camera.bearing = clamp(normalizeHeading($0), min: 0, max: 359.999) }
+                        set: { draft.routeMacro.tasks[taskIndex].waypoints[idx].camera.bearing = clamp(normalizeHeading($0), min: 0, max: 359.999) }
                     ),
                     step: 1,
                     min: 0,
                     max: 359.999,
                     onFocusChange: { focused in
-                        let key = waypointCameraFieldKey(pathIndex: pathIndex, waypointIndex: idx)
+                        let key = waypointCameraFieldKey(taskIndex: taskIndex, waypointIndex: idx)
                         if focused {
                             focusedWaypointCameraFieldKey = key
                             focusedTransitionCameraFieldKey = nil
@@ -1347,7 +1795,7 @@ private struct MissionWorkspaceView: View {
                     "Mode",
                     selection: Binding(
                         get: { waypoint.transition.mode },
-                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].transition.mode = $0 }
+                        set: { draft.routeMacro.tasks[taskIndex].waypoints[idx].transition.mode = $0 }
                     )
                 ) {
                     ForEach(TransitionMode.allCases) { mode in
@@ -1360,7 +1808,7 @@ private struct MissionWorkspaceView: View {
                 numericInput(
                     value: Binding(
                         get: { waypoint.transition.targetSpeed },
-                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].transition.targetSpeed = clamp($0, min: 0, max: 200) }
+                        set: { draft.routeMacro.tasks[taskIndex].waypoints[idx].transition.targetSpeed = clamp($0, min: 0, max: 200) }
                     ),
                     step: 1,
                     min: 0,
@@ -1371,7 +1819,7 @@ private struct MissionWorkspaceView: View {
                     "Speed Unit",
                     selection: Binding(
                         get: { waypoint.transition.speedUnit },
-                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].transition.speedUnit = $0 }
+                        set: { draft.routeMacro.tasks[taskIndex].waypoints[idx].transition.speedUnit = $0 }
                     )
                 ) {
                     ForEach(SpeedUnit.allCases) { unit in
@@ -1393,14 +1841,14 @@ private struct MissionWorkspaceView: View {
                     selection: Binding(
                         get: { waypoint.transition.cameraMode },
                         set: { mode in
-                            draft.routeMacro.paths[pathIndex].waypoints[idx].transition.cameraMode = mode
-                            applyTransitionCameraMode(pathIndex: pathIndex, waypointIndex: idx)
+                            draft.routeMacro.tasks[taskIndex].waypoints[idx].transition.cameraMode = mode
+                            applyTransitionCameraMode(taskIndex: taskIndex, waypointIndex: idx)
                         }
                     )
                 ) {
                     Text("Hold Current").tag(TransitionCameraMode.holdCurrent)
                     Text("Face Next Waypoint").tag(TransitionCameraMode.faceNextWaypoint)
-                    if pathIsLooped(pathIndex) {
+                    if taskIsLooped(taskIndex) {
                         Text("Perimeter Outward").tag(TransitionCameraMode.perimeterOutward)
                         Text("Perimeter Inward").tag(TransitionCameraMode.perimeterInward)
                     }
@@ -1413,13 +1861,13 @@ private struct MissionWorkspaceView: View {
                 numericInput(
                     value: Binding(
                         get: { waypoint.transition.cameraBearing },
-                        set: { draft.routeMacro.paths[pathIndex].waypoints[idx].transition.cameraBearing = clamp(normalizeHeading($0), min: 0, max: 359.999) }
+                        set: { draft.routeMacro.tasks[taskIndex].waypoints[idx].transition.cameraBearing = clamp(normalizeHeading($0), min: 0, max: 359.999) }
                     ),
                     step: 1,
                     min: 0,
                     max: 359.999,
                     onFocusChange: { focused in
-                        let key = transitionCameraFieldKey(pathIndex: pathIndex, waypointIndex: idx)
+                        let key = transitionCameraFieldKey(taskIndex: taskIndex, waypointIndex: idx)
                         if focused {
                             focusedTransitionCameraFieldKey = key
                             focusedWaypointCameraFieldKey = nil
@@ -1436,11 +1884,12 @@ private struct MissionWorkspaceView: View {
             HStack {
                 Spacer()
                 Button {
-                    draft.routeMacro.paths[pathIndex].waypoints.remove(at: idx)
-                    refreshAutoHeadings(for: pathIndex)
+                    draft.routeMacro.tasks[taskIndex].waypoints.remove(at: idx)
+                    refreshAutoHeadings(for: taskIndex)
                     if selectedWaypointIndex == idx {
                         selectedWaypointIndex = nil
                     }
+                    persistMissionToStoreNow()
                 } label: {
                     Image(systemName: "trash")
                         .appIconGlyph()
@@ -1452,10 +1901,10 @@ private struct MissionWorkspaceView: View {
         }
         .onAppear {
             if waypoint.headingPreset != nil {
-                applyHeadingPreset(pathIndex: pathIndex, waypointIndex: idx)
+                applyHeadingPreset(taskIndex: taskIndex, waypointIndex: idx)
             }
-            applyCameraMode(pathIndex: pathIndex, waypointIndex: idx)
-            applyTransitionCameraMode(pathIndex: pathIndex, waypointIndex: idx)
+            applyCameraMode(taskIndex: taskIndex, waypointIndex: idx)
+            applyTransitionCameraMode(taskIndex: taskIndex, waypointIndex: idx)
         }
         .textFieldStyle(.roundedBorder)
         .padding(10)
@@ -1467,130 +1916,130 @@ private struct MissionWorkspaceView: View {
         )
     }
 
-    private func headingFieldKey(pathIndex: Int, waypointIndex: Int) -> String {
-        "p-\(pathIndex)-w-\(waypointIndex)"
+    private func headingFieldKey(taskIndex: Int, waypointIndex: Int) -> String {
+        "p-\(taskIndex)-w-\(waypointIndex)"
     }
 
-    private func waypointCameraFieldKey(pathIndex: Int, waypointIndex: Int) -> String {
-        "p-\(pathIndex)-w-\(waypointIndex)"
+    private func waypointCameraFieldKey(taskIndex: Int, waypointIndex: Int) -> String {
+        "p-\(taskIndex)-w-\(waypointIndex)"
     }
 
-    private func transitionCameraFieldKey(pathIndex: Int, waypointIndex: Int) -> String {
-        "p-\(pathIndex)-w-\(waypointIndex)"
+    private func transitionCameraFieldKey(taskIndex: Int, waypointIndex: Int) -> String {
+        "p-\(taskIndex)-w-\(waypointIndex)"
     }
 
-    private func applyHeadingPreset(pathIndex: Int, waypointIndex: Int) {
-        guard draft.routeMacro.paths.indices.contains(pathIndex),
-              draft.routeMacro.paths[pathIndex].waypoints.indices.contains(waypointIndex) else { return }
-        guard let preset = draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].headingPreset else { return }
+    private func applyHeadingPreset(taskIndex: Int, waypointIndex: Int) {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex),
+              draft.routeMacro.tasks[taskIndex].waypoints.indices.contains(waypointIndex) else { return }
+        guard let preset = draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].headingPreset else { return }
         switch preset {
-        case .followPath:
-            if let followHeading = followPathHeading(pathIndex: pathIndex, waypointIndex: waypointIndex) {
-                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].heading = followHeading
+        case .followCourse:
+            if let followHeading = followCourseHeading(taskIndex: taskIndex, waypointIndex: waypointIndex) {
+                draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].heading = followHeading
             }
         case .perimeterOutward:
-            if let outwardHeading = perimeterHeading(pathIndex: pathIndex, waypointIndex: waypointIndex, outward: true) {
-                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].heading = outwardHeading
+            if let outwardHeading = perimeterHeading(taskIndex: taskIndex, waypointIndex: waypointIndex, outward: true) {
+                draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].heading = outwardHeading
             }
         case .perimeterInward:
-            if let inwardHeading = perimeterHeading(pathIndex: pathIndex, waypointIndex: waypointIndex, outward: false) {
-                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].heading = inwardHeading
+            if let inwardHeading = perimeterHeading(taskIndex: taskIndex, waypointIndex: waypointIndex, outward: false) {
+                draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].heading = inwardHeading
             }
         case .north:
-            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].heading = 0
+            draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].heading = 0
         case .east:
-            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].heading = 90
+            draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].heading = 90
         case .south:
-            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].heading = 180
+            draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].heading = 180
         case .west:
-            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].heading = 270
+            draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].heading = 270
         }
     }
 
-    private func refreshAutoHeadings(for pathIndex: Int) {
-        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return }
-        let waypointCount = draft.routeMacro.paths[pathIndex].waypoints.count
+    private func refreshAutoHeadings(for taskIndex: Int) {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex) else { return }
+        let waypointCount = draft.routeMacro.tasks[taskIndex].waypoints.count
         guard waypointCount > 0 else { return }
         for waypointIndex in 0..<waypointCount {
-            if draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].headingPreset != nil {
-                applyHeadingPreset(pathIndex: pathIndex, waypointIndex: waypointIndex)
+            if draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].headingPreset != nil {
+                applyHeadingPreset(taskIndex: taskIndex, waypointIndex: waypointIndex)
             }
         }
-        refreshCameraModes(for: pathIndex)
-        refreshTransitionCameraModes(for: pathIndex)
+        refreshCameraModes(for: taskIndex)
+        refreshTransitionCameraModes(for: taskIndex)
     }
 
-    private func applyCameraMode(pathIndex: Int, waypointIndex: Int) {
-        guard draft.routeMacro.paths.indices.contains(pathIndex),
-              draft.routeMacro.paths[pathIndex].waypoints.indices.contains(waypointIndex) else { return }
+    private func applyCameraMode(taskIndex: Int, waypointIndex: Int) {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex),
+              draft.routeMacro.tasks[taskIndex].waypoints.indices.contains(waypointIndex) else { return }
 
-        let mode = draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].camera.mode
+        let mode = draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].camera.mode
         switch mode {
         case .followHeading:
-            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].camera.bearing =
-                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].heading
+            draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].camera.bearing =
+                draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].heading
         case .perimeterOutward:
-            if let heading = perimeterHeading(pathIndex: pathIndex, waypointIndex: waypointIndex, outward: true) {
-                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].camera.bearing = heading
+            if let heading = perimeterHeading(taskIndex: taskIndex, waypointIndex: waypointIndex, outward: true) {
+                draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].camera.bearing = heading
             }
         case .perimeterInward:
-            if let heading = perimeterHeading(pathIndex: pathIndex, waypointIndex: waypointIndex, outward: false) {
-                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].camera.bearing = heading
+            if let heading = perimeterHeading(taskIndex: taskIndex, waypointIndex: waypointIndex, outward: false) {
+                draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].camera.bearing = heading
             }
         case .manualBearing:
             break
         }
 
-        applyTransitionCameraMode(pathIndex: pathIndex, waypointIndex: waypointIndex)
+        applyTransitionCameraMode(taskIndex: taskIndex, waypointIndex: waypointIndex)
     }
 
-    private func refreshCameraModes(for pathIndex: Int) {
-        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return }
-        let waypointCount = draft.routeMacro.paths[pathIndex].waypoints.count
+    private func refreshCameraModes(for taskIndex: Int) {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex) else { return }
+        let waypointCount = draft.routeMacro.tasks[taskIndex].waypoints.count
         guard waypointCount > 0 else { return }
         for waypointIndex in 0..<waypointCount {
-            applyCameraMode(pathIndex: pathIndex, waypointIndex: waypointIndex)
+            applyCameraMode(taskIndex: taskIndex, waypointIndex: waypointIndex)
         }
     }
 
-    private func applyTransitionCameraMode(pathIndex: Int, waypointIndex: Int) {
-        guard draft.routeMacro.paths.indices.contains(pathIndex),
-              draft.routeMacro.paths[pathIndex].waypoints.indices.contains(waypointIndex) else { return }
+    private func applyTransitionCameraMode(taskIndex: Int, waypointIndex: Int) {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex),
+              draft.routeMacro.tasks[taskIndex].waypoints.indices.contains(waypointIndex) else { return }
 
-        let cameraMode = draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].transition.cameraMode
+        let cameraMode = draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].transition.cameraMode
         switch cameraMode {
         case .holdCurrent:
-            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].transition.cameraBearing =
-                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].camera.bearing
+            draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].transition.cameraBearing =
+                draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].camera.bearing
         case .faceNextWaypoint:
-            if let heading = followPathHeading(pathIndex: pathIndex, waypointIndex: waypointIndex) {
-                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].transition.cameraBearing = heading
+            if let heading = followCourseHeading(taskIndex: taskIndex, waypointIndex: waypointIndex) {
+                draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].transition.cameraBearing = heading
             }
         case .perimeterOutward:
-            if let heading = perimeterHeading(pathIndex: pathIndex, waypointIndex: waypointIndex, outward: true) {
-                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].transition.cameraBearing = heading
+            if let heading = perimeterHeading(taskIndex: taskIndex, waypointIndex: waypointIndex, outward: true) {
+                draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].transition.cameraBearing = heading
             }
         case .perimeterInward:
-            if let heading = perimeterHeading(pathIndex: pathIndex, waypointIndex: waypointIndex, outward: false) {
-                draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].transition.cameraBearing = heading
+            if let heading = perimeterHeading(taskIndex: taskIndex, waypointIndex: waypointIndex, outward: false) {
+                draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].transition.cameraBearing = heading
             }
         case .manualBearing:
             break
         }
     }
 
-    private func refreshTransitionCameraModes(for pathIndex: Int) {
-        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return }
-        let waypointCount = draft.routeMacro.paths[pathIndex].waypoints.count
+    private func refreshTransitionCameraModes(for taskIndex: Int) {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex) else { return }
+        let waypointCount = draft.routeMacro.tasks[taskIndex].waypoints.count
         guard waypointCount > 0 else { return }
         for waypointIndex in 0..<waypointCount {
-            applyTransitionCameraMode(pathIndex: pathIndex, waypointIndex: waypointIndex)
+            applyTransitionCameraMode(taskIndex: taskIndex, waypointIndex: waypointIndex)
         }
     }
 
-    private func pathIsLooped(_ pathIndex: Int) -> Bool {
-        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return false }
-        let path = draft.routeMacro.paths[pathIndex]
+    private func taskIsLooped(_ taskIndex: Int) -> Bool {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex) else { return false }
+        let path = draft.routeMacro.tasks[taskIndex]
         if path.loopMode == "loop" { return true }
         guard path.waypoints.count > 2,
               let first = path.waypoints.first,
@@ -1599,24 +2048,24 @@ private struct MissionWorkspaceView: View {
             .distance(from: CLLocation(latitude: last.coord.lat, longitude: last.coord.lon)) <= 2
     }
 
-    private func nextWaypointCoordinate(pathIndex: Int, waypointIndex: Int) -> RouteCoordinate? {
-        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return nil }
-        let waypoints = draft.routeMacro.paths[pathIndex].waypoints
+    private func nextWaypointCoordinate(taskIndex: Int, waypointIndex: Int) -> RouteCoordinate? {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex) else { return nil }
+        let waypoints = draft.routeMacro.tasks[taskIndex].waypoints
         guard waypoints.indices.contains(waypointIndex) else { return nil }
         if waypoints.indices.contains(waypointIndex + 1) {
             return waypoints[waypointIndex + 1].coord
         }
-        if pathIsLooped(pathIndex), let first = waypoints.first {
+        if taskIsLooped(taskIndex), let first = waypoints.first {
             return first.coord
         }
         return nil
     }
 
-    private func transitionAnchorCoordinate(pathIndex: Int, waypointIndex: Int) -> RouteCoordinate? {
-        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return nil }
-        let waypoints = draft.routeMacro.paths[pathIndex].waypoints
+    private func transitionAnchorCoordinate(taskIndex: Int, waypointIndex: Int) -> RouteCoordinate? {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex) else { return nil }
+        let waypoints = draft.routeMacro.tasks[taskIndex].waypoints
         guard waypoints.indices.contains(waypointIndex),
-              let nextCoord = nextWaypointCoordinate(pathIndex: pathIndex, waypointIndex: waypointIndex) else { return nil }
+              let nextCoord = nextWaypointCoordinate(taskIndex: taskIndex, waypointIndex: waypointIndex) else { return nil }
         let current = waypoints[waypointIndex].coord
         return RouteCoordinate(
             lat: (current.lat + nextCoord.lat) / 2,
@@ -1624,9 +2073,9 @@ private struct MissionWorkspaceView: View {
         )
     }
 
-    private func followPathHeading(pathIndex: Int, waypointIndex: Int) -> Double? {
-        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return nil }
-        let path = draft.routeMacro.paths[pathIndex]
+    private func followCourseHeading(taskIndex: Int, waypointIndex: Int) -> Double? {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex) else { return nil }
+        let path = draft.routeMacro.tasks[taskIndex]
         guard path.waypoints.indices.contains(waypointIndex) else { return nil }
 
         if path.waypoints.indices.contains(waypointIndex + 1) {
@@ -1642,11 +2091,11 @@ private struct MissionWorkspaceView: View {
         return nil
     }
 
-    private func perimeterHeading(pathIndex: Int, waypointIndex: Int, outward: Bool) -> Double? {
-        guard pathIsLooped(pathIndex) else {
-            return followPathHeading(pathIndex: pathIndex, waypointIndex: waypointIndex)
+    private func perimeterHeading(taskIndex: Int, waypointIndex: Int, outward: Bool) -> Double? {
+        guard taskIsLooped(taskIndex) else {
+            return followCourseHeading(taskIndex: taskIndex, waypointIndex: waypointIndex)
         }
-        let waypoints = draft.routeMacro.paths[pathIndex].waypoints
+        let waypoints = draft.routeMacro.tasks[taskIndex].waypoints
         guard waypoints.count > 2, waypoints.indices.contains(waypointIndex) else { return nil }
 
         let prevIndex = (waypointIndex - 1 + waypoints.count) % waypoints.count
@@ -1697,53 +2146,54 @@ private struct MissionWorkspaceView: View {
         focusedTransitionCameraFieldKey = nil
     }
 
-    private func openBulkWaypointEditor(pathIndex: Int) {
-        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return }
-        guard !draft.routeMacro.paths[pathIndex].waypoints.isEmpty else {
+    private func openBulkWaypointEditor(taskIndex: Int) {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex) else { return }
+        guard !draft.routeMacro.tasks[taskIndex].waypoints.isEmpty else {
             onToast("No waypoints to edit", .info)
             return
         }
-        bulkWaypointDraft = draft.routeMacro.paths[pathIndex].waypoints[0]
-        bulkEditPathIndex = pathIndex
+        bulkWaypointDraft = draft.routeMacro.tasks[taskIndex].waypoints[0]
         clearPreviewFocusState()
-        showingBulkWaypointEditor = true
+        bulkWaypointEditorSheetContext = BulkWaypointEditorSheetContext(taskIndex: taskIndex)
     }
 
-    private func finishEditingPathFromSidebar(pathIndex: Int) {
-        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return }
-        let path = draft.routeMacro.paths[pathIndex]
+    private func finishEditingTaskFromSidebar(taskIndex: Int) {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex) else { return }
+        let path = draft.routeMacro.tasks[taskIndex]
         if shouldOfferCloseLoop(path) {
-            pendingCloseLoopPathIndex = pathIndex
+            pendingCloseLoopTaskIndex = taskIndex
             return
         }
-        editingPathIndex = nil
+        editingTaskIndex = nil
         selectedWaypointIndex = nil
         clearPreviewFocusState()
-        onToast("Path edit mode disabled", .info)
+        persistMissionToStoreNow()
+        onToast("Task edit mode disabled", .info)
     }
 
-    private func applyBulkWaypointValues(pathIndex: Int) {
-        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return }
-        guard !draft.routeMacro.paths[pathIndex].waypoints.isEmpty else {
+    private func applyBulkWaypointValues(taskIndex: Int) {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex) else { return }
+        guard !draft.routeMacro.tasks[taskIndex].waypoints.isEmpty else {
             onToast("No waypoints to update", .info)
             return
         }
 
-        for waypointIndex in draft.routeMacro.paths[pathIndex].waypoints.indices {
-            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].altitude = bulkWaypointDraft.altitude
-            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].headingPreset = bulkWaypointDraft.headingPreset
-            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].heading =
+        for waypointIndex in draft.routeMacro.tasks[taskIndex].waypoints.indices {
+            draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].altitude = bulkWaypointDraft.altitude
+            draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].headingPreset = bulkWaypointDraft.headingPreset
+            draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].heading =
                 clamp(normalizeHeading(bulkWaypointDraft.heading), min: 0, max: 359.999)
-            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].delaySec =
+            draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].delaySec =
                 clamp(bulkWaypointDraft.delaySec, min: 0, max: 100_000)
-            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].delayUnit = bulkWaypointDraft.delayUnit
-            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].action = bulkWaypointDraft.action
-            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].camera = bulkWaypointDraft.camera
-            draft.routeMacro.paths[pathIndex].waypoints[waypointIndex].transition = bulkWaypointDraft.transition
+            draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].delayUnit = bulkWaypointDraft.delayUnit
+            draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].action = bulkWaypointDraft.action
+            draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].camera = bulkWaypointDraft.camera
+            draft.routeMacro.tasks[taskIndex].waypoints[waypointIndex].transition = bulkWaypointDraft.transition
         }
 
-        refreshAutoHeadings(for: pathIndex)
-        showingBulkWaypointEditor = false
+        refreshAutoHeadings(for: taskIndex)
+        bulkWaypointEditorSheetContext = nil
+        persistMissionToStoreNow()
         onToast("Applied bulk waypoint settings", .success)
     }
 
@@ -1763,49 +2213,48 @@ private struct MissionWorkspaceView: View {
         )
     }
 
-    private func addRosterDeviceToPath(pathIndex: Int) {
-        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return }
-        let pathId = draft.routeMacro.paths[pathIndex].id
-        let fields = pathRosterDrafts[pathId] ?? PathRosterDraft()
+    private func addRosterDeviceToTask(taskIndex: Int) {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex) else { return }
+        let taskId = draft.routeMacro.tasks[taskIndex].id
+        let path = draft.routeMacro.tasks[taskIndex]
+        let fields = taskRosterDrafts[taskId] ?? TaskRosterDraft()
         let name = fields.name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else {
-            onToast("Enter a device label", .info)
+            onToast("Enter a vehicle callsign", .info)
             return
         }
-        let role = fields.role.trimmingCharacters(in: .whitespacesAndNewlines)
-        let hint = fields.hint.trimmingCharacters(in: .whitespacesAndNewlines)
+        var leaderId = fields.leaderRosterDeviceId
+        if fields.slot != .wingman && fields.slot != .reserve {
+            leaderId = nil
+        } else if let lid = leaderId {
+            let primaryIds = Set(primaryRosterDevices(on: path).map(\.id))
+            if !primaryIds.contains(lid) { leaderId = nil }
+        }
         let device = RosterDevice(
             name: name,
-            roleType: role.isEmpty ? "device" : role,
-            positionHint: hint
+            role: fields.role,
+            slot: fields.slot,
+            vehicleClass: fields.vehicleClass,
+            leaderRosterDeviceId: leaderId
         )
         draft.rosterDevices.append(device)
-        draft.routeMacro.paths[pathIndex].rosterDeviceIds.append(device.id)
-        pathRosterDrafts[pathId] = PathRosterDraft()
-        onToast("Device added to path", .success)
+        draft.routeMacro.tasks[taskIndex].rosterDeviceIds.append(device.id)
+        taskRosterDrafts[taskId] = TaskRosterDraft()
+        persistMissionToStoreNow()
     }
 
-    private func removeRosterDeviceFromPath(pathIndex: Int, deviceId: UUID) {
-        guard draft.routeMacro.paths.indices.contains(pathIndex) else { return }
-        draft.routeMacro.paths[pathIndex].rosterDeviceIds.removeAll { $0 == deviceId }
-        let stillReferenced = draft.routeMacro.paths.contains { $0.rosterDeviceIds.contains(deviceId) }
-        if !stillReferenced {
-            draft.rosterDevices.removeAll { $0.id == deviceId }
-        }
-    }
-
-    private func bulkWaypointEditorSheet(pathIndex: Int) -> some View {
+    private func bulkWaypointEditorSheet(taskIndex: Int) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Text("Bulk Edit Waypoints")
                     .font(.system(size: 17, weight: .semibold))
                 Spacer()
                 Button("Cancel") {
-                    showingBulkWaypointEditor = false
+                    bulkWaypointEditorSheetContext = nil
                 }
                 .buttonStyle(.bordered)
                 Button("Apply") {
-                    applyBulkWaypointValues(pathIndex: pathIndex)
+                    applyBulkWaypointValues(taskIndex: taskIndex)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.blue)
@@ -1865,8 +2314,8 @@ private struct MissionWorkspaceView: View {
                             )
                         ) {
                             Text("Manual").tag(HeadingPreset?.none)
-                            Text("Follow Path").tag(HeadingPreset?.some(.followPath))
-                            if pathIsLooped(pathIndex) {
+                            Text("Along route").tag(HeadingPreset?.some(.followCourse))
+                            if taskIsLooped(taskIndex) {
                                 Text("Perimeter Outward").tag(HeadingPreset?.some(.perimeterOutward))
                                 Text("Perimeter Inward").tag(HeadingPreset?.some(.perimeterInward))
                             }
@@ -1947,7 +2396,7 @@ private struct MissionWorkspaceView: View {
                             )
                         ) {
                             Text("Follow Heading").tag(CameraMode.followHeading)
-                            if pathIsLooped(pathIndex) {
+                            if taskIsLooped(taskIndex) {
                                 Text("Perimeter Outward").tag(CameraMode.perimeterOutward)
                                 Text("Perimeter Inward").tag(CameraMode.perimeterInward)
                             }
@@ -2025,7 +2474,7 @@ private struct MissionWorkspaceView: View {
                         ) {
                             Text("Hold Current").tag(TransitionCameraMode.holdCurrent)
                             Text("Face Next Waypoint").tag(TransitionCameraMode.faceNextWaypoint)
-                            if pathIsLooped(pathIndex) {
+                            if taskIsLooped(taskIndex) {
                                 Text("Perimeter Outward").tag(TransitionCameraMode.perimeterOutward)
                                 Text("Perimeter Inward").tag(TransitionCameraMode.perimeterInward)
                             }
@@ -2087,10 +2536,322 @@ private struct MissionWorkspaceView: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
-    private struct PathRosterDraft: Equatable {
+    private struct TaskRosterDraft: Equatable {
         var name: String = ""
-        var role: String = ""
-        var hint: String = ""
+        var role: RosterRole = .none
+        var slot: MissionRosterSlotRole = .primary
+        var vehicleClass: FleetVehicleType = .unknown
+        var leaderRosterDeviceId: UUID?
+    }
+}
+
+/// Roster-tab sidebar: edit one ``RosterDevice`` on a task (mirrors task settings overlay pattern).
+private struct MissionRosterDeviceSettingsSidebar: View {
+    @Binding var device: RosterDevice
+    let primariesOnTask: [RosterDevice]
+    let onSave: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+    private var fieldRowLabelFont: Font { .system(size: 13) }
+
+    private var slotNeedsLeader: Bool {
+        device.slot == .wingman || device.slot == .reserve
+    }
+
+    @ViewBuilder
+    private func rosterDeviceFieldRow<Trailing: View>(
+        label: String,
+        @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(label)
+                .font(fieldRowLabelFont)
+                .foregroundStyle(theme.textPrimary)
+            Spacer(minLength: 12)
+            trailing()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                rosterSettingsSection("Callsign") {
+                    TextField("Callsign", text: $device.name)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                rosterSettingsSection("Configuration") {
+                    rosterDeviceFieldRow(label: "Class") {
+                        Picker("", selection: $device.vehicleClass) {
+                            ForEach(FleetVehicleType.allCases, id: \.self) { t in
+                                Text(t.classCode).tag(t)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                    }
+                    rosterDeviceFieldRow(label: "Role") {
+                        Picker("", selection: $device.role) {
+                            ForEach(RosterRole.allCases) { r in
+                                Text(r.rawValue.capitalized).tag(r)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                    }
+                    rosterDeviceFieldRow(label: "Slot") {
+                        Picker("", selection: $device.slot) {
+                            ForEach(MissionRosterSlotRole.allCases) { r in
+                                Text(r.rawValue.capitalized).tag(r)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                    }
+                    .onChange(of: device.slot) { newSlot in
+                        if newSlot != .wingman && newSlot != .reserve {
+                            device.leaderRosterDeviceId = nil
+                        }
+                    }
+
+                    if slotNeedsLeader {
+                        rosterDeviceFieldRow(label: "Leader") {
+                            if primariesOnTask.isEmpty {
+                                Text("—")
+                                    .font(fieldRowLabelFont)
+                                    .foregroundStyle(theme.textSecondary)
+                            } else {
+                                Picker("", selection: $device.leaderRosterDeviceId) {
+                                    Text("Auto").tag(UUID?.none)
+                                    ForEach(primariesOnTask) { p in
+                                        Text(p.name).tag(Optional(p.id))
+                                    }
+                                }
+                                .labelsHidden()
+                                .pickerStyle(.menu)
+                                .fixedSize()
+                            }
+                        }
+                    }
+                }
+
+                HStack {
+                    Button("Save") {
+                        onSave()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func rosterSettingsSection<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(theme.textPrimary)
+            VStack(alignment: .leading, spacing: 10) {
+                content()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+/// Tasks-tab sidebar: edit ``MissionTask`` fields that are not waypoint geometry.
+private struct MissionTaskSettingsSidebar: View {
+    @Binding var task: MissionTask
+    let onSave: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
+    private var showsRepeatCount: Bool {
+        task.regularity == .continuous || task.regularity == .continuousWithDelay
+    }
+
+    private var showsRegularityDelay: Bool {
+        task.regularity == .continuousWithDelay
+    }
+
+    private var fieldRowLabelFont: Font { .system(size: 13) }
+
+    @ViewBuilder
+    private func missionTaskSettingsFieldRow<Trailing: View>(
+        label: String,
+        @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(label)
+                .font(fieldRowLabelFont)
+                .foregroundStyle(theme.textPrimary)
+            Spacer(minLength: 12)
+            trailing()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var missionTaskMethodRow: some View {
+        missionTaskSettingsFieldRow(label: "Method") {
+            Picker("", selection: $task.executionMethod) {
+                ForEach(MissionTaskExecutionMethod.allCases) { m in
+                    Text(m.displayTitle).tag(m)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+        }
+    }
+
+    private var missionTaskRegularityRow: some View {
+        missionTaskSettingsFieldRow(label: "Regularity") {
+            Picker("", selection: $task.regularity) {
+                ForEach(MissionTaskRegularity.allCases) { r in
+                    Text(r.displayTitle).tag(r)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+        }
+    }
+
+    private var missionTaskPatternRow: some View {
+        missionTaskSettingsFieldRow(label: "Pattern") {
+            Picker("", selection: $task.pattern) {
+                ForEach(MissionTaskPattern.allCases) { p in
+                    Text(p.displayTitle).tag(p)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+        }
+    }
+
+    private var missionTaskStartDelayRow: some View {
+        missionTaskIntStepperFieldRow(
+            label: "Start Delay",
+            value: $task.startDelay,
+            range: 0...59,
+            unitSuffix: "mins"
+        )
+    }
+
+    private func missionTaskIntStepperFieldRow(
+        label: String,
+        value: Binding<Int>,
+        range: ClosedRange<Int>,
+        unitSuffix: String? = nil
+    ) -> some View {
+        missionTaskSettingsFieldRow(label: label) {
+            HStack(spacing: 6) {
+                Stepper(value: value, in: range) {
+                    Text(String(value.wrappedValue))
+                        .font(fieldRowLabelFont)
+                        .monospacedDigit()
+                        .foregroundStyle(theme.textPrimary)
+                        .frame(minWidth: 28, alignment: .trailing)
+                }
+                if let unitSuffix {
+                    Text(unitSuffix)
+                        .font(fieldRowLabelFont)
+                        .foregroundStyle(theme.textSecondary)
+                }
+            }
+            .fixedSize()
+        }
+    }
+
+    private var missionTaskRegularityDelayRow: some View {
+        missionTaskIntStepperFieldRow(
+            label: "Regularity Delay",
+            value: $task.regularityDelayMinutes,
+            range: 1...60,
+            unitSuffix: "mins"
+        )
+    }
+
+    private var missionTaskRepeatCountRow: some View {
+        missionTaskIntStepperFieldRow(
+            label: "Repeat Count",
+            value: $task.repeatCount,
+            range: 0...100,
+            unitSuffix: nil
+        )
+    }
+
+    @ViewBuilder
+    private var missionTaskExecutionSettings: some View {
+        missionTaskMethodRow
+        missionTaskRegularityRow
+        missionTaskPatternRow
+        missionTaskStartDelayRow
+        if showsRegularityDelay {
+            missionTaskRegularityDelayRow
+        }
+        if showsRepeatCount {
+            missionTaskRepeatCountRow
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                settingsSection("") {
+                    missionTaskSettingsFieldRow(label: "Name") {
+                        TextField("Task name", text: $task.name)
+                            .textFieldStyle(.roundedBorder)
+                            .multilineTextAlignment(.trailing)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                }
+
+                settingsSection("") {
+                    missionTaskExecutionSettings
+                }
+
+                HStack {
+                    Button("Save") {
+                        onSave()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func settingsSection<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(theme.textPrimary)
+            VStack(alignment: .leading, spacing: 10) {
+                content()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 
@@ -2170,7 +2931,7 @@ private struct AddMissionSheet: View {
     }
 
     var body: some View {
-        GuardianModalTemplate(
+        Modal(
             title: "New Mission",
             headerActions: {
                 HStack(spacing: 8) {

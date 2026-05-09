@@ -36,31 +36,23 @@ final class MissionControlStore: ObservableObject {
         runEnvironment(for: runID)?.systems.scheduling.cancelScheduledMissionCycle()
     }
 
-    private func cancelScheduledMissionCycle(for runID: UUID, pathID: UUID) {
-        runEnvironment(for: runID)?.systems.scheduling.cancelScheduledMissionCycle(forPathID: pathID)
+    private func clearMissionTaskStartDeferral(for runID: UUID, taskID: UUID?) {
+        runEnvironment(for: runID)?.systems.scheduling.clearMissionTaskStartDeferral(forTaskID: taskID)
     }
 
-    private func clearMissionCycleIntermission(for runID: UUID, pathID: UUID?) {
-        runEnvironment(for: runID)?.systems.scheduling.clearMissionCycleIntermission(forPathID: pathID)
+    private func cancelScheduledTaskMissionStarts(for runID: UUID) {
+        runEnvironment(for: runID)?.systems.scheduling.cancelScheduledTaskMissionStarts()
     }
 
-    private func clearMissionPathStartDeferral(for runID: UUID, pathID: UUID?) {
-        runEnvironment(for: runID)?.systems.scheduling.clearMissionPathStartDeferral(forPathID: pathID)
+    private func cancelScheduledTaskMissionStarts(for runID: UUID, taskID: UUID) {
+        runEnvironment(for: runID)?.systems.scheduling.cancelScheduledTaskMissionStarts(forTaskID: taskID)
     }
 
-    private func cancelScheduledPathMissionStarts(for runID: UUID) {
-        runEnvironment(for: runID)?.systems.scheduling.cancelScheduledPathMissionStarts()
-    }
-
-    private func cancelScheduledPathMissionStarts(for runID: UUID, pathID: UUID) {
-        runEnvironment(for: runID)?.systems.scheduling.cancelScheduledPathMissionStarts(forPathID: pathID)
-    }
-
-    private func assignmentForPaladinPath(run: MissionRunEnvironment, mission: Mission?, pathID: UUID) -> MissionRunAssignment? {
-        if let a = run.assignments.first(where: { $0.pathId == pathID }) { return a }
-        let enabled = mission?.routeMacro.paths.filter(\.enabled) ?? []
-        if enabled.count == 1, enabled.first?.id == pathID {
-            return run.assignments.first(where: { $0.pathId == nil }) ?? run.assignments.first
+    private func assignmentForPaladinTask(run: MissionRunEnvironment, mission: Mission?, taskID: UUID) -> MissionRunAssignment? {
+        if let a = run.assignments.first(where: { $0.taskId == taskID }) { return a }
+        let enabled = mission?.routeMacro.tasks.filter(\.enabled) ?? []
+        if enabled.count == 1, enabled.first?.id == taskID {
+            return run.assignments.first(where: { $0.taskId == nil }) ?? run.assignments.first
         }
         return nil
     }
@@ -72,12 +64,12 @@ final class MissionControlStore: ObservableObject {
 
     func createRun(from mission: Mission) -> MissionRunEnvironment {
         var assignments: [MissionRunAssignment] = []
-        for path in mission.routeMacro.paths {
+        for path in mission.routeMacro.tasks {
             for deviceId in path.rosterDeviceIds {
                 guard let device = mission.rosterDevices.first(where: { $0.id == deviceId }) else { continue }
                 assignments.append(
                     MissionRunAssignment(
-                        pathId: path.id,
+                        taskId: path.id,
                         rosterDeviceId: device.id,
                         slotName: device.name
                     )
@@ -87,7 +79,7 @@ final class MissionControlStore: ObservableObject {
         if assignments.isEmpty {
             assignments = mission.rosterDevices.map {
                 MissionRunAssignment(
-                    pathId: nil,
+                    taskId: nil,
                     rosterDeviceId: $0.id,
                     slotName: $0.name
                 )
@@ -118,7 +110,7 @@ final class MissionControlStore: ObservableObject {
         guard let idx = runs.firstIndex(where: { $0.id == id }) else { return }
         cancelDeferredOneOffExecution(for: id)
         cancelScheduledMissionCycle(for: id)
-        cancelScheduledPathMissionStarts(for: id)
+        cancelScheduledTaskMissionStarts(for: id)
         let run = runs[idx]
         let ctx = MissionRunExecutionContext(
             mission: mission,
@@ -146,7 +138,7 @@ final class MissionControlStore: ObservableObject {
             notifyRunWillDelete(run)
         }
         cancelScheduledMissionCycle(for: id)
-        cancelScheduledPathMissionStarts(for: id)
+        cancelScheduledTaskMissionStarts(for: id)
         cancelDeferredOneOffExecution(for: id)
         runEnvironment(for: id)?.systems.executor.clearCommandQueue()
         runEnvironment(for: id)?.captureExecutionContext(nil)
@@ -158,7 +150,7 @@ final class MissionControlStore: ObservableObject {
     func resetRunToSetup(id: UUID) {
         guard let idx = runs.firstIndex(where: { $0.id == id }) else { return }
         cancelScheduledMissionCycle(for: id)
-        cancelScheduledPathMissionStarts(for: id)
+        cancelScheduledTaskMissionStarts(for: id)
         cancelDeferredOneOffExecution(for: id)
         runEnvironment(for: id)?.setMissionCycleCount(0)
         runEnvironment(for: id)?.systems.logging.clearState()
@@ -202,9 +194,9 @@ final class MissionControlStore: ObservableObject {
             fleetVehicles: fleetVehicles
         ) else { return }
         let plan = planningResult.plan
-        let summary = "Compiled \(plan.roleTracks.count) role track(s), \(plan.pathTopology.rawValue), \(plan.teamTopology.rawValue)."
+        let summary = "Compiled \(plan.roleTracks.count) role track(s), \(plan.taskTopology.rawValue), \(plan.teamTopology.rawValue)."
         run.systems.logging.clearState()
-        run.systems.logging.setPathContextFromRoleTracks(plan.roleTracks)
+        run.systems.logging.setTaskContextFromRoleTracks(plan.roleTracks)
         run.systems.lifecycle.markCompiled()
         run.systems.logging.appendLogEvent(
             level: .info,
@@ -213,7 +205,7 @@ final class MissionControlStore: ObservableObject {
             templateKey: PaladinLogTemplateKey.compileSummary,
             templateParams: [
                 "tracks": String(plan.roleTracks.count),
-                "pathTopology": plan.pathTopology.rawValue,
+                "taskTopology": plan.taskTopology.rawValue,
                 "teamTopology": plan.teamTopology.rawValue,
             ]
         )
@@ -593,6 +585,24 @@ final class MissionControlStore: ObservableObject {
                 permissions: registration.permissions
             )
         }
+    }
+
+    /// Swap-in-reserve operator prompts are not implemented in this build; Paladin may call this hook when ready.
+    @discardableResult
+    func raiseOperatorPromptSwapInReserve(
+        runID: UUID,
+        primaryAssignmentID: UUID,
+        reserveAssignmentID: UUID,
+        issuerKey: String,
+        observerToken: UUID
+    ) -> Bool {
+        _ = primaryAssignmentID
+        _ = reserveAssignmentID
+        _ = issuerKey
+        guard observerPermissions(for: observerToken)?.contains(.act) == true,
+              runEnvironment(for: runID) != nil
+        else { return false }
+        return false
     }
 
 }

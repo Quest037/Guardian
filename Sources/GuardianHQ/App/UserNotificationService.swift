@@ -159,6 +159,13 @@ final class UserNotificationService: NSObject, ObservableObject {
         }
     }
 
+    /// Stub for Mission Control operator prompts; full UNUserNotification delivery TBD.
+    func stubNotifyMissionRunOperatorPrompt(runID: UUID, missionName: String, summary: String) {
+        Self.trace(
+            "stub operator prompt runID=\(runID.uuidString) mission=\(missionName) — \(summary)"
+        )
+    }
+
     private static let userInfoKindKey = "guardian.kind"
     private static let userInfoRunIDKey = "guardian.runID"
 }

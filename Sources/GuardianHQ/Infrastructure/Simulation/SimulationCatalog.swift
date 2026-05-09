@@ -102,3 +102,22 @@ enum SimulationVehiclePreset: String, Codable, CaseIterable, Identifiable {
         }
     }
 }
+
+extension FleetVehicleType {
+    /// Bundled ``SimulationDevices`` PNG basenames for this class — same catalog as the SITL / mission vehicle picker (``SimulationVehiclePreset/simulationDeviceImageBasenames``).
+    var defaultSimulationDeviceImageBasenames: [String] {
+        let preset: SimulationVehiclePreset
+        switch self {
+        case .uavCopter: preset = .uavMultirotor
+        case .uavFixedWing: preset = .uavFixedWing
+        case .uavVTOL: preset = .uavVTOL
+        case .ugvWheeled: preset = .ugvWheeled
+        case .ugvTracked: preset = .ugvTracked
+        case .ugvLegged: preset = .ugvLegged
+        case .usv: preset = .usv
+        case .uuv: preset = .uuv
+        case .unknown: preset = .uavMultirotor
+        }
+        return preset.simulationDeviceImageBasenames
+    }
+}

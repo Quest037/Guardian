@@ -29,11 +29,10 @@ final class MissionPathWaypointUtilities {
     func mavItem(
         coord: RouteCoordinate,
         waypoint: RouteWaypoint,
-        home: RouteHome?,
         useWaypointHeadingForYaw: Bool,
         loiterOverrideSeconds: Float? = nil
     ) -> Mavsdk.Mission.MissionItem {
-        let relAlt = relativeAltitudeM(waypoint: waypoint, home: home)
+        let relAlt = relativeAltitudeM(waypoint: waypoint)
         let speed = speedMetersPerSecond(waypoint: waypoint)
         let loiter = loiterOverrideSeconds ?? delaySeconds(waypoint: waypoint)
         let yaw: Float = useWaypointHeadingForYaw ? Float(waypoint.heading) : 0
@@ -54,14 +53,13 @@ final class MissionPathWaypointUtilities {
         )
     }
 
-    func relativeAltitudeM(waypoint: RouteWaypoint, home: RouteHome?) -> Float {
+    func relativeAltitudeM(waypoint: RouteWaypoint) -> Float {
         let v = waypoint.altitude.value
         switch waypoint.altitude.reference {
         case .agl:
             return Float(max(5, v))
         case .msl, .asl:
-            let homeAlt = home?.altitude.value ?? 0
-            return Float(max(5, v - homeAlt))
+            return Float(max(5, v))
         }
     }
 
@@ -87,7 +85,7 @@ final class MissionPathWaypointUtilities {
         }
     }
 
-    func shouldIgnoreClosingWaypointDelay(path: RoutePath, index: Int, waypoint: RouteWaypoint) -> Bool {
+    func shouldIgnoreClosingWaypointDelay(path: MissionTask, index: Int, waypoint: RouteWaypoint) -> Bool {
         guard path.waypoints.count >= 2, index == path.waypoints.count - 1 else { return false }
         guard let first = path.waypoints.first else { return false }
         guard waypointHasNoAction(waypoint) else { return false }

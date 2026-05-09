@@ -57,6 +57,7 @@ struct GuardianHQApp: App {
     @State private var selection: AppSection = .dashboard
     @State private var showingSplash = true
     @StateObject private var toastCenter = ToastCenter()
+    @StateObject private var sidebarOverlay = SidebarOverlay()
     @StateObject private var fleetLinkService = FleetLinkService()
     @StateObject private var sitlService = SitlService()
     @StateObject private var generalSettingsStore = GeneralSettingsStore()
@@ -80,7 +81,9 @@ struct GuardianHQApp: App {
                         generalSettingsStore: generalSettingsStore
                     )
                         .withToasts()
+                        .withSidebarOverlay()
                         .environmentObject(toastCenter)
+                        .environmentObject(sidebarOverlay)
                         .onAppear {
                             // SwiftPM / early launch: re-run after splash so permission + System Settings registration line up with a real NSApplication + window session.
                             UserNotificationService.shared.configure()

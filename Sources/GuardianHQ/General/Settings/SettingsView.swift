@@ -72,6 +72,22 @@ struct SettingsView: View {
                 rowDivider
 
                 settingsRow(
+                    title: "Main sidebar",
+                    description: "Navigation rail when you open the app: collapsed shows icons only; expanded shows section names. You can still toggle the rail with the control at the top of the sidebar."
+                ) {
+                    Picker("Main sidebar", selection: $generalSettings.mainSidebarLaunchMode) {
+                        ForEach(MainSidebarLaunchMode.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(minWidth: 220, alignment: .trailing)
+                }
+
+                rowDivider
+
+                settingsRow(
                     title: "Default map view",
                     description: "Starting basemap for Missions (route editor) and Mission Control live overview. You can still switch per map."
                 ) {
@@ -407,7 +423,7 @@ struct SettingsView: View {
     }
 
     private var simLocationPickerSheet: some View {
-        GuardianModalTemplate(
+        Modal(
             title: "Pick SIM Spawn Location",
             headerActions: {
                 HStack(spacing: 8) {

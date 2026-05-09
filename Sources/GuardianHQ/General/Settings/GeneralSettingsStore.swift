@@ -33,6 +33,22 @@ enum AppAppearanceMode: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// Navigation rail width when the app opens (user can still toggle with the sidebar control).
+enum MainSidebarLaunchMode: String, Codable, CaseIterable, Identifiable {
+    /// Persisted as `"reduced"` for compatibility with existing settings files.
+    case collapsed = "reduced"
+    case expanded
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .collapsed: return "Collapsed"
+        case .expanded: return "Expanded"
+        }
+    }
+}
+
 enum SimBatteryDrainRate: String, Codable, CaseIterable, Identifiable {
     case slow
     case normal
@@ -157,6 +173,14 @@ final class GeneralSettingsStore: ObservableObject {
         }
     }
 
+    /// Main navigation sidebar when the app opens: icons-only rail vs full labels.
+    @Published var mainSidebarLaunchMode: MainSidebarLaunchMode {
+        didSet {
+            guard mainSidebarLaunchMode != oldValue else { return }
+            save()
+        }
+    }
+
     /// Default simulated battery drain rate used by LD/MC-R when enabling drain.
     @Published var defaultSimBatteryDrainRate: SimBatteryDrainRate {
         didSet {
@@ -192,6 +216,7 @@ final class GeneralSettingsStore: ObservableObject {
             defaultMapTileStyle = loaded.defaultMapTileStyle ?? .standard
             logRetentionProfile = loaded.logRetentionProfile ?? .default
             appearanceMode = loaded.appearanceMode ?? .system
+            mainSidebarLaunchMode = loaded.mainSidebarLaunchMode ?? .collapsed
             defaultSimBatteryDrainRate = loaded.defaultSimBatteryDrainRate ?? .normal
             simSpawnDefaults = loaded.simSpawnDefaults ?? .default
         } else {
@@ -199,6 +224,7 @@ final class GeneralSettingsStore: ObservableObject {
             defaultMapTileStyle = .standard
             logRetentionProfile = .default
             appearanceMode = .system
+            mainSidebarLaunchMode = .collapsed
             defaultSimBatteryDrainRate = .normal
             simSpawnDefaults = .default
         }
@@ -210,6 +236,7 @@ final class GeneralSettingsStore: ObservableObject {
             defaultMapTileStyle: defaultMapTileStyle,
             logRetentionProfile: logRetentionProfile,
             appearanceMode: appearanceMode,
+            mainSidebarLaunchMode: mainSidebarLaunchMode,
             defaultSimBatteryDrainRate: defaultSimBatteryDrainRate,
             simSpawnDefaults: simSpawnDefaults
         )
@@ -231,6 +258,8 @@ final class GeneralSettingsStore: ObservableObject {
         var logRetentionProfile: LogRetentionProfile?
         /// Omitted in older saves; treated as `.system`.
         var appearanceMode: AppAppearanceMode?
+        /// Omitted in older saves; treated as `.collapsed`.
+        var mainSidebarLaunchMode: MainSidebarLaunchMode?
         /// Omitted in older saves; treated as `.normal`.
         var defaultSimBatteryDrainRate: SimBatteryDrainRate?
         /// Omitted in older saves; treated as `.default`.

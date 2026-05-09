@@ -8,9 +8,9 @@ struct VehiclesView: View {
     @ObservedObject var missionControlStore: MissionControlStore
     @ObservedObject var liveDriveStore: LiveDriveStore
     @EnvironmentObject private var toastCenter: ToastCenter
+    @EnvironmentObject private var sidebarOverlay: SidebarOverlay
     @Environment(\.colorScheme) private var colorScheme
 
-    @State private var isAddSimSidebarPresented = false
     @State private var sidebarSpawnPlatform: SimulationPlatform = .ardupilot
     @State private var infoSheetVehicleTitle: String?
     @State private var infoSheetVehicleID: String?
@@ -168,9 +168,7 @@ struct VehiclesView: View {
             if fleetLink.isSimulateEnabled {
                 Button("Add Sim") {
                     sidebarSpawnPlatform = generalSettings.defaultSimulationPlatform
-                    withAnimation(addSimSidebarSpring) {
-                        isAddSimSidebarPresented = true
-                    }
+                    presentAddSimulationSidebar()
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.blue)
@@ -185,77 +183,50 @@ struct VehiclesView: View {
     }
 
     private var devicesContent: some View {
-        ZStack(alignment: .trailing) {
-            Group {
-                if fleetGridEntries.isEmpty {
-                    VStack(spacing: 0) {
-                        devicesHeaderRow
-                            .padding(.horizontal, 24)
-                            .padding(.top, 24)
-                        noVehiclesEmptyState
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 16) {
-                            devicesHeaderRow
-                            vehicleFleetSection
-                        }
-                        .padding(24)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+        Group {
+            if fleetGridEntries.isEmpty {
+                VStack(spacing: 0) {
+                    devicesHeaderRow
+                        .padding(.horizontal, 24)
+                        .padding(.top, 24)
+                    noVehiclesEmptyState
                 }
-            }
-
-            // Separate `if` branches so each view’s transition runs (one ZStack would animate as a single insert).
-            if isAddSimSidebarPresented {
-                theme.overlayScrim
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation(addSimSidebarSpring) {
-                            isAddSimSidebarPresented = false
-                        }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        devicesHeaderRow
+                        vehicleFleetSection
                     }
-                    .transition(.opacity)
-                    .zIndex(1)
-            }
-            if isAddSimSidebarPresented {
-                addSimulationSidebarPanel
-                    .transition(.move(edge: .trailing))
-                    .zIndex(2)
+                    .padding(24)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
     }
 
-    private var addSimulationSidebarPanel: some View {
-        SimulationVehiclePickerSidebar(
-            platform: $sidebarSpawnPlatform,
-            onSelect: { preset in
-                sitl.spawn(
-                    preset: preset,
-                    platform: sidebarSpawnPlatform,
-                    defaults: generalSettings.simSpawnDefaults
-                )
-                withAnimation(addSimSidebarSpring) {
-                    isAddSimSidebarPresented = false
+    private func presentAddSimulationSidebar() {
+        sidebarOverlay.present(
+            title: nil,
+            preferredWidth: 352,
+            scrimTapDismisses: true,
+            animation: addSimSidebarSpring
+        ) {
+            SimulationVehiclePickerSidebar(
+                platform: $sidebarSpawnPlatform,
+                onSelect: { preset in
+                    sitl.spawn(
+                        preset: preset,
+                        platform: sidebarSpawnPlatform,
+                        defaults: generalSettings.simSpawnDefaults
+                    )
+                    sidebarOverlay.dismiss(animation: addSimSidebarSpring)
+                },
+                onClose: {
+                    sidebarOverlay.dismiss(animation: addSimSidebarSpring)
                 }
-            },
-            onClose: {
-                withAnimation(addSimSidebarSpring) {
-                    isAddSimSidebarPresented = false
-                }
-            }
-        )
-        .frame(width: 352)
-        .frame(maxHeight: .infinity)
-        .background(theme.backgroundElevated)
-        .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(theme.borderSubtle)
-                .frame(width: 1)
+            )
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
     }
 
     private var vehicleFleetSection: some View {

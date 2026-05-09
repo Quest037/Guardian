@@ -1,0 +1,14 @@
+---
+description: Default scroll padding (10pt) for card-based SwiftUI views like MC-Setup
+globs: Sources/GuardianHQ/**/*View*.swift
+alwaysApply: false
+---
+
+# Card layouts — scroll padding (magic number **10**)
+
+When building or editing **SwiftUI views that stack cards** inside a `ScrollView` or similar scrollable content (Mission Control setup, multi-card settings, roster prep, etc.):
+
+- Use **10pt** for the default **horizontal** and **vertical** inset between the scroll (or pane) edges and the card column — **same value for H and V** unless the design explicitly calls for something else.
+- **10 is the canonical gutter** for this pattern: prefer a shared constant (e.g. `static let …ScrollPaddingH: CGFloat = 10` / `…V`) next to other layout constants for that screen, rather than ad‑hoc `16`, `24`, or `36` on scroll content.
+- **Reference implementation:** ``MissionRunPrepLayout.setupScrollPaddingH`` / ``setupScrollPaddingV`` in ``Sources/GuardianHQ/Systems/MissionControl/Views/MissionControlView.swift`` — keep these at **10** unless product asks for a deliberate change.
+- If the screen also has a **top sub-bar** (back, title, tabs, actions), align scroll/card horizontal inset with that bar’s horizontal padding so cards don’t sit wider or narrower than the chrome unless intentional.

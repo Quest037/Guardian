@@ -6,13 +6,29 @@ struct RootView: View {
     @ObservedObject var fleetLinkService: FleetLinkService
     @ObservedObject var sitlService: SitlService
     @ObservedObject var generalSettingsStore: GeneralSettingsStore
+    @EnvironmentObject private var sidebarOverlay: SidebarOverlay
     @StateObject private var missionStore = MissionStore()
     @StateObject private var missionControlStore = MissionControlStore()
     @StateObject private var liveDriveStore = LiveDriveStore()
     @StateObject private var manualControlSettings = ManualControlSettingsStore()
     @State private var settingsPane: SettingsPane = .general
-    @State private var isSidebarCollapsed = false
+    @State private var isSidebarCollapsed: Bool
     @Environment(\.colorScheme) private var colorScheme
+
+    init(
+        selection: Binding<AppSection>,
+        fleetLinkService: FleetLinkService,
+        sitlService: SitlService,
+        generalSettingsStore: GeneralSettingsStore
+    ) {
+        _selection = selection
+        self.fleetLinkService = fleetLinkService
+        self.sitlService = sitlService
+        self.generalSettingsStore = generalSettingsStore
+        _isSidebarCollapsed = State(
+            initialValue: generalSettingsStore.mainSidebarLaunchMode == .collapsed
+        )
+    }
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
@@ -71,6 +87,14 @@ struct RootView: View {
         }
         .onChange(of: generalSettingsStore.logRetentionProfile) { profile in
             fleetLinkService.applyLogRetentionProfile(profile)
+        }
+        .onChange(of: generalSettingsStore.mainSidebarLaunchMode) { mode in
+            withAnimation(.easeInOut(duration: 0.2)) {
+                isSidebarCollapsed = (mode == .collapsed)
+            }
+        }
+        .onChange(of: selection) { _ in
+            sidebarOverlay.dismiss()
         }
     }
 

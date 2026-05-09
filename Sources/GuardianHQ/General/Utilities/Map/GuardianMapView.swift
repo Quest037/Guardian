@@ -60,11 +60,11 @@ struct GuardianMapContextMenuPolicy {
 final class GuardianMapModel: ObservableObject {
     @Published var mapStyle: MapTileStyle
     @Published var preserveView: Bool
-    @Published var isEditingPath: Bool
+    @Published var isEditingTask: Bool
 
     @Published var home: RouteHome?
-    @Published var allPathsCoords: [[RouteCoordinate]]
-    @Published var selectedPathWaypoints: [RouteWaypoint]
+    @Published var allTasksCoords: [[RouteCoordinate]]
+    @Published var selectedTaskWaypoints: [RouteWaypoint]
     @Published var selectedWaypointIndex: Int?
     @Published var vehicleMarkers: [MapVehicleMarker]
     @Published var headingPreview: HeadingPreview?
@@ -78,10 +78,10 @@ final class GuardianMapModel: ObservableObject {
     init(
         mapStyle: MapTileStyle = .standard,
         preserveView: Bool = true,
-        isEditingPath: Bool = false,
+        isEditingTask: Bool = false,
         home: RouteHome? = nil,
-        allPathsCoords: [[RouteCoordinate]] = [],
-        selectedPathWaypoints: [RouteWaypoint] = [],
+        allTasksCoords: [[RouteCoordinate]] = [],
+        selectedTaskWaypoints: [RouteWaypoint] = [],
         selectedWaypointIndex: Int? = nil,
         vehicleMarkers: [MapVehicleMarker] = [],
         headingPreview: HeadingPreview? = nil,
@@ -90,10 +90,10 @@ final class GuardianMapModel: ObservableObject {
     ) {
         self.mapStyle = mapStyle
         self.preserveView = preserveView
-        self.isEditingPath = isEditingPath
+        self.isEditingTask = isEditingTask
         self.home = home
-        self.allPathsCoords = allPathsCoords
-        self.selectedPathWaypoints = selectedPathWaypoints
+        self.allTasksCoords = allTasksCoords
+        self.selectedTaskWaypoints = selectedTaskWaypoints
         self.selectedWaypointIndex = selectedWaypointIndex
         self.vehicleMarkers = vehicleMarkers
         self.headingPreview = headingPreview
@@ -123,7 +123,7 @@ struct GuardianMapToolbarButton: Identifiable {
 }
 
 /// Flag-driven config for the left-side toolbar overlay. Mirrors the
-/// "include certain things by default" pattern from `GuardianModalTemplate`.
+/// "include certain things by default" pattern from `Modal`.
 ///
 /// The toolbar is **on by default** with the style toggle and recenter/reset
 /// buttons enabled — callers can opt out individually (e.g.
@@ -177,7 +177,7 @@ struct GuardianMapView: View {
     var onWaypointClick: (Int) -> Void
     var onWaypointMoved: (Int, Double, Double) -> Void
     var onWaypointDelete: (Int) -> Void
-    var onPathInsert: (Int, Double, Double) -> Void
+    var onTaskMapInsert: (Int, Double, Double) -> Void
 
     init(
         model: GuardianMapModel,
@@ -189,7 +189,7 @@ struct GuardianMapView: View {
         onWaypointClick: @escaping (Int) -> Void = { _ in },
         onWaypointMoved: @escaping (Int, Double, Double) -> Void = { _, _, _ in },
         onWaypointDelete: @escaping (Int) -> Void = { _ in },
-        onPathInsert: @escaping (Int, Double, Double) -> Void = { _, _, _ in }
+        onTaskMapInsert: @escaping (Int, Double, Double) -> Void = { _, _, _ in }
     ) {
         self.model = model
         self.toolbar = toolbar
@@ -200,15 +200,15 @@ struct GuardianMapView: View {
         self.onWaypointClick = onWaypointClick
         self.onWaypointMoved = onWaypointMoved
         self.onWaypointDelete = onWaypointDelete
-        self.onPathInsert = onPathInsert
+        self.onTaskMapInsert = onTaskMapInsert
     }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
             OSMMapView(
                 home: model.home,
-                allPathsCoords: model.allPathsCoords,
-                selectedPathWaypoints: model.selectedPathWaypoints,
+                allTasksCoords: model.allTasksCoords,
+                selectedTaskWaypoints: model.selectedTaskWaypoints,
                 selectedWaypointIndex: model.selectedWaypointIndex,
                 vehicleMarkers: model.vehicleMarkers,
                 mapStyle: model.mapStyle,
@@ -217,7 +217,7 @@ struct GuardianMapView: View {
                 cameraPreview: model.cameraPreview,
                 followedVehicleMarkerID: model.followedVehicleMarkerID,
                 preserveView: model.preserveView,
-                isEditingPath: model.isEditingPath,
+                isEditingTask: model.isEditingTask,
                 contextMenuPolicy: contextMenuPolicy,
                 onMapClick: onMapClick,
                 onVehicleMarkerMoved: onVehicleMarkerMoved,
@@ -225,7 +225,7 @@ struct GuardianMapView: View {
                 onWaypointClick: onWaypointClick,
                 onWaypointMoved: onWaypointMoved,
                 onWaypointDelete: onWaypointDelete,
-                onPathInsert: onPathInsert
+                onTaskMapInsert: onTaskMapInsert
             )
 
             if toolbar.hasAnyVisibleButton {

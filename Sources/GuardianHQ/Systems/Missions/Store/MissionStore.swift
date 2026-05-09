@@ -22,6 +22,7 @@ final class MissionStore: ObservableObject {
         missions.insert(mission, at: 0)
         save()
         syncPaladinMissionDomainSnapshot()
+        scheduleCardThumbnailGeneration(for: mission.id)
     }
 
     func updateMission(_ updated: Mission) {
@@ -32,6 +33,7 @@ final class MissionStore: ObservableObject {
     }
 
     func deleteMission(id: UUID) {
+        MissionCardThumbnailSubsystem.deleteFileIfPresent(for: id)
         missions.removeAll { $0.id == id }
         save()
         syncPaladinMissionDomainSnapshot()
@@ -63,6 +65,7 @@ final class MissionStore: ObservableObject {
         missions.insert(cloned, at: 0)
         save()
         syncPaladinMissionDomainSnapshot()
+        scheduleCardThumbnailGeneration(for: cloned.id)
         return cloned
     }
 
@@ -74,6 +77,30 @@ final class MissionStore: ObservableObject {
             missions = []
         }
         syncPaladinMissionDomainSnapshot()
+        ensureCardThumbnailsForLoadedMissions()
+    }
+
+    /// One-time JPEG generation for missions saved before thumbnails existed.
+    private func ensureCardThumbnailsForLoadedMissions() {
+        Task { @MainActor in
+            var anyChanged = false
+            for mission in missions {
+                let url = MissionCardThumbnailSubsystem.fileURL(forMissionID: mission.id)
+                guard !FileManager.default.fileExists(atPath: url.path) else { continue }
+                do {
+                    try await MissionCardThumbnailSubsystem.generateAndSave(for: mission.id)
+                    guard let idx = missions.firstIndex(where: { $0.id == mission.id }) else { continue }
+                    missions[idx].cardThumbnailVersion += 1
+                    anyChanged = true
+                } catch {
+                    print("Mission card thumbnail backfill failed: \(error)")
+                }
+            }
+            if anyChanged {
+                save()
+                syncPaladinMissionDomainSnapshot()
+            }
+        }
     }
 
     private func save() {
@@ -87,12 +114,33 @@ final class MissionStore: ObservableObject {
         }
     }
 
-    private static func makeFileURL() -> URL {
+    nonisolated private static func makeFileURL() -> URL {
+        guardianAppSupportDirectoryURL.appendingPathComponent("missions.json")
+    }
+
+    /// Application Support / GuardianHQ (missions.json and MissionCardThumbnails live here).
+    nonisolated static var guardianAppSupportDirectoryURL: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
-        return base
-            .appendingPathComponent("GuardianHQ", isDirectory: true)
-            .appendingPathComponent("missions.json")
+        return base.appendingPathComponent("GuardianHQ", isDirectory: true)
+    }
+
+    nonisolated static var missionCardThumbnailsDirectoryURL: URL {
+        guardianAppSupportDirectoryURL.appendingPathComponent("MissionCardThumbnails", isDirectory: true)
+    }
+
+    private func scheduleCardThumbnailGeneration(for missionID: UUID) {
+        Task { @MainActor in
+            do {
+                try await MissionCardThumbnailSubsystem.generateAndSave(for: missionID)
+                guard let idx = missions.firstIndex(where: { $0.id == missionID }) else { return }
+                missions[idx].cardThumbnailVersion += 1
+                save()
+                syncPaladinMissionDomainSnapshot()
+            } catch {
+                print("Mission card thumbnail failed: \(error)")
+            }
+        }
     }
 
     private func syncPaladinMissionDomainSnapshot() {

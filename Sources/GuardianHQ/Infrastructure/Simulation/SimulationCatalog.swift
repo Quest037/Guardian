@@ -120,4 +120,19 @@ extension FleetVehicleType {
         }
         return preset.simulationDeviceImageBasenames
     }
+
+    /// Built-in SITL preset for this class (Mission Control roster auto-spawn, etc.).
+    var builtInSimulationVehiclePreset: SimulationVehiclePreset {
+        switch self {
+        case .uavCopter: return .uavMultirotor
+        case .uavFixedWing: return .uavFixedWing
+        case .uavVTOL: return .uavVTOL
+        case .ugvWheeled: return .ugvWheeled
+        case .ugvTracked: return .ugvTracked
+        case .ugvLegged: return .ugvLegged
+        case .usv: return .usv
+        case .uuv: return .uuv
+        case .unknown: return .uavMultirotor
+        }
+    }
 }

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <!-- Vertical flip matches raster in MissionCardThumbnailSubsystem (y-up drawing). -->
+  <g transform="translate(0,100) scale(1,-1)">
+    <path d="M50 6 L88 21 L88 49 Q88 72 50 94 Q12 72 12 49 L12 21 Z"
+          fill="#1e2430"
+          stroke="#3d4656"
+          stroke-width="4"
+          stroke-linejoin="round"/>
+  </g>
+</svg>

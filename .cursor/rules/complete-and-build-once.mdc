@@ -1,0 +1,16 @@
+---
+description: One coherent code pass per task; ask once before swift build—no incremental build nagging
+alwaysApply: true
+---
+
+# Coherent Pass, Then Ask to Build
+
+When given a **coding task** for this repo:
+
+1. **Implement fully in one coherent pass** before any build: apply all edits needed for the request, wire call sites, and fix obvious compile issues you can infer—avoid dripping one-line “fix next error” rounds when you already know the full shape of the change.
+
+2. **`swift build` requires explicit user permission.** Do **not** run `swift build` (or other shell commands) without the user approving that step. After the coherent pass, you may offer a **single** clear prompt to run the build (e.g. one short ask), not repeated incremental “should I build now?” after every small edit.
+
+3. **If the user approves a build and it fails**, fix the reported errors in **one follow-up batch** of edits, then **ask once** if they want to run the build again—same pattern: no permission-less builds, no build-after-every-line.
+
+4. Reserve other questions for real ambiguity (requirements, product tradeoffs), not for micro-permissions between trivial edits.

@@ -106,7 +106,8 @@ struct OSMMapView: NSViewRepresentable {
             "[\(path.map { "{\"lat\":\($0.lat),\"lon\":\($0.lon)}" }.joined(separator: ","))]"
         }.joined(separator: ",")
         let waypointsJSON = selectedTaskWaypoints.enumerated().map { idx, wp in
-            "{\"idx\":\(idx),\"lat\":\(wp.coord.lat),\"lon\":\(wp.coord.lon)}"
+            let anchorJSON = wp.pathRole == .anchor ? "true" : "false"
+            return "{\"idx\":\(idx),\"lat\":\(wp.coord.lat),\"lon\":\(wp.coord.lon),\"anchor\":\(anchorJSON)}"
         }.joined(separator: ",")
         let selectedWaypointIndexJS = selectedWaypointIndex.map(String.init) ?? "null"
         let vehicleMarkersJSON = vehicleMarkers.map { marker in
@@ -136,7 +137,7 @@ struct OSMMapView: NSViewRepresentable {
         {"vehicleActions":[\(contextMenuPolicy.vehicleActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"waypointActions":[\(contextMenuPolicy.waypointActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"homeActions":[\(contextMenuPolicy.homeActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))]}
         """
         let js = "setMissionData(\(homeJSON), [\(allPathsJSON)], [\(waypointsJSON)], \(selectedWaypointIndexJS), [\(vehicleMarkersJSON)], \"\(mapStyle.rawValue)\", \(recenterNonce), \(headingPreviewJSON), \(cameraPreviewJSON), \(followedVehicleMarkerIDJSON), \(contextMenuPolicyJSON), \(preserveView ? "true" : "false"), \(isEditingTask ? "true" : "false"));"
-        context.coordinator.apply(script: js)
+        context.coordinator.queueMissionUpdate(script: js)
     }
 }
 
@@ -156,6 +157,12 @@ extension OSMMapView {
         weak var webView: WKWebView?
         private var pendingScript: String?
         private var didFinishInitialLoad = false
+        /// Latest mission script from ``updateNSView`` (may arrive in a burst when several
+        /// ``GuardianMapModel`` fields publish in the same tick).
+        private var latestMissionScript: String?
+        private var coalescedMissionWorkItem: DispatchWorkItem?
+        /// Last script we successfully pushed to JS (skip duplicate evals).
+        private var lastAppliedMissionScript: String?
         private let onMapClick: (Double, Double) -> Void
         private let onVehicleMarkerMoved: (String, Double, Double) -> Void
         private let onContextAction: (GuardianMapContextActionEvent) -> Void
@@ -182,17 +189,38 @@ extension OSMMapView {
             self.onTaskMapInsert = onTaskMapInsert
         }
 
-        func apply(script: String) {
-            pendingScript = script
-            guard didFinishInitialLoad, let webView else { return }
+        /// Coalesces rapid ``updateNSView`` calls and skips identical mission payloads so the
+        /// WKWebView bridge does not tear down/rebuild every Leaflet layer dozens of times per frame.
+        func queueMissionUpdate(script: String) {
+            latestMissionScript = script
+            coalescedMissionWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                self?.flushMissionScriptToWebViewIfNeeded()
+            }
+            coalescedMissionWorkItem = work
+            DispatchQueue.main.async(execute: work)
+        }
+
+        private func flushMissionScriptToWebViewIfNeeded() {
+            guard let script = latestMissionScript else { return }
+            if script == lastAppliedMissionScript { return }
+            guard didFinishInitialLoad, let webView else {
+                pendingScript = script
+                return
+            }
+            lastAppliedMissionScript = script
+            pendingScript = nil
             webView.evaluateJavaScript(script, completionHandler: nil)
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             didFinishInitialLoad = true
-            if let pendingScript {
-                webView.evaluateJavaScript(pendingScript, completionHandler: nil)
-            }
+            lastAppliedMissionScript = nil
+            let script = latestMissionScript ?? pendingScript
+            guard let script else { return }
+            lastAppliedMissionScript = script
+            pendingScript = nil
+            webView.evaluateJavaScript(script, completionHandler: nil)
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -323,7 +351,7 @@ private extension OSMMapView {
     var cameraCone = null;
     const vehicleMarkers = [];
     const pathLines = [];
-    const state = { lastDataSignature: null, lastRecenterNonce: -1 };
+    const state = { lastDataSignature: null, lastRecenterNonce: -1, lastFullMissionSig: null };
     let contextMenuEl = null;
     let followedVehicleMarkerID = null;
     let contextMenuPolicy = { vehicleActions: [], waypointActions: [], homeActions: [] };
@@ -504,6 +532,27 @@ private extension OSMMapView {
     const defaultSinglePointZoom = 15;
 
     function setMissionData(home, allTasksCoords, selectedWaypoints, selectedWaypointIndex, missionVehicleMarkers, mapStyle, recenterNonce, headingPreview, cameraPreview, followVehicleMarkerID, menuPolicy, preserveView, isEditingTask) {
+      const geometryTasks = (allTasksCoords || []).filter(path => path && path.length > 0);
+      const fullMissionSig = JSON.stringify({
+        home: home,
+        geometryTasks: geometryTasks,
+        selectedWaypoints: selectedWaypoints || [],
+        selectedWaypointIndex: selectedWaypointIndex,
+        missionVehicleMarkers: missionVehicleMarkers || [],
+        mapStyle: mapStyle,
+        recenterNonce: recenterNonce,
+        headingPreview: headingPreview,
+        cameraPreview: cameraPreview,
+        followVehicleMarkerID: followVehicleMarkerID || null,
+        menuPolicy: menuPolicy || {},
+        preserveView: !!preserveView,
+        isEditingTask: !!isEditingTask
+      });
+      if (fullMissionSig === state.lastFullMissionSig) {
+        return;
+      }
+      state.lastFullMissionSig = fullMissionSig;
+
       followedVehicleMarkerID = followVehicleMarkerID || null;
       contextMenuPolicy = menuPolicy || { vehicleActions: [], waypointActions: [], homeActions: [] };
       if (homeMarker) { map.removeLayer(homeMarker); homeMarker = null; }
@@ -525,7 +574,6 @@ private extension OSMMapView {
       map.getContainer().style.cursor = isEditingTask ? 'pointer' : '';
 
       const points = [];
-      const geometryTasks = (allTasksCoords || []).filter(path => path && path.length > 0);
       const dataSignature = JSON.stringify({
         home: home,
         geometryTasks: geometryTasks,
@@ -577,9 +625,12 @@ private extension OSMMapView {
         }
 
         selectedWaypoints.forEach((wp) => {
+          if (wp.anchor === false) {
+            return;
+          }
           const isSelected = selectedWaypointIndex === wp.idx;
           const marker = L.marker([wp.lat, wp.lon], {
-            draggable: isEditingTask,
+            draggable: isEditingTask && wp.anchor !== false,
             zIndexOffset: isSelected ? 1000 : 0,
             icon: L.divIcon({
               className: 'wp-dot',

@@ -17,16 +17,9 @@ struct PresentedSidebar: Identifiable {
 
 // MARK: - App host
 
-/// App-wide trailing sidebar overlays (scrim + slide). Mirrors ``ToastCenter``: inject via environment and attach ``View/withSidebarOverlay()`` on the window root.
+/// App-wide trailing sidebar overlays (scrim + slide). Inject via environment and attach ``View/withSidebarOverlay()`` on the window root (after ``RootView``).
 ///
-/// **Modifier order:** Apply **after** ``View/withToasts()`` so overlays draw above toasts:
-/// ```swift
-/// RootView(...)
-///     .withToasts()
-///     .withSidebarOverlay()
-///     .environmentObject(toastCenter)
-///     .environmentObject(sidebarOverlay)
-/// ```
+/// Ephemeral app toasts use a separate ``View/withToasts()`` host on the **main content** column inside ``RootView`` so they do not cover the nav rail. Apply ``withSidebarOverlay()`` on the outer window root so drawers stack above primary UI.
 @MainActor
 final class SidebarOverlay: ObservableObject {
     @Published private(set) var presented: PresentedSidebar?

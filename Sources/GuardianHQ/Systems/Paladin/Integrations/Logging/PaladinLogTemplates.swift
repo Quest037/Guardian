@@ -3,63 +3,12 @@ import Foundation
 
 // MARK: - Stable template ids (future i18n / string tables)
 
-/// Namespace of stable keys for Paladin log lines. `MissionRunEvent.message` remains the default English;
-/// when a string table maps `templateKey` → pattern, `PaladinLogTemplateRegistry` formats the displayed line.
+/// Stable keys for **fleet-mirrored** Paladin log lines (see ``PaladinFleetMirrorLineClassifier``).
+/// Mission Run / Mission Control events use ``MissionRunLogTemplateKey`` instead.
 enum PaladinLogTemplateKey {
-    // Fleet mirror (from `FleetLinkService` → Paladin)
     static let fleetMirrorMissionProgress = "fleet.mirror.mission_progress"
     static let fleetMirrorMissionRunComplete = "fleet.mirror.mission_run_complete"
     static let fleetMirrorVehicleStatus = "fleet.mirror.vehicle_status"
-
-    // Execution
-    static let executionStarted = "paladin.execution.started"
-    static let executionMissionMissing = "paladin.execution.mission_missing_store"
-
-    // Compile
-    static let compileSummary = "paladin.compile.summary"
-    static let sessionStaging = "paladin.session.staging"
-
-    // Schedule (deferred task starts, skip guards)
-    static let scheduleSkipNoMission = "paladin.schedule.skip_no_mission"
-    /// First mission upload/start for a task is delayed after execution begins (``TaskStartDelay``).
-    static let scheduleTaskMissionStartDeferred = "paladin.schedule.task_mission_start_deferred"
-
-    // Run completion
-    static let runStoppedImmediate = "paladin.run.stopped_immediate"
-    static let runOneOffFinished = "paladin.run.one_off_finished"
-    static let runGracefulAfterCycle = "paladin.run.graceful_after_cycle"
-
-    // Telemetry narrative
-    static let telemetryAutopilotSnapshot = "paladin.telemetry.autopilot_snapshot"
-    static let telemetryFlightModeChange = "paladin.telemetry.flight_mode_change"
-    static let telemetryArmed = "paladin.telemetry.armed"
-    static let telemetryDisarmed = "paladin.telemetry.disarmed"
-    static let telemetryAirborne = "paladin.telemetry.airborne"
-    static let telemetryOnGround = "paladin.telemetry.on_ground"
-    static let telemetryAltTrend = "paladin.telemetry.alt_trend"
-    static let telemetryTrack = "paladin.telemetry.track"
-    static let telemetryApproachWP1 = "paladin.telemetry.approach_wp1"
-    static let telemetryTurningLeg = "paladin.telemetry.turning_leg"
-    static let telemetryMovingWP1 = "paladin.telemetry.moving_wp1"
-
-    // Commands / fleet
-    static let commandInvalidToken = "paladin.command.invalid_token"
-    static let commandVehicleUnavailable = "paladin.command.vehicle_unavailable"
-    static let commandDispatched = "paladin.command.dispatched"
-    static let commandNotSent = "paladin.command.not_sent"
-    static let fleetAckSuccess = "paladin.fleet.ack_success"
-    static let fleetAckFailed = "paladin.fleet.ack_failed"
-
-    // Staging / mission passes
-    static let stagingPassStarted = "paladin.staging.pass_started"
-    static let stagingPassComplete = "paladin.staging.pass_complete"
-    static let stagingNoToken = "paladin.staging.no_token"
-    static let stagingSimFoldedMission = "paladin.staging.sim_folded_mission"
-    static let stagingSimTarget = "paladin.staging.sim_target"
-    static let stagingSimNoOverride = "paladin.staging.sim_no_override"
-    static let stagingLiveReadonly = "paladin.staging.live_readonly"
-    static let missionNotStarted = "paladin.mission.not_started"
-    static let missionExecuting = "paladin.mission.executing"
 }
 
 // MARK: - Fleet mirror line → key + params
@@ -162,9 +111,14 @@ extension MissionRunEvent {
     /// Plain line for copy / print (no colours). Uses `PaladinLogTemplateRegistry`
     /// when a `templateKey` pattern is registered.
     @MainActor
-    func plainTextLine(templateRegistry: PaladinLogTemplateRegistry = .shared) -> String {
+    func plainTextLine(
+        templateRegistry: PaladinLogTemplateRegistry = .shared,
+        mission: Mission? = nil,
+        assignments: [MissionRunAssignment] = []
+    ) -> String {
         let body = templateRegistry.resolveDisplayBody(for: self)
-        let pathPart = taskLabel.map { "[\($0)]" } ?? ""
+        let taskNameForPrefix = resolvedTaskLogPrefix(mission: mission, assignments: assignments)
+        let pathPart = taskNameForPrefix.map { "[\($0)]" } ?? ""
         let speakerPart: String
         switch speaker {
         case .missionControl: speakerPart = "[MissionControl]"

@@ -331,6 +331,22 @@ struct RouteTransition: Codable, Equatable {
     }
 }
 
+// MARK: - Task path segments (flat ``waypoints`` for MRE; metadata for hybrid legs + future reroute)
+
+/// Whether a waypoint is operator-authored or generated along a leg.
+enum RouteWaypointPathRole: String, Codable, Equatable {
+    case anchor
+    case segmentInterior
+}
+
+/// Geometry mode for a leg to the **next** anchor (interior points copy this value).
+enum RouteSegmentKind: String, Codable, Equatable, Hashable, CaseIterable {
+    /// Straight interpolation to the next anchor.
+    case direct
+    /// Road network routing (dense interior waypoints).
+    case followRoads
+}
+
 struct RouteWaypoint: Identifiable, Codable, Equatable {
     let id: UUID
     var coord: RouteCoordinate
@@ -343,6 +359,14 @@ struct RouteWaypoint: Identifiable, Codable, Equatable {
     var camera: RouteCamera
     var transition: RouteTransition
 
+    /// `nil` on anchors; shared by all interior samples on one leg.
+    var pathSegmentId: UUID?
+    var pathRole: RouteWaypointPathRole
+    /// Kind of geometry for this waypoint’s leg bucket (interiors mirror the anchor’s outgoing kind).
+    var pathSegmentKind: RouteSegmentKind
+    /// When ``pathRole == .anchor``, how we reach the **next** anchor. `nil` on the final anchor.
+    var outgoingSegmentKind: RouteSegmentKind?
+
     init(
         id: UUID = UUID(),
         coord: RouteCoordinate = RouteCoordinate(),
@@ -353,7 +377,11 @@ struct RouteWaypoint: Identifiable, Codable, Equatable {
         delayUnit: DelayUnit = .secs,
         action: String = "none",
         camera: RouteCamera = RouteCamera(),
-        transition: RouteTransition = RouteTransition()
+        transition: RouteTransition = RouteTransition(),
+        pathSegmentId: UUID? = nil,
+        pathRole: RouteWaypointPathRole = .anchor,
+        pathSegmentKind: RouteSegmentKind = .direct,
+        outgoingSegmentKind: RouteSegmentKind? = nil
     ) {
         self.id = id
         self.coord = coord
@@ -365,10 +393,15 @@ struct RouteWaypoint: Identifiable, Codable, Equatable {
         self.action = action
         self.camera = camera
         self.transition = transition
+        self.pathSegmentId = pathSegmentId
+        self.pathRole = pathRole
+        self.pathSegmentKind = pathSegmentKind
+        self.outgoingSegmentKind = outgoingSegmentKind
     }
 
     enum CodingKeys: String, CodingKey {
         case id, coord, altitude, heading, headingPreset, delaySec, delayUnit, action, camera, transition
+        case pathSegmentId, pathRole, pathSegmentKind, outgoingSegmentKind
     }
 
     init(from decoder: Decoder) throws {
@@ -397,6 +430,10 @@ struct RouteWaypoint: Identifiable, Codable, Equatable {
         action = try container.decodeIfPresent(String.self, forKey: .action) ?? "none"
         camera = try container.decodeIfPresent(RouteCamera.self, forKey: .camera) ?? RouteCamera()
         transition = try container.decodeIfPresent(RouteTransition.self, forKey: .transition) ?? RouteTransition()
+        pathSegmentId = try container.decodeIfPresent(UUID.self, forKey: .pathSegmentId)
+        pathRole = try container.decodeIfPresent(RouteWaypointPathRole.self, forKey: .pathRole) ?? .anchor
+        pathSegmentKind = try container.decodeIfPresent(RouteSegmentKind.self, forKey: .pathSegmentKind) ?? .direct
+        outgoingSegmentKind = try container.decodeIfPresent(RouteSegmentKind.self, forKey: .outgoingSegmentKind)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -411,6 +448,10 @@ struct RouteWaypoint: Identifiable, Codable, Equatable {
         try container.encode(action, forKey: .action)
         try container.encode(camera, forKey: .camera)
         try container.encode(transition, forKey: .transition)
+        try container.encodeIfPresent(pathSegmentId, forKey: .pathSegmentId)
+        try container.encode(pathRole, forKey: .pathRole)
+        try container.encode(pathSegmentKind, forKey: .pathSegmentKind)
+        try container.encodeIfPresent(outgoingSegmentKind, forKey: .outgoingSegmentKind)
     }
 }
 
@@ -596,6 +637,25 @@ struct MissionTask: Identifiable, Codable, Equatable {
         pattern = try c.decodeIfPresent(MissionTaskPattern.self, forKey: .pattern) ?? .patrol
         let decodedStartDelay = try c.decodeIfPresent(Int.self, forKey: .startDelay) ?? 0
         startDelay = min(59, max(0, decodedStartDelay))
+        waypoints = Self.migratePathMetadataIfNeeded(waypoints)
+    }
+
+    /// Ensures path segment fields are populated (legacy JSON had no segment keys).
+    static func migratePathMetadataIfNeeded(_ waypoints: [RouteWaypoint]) -> [RouteWaypoint] {
+        guard !waypoints.isEmpty else { return waypoints }
+        let looksLegacy = waypoints.allSatisfy { wp in
+            wp.pathSegmentId == nil && wp.pathRole == .anchor && wp.outgoingSegmentKind == nil
+        }
+        guard looksLegacy else { return waypoints }
+        var migrated = waypoints
+        let n = migrated.count
+        for i in migrated.indices {
+            migrated[i].pathSegmentKind = .direct
+            migrated[i].pathRole = .anchor
+            migrated[i].pathSegmentId = nil
+            migrated[i].outgoingSegmentKind = (i < n - 1) ? .direct : nil
+        }
+        return migrated
     }
 
     func encode(to encoder: Encoder) throws {
@@ -641,7 +701,7 @@ struct RouteMacro: Codable, Equatable {
     }
 
     init(
-        version: Int = 1,
+        version: Int = 2,
         tasks: [MissionTask] = [],
         rules: RouteRules = RouteRules()
     ) {
@@ -652,8 +712,13 @@ struct RouteMacro: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
-        tasks = try c.decodeIfPresent([MissionTask].self, forKey: .tasks) ?? []
+        var decodedVersion = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        let decodedTasks = try c.decodeIfPresent([MissionTask].self, forKey: .tasks) ?? []
+        if decodedVersion < 2 {
+            decodedVersion = 2
+        }
+        version = decodedVersion
+        tasks = decodedTasks
         rules = try c.decodeIfPresent(RouteRules.self, forKey: .rules) ?? RouteRules()
     }
 
@@ -703,6 +768,8 @@ struct Mission: Identifiable, Codable {
     var rosterDevices: [RosterDevice]
     var routeMacro: RouteMacro
     let createdAt: Date
+    /// Bumped when a new list/grid JPEG is written so SwiftUI reloads ``MissionCardThumbnailView``.
+    var cardThumbnailVersion: Int
 
     init(
         id: UUID = UUID(),
@@ -715,7 +782,8 @@ struct Mission: Identifiable, Codable {
         deviceIDs: [String] = [],
         rosterDevices: [RosterDevice] = [],
         routeMacro: RouteMacro = RouteMacro(),
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        cardThumbnailVersion: Int = 0
     ) {
         self.id = id
         self.name = name
@@ -728,10 +796,12 @@ struct Mission: Identifiable, Codable {
         self.rosterDevices = rosterDevices
         self.routeMacro = routeMacro
         self.createdAt = createdAt
+        self.cardThumbnailVersion = cardThumbnailVersion
     }
 
     enum CodingKeys: String, CodingKey {
         case id, name, description, type, isArchived, count, duration, schedule, deviceIDs, routeMacro, createdAt
+        case cardThumbnailVersion
         case rosterDevices = "spaces"
         case mapRegion, routePlan // legacy
     }
@@ -762,6 +832,7 @@ struct Mission: Identifiable, Codable {
             }
         }
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        cardThumbnailVersion = try container.decodeIfPresent(Int.self, forKey: .cardThumbnailVersion) ?? 0
     }
 
     func encode(to encoder: Encoder) throws {
@@ -777,5 +848,6 @@ struct Mission: Identifiable, Codable {
         try container.encode(rosterDevices, forKey: .rosterDevices)
         try container.encode(routeMacro, forKey: .routeMacro)
         try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(cardThumbnailVersion, forKey: .cardThumbnailVersion)
     }
 }

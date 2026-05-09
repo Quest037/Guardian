@@ -5,6 +5,7 @@ enum ToastStyle {
     case info
     case error
 
+    /// Legacy translucent chip tint (avoid for new UI; ephemeral toasts use ``ToastHost`` solid fills).
     var background: Color {
         switch self {
         case .success:
@@ -59,29 +60,44 @@ struct ToastHost: ViewModifier {
     @EnvironmentObject private var toastCenter: ToastCenter
 
     func body(content: Content) -> some View {
-        ZStack(alignment: .bottomLeading) {
+        ZStack(alignment: .topLeading) {
             content
 
             if let toast = toastCenter.current {
-                HStack(spacing: 8) {
+                HStack(alignment: .center, spacing: 8) {
                     Image(systemName: toast.style.icon)
                     Text(toast.text)
-                        .lineLimit(2)
+                        .lineLimit(4)
+                        .multilineTextAlignment(.leading)
+                    Spacer(minLength: 0)
                 }
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                .background(toast.style.background)
+                .background(toastEphemeralBackground(for: toast.style))
                 .overlay(
                     RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
                 )
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .padding(.leading, 18)
-                .padding(.bottom, 20)
-                .transition(.move(edge: .leading).combined(with: .opacity))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .frame(maxWidth: 380, alignment: .leading)
+                .padding(.leading, 14)
+                .padding(.top, 12)
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
+        }
+    }
+
+    /// App-wide ephemeral toasts: more readable than ``ToastStyle/background`` tints, less heavy than MC-R banners.
+    private func toastEphemeralBackground(for style: ToastStyle) -> Color {
+        switch style {
+        case .success:
+            return Color(red: 0.11, green: 0.44, blue: 0.24).opacity(0.82)
+        case .info:
+            return Color(red: 0.14, green: 0.34, blue: 0.62).opacity(0.82)
+        case .error:
+            return Color(red: 0.52, green: 0.14, blue: 0.18).opacity(0.82)
         }
     }
 }

@@ -91,12 +91,14 @@ final class MissionControlStore: ObservableObject {
             assignments: assignments
         )
         runs.insert(run, at: 0)
+        run.refreshDerivedTaskStates()
         notifyRunCreated(run)
         return run
     }
 
     func updateRun(_ run: MissionRunEnvironment) {
         guard let idx = runs.firstIndex(where: { $0.id == run.id }) else { return }
+        run.refreshDerivedTaskStates()
         runs[idx] = run
     }
 
@@ -132,6 +134,7 @@ final class MissionControlStore: ObservableObject {
                 missionsProvider: missionsProvider
             )
         )
+        run.refreshDerivedTaskStates()
     }
 
     func deleteRun(id: UUID) {
@@ -182,6 +185,7 @@ final class MissionControlStore: ObservableObject {
         runs[idx].completionKind = nil
         runs[idx].systems.executor.clearCommandQueue()
         runs[idx].captureExecutionContext(nil)
+        runs[idx].refreshDerivedTaskStates()
         // Intentionally preserve mission prep state (schedule, assignments, and chosen vehicles).
     }
 
@@ -223,9 +227,9 @@ final class MissionControlStore: ObservableObject {
         run.systems.lifecycle.markCompiled()
         run.systems.logging.appendLogEvent(
             level: .info,
-            speaker: .paladin,
+            speaker: .missionControl,
             message: summary,
-            templateKey: PaladinLogTemplateKey.compileSummary,
+            templateKey: MissionRunLogTemplateKey.compileSummary,
             templateParams: [
                 "tracks": String(plan.roleTracks.count),
                 "taskTopology": plan.taskTopology.rawValue,
@@ -236,6 +240,7 @@ final class MissionControlStore: ObservableObject {
             runID: run.id,
             missionName: run.missionName
         )
+        run.refreshDerivedTaskStates()
     }
 
     func ingestFleetMirrorLine(

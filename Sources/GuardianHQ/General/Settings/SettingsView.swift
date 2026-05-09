@@ -465,7 +465,9 @@ struct SettingsView: View {
                         }
                     )
                     .task(id: simSpawnDraftSignature) {
-                        simSpawnMapModel.home = simSpawnDraftHome
+                        var geo = simSpawnMapModel.routeGeometry
+                        geo.home = simSpawnDraftHome
+                        simSpawnMapModel.routeGeometry = geo
                         simSpawnMapModel.vehicleMarkers = [simSpawnDraftMarker]
                     }
                     .frame(minHeight: 420)

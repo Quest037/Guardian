@@ -101,7 +101,7 @@ final class PaladinMissionAssistant {
             level: .info,
             speaker: .paladin,
             message: "Paladin execution started.",
-            templateKey: PaladinLogTemplateKey.executionStarted
+            templateKey: MissionRunLogTemplateKey.executionStarted
         )
         let ctx = MissionRunExecutionContext(
             mission: context.mission,

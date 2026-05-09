@@ -11,6 +11,42 @@ enum MissionRunSessionPhase: String, Equatable {
     case failed
 }
 
+/// Per-task lifecycle label for Mission Control runtime (derived on ``MissionRunEnvironment``).
+enum MissionTaskState: String, Codable, CaseIterable, Equatable, Hashable {
+    /// Mission Control is sending missions to task-force aircraft (upload / staging pass to drones).
+    case compiling
+    /// MC considers all roster aircraft for the task to have missions loaded; awaiting start / cycle.
+    case ready
+    /// Task force is getting ready to execute (e.g. countdown, arming, manual prep).
+    case staging
+    case executing
+    /// Between-cycle behavior (delay / between-cycles commands) before the next cycle.
+    case between
+    /// Orderly wind-down after successful task completion; roster follows recovery protocol.
+    case recovery
+    /// Abort protocol in progress on the task force (MC-directed; aircraft confirm separately).
+    case aborting
+    /// Abort protocol finished for this task (operator or future fleet confirmation).
+    case aborted
+    /// Task force has finished recovery / wind-up for this task.
+    case completed
+
+    /// Short operator-facing title (MC-R task chip / triage banner).
+    var displayTitle: String {
+        switch self {
+        case .compiling: return "Compiling"
+        case .ready: return "Ready"
+        case .staging: return "Staging"
+        case .executing: return "Executing"
+        case .between: return "Between"
+        case .recovery: return "Recovery"
+        case .aborting: return "Aborting"
+        case .aborted: return "Aborted"
+        case .completed: return "Completed"
+        }
+    }
+}
+
 enum MissionRunStatus: String, Codable, CaseIterable, Identifiable {
     case setup
     case running
@@ -333,6 +369,47 @@ struct MissionRunEvent: Identifiable, Equatable {
         self.message = message
         self.templateKey = templateKey
         self.templateParams = templateParams
+    }
+}
+
+/// Resolves the human task name for MC-R log lines from roster + mission template (role-track context may be absent).
+func missionRunLogResolvedTaskName(assignment: MissionRunAssignment, mission: Mission) -> String? {
+    if let tid = assignment.taskId,
+       let n = mission.routeMacro.tasks.first(where: { $0.id == tid })?.name,
+       !n.isEmpty {
+        return n
+    }
+    let enabled = mission.routeMacro.tasks.filter(\.enabled)
+    if enabled.count == 1, let n = enabled.first?.name, !n.isEmpty {
+        return n
+    }
+    return nil
+}
+
+extension MissionRunEvent {
+    /// Canonical `[Task]` prefix for MC-R logs: stored labels, `taskID`, roster slot, or `slot` in ``templateParams``.
+    func resolvedTaskLogPrefix(mission: Mission?, assignments: [MissionRunAssignment]) -> String? {
+        if let t = taskLabel, !t.isEmpty { return t }
+        if let tid = taskID, let mission,
+           let n = mission.routeMacro.tasks.first(where: { $0.id == tid })?.name, !n.isEmpty {
+            return n
+        }
+        guard let mission else { return nil }
+        let slotKey: String? = {
+            switch speaker {
+            case .vehicleSlot(let s):
+                return s
+            case .paladin, .missionControl:
+                guard let raw = templateParams["slot"] else { return nil }
+                let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                return s.isEmpty ? nil : s
+            }
+        }()
+        if let slot = slotKey,
+           let a = assignments.first(where: { $0.slotName == slot }) {
+            return missionRunLogResolvedTaskName(assignment: a, mission: mission)
+        }
+        return nil
     }
 }
 

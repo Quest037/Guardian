@@ -59,11 +59,13 @@ The Live Drive system allows a user to manually take control of a connected vehi
 
 Missions are the templates created by users that involve telling one or more vehicles what, when where and how to do what it needs to do.
 
-- **Convoy Task Design:** - Hook into OSM Routing system so that we can build convoy routes for tasks.
-- **Custom Popup Mission Templates:** E.g. quick circle radius patrol with x vehicles.
-- **Grid Card/List Card:** 
-  - Get a map image snapshot as grid card image
+- **Mission Templates:**
+  - Create pre-defined mission templates that the user can quick start their mission and build from
+  - Offer these by default in a modal when user clicks "Add Mission", with the first option being a blank mission.
 
+- **Mission image generator:** 
+  - Add more preset variations beyond double-chevron.
+  - Add a blacklist for hexcode ranges (no black on black)
 
 ### Mission Mechanics
 - **Points:** - Add a points system for Tasks/Missions.
@@ -73,6 +75,7 @@ Missions are the templates created by users that involve telling one or more veh
 - **Mission Task.timings:** - currently all fixed in minutes, allow variant of secs/mins/hrs
 - **Mission Task.geofence:** - Add a geofence limit around a MissionTask to say drones cannot exit it.
 - **Mission Task.betweenCycles:** - Add a between cycles param to tell squads what to do between task cycles. These are actions.
+  - Loiter, Park, RTL, Charge, GoToStart, GoToPoint etc.
 
 ## Mission Control
 
@@ -87,21 +90,33 @@ Mission Control: Environment is the world environment that mission control uses 
 - **Failure injection:** - build in intentional failure injections so that MissionControl/Paladin can react.
 
 ### Mission Control: Setup
-- **Rosters:** - Allow user to add a pool of reserves to Task rosters by default.
-- **AbortPolicy:** - Extend the abort policy system to allow other choices besides the default.
-- **AbortPolicy:** - Extend the abort policy to allow tasks to override mission.
-- **AbortPolicy:** - Extend the abort policy to allow roster cards to override task/mission.
+- **Rosters:** 
+  - Allow user to add a pool of reserves to Task rosters by default.
+
+- **AbortPolicy:** 
+  - Extend the abort policy system to allow other choices besides the default.
+  - Extend the abort policy to allow tasks to override mission.
+  - Extend the abort policy to allow roster cards to override task/mission.
+
+- **RecoveryPolicy:** 
+  - Add a mission-wide recovery policy
+  - Add task-wide recovery policies that override mission
+  - Add roster card recovery policies that override task/mission
 
 ### Mission Control: Running
 
-**Tasks List:** - selectable and triggers expanded view of card with more data. Also shows all vehicles attached to task in health, and moves map (if necessary) to view task.
+- **Tasks:** 
+  - can increment delays and cancel them, but cannot decrement delays. Also, it's tied to minutes but that should be seconds,minutes,hours as a second part of the choice.
+  - add ability for operator to start a task that is marked as operatorTriggered.
+  - add functionality for tasks that use onceAtStart, twiceStartEnd.
+  - add functionality to tell task to complete/abort.
 
-- **Tasks:** - can increment delays and cancel them, but cannot decrement delays. Also, it's tied to minutes but that should be seconds,minutes,hours as a second part of the choice.
-- **Tasks:** - add ability for operator to start a task that is marked as operatorTriggered.
-- **Tasks:** - add functionality for tasks that use onceAtStart, twiceStartEnd.
-- **Abort:** - Remove stopAtEndOfCycle (if it still exists) and replace with stopAtEndOfCurrentCycles. This means that the mission winds itself down, making sure that the current cycle for each task is its last.
-- **Map:** - Integrate CesiumJS system to offer 3D map version as well as Leaflet 2D map.
-- **RoE Updates:** - Allow the operator to update the RoE on the fly via a modal/overlay.
+- **End:** 
+  - Add ability to move into recovery without "Aborting". End mission, but as a success, not an abort failure.
+- **Map:** 
+  - Integrate CesiumJS system to offer 3D map version as well as Leaflet 2D map.
+- **RoE Updates:** 
+  - Allow the operator to update the RoE on the fly via a modal/overlay.
 
 #### Vehicle Groups (Primary + wingmen)
 - **Formations:** - allow user to define a formation for the VG to use. This overrides pattern behaviour.
@@ -135,11 +150,21 @@ Mission Control: Environment is the world environment that mission control uses 
 #### Scheduling
 - **MRE Scheduling:** - handle scheduling of tasks that are operatorTriggered.
 - **MRE Scheduling:** - handle scheduling of tasks that are onceAtStart, twiceStartEnd.
-- **MRE Scheduling:** - Remove stopAtEndOfCycle (if it still exists) and replace with stopAtEndOfCurrentCycles. This means that the mission winds itself down, making sure that the current cycle for each task is its last.
+- **AbortPolicy:** 
+  - Trigger all tasks to move into aborting/aborted
+  - Trigger a task to move into aborting/aborted
+- **RecoveryPolicy:** 
+  - Trigger all tasks to move into recovery/completed
+  - Trigger a task to move into recovery/completed
 
 #### Logging
 - **MRE Logging:** - When vehicles talk make sure to use their title (callsign) to identify them, if not already.
 - **MRE Logging:** - Add a sub-system of Logging called Humanizing. It takes in log items and humanizes them for operators to understand better. (Makes it look like vehicles and assistants are actually speaking)
+
+#### Tasks
+- **State & Action:** - Add state, action params to Tasks to tell the user what they are currently doing.
+  - State: "Staging, Executing, Between, Recovery, Aborted, Completed"
+  - Action: "Moving, Loitering, Parked"
 
 - **Operator prompts subsystem (MC-R):** v1 ships `MissionRunPromptsSubsystem` + `.swapInReserve` only (stacked FIFO, act-gated raise, planner → immediate executor batch — batch is empty until real resolution lands). Follow-ups:
   - **User Notifications:** replace `UserNotificationService.stubNotifyMissionRunOperatorPrompt` with real local notifications (category, thread by `runID`, copy for prompt kind + mission name + slot/path summary); align with **App System → UserNotifications** once the app runs as a proper `.app` and authorization is reliable. Optional notification actions (Accept/Decline) are a later UX decision — banner remains canonical while in-app.

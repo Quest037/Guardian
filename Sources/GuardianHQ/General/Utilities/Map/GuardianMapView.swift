@@ -52,6 +52,31 @@ struct GuardianMapContextMenuPolicy {
     static let disabled = GuardianMapContextMenuPolicy()
 }
 
+/// Home, route polylines, editable waypoint overlay, and heading/camera previews — published as **one**
+/// value from ``GuardianMapModel`` so route updates do not fan out into many ``ObservableObject``
+/// notifications (each of which re-ran the WKWebView bridge).
+struct GuardianRouteMapGeometry: Equatable {
+    var home: RouteHome?
+    var allTasksCoords: [[RouteCoordinate]]
+    var selectedTaskWaypoints: [RouteWaypoint]
+    var selectedWaypointIndex: Int?
+    var headingPreview: HeadingPreview?
+    var cameraPreview: CameraPreview?
+    var preserveView: Bool
+    var isEditingTask: Bool
+
+    static let empty = GuardianRouteMapGeometry(
+        home: nil,
+        allTasksCoords: [],
+        selectedTaskWaypoints: [],
+        selectedWaypointIndex: nil,
+        headingPreview: nil,
+        cameraPreview: nil,
+        preserveView: true,
+        isEditingTask: false
+    )
+}
+
 /// Shared, observable state for a Leaflet-backed `OSMMapView`. One source of truth
 /// for tile style, content (home / paths / waypoints / vehicle markers / previews),
 /// and recenter requests, so call sites can `pull in` a single model instead of
@@ -59,16 +84,8 @@ struct GuardianMapContextMenuPolicy {
 @MainActor
 final class GuardianMapModel: ObservableObject {
     @Published var mapStyle: MapTileStyle
-    @Published var preserveView: Bool
-    @Published var isEditingTask: Bool
-
-    @Published var home: RouteHome?
-    @Published var allTasksCoords: [[RouteCoordinate]]
-    @Published var selectedTaskWaypoints: [RouteWaypoint]
-    @Published var selectedWaypointIndex: Int?
+    @Published var routeGeometry: GuardianRouteMapGeometry
     @Published var vehicleMarkers: [MapVehicleMarker]
-    @Published var headingPreview: HeadingPreview?
-    @Published var cameraPreview: CameraPreview?
     @Published var followedVehicleMarkerID: String?
 
     /// Bumping this nonce asks `OSMMapView`'s JS side to re-fit / recenter on the
@@ -77,28 +94,21 @@ final class GuardianMapModel: ObservableObject {
 
     init(
         mapStyle: MapTileStyle = .standard,
-        preserveView: Bool = true,
-        isEditingTask: Bool = false,
-        home: RouteHome? = nil,
-        allTasksCoords: [[RouteCoordinate]] = [],
-        selectedTaskWaypoints: [RouteWaypoint] = [],
-        selectedWaypointIndex: Int? = nil,
+        routeGeometry: GuardianRouteMapGeometry = .empty,
         vehicleMarkers: [MapVehicleMarker] = [],
-        headingPreview: HeadingPreview? = nil,
-        cameraPreview: CameraPreview? = nil,
         followedVehicleMarkerID: String? = nil
     ) {
         self.mapStyle = mapStyle
-        self.preserveView = preserveView
-        self.isEditingTask = isEditingTask
-        self.home = home
-        self.allTasksCoords = allTasksCoords
-        self.selectedTaskWaypoints = selectedTaskWaypoints
-        self.selectedWaypointIndex = selectedWaypointIndex
+        self.routeGeometry = routeGeometry
         self.vehicleMarkers = vehicleMarkers
-        self.headingPreview = headingPreview
-        self.cameraPreview = cameraPreview
         self.followedVehicleMarkerID = followedVehicleMarkerID
+    }
+
+    /// Convenience for call sites that only need to set ``GuardianRouteMapGeometry/preserveView``.
+    convenience init(mapStyle: MapTileStyle = .standard, preserveView: Bool) {
+        var geo = GuardianRouteMapGeometry.empty
+        geo.preserveView = preserveView
+        self.init(mapStyle: mapStyle, routeGeometry: geo)
     }
 
     /// Force the next map update to re-fit bounds / recenter (used by the toolbar
@@ -206,18 +216,18 @@ struct GuardianMapView: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             OSMMapView(
-                home: model.home,
-                allTasksCoords: model.allTasksCoords,
-                selectedTaskWaypoints: model.selectedTaskWaypoints,
-                selectedWaypointIndex: model.selectedWaypointIndex,
+                home: model.routeGeometry.home,
+                allTasksCoords: model.routeGeometry.allTasksCoords,
+                selectedTaskWaypoints: model.routeGeometry.selectedTaskWaypoints,
+                selectedWaypointIndex: model.routeGeometry.selectedWaypointIndex,
                 vehicleMarkers: model.vehicleMarkers,
                 mapStyle: model.mapStyle,
                 recenterNonce: model.recenterNonce,
-                headingPreview: model.headingPreview,
-                cameraPreview: model.cameraPreview,
+                headingPreview: model.routeGeometry.headingPreview,
+                cameraPreview: model.routeGeometry.cameraPreview,
                 followedVehicleMarkerID: model.followedVehicleMarkerID,
-                preserveView: model.preserveView,
-                isEditingTask: model.isEditingTask,
+                preserveView: model.routeGeometry.preserveView,
+                isEditingTask: model.routeGeometry.isEditingTask,
                 contextMenuPolicy: contextMenuPolicy,
                 onMapClick: onMapClick,
                 onVehicleMarkerMoved: onVehicleMarkerMoved,

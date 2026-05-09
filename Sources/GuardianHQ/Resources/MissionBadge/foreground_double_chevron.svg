@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <!-- Rank-style ∧ ribbons (reference only; raster uses MissionCardThumbnailSubsystem paths). -->
+  <g stroke-linecap="round" stroke-linejoin="round" fill="{{FILL}}" stroke="{{STROKE}}" stroke-width="3.5">
+    <path d="M 37.8 49.2 L 50 33.5 L 62.2 49.2 L 58.1 46.9 L 50 36.2 L 41.9 46.9 Z"/>
+    <path opacity="0.92" d="M 37.2 68.2 L 50 51.8 L 62.8 68.2 L 58.6 65.9 L 50 54.5 L 41.4 65.9 Z"/>
+  </g>
+</svg>

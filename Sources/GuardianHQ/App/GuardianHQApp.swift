@@ -61,6 +61,7 @@ struct GuardianHQApp: App {
     @StateObject private var fleetLinkService = FleetLinkService()
     @StateObject private var sitlService = SitlService()
     @StateObject private var generalSettingsStore = GeneralSettingsStore()
+    @StateObject private var osmRoutingService = OSMRoutingService()
 
     init() {
         NSWindow.allowsAutomaticWindowTabbing = false
@@ -80,10 +81,10 @@ struct GuardianHQApp: App {
                         sitlService: sitlService,
                         generalSettingsStore: generalSettingsStore
                     )
-                        .withToasts()
                         .withSidebarOverlay()
                         .environmentObject(toastCenter)
                         .environmentObject(sidebarOverlay)
+                        .environmentObject(osmRoutingService)
                         .onAppear {
                             // SwiftPM / early launch: re-run after splash so permission + System Settings registration line up with a real NSApplication + window session.
                             UserNotificationService.shared.configure()

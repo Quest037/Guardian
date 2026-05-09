@@ -310,6 +310,10 @@ private struct MissionWorkspaceView: View {
     @State private var debouncedPersistMissionTask: Task<Void, Never>?
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var sidebarOverlay: SidebarOverlay
+    @EnvironmentObject private var osmRoutingService: OSMRoutingService
+
+    /// Outgoing leg mode for the **next** map click when extending the path.
+    @State private var pendingOutgoingSegmentKind: RouteSegmentKind = .direct
 
     let onBack: () -> Void
     let onDelete: (Mission) -> Void
@@ -1108,12 +1112,108 @@ private struct MissionWorkspaceView: View {
         .onExitCommand { dismissRosterDeviceEditOverlay() }
     }
 
+    @MainActor
+    private func handleTaskMapClickAddWaypoint(lat: Double, lon: Double) async {
+        guard let taskIndex = editingTaskIndex,
+              draft.routeMacro.tasks.indices.contains(taskIndex) else { return }
+
+        let coord = RouteCoordinate(lat: lat, lon: lon)
+        var wps = draft.routeMacro.tasks[taskIndex].waypoints
+
+        if wps.isEmpty {
+            wps.append(RouteWaypoint(coord: coord, headingPreset: .followCourse))
+        } else {
+            guard let anchorIdx = wps.lastIndex(where: { $0.pathRole == .anchor }) else {
+                wps.append(RouteWaypoint(coord: coord, headingPreset: .followCourse))
+                draft.routeMacro.tasks[taskIndex].waypoints = wps
+                refreshAutoHeadings(for: taskIndex)
+                selectedTaskIndex = taskIndex
+                selectedWaypointIndex = wps.count - 1
+                onToast("Waypoint added", .success)
+                persistMissionToStoreNow()
+                return
+            }
+
+            switch pendingOutgoingSegmentKind {
+            case .direct:
+                MissionTaskPathSegmentEditing.appendDirectLeg(
+                    waypoints: &wps,
+                    coordinate: coord,
+                    outgoingKind: .direct
+                )
+            case .followRoads:
+                let from = wps[anchorIdx].coord
+                do {
+                    let dense = try await osmRoutingService.routeDrivingCoordinates(from: from, to: coord)
+                    MissionTaskPathSegmentEditing.appendFollowRoadLeg(
+                        waypoints: &wps,
+                        templateIndex: anchorIdx,
+                        coordinate: coord,
+                        denseCoords: dense
+                    )
+                } catch {
+                    MissionTaskPathSegmentEditing.appendDirectLeg(
+                        waypoints: &wps,
+                        coordinate: coord,
+                        outgoingKind: .direct
+                    )
+                    onToast("Road routing unavailable; added direct leg.", .info)
+                }
+            }
+        }
+
+        draft.routeMacro.tasks[taskIndex].waypoints = wps
+        refreshAutoHeadings(for: taskIndex)
+        selectedTaskIndex = taskIndex
+        selectedWaypointIndex = draft.routeMacro.tasks[taskIndex].waypoints.count - 1
+        onToast("Waypoint added", .success)
+        persistMissionToStoreNow()
+    }
+
+    @MainActor
+    private func maybeRebuildFollowRoadAfterWaypointMove(taskIndex: Int, movedIndex: Int) async {
+        guard draft.routeMacro.tasks.indices.contains(taskIndex) else { return }
+        var wps = draft.routeMacro.tasks[taskIndex].waypoints
+        guard wps.indices.contains(movedIndex) else { return }
+        guard let prevAnchor = MissionTaskPathSegmentEditing.indexOfPreviousAnchor(in: wps, before: movedIndex) else { return }
+        guard wps[prevAnchor].outgoingSegmentKind == .followRoads else { return }
+        guard let nextIdx = MissionTaskPathSegmentEditing.indexOfNextAnchor(in: wps, after: prevAnchor) else { return }
+        let from = wps[prevAnchor].coord
+        let to = wps[nextIdx].coord
+        do {
+            let dense = try await osmRoutingService.routeDrivingCoordinates(from: from, to: to)
+            MissionTaskPathSegmentEditing.rebuildFollowRoadInterior(
+                waypoints: &wps,
+                anchorFromIndex: prevAnchor,
+                denseCoords: dense
+            )
+            draft.routeMacro.tasks[taskIndex].waypoints = wps
+            refreshAutoHeadings(for: taskIndex)
+            persistMissionToStoreNow()
+        } catch {
+            onToast("Could not refresh road leg after move.", .info)
+        }
+    }
+
+    private func waypointPathRoleLabel(_ waypoint: RouteWaypoint) -> String {
+        switch waypoint.pathRole {
+        case .segmentInterior:
+            return "Road segment sample"
+        case .anchor:
+            if let out = waypoint.outgoingSegmentKind {
+                return out == .direct ? "Anchor · next leg: direct" : "Anchor · next leg: follow roads"
+            }
+            return "Anchor · path end"
+        }
+    }
+
     private var tasksTab: some View {
         GeometryReader { geo in
             let mapWidth = geo.size.width * 0.7
             let listWidth = geo.size.width * 0.3
             HStack(spacing: 0) {
-                GuardianMapView(
+                VStack(alignment: .leading, spacing: 8) {
+                    GuardianMapView(
                         model: mapModel,
                         contextMenuPolicy: GuardianMapContextMenuPolicy(
                             vehicleActions: [],
@@ -1125,21 +1225,9 @@ private struct MissionWorkspaceView: View {
                                 suppressNextMapClick = false
                                 return
                             }
-
-                            guard let taskIndex = editingTaskIndex,
-                                  draft.routeMacro.tasks.indices.contains(taskIndex) else { return }
-
-                            draft.routeMacro.tasks[taskIndex].waypoints.append(
-                                RouteWaypoint(
-                                    coord: RouteCoordinate(lat: lat, lon: lon),
-                                    headingPreset: .followCourse
-                                )
-                            )
-                            refreshAutoHeadings(for: taskIndex)
-                            selectedTaskIndex = taskIndex
-                            selectedWaypointIndex = draft.routeMacro.tasks[taskIndex].waypoints.count - 1
-                            onToast("Waypoint added", .success)
-                            persistMissionToStoreNow()
+                            Task { @MainActor in
+                                await handleTaskMapClickAddWaypoint(lat: lat, lon: lon)
+                            }
                         },
                         onContextAction: { event in
                             guard event.markerType == .waypoint,
@@ -1168,6 +1256,9 @@ private struct MissionWorkspaceView: View {
                             draft.routeMacro.tasks[taskIndex].waypoints[idx].coord.lon = lon
                             refreshAutoHeadings(for: taskIndex)
                             persistMissionToStoreNow()
+                            Task { @MainActor in
+                                await maybeRebuildFollowRoadAfterWaypointMove(taskIndex: taskIndex, movedIndex: idx)
+                            }
                         },
                         onWaypointDelete: { idx in
                             guard let taskIndex = editingTaskIndex,
@@ -1190,6 +1281,22 @@ private struct MissionWorkspaceView: View {
                             )
                             let safeInsert = max(0, min(idx, draft.routeMacro.tasks[taskIndex].waypoints.count))
                             draft.routeMacro.tasks[taskIndex].waypoints.insert(waypoint, at: safeInsert)
+
+                            var wps = draft.routeMacro.tasks[taskIndex].waypoints
+                            if let pa = MissionTaskPathSegmentEditing.indexOfPreviousAnchor(in: wps, before: safeInsert),
+                               let na = MissionTaskPathSegmentEditing.indexOfNextAnchor(in: wps, after: safeInsert),
+                               na > pa + 1 {
+                                for i in stride(from: na - 1, through: pa + 1, by: -1) where wps.indices.contains(i) {
+                                    if wps[i].pathRole == .segmentInterior {
+                                        wps.remove(at: i)
+                                    }
+                                }
+                                if pa < wps.count {
+                                    wps[pa].outgoingSegmentKind = .direct
+                                }
+                            }
+                            draft.routeMacro.tasks[taskIndex].waypoints = wps
+
                             refreshAutoHeadings(for: taskIndex)
                             selectedTaskIndex = taskIndex
                             selectedWaypointIndex = safeInsert
@@ -1198,17 +1305,22 @@ private struct MissionWorkspaceView: View {
                         }
                     )
                     .task(id: routeTabMapSignature) {
-                        mapModel.home = nil
-                        mapModel.allTasksCoords = allTasksCoords
-                        mapModel.selectedTaskWaypoints = selectedTask?.waypoints ?? []
-                        mapModel.selectedWaypointIndex = selectedWaypointIndex
-                        mapModel.headingPreview = headingPreview
-                        mapModel.cameraPreview = cameraPreview
-                        mapModel.preserveView = editingTaskIndex != nil
-                        mapModel.isEditingTask = editingTaskIndex != nil
+                        mapModel.routeGeometry = GuardianRouteMapGeometry(
+                            home: nil,
+                            allTasksCoords: allTasksCoords,
+                            selectedTaskWaypoints: selectedTask?.waypoints ?? [],
+                            selectedWaypointIndex: selectedWaypointIndex,
+                            headingPreview: headingPreview,
+                            cameraPreview: cameraPreview,
+                            preserveView: editingTaskIndex != nil,
+                            isEditingTask: editingTaskIndex != nil
+                        )
                     }
-                    .frame(width: mapWidth, height: geo.size.height)
+                    .frame(width: mapWidth)
+                    .frame(maxHeight: .infinity)
                     .clipped()
+                }
+                .frame(width: mapWidth, height: geo.size.height, alignment: .top)
 
                 ZStack(alignment: .topTrailing) {
                     ScrollView {
@@ -1238,77 +1350,90 @@ private struct MissionWorkspaceView: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             } else {
                                 ForEach(Array(draft.routeMacro.tasks.enumerated()), id: \.offset) { index, path in
-                                    HStack {
-                                        TextField(
-                                            "Task name",
-                                            text: Binding(
-                                                get: { path.name },
-                                                set: { newValue in
-                                                    draft.routeMacro.tasks[index].name = newValue
-                                                }
+                                    HStack(alignment: .center, spacing: 12) {
+                                        VStack(alignment: .leading, spacing: 6) {
+                                            TextField(
+                                                "Task name",
+                                                text: Binding(
+                                                    get: { path.name },
+                                                    set: { newValue in
+                                                        draft.routeMacro.tasks[index].name = newValue
+                                                    }
+                                                )
                                             )
-                                        )
-                                        .textFieldStyle(.plain)
-                                        .foregroundStyle(theme.textPrimary)
+                                            .textFieldStyle(.plain)
+                                            .font(.system(size: 15, weight: .semibold))
+                                            .foregroundStyle(theme.textPrimary)
 
-                                        Text("• \(path.waypoints.count) wp").foregroundStyle(theme.textSecondary)
-                                        Text("• \(distanceLabel(for: path))").foregroundStyle(theme.textSecondary)
-                                        Text("• \(durationLabel(for: path))").foregroundStyle(theme.textSecondary)
-                                        Spacer()
-
-                                        Button {
-                                            presentTaskSettingsSidebar(taskIndex: index)
-                                        } label: {
-                                            Image(systemName: "gearshape.fill")
-                                                .appIconGlyph()
-                                        }
-                                        .buttonStyle(.bordered)
-                                        .uniformIconButton()
-                                        .help("Task settings")
-
-                                        if editingTaskIndex == index {
-                                            Button {
-                                                if shouldOfferCloseLoop(path) {
-                                                    pendingCloseLoopTaskIndex = index
-                                                } else {
-                                                    editingTaskIndex = nil
-                                                    selectedWaypointIndex = nil
-                                                    persistMissionToStoreNow()
-                                                    onToast("Task edit mode disabled", .info)
-                                                }
-                                            } label: {
-                                                Image(systemName: "pencil")
-                                                    .appIconGlyph()
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text("\(path.waypoints.count) wp")
+                                                    .foregroundStyle(theme.textSecondary)
+                                                Text(distanceLabel(for: path))
+                                                    .foregroundStyle(theme.textSecondary)
+                                                Text(durationLabel(for: path))
+                                                    .foregroundStyle(theme.textSecondary)
                                             }
-                                            .buttonStyle(.borderedProminent)
-                                            .tint(.blue)
-                                            .uniformIconButton()
-                                        } else {
+                                            .font(.system(size: 12, weight: .medium))
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                                        HStack(spacing: 8) {
                                             Button {
-                                                editingTaskIndex = index
-                                                selectedTaskIndex = index
-                                                onToast("Task edit mode enabled. Click map to add waypoints.", .info)
+                                                presentTaskSettingsSidebar(taskIndex: index)
                                             } label: {
-                                                Image(systemName: "pencil")
+                                                Image(systemName: "gearshape.fill")
                                                     .appIconGlyph()
                                             }
                                             .buttonStyle(.bordered)
                                             .uniformIconButton()
-                                        }
+                                            .help("Task settings")
 
-                                        Button {
-                                            pendingDeleteTaskIndex = index
-                                        } label: {
-                                            Image(systemName: "trash")
-                                                .appIconGlyph()
+                                            if editingTaskIndex == index {
+                                                Button {
+                                                    if shouldOfferCloseLoop(path) {
+                                                        pendingCloseLoopTaskIndex = index
+                                                    } else {
+                                                        editingTaskIndex = nil
+                                                        selectedWaypointIndex = nil
+                                                        persistMissionToStoreNow()
+                                                        onToast("Task edit mode disabled", .info)
+                                                    }
+                                                } label: {
+                                                    Image(systemName: "pencil")
+                                                        .appIconGlyph()
+                                                }
+                                                .buttonStyle(.borderedProminent)
+                                                .tint(.blue)
+                                                .uniformIconButton()
+                                            } else {
+                                                Button {
+                                                    editingTaskIndex = index
+                                                    selectedTaskIndex = index
+                                                    pendingOutgoingSegmentKind = .direct
+                                                    onToast("Task edit mode enabled. Click map to add waypoints.", .info)
+                                                } label: {
+                                                    Image(systemName: "pencil")
+                                                        .appIconGlyph()
+                                                }
+                                                .buttonStyle(.bordered)
+                                                .uniformIconButton()
+                                            }
+
+                                            Button {
+                                                pendingDeleteTaskIndex = index
+                                            } label: {
+                                                Image(systemName: "trash")
+                                                    .appIconGlyph()
+                                            }
+                                            .buttonStyle(.borderedProminent)
+                                            .tint(.red)
+                                            .uniformIconButton()
                                         }
-                                        .buttonStyle(.borderedProminent)
-                                        .tint(.red)
-                                        .uniformIconButton()
                                     }
                                     .contentShape(Rectangle())
                                     .onTapGesture { selectedTaskIndex = index }
-                                    .padding(14)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 16)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .background(theme.backgroundRaised)
                                     .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -1350,15 +1475,20 @@ private struct MissionWorkspaceView: View {
                                 onToast("Task edit mode disabled", .info)
                             }
                             Button("Close Loop") {
-                                if let idx = pendingCloseLoopTaskIndex,
-                                   draft.routeMacro.tasks.indices.contains(idx) {
-                                    closeLoop(for: idx)
+                                guard let idx = pendingCloseLoopTaskIndex,
+                                      draft.routeMacro.tasks.indices.contains(idx) else {
+                                    pendingCloseLoopTaskIndex = nil
+                                    persistMissionToStoreNow()
+                                    return
+                                }
+                                Task { @MainActor in
+                                    await closeLoop(for: idx)
                                     editingTaskIndex = nil
                                     selectedWaypointIndex = nil
                                     onToast("Loop closed", .success)
+                                    pendingCloseLoopTaskIndex = nil
+                                    persistMissionToStoreNow()
                                 }
-                                pendingCloseLoopTaskIndex = nil
-                                persistMissionToStoreNow()
                             }
                         } message: {
                             Text("Add the start waypoint to the end and mark this task as looped?")
@@ -1377,7 +1507,7 @@ private struct MissionWorkspaceView: View {
                     }
                 }
                 .frame(width: listWidth, height: geo.size.height)
-                .background(theme.backgroundBase)
+                .background(theme.backgroundElevated)
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
@@ -1565,33 +1695,125 @@ private struct MissionWorkspaceView: View {
         return distance > 2
     }
 
-    private func closeLoop(for index: Int) {
+    /// Closes the path back to the first anchor; respects ``pendingOutgoingSegmentKind`` for the closing leg.
+    private func closeLoop(for index: Int) async {
         guard draft.routeMacro.tasks.indices.contains(index) else { return }
         guard let first = draft.routeMacro.tasks[index].waypoints.first else { return }
-        let closingWaypoint = RouteWaypoint(
-            coord: first.coord,
-            altitude: first.altitude,
-            heading: first.heading,
-            delaySec: 0,
-            action: "none",
-            camera: first.camera
-        )
-        draft.routeMacro.tasks[index].waypoints.append(closingWaypoint)
+        var wps = draft.routeMacro.tasks[index].waypoints
+        guard let lastAnchorIdx = MissionTaskPathSegmentEditing.anchorFlatIndices(in: wps).last else { return }
+
+        switch pendingOutgoingSegmentKind {
+        case .direct:
+            if wps.indices.contains(lastAnchorIdx) {
+                wps[lastAnchorIdx].outgoingSegmentKind = .direct
+            }
+            let closingWaypoint = RouteWaypoint(
+                coord: first.coord,
+                altitude: first.altitude,
+                heading: first.heading,
+                headingPreset: first.headingPreset,
+                delaySec: first.delaySec,
+                delayUnit: first.delayUnit,
+                action: first.action,
+                camera: first.camera,
+                transition: first.transition
+            )
+            wps.append(closingWaypoint)
+        case .followRoads:
+            let fromCoord = wps[lastAnchorIdx].coord
+            let toCoord = first.coord
+            do {
+                let dense = try await osmRoutingService.routeDrivingCoordinates(from: fromCoord, to: toCoord)
+                MissionTaskPathSegmentEditing.appendFollowRoadLeg(
+                    waypoints: &wps,
+                    templateIndex: lastAnchorIdx,
+                    coordinate: toCoord,
+                    denseCoords: dense
+                )
+                if let li = wps.indices.last {
+                    let closingId = wps[li].id
+                    wps[li] = RouteWaypoint(
+                        id: closingId,
+                        coord: first.coord,
+                        altitude: first.altitude,
+                        heading: first.heading,
+                        headingPreset: first.headingPreset,
+                        delaySec: first.delaySec,
+                        delayUnit: first.delayUnit,
+                        action: first.action,
+                        camera: first.camera,
+                        transition: first.transition,
+                        pathSegmentId: nil,
+                        pathRole: .anchor,
+                        pathSegmentKind: .direct,
+                        outgoingSegmentKind: nil
+                    )
+                }
+            } catch {
+                if wps.indices.contains(lastAnchorIdx) {
+                    wps[lastAnchorIdx].outgoingSegmentKind = .direct
+                }
+                let closingWaypoint = RouteWaypoint(
+                    coord: first.coord,
+                    altitude: first.altitude,
+                    heading: first.heading,
+                    headingPreset: first.headingPreset,
+                    delaySec: first.delaySec,
+                    delayUnit: first.delayUnit,
+                    action: first.action,
+                    camera: first.camera,
+                    transition: first.transition
+                )
+                wps.append(closingWaypoint)
+                onToast("Road routing unavailable; closed loop with a direct leg.", .info)
+            }
+        }
+
+        draft.routeMacro.tasks[index].waypoints = wps
         draft.routeMacro.tasks[index].loopMode = "loop"
         refreshAutoHeadings(for: index)
     }
 
+    private func sanitizeSelectedWaypointToAnchorIfNeeded(taskIndex: Int) {
+        guard let sel = selectedWaypointIndex,
+              draft.routeMacro.tasks[taskIndex].waypoints.indices.contains(sel) else { return }
+        guard draft.routeMacro.tasks[taskIndex].waypoints[sel].pathRole != .anchor else { return }
+        let wps = draft.routeMacro.tasks[taskIndex].waypoints
+        if let next = MissionTaskPathSegmentEditing.indexOfNextAnchor(in: wps, after: sel) {
+            selectedWaypointIndex = next
+        } else if let prev = MissionTaskPathSegmentEditing.indexOfPreviousAnchor(in: wps, before: sel) {
+            selectedWaypointIndex = prev
+        } else if let firstAnchor = MissionTaskPathSegmentEditing.anchorFlatIndices(in: wps).first {
+            selectedWaypointIndex = firstAnchor
+        }
+    }
+
     private func waypointSidebar(taskIndex: Int) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
+        let waypoints = draft.routeMacro.tasks[taskIndex].waypoints
+        let anchorCount = waypoints.filter { $0.pathRole == .anchor }.count
+        let interiorCount = waypoints.filter { $0.pathRole == .segmentInterior }.count
+        return VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .center, spacing: 8) {
                     Text("Waypoints")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(theme.textPrimary)
-                    Text("\(draft.routeMacro.tasks[taskIndex].waypoints.count)")
+                    Text("\(anchorCount)")
                         .font(.system(size: 12, weight: .bold))
                         .foregroundStyle(theme.textSecondary)
-                    Spacer()
+                    if interiorCount > 0 {
+                        Text("· +\(interiorCount) road")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                    Spacer(minLength: 6)
+                    Picker("", selection: $pendingOutgoingSegmentKind) {
+                        Text("Direct").tag(RouteSegmentKind.direct)
+                        Text("Road").tag(RouteSegmentKind.followRoads)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 148)
                     Button {
                         openBulkWaypointEditor(taskIndex: taskIndex)
                     } label: {
@@ -1610,17 +1832,19 @@ private struct MissionWorkspaceView: View {
                     .buttonStyle(.borderedProminent)
                     .help("Finish task editing")
                     .uniformIconButton()
-                    
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+
+                Rectangle()
+                    .fill(theme.borderSubtle)
+                    .frame(height: 1)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(Color.black.opacity(0.2))
 
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
-                        ForEach(Array(draft.routeMacro.tasks[taskIndex].waypoints.enumerated()), id: \.element.id) { idx, _ in
+                        ForEach(MissionTaskPathSegmentEditing.anchorFlatIndices(in: draft.routeMacro.tasks[taskIndex].waypoints), id: \.self) { idx in
                             waypointEditorRow(taskIndex: taskIndex, idx: idx)
                                 .id("wp-\(idx)")
                                 .onTapGesture {
@@ -1629,6 +1853,14 @@ private struct MissionWorkspaceView: View {
                         }
                     }
                     .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .onAppear {
+                    sanitizeSelectedWaypointToAnchorIfNeeded(taskIndex: taskIndex)
+                }
+                .onChange(of: draft.routeMacro.tasks[taskIndex].waypoints.count) { _ in
+                    sanitizeSelectedWaypointToAnchorIfNeeded(taskIndex: taskIndex)
                 }
                 .onChange(of: selectedWaypointIndex) { idx in
                     clearPreviewFocusState()
@@ -1637,14 +1869,9 @@ private struct MissionWorkspaceView: View {
                         proxy.scrollTo("wp-\(idx)", anchor: .center)
                     }
                 }
-                .onChange(of: draft.routeMacro.tasks[taskIndex].waypoints.count) { _ in
-                    guard let idx = selectedWaypointIndex else { return }
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        proxy.scrollTo("wp-\(idx)", anchor: .center)
-                    }
-                }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.backgroundElevated)
         .overlay(
             Rectangle()
@@ -1658,9 +1885,11 @@ private struct MissionWorkspaceView: View {
         let waypoint = draft.routeMacro.tasks[taskIndex].waypoints[idx]
         let isSelected = selectedWaypointIndex == idx
         let headingKey = headingFieldKey(taskIndex: taskIndex, waypointIndex: idx)
+        let anchorOrdinal = draft.routeMacro.tasks[taskIndex].waypoints[...idx].filter { $0.pathRole == .anchor }.count
+        let rowTitle = waypoint.pathRole == .anchor ? "Anchor \(anchorOrdinal)" : "Road sample \(idx + 1)"
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Waypoint \(idx + 1)")
+                Text(rowTitle)
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(theme.textPrimary)
                 Spacer()
@@ -1670,6 +1899,9 @@ private struct MissionWorkspaceView: View {
                         .foregroundStyle(.blue)
                 }
             }
+            Text(waypointPathRoleLabel(waypoint))
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(theme.textTertiary)
 
             HStack(spacing: 8) {
                 Text("Altitude")
@@ -2990,25 +3222,30 @@ private struct MissionRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(mission.name)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(theme.textPrimary)
-                Spacer()
-                if mission.isArchived {
-                    Text("Archived")
-                        .font(.system(size: 10, weight: .semibold))
+            HStack(alignment: .top, spacing: 12) {
+                MissionCardThumbnailView(mission: mission, fixedLength: 56)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(mission.name)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(theme.textPrimary)
+                        Spacer()
+                        if mission.isArchived {
+                            Text("Archived")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(theme.textSecondary)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(theme.backgroundElevated)
+                                .clipShape(Capsule())
+                        }
+                        MissionTypeCapsuleBadge(type: mission.type)
+                    }
+                    Text(mission.description.isEmpty ? "No description" : mission.description)
                         .foregroundStyle(theme.textSecondary)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(theme.backgroundElevated)
-                        .clipShape(Capsule())
+                        .lineLimit(2)
                 }
-                MissionTypeCapsuleBadge(type: mission.type)
             }
-            Text(mission.description.isEmpty ? "No description" : mission.description)
-                .foregroundStyle(theme.textSecondary)
-                .lineLimit(2)
             Divider().overlay(.gray.opacity(0.25))
             Text("Tasks: \(taskCount)")
                 .font(.system(size: 12))
@@ -3076,6 +3313,7 @@ private struct MissionCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            MissionCardThumbnailView(mission: mission, gridBannerBarHeight: 120, gridThumbnailSide: 100)
             HStack(alignment: .firstTextBaseline) {
                 Text(mission.name)
                     .font(.system(size: 17, weight: .semibold))

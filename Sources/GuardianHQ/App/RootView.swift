@@ -54,6 +54,7 @@ struct RootView: View {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .background(theme.backgroundBase)
+                    .withToasts()
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

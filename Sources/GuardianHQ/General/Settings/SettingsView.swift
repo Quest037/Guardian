@@ -33,6 +33,8 @@ struct SettingsView: View {
                 switch selectedPane {
                 case .general:
                     generalPane
+                case .missions:
+                    missionsPane
                 case .sims:
                     simsPane
                 case .controls:
@@ -54,6 +56,17 @@ struct SettingsView: View {
                     .font(.system(size: 22, weight: .bold))
                     .foregroundStyle(theme.textPrimary)
                     .padding(.bottom, 16)
+
+                settingsRow(
+                    title: "Callsign",
+                    description: "Your operator name or call sign. Used where the app identifies the local operator (e.g. Mission Control and logs)."
+                ) {
+                    TextField("Callsign", text: $generalSettings.callsign)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(minWidth: 280, alignment: .trailing)
+                }
+
+                rowDivider
 
                 settingsRow(
                     title: "Appearance",
@@ -114,6 +127,44 @@ struct SettingsView: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     .frame(minWidth: 280, alignment: .trailing)
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(theme.backgroundBase)
+    }
+
+    private var missionsPane: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Missions")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(theme.textPrimary)
+                    .padding(.bottom, 16)
+
+                settingsRow(
+                    title: "Mission Control postpone cap",
+                    description:
+                        "Maximum duration for one Alter step (Sooner / Later) while a run is active: scheduled mission start, per-task MAVLink start deferrals (including between-cycle restarts). Larger changes require multiple steps."
+                ) {
+                    VStack(alignment: .trailing, spacing: 8) {
+                        Slider(
+                            value: Binding(
+                                get: { Double(generalSettings.missionControlPostponeStepCapSeconds) },
+                                set: { generalSettings.missionControlPostponeStepCapSeconds = Int($0.rounded()) }
+                            ),
+                            in: Double(GeneralSettingsStore.minMissionPostponeStepCapSeconds)
+                                ... Double(GeneralSettingsStore.maxMissionPostponeStepCapSeconds),
+                            step: 60
+                        )
+                        .frame(minWidth: 280)
+                        Text(MissionDelayPolicy.humanReadableDuration(
+                            seconds: TimeInterval(generalSettings.missionControlPostponeStepCapSeconds)
+                        ))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(theme.textSecondary)
+                    }
                 }
             }
             .padding(24)

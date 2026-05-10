@@ -1,13 +1,13 @@
 import Foundation
 
 /// Ensures `awaitArmCommandOutcome` resumes its continuation **at most once** (defensive against MAVSDK / Rx edge cases).
-private final class PaladinArmOutcomeContinuationGate: @unchecked Sendable {
+private final class ArmOutcomeContinuationGate: @unchecked Sendable {
     private var hasResumed = false
     private let lock = NSLock()
 
     func resume(
-        _ continuation: CheckedContinuation<PaladinFleetCommandAsyncOutcome, Never>,
-        returning outcome: PaladinFleetCommandAsyncOutcome
+        _ continuation: CheckedContinuation<FleetCommandAsyncOutcome, Never>,
+        returning outcome: FleetCommandAsyncOutcome
     ) {
         lock.lock()
         let shouldFire = !hasResumed
@@ -46,15 +46,6 @@ final class MissionControlStore: ObservableObject {
 
     private func cancelScheduledTaskMissionStarts(for runID: UUID, taskID: UUID) {
         runEnvironment(for: runID)?.systems.scheduling.cancelScheduledTaskMissionStarts(forTaskID: taskID)
-    }
-
-    private func assignmentForPaladinTask(run: MissionRunEnvironment, mission: Mission?, taskID: UUID) -> MissionRunAssignment? {
-        if let a = run.assignments.first(where: { $0.taskId == taskID }) { return a }
-        let enabled = mission?.routeMacro.tasks.filter(\.enabled) ?? []
-        if enabled.count == 1, enabled.first?.id == taskID {
-            return run.assignments.first(where: { $0.taskId == nil }) ?? run.assignments.first
-        }
-        return nil
     }
 
     private func cancelDeferredOneOffExecution(for runID: UUID) {
@@ -180,7 +171,7 @@ final class MissionControlStore: ObservableObject {
         runEnvironment(for: id)?.setMissionCycleCount(0)
         runEnvironment(for: id)?.systems.logging.clearState()
         runs[idx].status = .setup
-        runs[idx].pendingGracefulCycleStop = false
+        runs[idx].gracefulStopKind = .none
         runs[idx].reportCyclesCompleted = nil
         runs[idx].completionKind = nil
         runs[idx].systems.executor.clearCommandQueue()
@@ -221,14 +212,12 @@ final class MissionControlStore: ObservableObject {
             fleetVehicles: fleetVehicles
         ) else { return }
         let plan = planningResult.plan
-        let summary = "Compiled \(plan.roleTracks.count) role track(s), \(plan.taskTopology.rawValue), \(plan.teamTopology.rawValue)."
         run.systems.logging.clearState()
         run.systems.logging.setTaskContextFromRoleTracks(plan.roleTracks)
         run.systems.lifecycle.markCompiled()
         run.systems.logging.appendLogEvent(
             level: .info,
             speaker: .missionControl,
-            message: summary,
             templateKey: MissionRunLogTemplateKey.compileSummary,
             templateParams: [
                 "tracks": String(plan.roleTracks.count),
@@ -310,9 +299,9 @@ final class MissionControlStore: ObservableObject {
         fleetLink: FleetLinkService,
         vehicleID: String,
         source: String
-    ) async -> PaladinFleetCommandAsyncOutcome {
+    ) async -> FleetCommandAsyncOutcome {
         await withCheckedContinuation { continuation in
-            let gate = PaladinArmOutcomeContinuationGate()
+            let gate = ArmOutcomeContinuationGate()
             let timeout = Task {
                 do {
                     try await Task.sleep(nanoseconds: Self.armCommandWaitTimeoutNanoseconds)
@@ -327,8 +316,8 @@ final class MissionControlStore: ObservableObject {
                 vehicleID: vehicleID,
                 command: .arm,
                 source: source,
-                category: .paladin,
-                onPaladinCommandOutcome: { outcome in
+                category: .missionControl,
+                onCommandOutcome: { outcome in
                     timeout.cancel()
                     gate.resume(continuation, returning: outcome)
                 }
@@ -408,8 +397,8 @@ final class MissionControlStore: ObservableObject {
                     vehicleID: vehicleID,
                     command: .disarm,
                     source: "missionControl.preflightAutoDisarm",
-                    category: .paladin,
-                    onPaladinCommandOutcome: nil
+                    category: .missionControl,
+                    onCommandOutcome: nil
                 )
             }
             return result

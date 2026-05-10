@@ -1,4 +1,4 @@
-// MissionControlCompletedView.swift — MC-C: completed-run report cards and Paladin log export (`MissionRunDetailView`).
+// MissionControlCompletedView.swift — MC-C: completed-run report cards and mission log export (`MissionRunDetailView`).
 import AppKit
 import Foundation
 import SwiftUI
@@ -18,7 +18,7 @@ extension MissionRunDetailView {
             completedScheduleCyclesCard
             completedTimelineCard
             completedRosterCard
-            completedPaladinHealthCard
+            completedMissionLogHealthCard
         }
     }
 
@@ -43,6 +43,8 @@ extension MissionRunDetailView {
             return Color.blue.opacity(0.8)
         case .operatorStoppedImmediate:
             return Color.orange.opacity(0.85)
+        case .operatorCompletedImmediate, .operatorCompletedAfterCycle:
+            return Color.green.opacity(0.72)
         case .none:
             return Color.gray.opacity(0.55)
         }
@@ -54,6 +56,10 @@ extension MissionRunDetailView {
             return "Stopped by operator"
         case .operatorStoppedAfterCycle:
             return "Stopped after current cycle"
+        case .operatorCompletedImmediate:
+            return "Completed by operator (recovery)"
+        case .operatorCompletedAfterCycle:
+            return "Completed after current cycle (recovery)"
         case .oneOffAutopilotFinished:
             return "Mission finished"
         case .none:
@@ -67,6 +73,10 @@ extension MissionRunDetailView {
             return "The run was ended immediately (vehicles were commanded home / RTL where applicable)."
         case .operatorStoppedAfterCycle:
             return "The active mission cycle was allowed to finish, then the run ended."
+        case .operatorCompletedImmediate:
+            return "The run moved to recovery immediately using your complete policy (not the abort policy)."
+        case .operatorCompletedAfterCycle:
+            return "The active mission cycle was allowed to finish, then the run moved to recovery using your complete policy."
         case .oneOffAutopilotFinished:
             return "The mission cycle completed and the run ended."
         case .none:
@@ -136,11 +146,11 @@ extension MissionRunDetailView {
         }
     }
 
-    var completedPaladinHealthCard: some View {
-        let errs = completedPaladinErrorCount
-        let warns = completedPaladinWarningCount
+    var completedMissionLogHealthCard: some View {
+        let errs = completedMissionLogErrorCount
+        let warns = completedMissionLogWarningCount
         let accent: Color = errs > 0 ? Color.red.opacity(0.8) : (warns > 0 ? Color.orange.opacity(0.8) : Color.green.opacity(0.65))
-        return completedReportCardChrome(title: "Paladin log health", accent: accent) {
+        return completedReportCardChrome(title: "Mission log health", accent: accent) {
             if run.events.isEmpty {
                 Text("No mission log entries are stored for this run.")
                     .font(.system(size: 13))
@@ -151,7 +161,7 @@ extension MissionRunDetailView {
                 labeledReportRow("Warnings", "\(warns)")
                 labeledReportRow("Errors", "\(errs)")
                 if errs == 0, warns == 0 {
-                    Text("No warnings or errors in the Paladin log.")
+                    Text("No warnings or errors in the mission log.")
                         .font(.system(size: 12))
                         .foregroundStyle(GuardianDynamicColors.textTertiary)
                         .padding(.top, 4)
@@ -160,38 +170,38 @@ extension MissionRunDetailView {
         }
     }
 
-    var completedPaladinErrorCount: Int {
+    var completedMissionLogErrorCount: Int {
         run.events.filter { $0.level == .error }.count
     }
 
-    var completedPaladinWarningCount: Int {
+    var completedMissionLogWarningCount: Int {
         run.events.filter { $0.level == .warning }.count
     }
 
-    var completedPaladinLogExportSection: some View {
-        let text = paladinLiveLogPlainText(events: run.events, phase: run.sessionPhase, plan: run.compiledPlan)
+    var completedMissionLogExportSection: some View {
+        let text = liveLogPlainText(events: run.events, phase: run.sessionPhase, plan: run.compiledPlan)
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Paladin log")
+                Text("Mission log")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(GuardianDynamicColors.textPrimary)
                 Spacer()
                 Button("Copy") {
-                    copyCompletedPaladinLog()
+                    copyCompletedLog()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(text.isEmpty)
 
                 Button("Save…") {
-                    saveCompletedPaladinLog()
+                    saveCompletedLog()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(text.isEmpty)
 
                 Button("Print…") {
-                    printCompletedPaladinLog()
+                    printCompletedLog()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -263,27 +273,27 @@ extension MissionRunDetailView {
         }
     }
 
-    func copyCompletedPaladinLog() {
+    func copyCompletedLog() {
         guard !run.events.isEmpty else { return }
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(
-            paladinLiveLogPlainText(events: run.events, phase: run.sessionPhase, plan: run.compiledPlan),
+            liveLogPlainText(events: run.events, phase: run.sessionPhase, plan: run.compiledPlan),
             forType: .string
         )
     }
 
-    func saveCompletedPaladinLog() {
+    func saveCompletedLog() {
         guard !run.events.isEmpty else { return }
-        let text = paladinLiveLogPlainText(events: run.events, phase: run.sessionPhase, plan: run.compiledPlan)
+        let text = liveLogPlainText(events: run.events, phase: run.sessionPhase, plan: run.compiledPlan)
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.plainText]
         panel.canCreateDirectories = true
-        panel.title = "Save Paladin log"
+        panel.title = "Save mission log"
         let safeName = run.missionName
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: ":", with: "-")
-        panel.nameFieldStringValue = "\(safeName)-paladin-log.txt"
+        panel.nameFieldStringValue = "\(safeName)-mission-log.txt"
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
             do {
@@ -294,16 +304,16 @@ extension MissionRunDetailView {
         }
     }
 
-    func printCompletedPaladinLog() {
+    func printCompletedLog() {
         guard !run.events.isEmpty else { return }
-        let text = paladinLiveLogPlainText(events: run.events, phase: run.sessionPhase, plan: run.compiledPlan)
+        let text = liveLogPlainText(events: run.events, phase: run.sessionPhase, plan: run.compiledPlan)
         let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: 680, height: 2000))
         tv.string = text
         tv.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
         tv.isEditable = false
         tv.drawsBackground = false
         let op = NSPrintOperation(view: tv, printInfo: NSPrintInfo.shared)
-        op.jobTitle = "\(run.missionName) — Paladin log"
+        op.jobTitle = "\(run.missionName) — Mission log"
         op.run()
     }
 }

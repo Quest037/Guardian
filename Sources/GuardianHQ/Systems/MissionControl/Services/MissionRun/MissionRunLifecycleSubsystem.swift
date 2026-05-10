@@ -33,7 +33,7 @@ final class MissionRunLifecycleSubsystem {
         environment.reportCyclesCompleted = environment.reportCyclesCompleted ?? environment.cyclesCompleted
         environment.setSessionPhase(.completed)
         environment.systems.scheduling.cancelAllScheduledTasks()
-        UserNotificationService.shared.notifyPaladinRunCompleted(
+        UserNotificationService.shared.notifyMissionControlRunCompleted(
             runID: environment.id,
             missionName: environment.missionName,
             summary: "Mission run completed."
@@ -44,9 +44,15 @@ final class MissionRunLifecycleSubsystem {
         guard let environment else { return }
         environment.status = .completed
         environment.completedAt = Date()
-        environment.setSessionPhase(.failed)
+        environment.setSessionPhase(.aborted)
         if let detail {
-            environment.appendEvent(MissionRunEvent(level: .error, message: detail))
+            environment.appendEvent(
+                MissionRunEvent(
+                    level: .error,
+                    templateKey: MissionRunLogTemplateKey.lifecycleRunFailed,
+                    templateParams: ["detail": detail]
+                )
+            )
         }
         environment.systems.scheduling.cancelAllScheduledTasks()
     }
@@ -56,7 +62,7 @@ final class MissionRunLifecycleSubsystem {
         environment.systems.scheduling.cancelAllScheduledTasks()
         environment.status = .setup
         environment.setSessionPhase(.draft)
-        environment.pendingGracefulCycleStop = false
+        environment.gracefulStopKind = .none
         environment.systems.scheduling.setDeferredOneOffExecution(nil)
         environment.startedAt = nil
         environment.completedAt = nil
@@ -68,6 +74,7 @@ final class MissionRunLifecycleSubsystem {
         environment.clearTaskCycleCompletionCounts()
         environment.clearTaskMissionEndRecoveryAcknowledgements()
         environment.clearTaskMissionEndAbortAcknowledgements()
+        environment.clearMissionTaskScopedOrchestrationState()
         environment.clearEvents()
         environment.systems.planner.clearCompiledPlan()
         environment.systems.logging.clearState()
@@ -75,4 +82,8 @@ final class MissionRunLifecycleSubsystem {
         environment.captureExecutionContext(nil)
         environment.refreshDerivedTaskStates()
     }
+}
+
+extension MissionRunLogTemplateKey {
+    static let lifecycleRunFailed = "missioncontrol.mre.lifecycle.run_failed"
 }

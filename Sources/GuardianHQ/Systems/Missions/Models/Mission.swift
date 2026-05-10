@@ -483,7 +483,6 @@ enum MissionTaskExecutionMethod: String, Codable, CaseIterable, Identifiable {
 /// How often this task is intended to run within a broader mission schedule.
 enum MissionTaskRegularity: String, Codable, CaseIterable, Identifiable {
     case onceAtStart
-    case twiceStartEnd
     case continuous
     case continuousWithDelay
     case operatorTriggered
@@ -493,7 +492,6 @@ enum MissionTaskRegularity: String, Codable, CaseIterable, Identifiable {
     var displayTitle: String {
         switch self {
         case .onceAtStart: return "Once at start"
-        case .twiceStartEnd: return "Twice (start & end)"
         case .continuous: return "Continuous"
         case .continuousWithDelay: return "Continuous with delay"
         case .operatorTriggered: return "Operator triggered"
@@ -504,7 +502,7 @@ enum MissionTaskRegularity: String, Codable, CaseIterable, Identifiable {
     static func migrated(fromRaw raw: String) -> MissionTaskRegularity {
         switch raw.lowercased() {
         case "onceatstart", "once", "once_per_run", "onceperrun": return .onceAtStart
-        case "twicestartend", "twice_start_end": return .twiceStartEnd
+        case "twicestartend", "twice_start_end": return .operatorTriggered
         case "continuous", "each_loop", "eachmissionloop": return .continuous
         case "continuouswithdelay", "continuous_with_delay": return .continuousWithDelay
         case "operatortriggered", "operator", "operator_keyed", "operatorkeyed": return .operatorTriggered
@@ -547,8 +545,9 @@ struct MissionTask: Identifiable, Codable, Equatable {
     var loopMode: String
     /// For ``regularity`` ``continuous`` / ``continuousWithDelay``: exact number of task cycles to run. ``0`` means unlimited. Clamped 0...100.
     var cycles: Int
-    /// Minutes between continuous repeats when ``regularity`` is ``continuousWithDelay``. Clamped to 1...60.
-    var regularityDelayMinutes: Int
+    /// Gap between continuous-with-delay cycles (same unit model as waypoint dwell; see ``MissionDelayPolicy``).
+    var regularityDelayValue: Double
+    var regularityDelayUnit: DelayUnit
     /// Autopilot / planner execution strategy for this task.
     var executionMethod: MissionTaskExecutionMethod
     /// Cadence / scheduling intent for this task within the mission.
@@ -559,15 +558,40 @@ struct MissionTask: Identifiable, Codable, Equatable {
     var pattern: MissionTaskPattern
     /// Device slots assigned to this task (IDs into `Mission.rosterDevices`).
     var rosterDeviceIds: [UUID]
-    /// Default minutes (0…59) to defer this task’s MAVLink mission upload/start after execution begins; MC Setup can override per run (``TaskStartDelay``).
-    var startDelay: Int
+    /// Defer this task’s MAVLink mission upload/start after execution begins (``MissionDelayPolicy``); MC Setup can override per run (``TaskStartDelay``).
+    var startDelayValue: Double
+    var startDelayUnit: DelayUnit
+    /// When set, overrides ``RouteRules/missionAbortPolicy`` for this task’s roster slots (unless a slot sets ``MissionRunAssignmentPolicies/abort``).
+    var abortPolicyOverride: MissionRunAbortPolicy?
+    /// When set, overrides ``RouteRules/missionCompletePolicy`` for this task’s roster slots (unless a slot sets ``MissionRunAssignmentPolicies/complete``).
+    var completePolicyOverride: MissionRunCompletePolicy?
 
     enum CodingKeys: String, CodingKey {
         case id, name, enabled, waypoints, loopMode, cycles
         case legacyRepeatCount = "repeatCount"
-        case executionMethod, regularity, betweenCycles, pattern, regularityDelayMinutes, startDelay
+        case executionMethod, regularity, betweenCycles, pattern
+        case startDelayValue, startDelayUnit, regularityDelayValue, regularityDelayUnit
+        case legacyRegularityDelayMinutes = "regularityDelayMinutes"
+        case legacyStartDelayInt = "startDelay"
         case rosterDeviceIds = "spaceBindings"
         case legacyScheduleRefs = "scheduleRefs"
+        case abortPolicyOverride, completePolicyOverride
+    }
+
+    /// Effective start deferral duration for execution (seconds).
+    var startDelayTotalSeconds: TimeInterval {
+        MissionDelayPolicy.clampTotalSeconds(
+            MissionDelayPolicy.totalSeconds(value: startDelayValue, unit: startDelayUnit),
+            minimumTotalSeconds: 0
+        )
+    }
+
+    /// Effective inter-cycle delay for ``continuousWithDelay`` (seconds, minimum 1).
+    var regularityDelayTotalSeconds: TimeInterval {
+        MissionDelayPolicy.clampTotalSeconds(
+            MissionDelayPolicy.totalSeconds(value: regularityDelayValue, unit: regularityDelayUnit),
+            minimumTotalSeconds: 1
+        )
     }
 
     init(
@@ -577,13 +601,17 @@ struct MissionTask: Identifiable, Codable, Equatable {
         waypoints: [RouteWaypoint] = [],
         loopMode: String = "none",
         cycles: Int = 1,
-        regularityDelayMinutes: Int = 1,
+        regularityDelayValue: Double = 1,
+        regularityDelayUnit: DelayUnit = .mins,
         executionMethod: MissionTaskExecutionMethod = .group,
         regularity: MissionTaskRegularity = .onceAtStart,
         betweenCycles: MissionTaskBetweenCyclesAction = .returnToLaunch,
         pattern: MissionTaskPattern = .patrol,
         rosterDeviceIds: [UUID] = [],
-        startDelay: Int = 0
+        startDelayValue: Double = 0,
+        startDelayUnit: DelayUnit = .secs,
+        abortPolicyOverride: MissionRunAbortPolicy? = nil,
+        completePolicyOverride: MissionRunCompletePolicy? = nil
     ) {
         self.id = id
         self.name = name
@@ -591,13 +619,18 @@ struct MissionTask: Identifiable, Codable, Equatable {
         self.waypoints = waypoints
         self.loopMode = loopMode
         self.cycles = min(100, max(0, cycles))
-        self.regularityDelayMinutes = min(60, max(1, regularityDelayMinutes))
+        self.regularityDelayValue = regularityDelayValue
+        self.regularityDelayUnit = regularityDelayUnit
         self.executionMethod = executionMethod
         self.regularity = regularity
         self.betweenCycles = betweenCycles
         self.pattern = pattern
         self.rosterDeviceIds = rosterDeviceIds
-        self.startDelay = min(59, max(0, startDelay))
+        self.startDelayValue = startDelayValue
+        self.startDelayUnit = startDelayUnit
+        self.abortPolicyOverride = abortPolicyOverride
+        self.completePolicyOverride = completePolicyOverride
+        normalizeDelayFields()
     }
 
     init(from decoder: Decoder) throws {
@@ -614,8 +647,17 @@ struct MissionTask: Identifiable, Codable, Equatable {
         } else {
             cycles = 1
         }
-        let decodedDelay = try c.decodeIfPresent(Int.self, forKey: .regularityDelayMinutes) ?? 1
-        regularityDelayMinutes = min(60, max(1, decodedDelay))
+
+        if let rv = try c.decodeIfPresent(Double.self, forKey: .regularityDelayValue),
+           let ru = try c.decodeIfPresent(DelayUnit.self, forKey: .regularityDelayUnit) {
+            regularityDelayValue = rv
+            regularityDelayUnit = ru
+        } else {
+            let legacyMins = try c.decodeIfPresent(Int.self, forKey: .legacyRegularityDelayMinutes) ?? 1
+            regularityDelayValue = Double(legacyMins)
+            regularityDelayUnit = .mins
+        }
+
         rosterDeviceIds = try c.decodeIfPresent([UUID].self, forKey: .rosterDeviceIds) ?? []
         _ = try? c.decodeIfPresent([String].self, forKey: .legacyScheduleRefs)
 
@@ -635,9 +677,31 @@ struct MissionTask: Identifiable, Codable, Equatable {
         betweenCycles = try c.decodeIfPresent(MissionTaskBetweenCyclesAction.self, forKey: .betweenCycles) ?? .returnToLaunch
 
         pattern = try c.decodeIfPresent(MissionTaskPattern.self, forKey: .pattern) ?? .patrol
-        let decodedStartDelay = try c.decodeIfPresent(Int.self, forKey: .startDelay) ?? 0
-        startDelay = min(59, max(0, decodedStartDelay))
+
+        if let sv = try c.decodeIfPresent(Double.self, forKey: .startDelayValue),
+           let su = try c.decodeIfPresent(DelayUnit.self, forKey: .startDelayUnit) {
+            startDelayValue = sv
+            startDelayUnit = su
+        } else {
+            let legacyStart = try c.decodeIfPresent(Int.self, forKey: .legacyStartDelayInt) ?? 0
+            startDelayValue = Double(legacyStart)
+            startDelayUnit = .mins
+        }
+
+        abortPolicyOverride = try c.decodeIfPresent(MissionRunAbortPolicy.self, forKey: .abortPolicyOverride)
+        completePolicyOverride = try c.decodeIfPresent(MissionRunCompletePolicy.self, forKey: .completePolicyOverride)
+
         waypoints = Self.migratePathMetadataIfNeeded(waypoints)
+        normalizeDelayFields()
+    }
+
+    mutating func normalizeDelayFields() {
+        let s = MissionDelayPolicy.normalizedTaskStart(value: startDelayValue, unit: startDelayUnit)
+        startDelayValue = s.0
+        startDelayUnit = s.1
+        let r = MissionDelayPolicy.normalizedRegularityGap(value: regularityDelayValue, unit: regularityDelayUnit)
+        regularityDelayValue = r.0
+        regularityDelayUnit = r.1
     }
 
     /// Ensures path segment fields are populated (legacy JSON had no segment keys).
@@ -666,13 +730,17 @@ struct MissionTask: Identifiable, Codable, Equatable {
         try c.encode(waypoints, forKey: .waypoints)
         try c.encode(loopMode, forKey: .loopMode)
         try c.encode(cycles, forKey: .cycles)
-        try c.encode(regularityDelayMinutes, forKey: .regularityDelayMinutes)
+        try c.encode(regularityDelayValue, forKey: .regularityDelayValue)
+        try c.encode(regularityDelayUnit, forKey: .regularityDelayUnit)
         try c.encode(executionMethod, forKey: .executionMethod)
         try c.encode(regularity, forKey: .regularity)
         try c.encode(betweenCycles, forKey: .betweenCycles)
         try c.encode(pattern, forKey: .pattern)
         try c.encode(rosterDeviceIds, forKey: .rosterDeviceIds)
-        try c.encode(startDelay, forKey: .startDelay)
+        try c.encode(startDelayValue, forKey: .startDelayValue)
+        try c.encode(startDelayUnit, forKey: .startDelayUnit)
+        try c.encodeIfPresent(abortPolicyOverride, forKey: .abortPolicyOverride)
+        try c.encodeIfPresent(completePolicyOverride, forKey: .completePolicyOverride)
     }
 }
 
@@ -682,10 +750,41 @@ typealias RoutePath = MissionTask
 struct RouteRules: Codable, Equatable {
     var defaultSpeed: Double
     var defaultHeadingHold: Bool
+    /// Default abort policy for all tasks unless overridden per task or per roster assignment.
+    var missionAbortPolicy: MissionRunAbortPolicy
+    /// Default complete-policy for recovery wind-down unless overridden per task or per roster assignment.
+    var missionCompletePolicy: MissionRunCompletePolicy
 
-    init(defaultSpeed: Double = 5, defaultHeadingHold: Bool = true) {
+    init(
+        defaultSpeed: Double = 5,
+        defaultHeadingHold: Bool = true,
+        missionAbortPolicy: MissionRunAbortPolicy = .returnToLaunch,
+        missionCompletePolicy: MissionRunCompletePolicy = .returnToLaunch
+    ) {
         self.defaultSpeed = defaultSpeed
         self.defaultHeadingHold = defaultHeadingHold
+        self.missionAbortPolicy = missionAbortPolicy
+        self.missionCompletePolicy = missionCompletePolicy
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case defaultSpeed, defaultHeadingHold, missionAbortPolicy, missionCompletePolicy
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        defaultSpeed = try c.decodeIfPresent(Double.self, forKey: .defaultSpeed) ?? 5
+        defaultHeadingHold = try c.decodeIfPresent(Bool.self, forKey: .defaultHeadingHold) ?? true
+        missionAbortPolicy = try c.decodeIfPresent(MissionRunAbortPolicy.self, forKey: .missionAbortPolicy) ?? .returnToLaunch
+        missionCompletePolicy = try c.decodeIfPresent(MissionRunCompletePolicy.self, forKey: .missionCompletePolicy) ?? .returnToLaunch
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(defaultSpeed, forKey: .defaultSpeed)
+        try c.encode(defaultHeadingHold, forKey: .defaultHeadingHold)
+        try c.encode(missionAbortPolicy, forKey: .missionAbortPolicy)
+        try c.encode(missionCompletePolicy, forKey: .missionCompletePolicy)
     }
 }
 

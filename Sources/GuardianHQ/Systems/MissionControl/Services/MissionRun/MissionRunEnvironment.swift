@@ -23,7 +23,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     @Published var createdAt: Date
     @Published var startedAt: Date?
     @Published var completedAt: Date?
-    @Published var pendingGracefulCycleStop: Bool
+    @Published var gracefulStopKind: MissionRunGracefulStopKind = .none
     @Published var reportCyclesCompleted: Int?
     @Published var completionKind: MissionRunCompletionKind?
     @Published var policies: MissionRunPolicies = MissionRunPolicies()
@@ -52,16 +52,36 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     /// Operator (or future automation) confirms this task’s roster finished the post-mission **recovery** protocol; then UI shows ``MissionTaskState/completed`` for that task while the run may still be active.
     @Published private(set) var taskMissionEndRecoveryCompletedByTaskID: Set<UUID> = []
 
-    /// Operator (or future automation) confirms this task’s roster finished the **abort** protocol after a failed run (`MissionRunSessionPhase/failed`).
+    /// Operator (or future automation) confirms this task’s roster finished the **abort** protocol while the run is in ``MissionRunSessionPhase/aborting`` or ``MissionRunSessionPhase/aborted``.
     @Published private(set) var taskMissionEndAbortCompletedByTaskID: Set<UUID> = []
 
     /// Derived per-task state for MC-R UI (refreshed when run scheduling / lifecycle inputs change).
     @Published private(set) var taskStateByTaskID: [UUID: MissionTaskState] = [:]
 
+    /// Operator triage terminal state for a task (``.aborted`` / ``.completed``). ``deriveMissionTaskState`` returns this verbatim so refresh cannot override the operator’s choice.
+    @Published private(set) var operatorTriageMarkedMissionTaskStateByTaskID: [UUID: MissionTaskState] = [:]
+
+    /// Task-scoped graceful wind-down scheduled for the next shared autopilot cycle boundary (see scheduling APIs).
+    @Published private(set) var pendingMissionTaskGracefulWindDownKindByTaskID: [UUID: MissionRunMissionTaskGracefulPendingKind] = [:]
+
+    /// Fleet abort-policy commands were dispatched for this task (immediate or end-of-cycle); cleared when abort protocol is acknowledged.
+    @Published private(set) var missionTaskAbortWindDownIssuedTaskIDs: Set<UUID> = []
+
+    /// Complete-policy wind-down was dispatched for this task; cleared when recovery protocol is acknowledged.
+    @Published private(set) var missionTaskCompleteWindDownIssuedTaskIDs: Set<UUID> = []
+
+    /// Tasks that must not receive automatic next-cycle MAVLink starts after a task-scoped wind-down.
+    @Published private(set) var missionTaskAutopilotAutostartSuppressedTaskIDs: Set<UUID> = []
+
     internal weak var fleetLink: FleetLinkService?
     internal weak var sitl: SitlService?
     private var assistantsByKey: [String: AnyObject] = [:]
     let systems: MissionRunSystems
+
+    /// Persists template mutations performed via ``MissionRunEnvironment`` policy / Rules-of-Engagement APIs.
+    /// Set by the layer that owns the ``MissionStore`` (typically ``MissionRunDetailView``); when `nil`,
+    /// mission/task edits are still applied to the in-memory ``template`` but won't survive a template refresh.
+    var missionTemplatePersister: ((Mission) -> Void)?
 
     init(
         id: UUID = UUID(),
@@ -78,7 +98,8 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             planner: MissionRunPlannerSubsystem(),
             projections: MissionRunProjectionsSubsystem(),
             executor: MissionRunExecutionSubsystem(),
-            scheduling: MissionRunSchedulingSubsystem()
+            scheduling: MissionRunSchedulingSubsystem(),
+            policyAuthority: MissionRunPolicyAuthoritySubsystem()
         )
         self.id = id
         self.missionId = mission.id
@@ -90,7 +111,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         self.createdAt = createdAt
         self.startedAt = nil
         self.completedAt = nil
-        self.pendingGracefulCycleStop = false
+        self.gracefulStopKind = .none
         self.reportCyclesCompleted = nil
         self.completionKind = nil
         self.template = mission
@@ -101,6 +122,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         self.systems.projections.environment = self
         self.systems.executor.environment = self
         self.systems.scheduling.environment = self
+        self.systems.policyAuthority.environment = self
         refreshDerivedTaskStates()
     }
 
@@ -115,7 +137,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         createdAt: Date = Date(),
         startedAt: Date? = nil,
         completedAt: Date? = nil,
-        pendingGracefulCycleStop: Bool = false,
+        gracefulStopKind: MissionRunGracefulStopKind = .none,
         reportCyclesCompleted: Int? = nil,
         completionKind: MissionRunCompletionKind? = nil
     ) {
@@ -136,7 +158,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         self.status = status
         self.startedAt = startedAt
         self.completedAt = completedAt
-        self.pendingGracefulCycleStop = pendingGracefulCycleStop
+        self.gracefulStopKind = gracefulStopKind
         self.reportCyclesCompleted = reportCyclesCompleted
         self.completionKind = completionKind
         refreshDerivedTaskStates()
@@ -149,6 +171,234 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
 
     func captureExecutionContext(_ context: MissionRunExecutionContext?) {
         lastExecutionContext = context
+    }
+
+    /// When ``lastExecutionContext`` is unset, builds one from the run template and attached link services.
+    func effectiveExecutionContextForDispatch() -> MissionRunExecutionContext? {
+        if let existing = lastExecutionContext {
+            return existing
+        }
+        guard status == .running else { return nil }
+        guard let fleetLink, let sitl, let mission = template else { return nil }
+        return MissionRunExecutionContext(
+            mission: mission,
+            fleetLink: fleetLink,
+            sitl: sitl,
+            missionProvider: { [weak self] in self?.template }
+        )
+    }
+
+    /// Starts one task’s MAVLink mission upload / cycle (same pipeline as a deferred start). Only while ``status`` is ``MissionRunStatus/running``.
+    @discardableResult
+    func startMissionTask(taskID: UUID) -> Bool {
+        guard status == .running else { return false }
+        if taskStateByTaskID[taskID] == .executing {
+            let label = template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name
+            systems.logging.appendLogEvent(
+                level: .info,
+                taskID: taskID,
+                taskLabel: label,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.startMissionTaskSkippedAlreadyExecuting,
+                templateParams: label.map { ["task": $0] } ?? [:]
+            )
+            return false
+        }
+        guard let ctx = effectiveExecutionContextForDispatch() else {
+            systems.logging.appendLogEvent(
+                level: .warning,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.startMissionTaskNoDispatchContext
+            )
+            return false
+        }
+        captureExecutionContext(ctx)
+        return systems.executor.startMissionTask(taskID: taskID, context: ctx)
+    }
+
+    // MARK: - Task-scoped mission wind-down (abort / complete)
+
+    /// Assignments whose compiled or explicit ``MissionRunAssignment/taskId`` maps to `taskID`.
+    func assignmentsBoundToMissionTask(taskID: UUID) -> [MissionRunAssignment] {
+        assignments.filter { assignment in
+            if assignment.taskId == taskID { return true }
+            guard let plan = compiledPlan else { return false }
+            return plan.roleTracks.contains { $0.assignmentID == assignment.id && $0.taskID == taskID }
+        }
+    }
+
+    /// Clears task-scoped graceful scheduling, dispatch markers, and autostart suppression (whole-run start / reset).
+    internal func clearMissionTaskScopedOrchestrationState() {
+        if !pendingMissionTaskGracefulWindDownKindByTaskID.isEmpty {
+            pendingMissionTaskGracefulWindDownKindByTaskID = [:]
+        }
+        if !missionTaskAbortWindDownIssuedTaskIDs.isEmpty { missionTaskAbortWindDownIssuedTaskIDs = [] }
+        if !missionTaskCompleteWindDownIssuedTaskIDs.isEmpty { missionTaskCompleteWindDownIssuedTaskIDs = [] }
+        if !missionTaskAutopilotAutostartSuppressedTaskIDs.isEmpty { missionTaskAutopilotAutostartSuppressedTaskIDs = [] }
+        if !operatorTriageMarkedMissionTaskStateByTaskID.isEmpty { operatorTriageMarkedMissionTaskStateByTaskID = [:] }
+    }
+
+    internal func setPendingMissionTaskGracefulWindDown(kind: MissionRunMissionTaskGracefulPendingKind, forTaskID taskID: UUID) {
+        pendingMissionTaskGracefulWindDownKindByTaskID[taskID] = kind
+        refreshDerivedTaskStates()
+    }
+
+    internal func clearPendingMissionTaskGracefulWindDown(forTaskID taskID: UUID? = nil) {
+        if let taskID {
+            pendingMissionTaskGracefulWindDownKindByTaskID.removeValue(forKey: taskID)
+        } else {
+            pendingMissionTaskGracefulWindDownKindByTaskID.removeAll()
+        }
+        refreshDerivedTaskStates()
+    }
+
+    internal func consumePendingMissionTaskGracefulWindDown(forTaskID taskID: UUID) -> MissionRunMissionTaskGracefulPendingKind? {
+        let v = pendingMissionTaskGracefulWindDownKindByTaskID.removeValue(forKey: taskID)
+        if v != nil { refreshDerivedTaskStates() }
+        return v
+    }
+
+    internal func markMissionTaskAbortWindDownIssued(forTaskID taskID: UUID) {
+        missionTaskAbortWindDownIssuedTaskIDs.insert(taskID)
+        missionTaskAutopilotAutostartSuppressedTaskIDs.insert(taskID)
+        refreshDerivedTaskStates()
+    }
+
+    internal func markMissionTaskCompleteWindDownIssued(forTaskID taskID: UUID) {
+        missionTaskCompleteWindDownIssuedTaskIDs.insert(taskID)
+        missionTaskAutopilotAutostartSuppressedTaskIDs.insert(taskID)
+        refreshDerivedTaskStates()
+    }
+
+    /// When the operator explicitly starts a task cycle again, allow autostart bookkeeping and prior task-scoped markers to reset for that path.
+    internal func prepareMissionTaskForOperatorRestart(taskID: UUID) {
+        clearPendingMissionTaskGracefulWindDown(forTaskID: taskID)
+        missionTaskAutopilotAutostartSuppressedTaskIDs.remove(taskID)
+        missionTaskAbortWindDownIssuedTaskIDs.remove(taskID)
+        missionTaskCompleteWindDownIssuedTaskIDs.remove(taskID)
+        taskMissionEndRecoveryCompletedByTaskID.remove(taskID)
+        taskMissionEndAbortCompletedByTaskID.remove(taskID)
+        var triage = operatorTriageMarkedMissionTaskStateByTaskID
+        triage.removeValue(forKey: taskID)
+        operatorTriageMarkedMissionTaskStateByTaskID = triage
+        refreshDerivedTaskStates()
+    }
+
+    /// Operator marks this task’s MC-R lifecycle label as ``.aborted`` or ``.completed``; records that choice, emits one run event, and updates abort/recovery ack sets for session bookkeeping.
+    func operatorMarkMissionTaskTriageState(taskID: UUID, state: MissionTaskState) {
+        guard state == .aborted || state == .completed else { return }
+        guard let mission = template, let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }) else { return }
+        if operatorTriageMarkedMissionTaskStateByTaskID[taskID] == state { return }
+
+        var triage = operatorTriageMarkedMissionTaskStateByTaskID
+        triage[taskID] = state
+        operatorTriageMarkedMissionTaskStateByTaskID = triage
+
+        switch state {
+        case .aborted:
+            var abortDone = taskMissionEndAbortCompletedByTaskID
+            abortDone.insert(taskID)
+            taskMissionEndAbortCompletedByTaskID = abortDone
+            var abortIssued = missionTaskAbortWindDownIssuedTaskIDs
+            abortIssued.remove(taskID)
+            missionTaskAbortWindDownIssuedTaskIDs = abortIssued
+            var recoveryDone = taskMissionEndRecoveryCompletedByTaskID
+            recoveryDone.remove(taskID)
+            taskMissionEndRecoveryCompletedByTaskID = recoveryDone
+            var completeIssued = missionTaskCompleteWindDownIssuedTaskIDs
+            completeIssued.remove(taskID)
+            missionTaskCompleteWindDownIssuedTaskIDs = completeIssued
+        case .completed:
+            var recoveryDone = taskMissionEndRecoveryCompletedByTaskID
+            recoveryDone.insert(taskID)
+            taskMissionEndRecoveryCompletedByTaskID = recoveryDone
+            var completeIssued = missionTaskCompleteWindDownIssuedTaskIDs
+            completeIssued.remove(taskID)
+            missionTaskCompleteWindDownIssuedTaskIDs = completeIssued
+            var abortDone = taskMissionEndAbortCompletedByTaskID
+            abortDone.remove(taskID)
+            taskMissionEndAbortCompletedByTaskID = abortDone
+            var abortIssued = missionTaskAbortWindDownIssuedTaskIDs
+            abortIssued.remove(taskID)
+            missionTaskAbortWindDownIssuedTaskIDs = abortIssued
+        default:
+            break
+        }
+
+        appendEvent(
+            MissionRunEvent(
+                taskID: taskID,
+                taskLabel: task.name,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.operatorMarkedMissionTaskTriageState,
+                templateParams: [
+                    "task": task.name,
+                    "stateDisplay": state.displayTitle,
+                ]
+            )
+        )
+
+        refreshDerivedTaskStates()
+        if state == .aborted {
+            promoteSessionPhaseToAbortedIfAllTasksAcknowledgedAbort()
+        }
+    }
+
+    @discardableResult
+    func abortMissionTask(_ target: MissionRunCommandTarget) -> Bool {
+        guard case .task = target else { return false }
+        guard status == .running || status == .paused else { return false }
+        guard sessionPhase == .executing else { return false }
+        guard let ctx = effectiveExecutionContextForDispatch() else {
+            systems.logging.appendLogEvent(
+                level: .warning,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.abortMissionTaskNoDispatchContext
+            )
+            return false
+        }
+        captureExecutionContext(ctx)
+        return systems.scheduling.abortMissionTaskNow(target: target, context: ctx)
+    }
+
+    @discardableResult
+    func abortMissionTaskGraceful(_ target: MissionRunCommandTarget) -> Bool {
+        guard case .task(let taskID) = target else { return false }
+        guard status == .running || status == .paused else { return false }
+        guard sessionPhase == .executing else { return false }
+        systems.scheduling.abortMissionTaskAfterCycle(target: target)
+        return pendingMissionTaskGracefulWindDownKindByTaskID[taskID] != nil
+    }
+
+    @discardableResult
+    func completeMissionTask(_ target: MissionRunCommandTarget) -> Bool {
+        guard case .task = target else { return false }
+        guard status == .running || status == .paused else { return false }
+        guard sessionPhase == .executing else { return false }
+        guard let ctx = effectiveExecutionContextForDispatch() else {
+            systems.logging.appendLogEvent(
+                level: .warning,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.completeMissionTaskNoDispatchContext
+            )
+            return false
+        }
+        captureExecutionContext(ctx)
+        return systems.scheduling.completeMissionTaskNow(target: target, context: ctx)
+    }
+
+    @discardableResult
+    func completeMissionTaskGraceful(_ target: MissionRunCommandTarget) -> Bool {
+        guard case .task(let taskID) = target else { return false }
+        guard status == .running || status == .paused else { return false }
+        guard sessionPhase == .executing else { return false }
+        systems.scheduling.completeMissionTaskAfterCycle(target: target)
+        return pendingMissionTaskGracefulWindDownKindByTaskID[taskID] != nil
+    }
+
+    /// Cancels a previously scheduled per-task end-of-cycle wind-down for one task (or all tasks if `taskID` is nil).
+    func revokeMissionTaskGracefulWindDown(forTaskID taskID: UUID? = nil) {
+        systems.scheduling.revokeMissionTaskGracefulWindDown(forTaskID: taskID)
     }
 
     func installAssistant(_ assistant: AnyObject, key: String) {
@@ -260,19 +510,21 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
 
     /// Call when this task’s roster has finished the orderly recovery protocol (finite cycles finished, or whole-run recovery).
     func acknowledgeTaskMissionEndRecovery(taskID: UUID) {
-        guard !taskMissionEndRecoveryCompletedByTaskID.contains(taskID) else { return }
-        var next = taskMissionEndRecoveryCompletedByTaskID
-        next.insert(taskID)
-        taskMissionEndRecoveryCompletedByTaskID = next
-        refreshDerivedTaskStates()
+        operatorMarkMissionTaskTriageState(taskID: taskID, state: .completed)
     }
 
     func acknowledgeTaskMissionEndAbort(taskID: UUID) {
-        guard !taskMissionEndAbortCompletedByTaskID.contains(taskID) else { return }
-        var next = taskMissionEndAbortCompletedByTaskID
-        next.insert(taskID)
-        taskMissionEndAbortCompletedByTaskID = next
-        refreshDerivedTaskStates()
+        operatorMarkMissionTaskTriageState(taskID: taskID, state: .aborted)
+    }
+
+    /// When every **enabled** task has acknowledged the abort protocol, move session from ``MissionRunSessionPhase/aborting`` → ``MissionRunSessionPhase/aborted`` (run stays ``MissionRunStatus/running`` or ``MissionRunStatus/paused`` until the operator marks complete).
+    private func promoteSessionPhaseToAbortedIfAllTasksAcknowledgedAbort() {
+        guard (status == .running || status == .paused), sessionPhase == .aborting,
+              let mission = template
+        else { return }
+        let enabledIDs = Set(mission.routeMacro.tasks.filter(\.enabled).map(\.id))
+        guard enabledIDs.isSubset(of: taskMissionEndAbortCompletedByTaskID) else { return }
+        setSessionPhase(.aborted)
     }
 
     internal func recordTaskCycleCompletions(forTaskIDs taskIDs: Set<UUID>) {
@@ -318,14 +570,15 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         return t.timeIntervalSince(referenceNow) < -Self.oneOffScheduleTimeTolerance
     }
 
-    func startDelayMinutes(forTask taskId: UUID, mission: Mission? = nil) -> Int {
+    /// Effective MAVLink mission start deferral for this task (run override or template).
+    func startDelayTotalSeconds(forTask taskId: UUID, mission: Mission? = nil) -> TimeInterval {
         if let t = taskStartDelays.first(where: { $0.taskId == taskId }) {
-            return min(59, max(0, t.startDelayMinutes))
+            return t.totalSeconds
         }
         let source = mission ?? template
         if let mission = source,
            let task = mission.routeMacro.tasks.first(where: { $0.id == taskId }) {
-            return min(59, max(0, task.startDelay))
+            return task.startDelayTotalSeconds
         }
         return 0
     }
@@ -336,8 +589,9 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             startedAt = Date()
         }
         completedAt = nil
-        pendingGracefulCycleStop = false
+        gracefulStopKind = .none
         completionKind = nil
+        clearMissionTaskScopedOrchestrationState()
         setSessionPhase(.staging)
     }
 
@@ -371,14 +625,15 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             guard let oldState = previous[taskID], oldState != newState,
                   let task = tasksByID[taskID]
             else { continue }
-            let message =
-                "Mission Control is putting the task force for task “\(task.name)” into \(newState.displayTitle) state (was \(oldState.displayTitle)). Individual roster vehicles will confirm their own modes separately."
+            if operatorTriageMarkedMissionTaskStateByTaskID[taskID] == newState,
+               newState == .aborted || newState == .completed {
+                continue
+            }
             systems.logging.appendLogEvent(
                 level: .info,
                 taskID: task.id,
                 taskLabel: task.name,
                 speaker: .missionControl,
-                message: message,
                 templateKey: MissionRunLogTemplateKey.taskForceStateChanged,
                 templateParams: [
                     "task": task.name,
@@ -394,9 +649,14 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     private static func deriveMissionTaskState(task: MissionTask, run: MissionRunEnvironment, now: Date) -> MissionTaskState {
         if !task.enabled { return .ready }
 
+        if let pinned = run.operatorTriageMarkedMissionTaskStateByTaskID[task.id],
+           pinned == .aborted || pinned == .completed {
+            return pinned
+        }
+
         switch run.status {
         case .completed:
-            if run.sessionPhase == .failed {
+            if run.sessionPhase == .aborted {
                 return run.taskMissionEndAbortCompletedByTaskID.contains(task.id) ? .aborted : .aborting
             }
             return .completed
@@ -407,7 +667,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             switch run.sessionPhase {
             case .draft, .compiled: return .ready
             case .staging: return .staging
-            case .executing, .recovery, .completed, .failed: return .ready
+            case .executing, .recovery, .completed, .aborting, .aborted: return .ready
             }
         case .running, .paused:
             break
@@ -426,9 +686,15 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             return .recovery
         case .completed:
             return .completed
-        case .failed:
+        case .aborting, .aborted:
             return run.taskMissionEndAbortCompletedByTaskID.contains(task.id) ? .aborted : .aborting
         case .executing:
+            if run.missionTaskAbortWindDownIssuedTaskIDs.contains(task.id) {
+                return run.taskMissionEndAbortCompletedByTaskID.contains(task.id) ? .aborted : .aborting
+            }
+            if run.missionTaskCompleteWindDownIssuedTaskIDs.contains(task.id) {
+                return run.taskMissionEndRecoveryCompletedByTaskID.contains(task.id) ? .completed : .recovery
+            }
             if inDeferral { return .staging }
             if run.activeCycleTaskIDs.contains(task.id) { return .executing }
             let cyclesDone = run.taskCyclesCompletedByTaskID[task.id] ?? 0
@@ -462,5 +728,6 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
 
 extension MissionRunLogTemplateKey {
     static let taskForceStateChanged = "missioncontrol.mre.task.taskforce_state"
+    static let operatorMarkedMissionTaskTriageState = "missioncontrol.mre.operator.marked_task_triage_state"
 }
 

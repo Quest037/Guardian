@@ -22,11 +22,28 @@ struct MissionLiveVehicleHealthCard: View {
     let vehicleModel: FleetVehicleOperationalModel
     /// Must match the MC-R live roster row height so cards do not overflow and overlap siblings.
     var slotHeight: CGFloat = 210
+    /// Optional click-through; when non-nil the entire card becomes a button (used to open the
+    /// MC-R vehicle overlay on the Tasks card). The empty-roster placeholder leaves this nil.
+    var onTap: (() -> Void)?
 
     private let cardFill = GuardianDynamicColors.backgroundElevated
     private let cardStrokeNeutral = GuardianDynamicColors.borderSubtle
 
     var body: some View {
+        Group {
+            if let onTap {
+                Button(action: onTap) {
+                    cardBody
+                }
+                .buttonStyle(.plain)
+                .help("Open vehicle details")
+            } else {
+                cardBody
+            }
+        }
+    }
+
+    private var cardBody: some View {
         ZStack(alignment: .topTrailing) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .center, spacing: 8) {

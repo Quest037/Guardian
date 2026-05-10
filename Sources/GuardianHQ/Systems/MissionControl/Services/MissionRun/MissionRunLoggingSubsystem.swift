@@ -26,8 +26,8 @@ final class MissionRunLoggingSubsystem {
         taskID: UUID? = nil,
         taskLabel: String? = nil,
         speaker: MissionRunEventSpeaker = .missionControl,
-        message: String,
-        templateKey: String? = nil,
+        target: MissionRunEventTarget? = nil,
+        templateKey: String,
         templateParams: [String: String] = [:]
     ) {
         environment?.appendEvent(
@@ -36,11 +36,39 @@ final class MissionRunLoggingSubsystem {
                 taskID: taskID,
                 taskLabel: taskLabel,
                 speaker: speaker,
-                message: message,
+                target: target,
                 templateKey: templateKey,
-                templateParams: templateParams
+                templateParams: augmentedTemplateParams(
+                    speaker: speaker,
+                    base: templateParams
+                )
             )
         )
+    }
+
+    /// Auto-injects `slotID` (assignment id, lower-cased uuid string) into `templateParams` so
+    /// catalog templates can write `@{{slotID}}` for colored, clickable slot mentions without each
+    /// emitter having to pass it. Resolution order:
+    /// 1. If `templateParams["slotID"]` is already set, keep it as-is.
+    /// 2. Else if `speaker == .vehicleSlot(name)`, look the slot up in the live roster by name.
+    /// 3. Else if `templateParams["slot"]` is a known slot name, look it up the same way.
+    /// (`taskID` injection happens in the ``MissionRunEvent`` convenience init from the
+    /// event-level `taskID:` arg.)
+    private func augmentedTemplateParams(
+        speaker: MissionRunEventSpeaker,
+        base: [String: String]
+    ) -> [String: String] {
+        guard base["slotID"] == nil, let environment else { return base }
+        let slotName: String? = {
+            if case .vehicleSlot(let name) = speaker { return name }
+            return base["slot"]
+        }()
+        guard let name = slotName,
+              let assignment = environment.assignments.first(where: { $0.slotName == name })
+        else { return base }
+        var augmented = base
+        augmented["slotID"] = assignment.id.uuidString
+        return augmented
     }
 
     func setTaskContextFromRoleTracks(_ tracks: [MissionControlRoleTrack]) {
@@ -106,15 +134,18 @@ final class MissionRunLoggingSubsystem {
             level = .info
         }
         let fields = effectiveTaskFields(forAssignmentID: assignment.id)
-        let classified = PaladinFleetMirrorLineClassifier.classify(line)
+        let classified = FleetMirrorLineClassifier.classify(line)
+        let mirrorKey = classified.templateKey ?? FleetMirrorLogTemplateKey.fleetMirrorUnclassified
+        let mirrorParams: [String: String] = classified.templateKey == nil
+            ? ["text": classified.message]
+            : classified.params
         appendLogEvent(
             level: level,
             taskID: fields.0,
             taskLabel: fields.1,
             speaker: .vehicleSlot(assignment.slotName),
-            message: classified.message,
-            templateKey: classified.templateKey,
-            templateParams: classified.params
+            templateKey: mirrorKey,
+            templateParams: mirrorParams
         )
     }
 
@@ -148,7 +179,6 @@ final class MissionRunLoggingSubsystem {
                     taskID: taskFields.0,
                     taskLabel: taskFields.1,
                     speaker: .vehicleSlot(slot),
-                    message: "Autopilot: mode \(mode), \(arm), rel alt \(alt).",
                     templateKey: MissionRunLogTemplateKey.telemetryAutopilotSnapshot,
                     templateParams: ["mode": mode, "armState": arm, "relAlt": alt]
                 )
@@ -158,7 +188,6 @@ final class MissionRunLoggingSubsystem {
                     taskID: taskFields.0,
                     taskLabel: taskFields.1,
                     speaker: .vehicleSlot(slot),
-                    message: "Flight mode: \(prev!.flightMode) -> \(hub.flightMode).",
                     templateKey: MissionRunLogTemplateKey.telemetryFlightModeChange,
                     templateParams: ["from": prev!.flightMode, "to": hub.flightMode]
                 )
@@ -168,7 +197,6 @@ final class MissionRunLoggingSubsystem {
                     taskID: taskFields.0,
                     taskLabel: taskFields.1,
                     speaker: .vehicleSlot(slot),
-                    message: hub.isArmed ? "Armed." : "Disarmed.",
                     templateKey: hub.isArmed ? MissionRunLogTemplateKey.telemetryArmed : MissionRunLogTemplateKey.telemetryDisarmed
                 )
             } else if let was = prev!.inAir, let now = hub.inAir, was != now {
@@ -177,7 +205,6 @@ final class MissionRunLoggingSubsystem {
                     taskID: taskFields.0,
                     taskLabel: taskFields.1,
                     speaker: .vehicleSlot(slot),
-                    message: now ? "Airborne." : "On ground (in-air flag cleared).",
                     templateKey: now ? MissionRunLogTemplateKey.telemetryAirborne : MissionRunLogTemplateKey.telemetryOnGround
                 )
             }
@@ -191,7 +218,6 @@ final class MissionRunLoggingSubsystem {
                         taskID: taskFields.0,
                         taskLabel: taskFields.1,
                         speaker: .vehicleSlot(slot),
-                        message: "\(trend) - rel alt ~\(String(format: "%.1f", r)) m (delta \(String(format: "%.1f", delta)) m).",
                         templateKey: MissionRunLogTemplateKey.telemetryAltTrend,
                         templateParams: ["trend": trend, "alt": String(format: "%.1f", r), "delta": String(format: "%.1f", delta)]
                     )
@@ -212,7 +238,6 @@ final class MissionRunLoggingSubsystem {
                             taskID: taskFields.0,
                             taskLabel: taskFields.1,
                             speaker: .vehicleSlot(slot),
-                            message: "Track - \(String(format: "%.5f", lat)) deg, \(String(format: "%.5f", lon)) deg · rel alt \(alt) · \(mode).",
                             templateKey: MissionRunLogTemplateKey.telemetryTrack,
                             templateParams: ["lat": String(format: "%.5f", lat), "lon": String(format: "%.5f", lon), "relAlt": alt, "mode": mode]
                         )
@@ -238,7 +263,6 @@ final class MissionRunLoggingSubsystem {
                         taskID: taskFields.0,
                         taskLabel: taskFields.1,
                         speaker: .vehicleSlot(slot),
-                        message: "Approaching first waypoint - ~\(Int(dist)) m out, mode \(mode).",
                         templateKey: MissionRunLogTemplateKey.telemetryApproachWP1,
                         templateParams: ["distance": String(Int(dist)), "mode": mode]
                     )
@@ -251,7 +275,6 @@ final class MissionRunLoggingSubsystem {
                             taskID: taskFields.0,
                             taskLabel: taskFields.1,
                             speaker: .vehicleSlot(slot),
-                            message: "Turning toward leg - heading ~\(Int(heading)) deg, bearing to WP1 ~\(Int(bear)) deg (~\(Int(dist)) m).",
                             templateKey: MissionRunLogTemplateKey.telemetryTurningLeg,
                             templateParams: ["heading": String(Int(heading)), "bearing": String(Int(bear)), "distance": String(Int(dist))]
                         )
@@ -262,7 +285,6 @@ final class MissionRunLoggingSubsystem {
                             taskID: taskFields.0,
                             taskLabel: taskFields.1,
                             speaker: .vehicleSlot(slot),
-                            message: "Moving toward WP1 - ~\(Int(dist)) m, aligned within ~\(Int(turn)) deg.",
                             templateKey: MissionRunLogTemplateKey.telemetryMovingWP1,
                             templateParams: ["distance": String(Int(dist)), "turn": String(Int(turn))]
                         )

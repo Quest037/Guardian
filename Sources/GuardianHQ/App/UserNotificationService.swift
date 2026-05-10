@@ -8,7 +8,7 @@ enum UserNotificationCategory: String {
     case general = "com.calwest.guardianhq.general"
 }
 
-/// Global app-level local notification service. Subsystems (e.g. Paladin) should plug in via extensions.
+/// Global app-level local notification service. Subsystems plug in via extensions (Mission Control, Paladin, …).
 @MainActor
 final class UserNotificationService: NSObject, ObservableObject {
     static let shared = UserNotificationService()

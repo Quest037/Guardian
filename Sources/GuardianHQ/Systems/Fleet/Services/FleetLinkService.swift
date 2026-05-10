@@ -699,7 +699,7 @@ final class FleetLinkService: ObservableObject {
         return FleetVehicleModel.defaultMapColorHex(forVehicleID: vehicleID)
     }
 
-    /// Raise the gate so lower-priority sources stop issuing (e.g. `.manualTakeover` blocks Paladin until reset to `.paladin`).
+    /// Raise the gate so lower-priority sources stop issuing (e.g. `.manualTakeover` blocks automation until reset to `.missionControl` / `.paladin`).
     func setCommandAuthorityGate(vehicleID: String, minimumCategory: FleetVehicleCommandCategory) {
         ensureVehicleModel(vehicleID: vehicleID, systemID: nil, initialStatus: .init(stage: .connecting))
         guard var model = vehicleModelsByVehicleID[vehicleID] else { return }
@@ -723,18 +723,18 @@ final class FleetLinkService: ObservableObject {
         return liveDriveControlSessionVehicleID == vehicleID
     }
 
-    /// Command dispatch entrypoint for Paladin and future manual-control systems.
+    /// Command dispatch entrypoint for Mission Control, Live Drive, and other fleet command sources.
     @discardableResult
     func executeVehicleCommand(
         vehicleID: String,
         command: FleetVehicleCommand,
         source: String,
-        category: FleetVehicleCommandCategory = .paladin,
-        onPaladinCommandOutcome: (@MainActor (PaladinFleetCommandAsyncOutcome) -> Void)? = nil
+        category: FleetVehicleCommandCategory = .missionControl,
+        onCommandOutcome: (@MainActor (FleetCommandAsyncOutcome) -> Void)? = nil
     ) -> UUID? {
         ensureVehicleModel(vehicleID: vehicleID, systemID: nil, initialStatus: .init(stage: .connecting))
         guard var model = vehicleModelsByVehicleID[vehicleID] else {
-            onPaladinCommandOutcome?(.failed("No vehicle model for this stream key."))
+            onCommandOutcome?(.failed("No vehicle model for this stream key."))
             return nil
         }
         if category.arbitrationPriority < model.functions.commandGateMinimumPriority {
@@ -742,7 +742,7 @@ final class FleetLinkService: ObservableObject {
                 "Command rejected [source=\(source) category=\(category.rawValue)]: below gate (\(model.functions.commandGateMinimumPriority)).",
                 vehicleID: vehicleID
             )
-            onPaladinCommandOutcome?(
+            onCommandOutcome?(
                 .failed(
                     "Command rejected: authority gate on this vehicle requires a higher-priority source than \(category.rawValue)."
                 )
@@ -754,7 +754,7 @@ final class FleetLinkService: ObservableObject {
                 "Live Drive: blocked \(source) — no active control session (start a Live Drive session first).",
                 vehicleID: vehicleID
             )
-            onPaladinCommandOutcome?(.failed("Live Drive has no active session for this vehicle."))
+            onCommandOutcome?(.failed("Live Drive has no active session for this vehicle."))
             return nil
         }
         let commandID = model.queueCommand(command, source: source, category: category)
@@ -768,7 +768,7 @@ final class FleetLinkService: ObservableObject {
         guard let session = sessionsByVehicleID[vehicleID] else {
             markVehicleCommand(vehicleID: vehicleID, commandID: commandID, status: .failed("No MAVSDK session for vehicle."))
             appendVehicleLog("Command failed: no MAVSDK session.", vehicleID: vehicleID)
-            onPaladinCommandOutcome?(.failed("No MAVSDK session for vehicle."))
+            onCommandOutcome?(.failed("No MAVSDK session for vehicle."))
             return commandID
         }
 
@@ -779,7 +779,7 @@ final class FleetLinkService: ObservableObject {
                 commandID: commandID,
                 command: command,
                 items: items,
-                onPaladinCommandOutcome: onPaladinCommandOutcome
+                onCommandOutcome: onCommandOutcome
             )
             return commandID
         }
@@ -824,7 +824,7 @@ final class FleetLinkService: ObservableObject {
                     Task { @MainActor [weak self] in
                         self?.markVehicleCommand(vehicleID: vehicleID, commandID: commandID, status: .succeeded)
                         self?.appendVehicleLog("Command succeeded: \(self?.describe(command: command) ?? "command")", vehicleID: vehicleID)
-                        onPaladinCommandOutcome?(.succeeded)
+                        onCommandOutcome?(.succeeded)
                     }
                 },
                 onError: { [weak self] error in
@@ -837,7 +837,7 @@ final class FleetLinkService: ObservableObject {
                             status: .failed(detail)
                         )
                         self?.appendVehicleLog("Command error: \(detail)", vehicleID: vehicleID)
-                        onPaladinCommandOutcome?(.failed(detail))
+                        onCommandOutcome?(.failed(detail))
                     }
                 }
             )
@@ -1199,14 +1199,14 @@ final class FleetLinkService: ObservableObject {
         return "\(detail) — Context: \(prefix)…"
     }
 
-    /// Upload, arm, and start mission as separate steps so logs / Paladin see **which** step failed.
+    /// Upload, arm, and start mission as separate steps so logs show **which** step failed.
     private func runUploadArmStartMissionPipeline(
         session: VehicleSession,
         vehicleID: String,
         commandID: UUID,
         command: FleetVehicleCommand,
         items: [Mavsdk.Mission.MissionItem],
-        onPaladinCommandOutcome: (@MainActor (PaladinFleetCommandAsyncOutcome) -> Void)?
+        onCommandOutcome: (@MainActor (FleetCommandAsyncOutcome) -> Void)?
     ) {
         let plan = Mavsdk.Mission.MissionPlan(missionItems: items)
         let drone = session.drone
@@ -1244,7 +1244,7 @@ final class FleetLinkService: ObservableObject {
                                                     "Command succeeded: \(self.describe(command: command))",
                                                     vehicleID: vehicleID
                                                 )
-                                                onPaladinCommandOutcome?(.succeeded)
+                                                onCommandOutcome?(.succeeded)
                                             }
                                         },
                                         onError: { [weak self] error in
@@ -1261,7 +1261,7 @@ final class FleetLinkService: ObservableObject {
                                                     status: .failed(detail)
                                                 )
                                                 self.appendVehicleLog("Command error: \(detail)", vehicleID: vehicleID)
-                                                onPaladinCommandOutcome?(.failed(detail))
+                                                onCommandOutcome?(.failed(detail))
                                             }
                                         }
                                     )
@@ -1281,7 +1281,7 @@ final class FleetLinkService: ObservableObject {
                                         status: .failed(detail)
                                     )
                                     self.appendVehicleLog("Command error: \(detail)", vehicleID: vehicleID)
-                                    onPaladinCommandOutcome?(.failed(detail))
+                                    onCommandOutcome?(.failed(detail))
                                 }
                             }
                         )
@@ -1301,7 +1301,7 @@ final class FleetLinkService: ObservableObject {
                             status: .failed(detail)
                         )
                         self.appendVehicleLog("Command error: \(detail)", vehicleID: vehicleID)
-                        onPaladinCommandOutcome?(.failed(detail))
+                        onCommandOutcome?(.failed(detail))
                     }
                 }
             )
@@ -2106,7 +2106,7 @@ final class FleetLinkService: ObservableObject {
     }
 
     /// Wrap `Px4ModeCommander.setMode(...)` in a `Completable` so the existing
-    /// command-pipeline plumbing (queueing, status tracking, Paladin outcome
+    /// command-pipeline plumbing (queueing, status tracking, async outcome
     /// reporting) keeps working without leaking async/await everywhere.
     private func sendPx4SetModeCompletable(
         vehicleID: String,

@@ -510,7 +510,7 @@ struct LiveDriveView: View {
                     category: .manualTakeover
                 )
             }
-            fleetLink.setCommandAuthorityGate(vehicleID: vehicleID, minimumCategory: .paladin)
+            fleetLink.setCommandAuthorityGate(vehicleID: vehicleID, minimumCategory: .missionControl)
 
             let logLinesNow = fleetLink.storedLogLines(forVehicleID: vehicleID)
             store.finalizeActiveSession(vehicleLogLinesSnapshot: logLinesNow)
@@ -941,7 +941,7 @@ struct LiveDriveView: View {
             command: .manualControl(manual),
             source: source,
             category: .manualTakeover,
-            onPaladinCommandOutcome: { outcome in
+            onCommandOutcome: { outcome in
                 switch outcome {
                 case .succeeded:
                     lastKeyboardCommandText = "Keyboard: \(action.title)"

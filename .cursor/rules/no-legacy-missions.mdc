@@ -1,0 +1,17 @@
+---
+description: No legacy mission compatibility—assume current schema only; do not preserve or design for old missions
+alwaysApply: true
+---
+
+# No Legacy Missions
+
+This project **does not ship or load legacy missions**. There are no old mission files, pre-migration templates, or historical run shapes to support in the field.
+
+When working on missions, Mission Control runs, persistence, or fleet policy:
+
+- **Do not** add branches, fallbacks, migrations, dual decode paths, or comments framed as “legacy / old runs / backward compatibility” for mission data unless the **user explicitly** asks for that work.
+- **Do not** spend review or implementation budget on “what if an old mission appears”—assume **current models and enums only**.
+- Prefer **removing** dead compatibility code when you touch it, rather than extending it.
+- If something looks like a legacy guard (e.g. `nil` task id “old runs”), treat it as **candidates for deletion or simplification** after confirming with the user, not as a requirement to preserve.
+
+Exception: **General Swift or OS APIs** (deprecated SDK symbols, etc.) are unrelated—this rule is about **Guardian mission / run domain data only**.

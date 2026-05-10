@@ -1,6 +1,6 @@
-# Paladin System Overview
+# Paladin Plugin Overview
 
-Paladin is GuardianHQ's cross-system autonomy platform. It is integral to the app (not a plugin), but it is organized into explicit domains so each concern remains isolated and testable.
+Paladin is GuardianHQ's cross-system autonomy plugin. It lives under `Sources/GuardianHQ/Plugins/Paladin/` and registers itself with the app's per-domain catalogs / registries (assistant identity, log templates, etc.) — no core code knows about Paladin specifically; it plugs in via stable extension APIs.
 
 This document explains the current Paladin structure, boundaries, and how to extend it safely.
 
@@ -15,16 +15,19 @@ This document explains the current Paladin structure, boundaries, and how to ext
 
 Paladin lives at:
 
-- `Sources/GuardianHQ/Systems/Paladin/`
+- `Sources/GuardianHQ/Plugins/Paladin/`
 
 Current structure:
 
 - `Core/` - shared entrypoint and cross-domain API surface.
 - `DomainModels/` - normalized models used across Paladin domains.
 - `Domains/` - bounded domain logic (MissionControl, Fleet, Missions, LiveDrive).
-- `Policies/` - pure decision rules (planned expansion area).
-- `Runtime/` - execution machinery (planned expansion area).
-- `Integrations/` - adapters to external systems (Fleet bridge, logging, notifications).
+- `Integrations/` - adapters to external systems (Fleet bridge, notifications).
+
+Paladin's MC-R log template registration lives at
+`Domains/MissionControl/PaladinLogTemplates.swift` (registers with the app-wide
+`StructuredLogTemplateCatalog` via `PaladinLogTemplateCatalog.registerTemplates()`,
+called from `PaladinMissionAssistant.registerProfile()`).
 
 ## Core Entrypoint
 
@@ -98,7 +101,7 @@ This enables Paladin MC to consume a consistent "is this vehicle autonomy-ready?
 
 ## Logging + Notifications
 
-- `Integrations/Logging/PaladinLogTemplates.swift` - template keys and registry for Paladin log localization/copy evolution.
+- `Domains/MissionControl/PaladinLogTemplates.swift` - Paladin-owned `MissionRunLogTemplateKey` constants and a `PaladinLogTemplateCatalog.registerTemplates()` entry point that publishes wording into the app-wide `StructuredLogTemplateCatalog`. Triggered from `PaladinMissionAssistant.registerProfile()`.
 - `Integrations/Notifications/PaladinNotificationPlugin.swift` - Paladin notification extension on app-level `UserNotificationService`.
 
 ## Current Status
@@ -112,7 +115,6 @@ Implemented:
 
 Planned next:
 
-- Split MissionControl runtime/compiler internals into dedicated `Runtime/` + `Policies/` files.
 - Wire Fleet readiness updates from real preflight probe callsites (MissionControl start-run and Vehicles preflight flows).
 - Expand Fleet readiness with calibration process states and richer health signal ingestion.
 
@@ -123,5 +125,5 @@ Planned next:
   - MissionControl domain decides mission behavior.
 - Prefer adding normalized `DomainModels` instead of passing UI-specific structs across domains.
 - Place external-system adapters in `Integrations/`, not inside core domains.
-- Keep `Policies/` deterministic and side-effect free where possible.
 - Route cross-domain access through `PaladinEngine` so callers depend on stable APIs.
+- New Paladin log lines: declare the key constant in `Domains/MissionControl/PaladinLogTemplates.swift` and add a `StructuredLogTemplateCatalog.registerTemplate(...)` call inside `PaladinLogTemplateCatalog.registerTemplates()`. No core-catalog edits needed.

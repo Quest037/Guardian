@@ -10,15 +10,15 @@ final class MissionRunCommandSubsystem {
         sitl: SitlService
     ) -> MissionRunEvent {
         let ctx = environment?.systems.logging.effectiveTaskFields(forAssignmentID: issued.assignmentID) ?? (nil, nil)
+        let slotIDString = issued.assignmentID.uuidString
         guard let token = FleetMissionVehicleToken(storageKey: issued.vehicleTokenKey) else {
             return MissionRunEvent(
                 level: .error,
                 taskID: ctx.0,
                 taskLabel: ctx.1,
-                speaker: .paladin,
-                message: "Invalid vehicle token for slot \(issued.slotName); command dropped.",
+                speaker: .missionControl,
                 templateKey: MissionRunLogTemplateKey.commandInvalidToken,
-                templateParams: ["slot": issued.slotName]
+                templateParams: ["slot": issued.slotName, "slotID": slotIDString]
             )
         }
         guard let vehicleID = resolvedFleetStreamVehicleID(token: token, fleetLink: fleetLink, sitl: sitl) else {
@@ -26,10 +26,9 @@ final class MissionRunCommandSubsystem {
                 level: .error,
                 taskID: ctx.0,
                 taskLabel: ctx.1,
-                speaker: .paladin,
-                message: "Vehicle unavailable for slot \(issued.slotName); command dropped.",
+                speaker: .missionControl,
                 templateKey: MissionRunLogTemplateKey.commandVehicleUnavailable,
-                templateParams: ["slot": issued.slotName]
+                templateParams: ["slot": issued.slotName, "slotID": slotIDString]
             )
         }
         let summary = shortCommandSummary(issued.command)
@@ -38,7 +37,7 @@ final class MissionRunCommandSubsystem {
             command: issued.command,
             source: issued.fleetDispatchSourceLabel,
             category: issued.category,
-            onPaladinCommandOutcome: { [weak self] outcome in
+            onCommandOutcome: { [weak self] outcome in
                 guard let self, let environment = self.environment else { return }
                 switch outcome {
                 case .succeeded:
@@ -47,13 +46,13 @@ final class MissionRunCommandSubsystem {
                         level: .info,
                         taskID: ackCtx.0,
                         taskLabel: ackCtx.1,
-                        speaker: .paladin,
-                        message: "Fleet acknowledged: \(summary) on \(vehicleID).",
+                        speaker: .missionControl,
                         templateKey: MissionRunLogTemplateKey.fleetAckSuccess,
                         templateParams: [
                             "summary": summary,
                             "vehicleID": vehicleID,
                             "slot": issued.slotName,
+                            "slotID": slotIDString,
                             "issuer": issued.issuer.rawValue,
                             "issuerKey": issued.issuerKey,
                         ]
@@ -64,14 +63,14 @@ final class MissionRunCommandSubsystem {
                         level: .error,
                         taskID: ackCtx.0,
                         taskLabel: ackCtx.1,
-                        speaker: .paladin,
-                        message: "Fleet command failed: \(summary) - \(reason)",
+                        speaker: .missionControl,
                         templateKey: MissionRunLogTemplateKey.fleetAckFailed,
                         templateParams: [
                             "summary": summary,
                             "reason": reason,
                             "vehicleID": vehicleID,
                             "slot": issued.slotName,
+                            "slotID": slotIDString,
                             "issuer": issued.issuer.rawValue,
                             "issuerKey": issued.issuerKey,
                         ]
@@ -84,12 +83,12 @@ final class MissionRunCommandSubsystem {
                 level: .info,
                 taskID: ctx.0,
                 taskLabel: ctx.1,
-                speaker: .paladin,
-                message: "Command dispatched to \(vehicleID).",
+                speaker: .missionControl,
                 templateKey: MissionRunLogTemplateKey.commandDispatched,
                 templateParams: [
                     "vehicleID": vehicleID,
                     "slot": issued.slotName,
+                    "slotID": slotIDString,
                     "issuer": issued.issuer.rawValue,
                     "issuerKey": issued.issuerKey,
                 ]
@@ -99,12 +98,12 @@ final class MissionRunCommandSubsystem {
             level: .error,
             taskID: ctx.0,
             taskLabel: ctx.1,
-            speaker: .paladin,
-            message: "Command not sent to \(vehicleID) (no session, blocked by authority gate, or dispatch error).",
+            speaker: .missionControl,
             templateKey: MissionRunLogTemplateKey.commandNotSent,
             templateParams: [
                 "vehicleID": vehicleID,
                 "slot": issued.slotName,
+                "slotID": slotIDString,
             ]
         )
     }

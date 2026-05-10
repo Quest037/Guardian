@@ -96,7 +96,10 @@ final class MissionRunPlannerSubsystem {
         }
         var entries: [MissionRunAbortPlanEntry] = []
         for assignment in environment.assignments {
-            let resolved = assignment.policies.abort ?? environment.policies.abort
+            let resolved = MissionRunPolicyResolution.resolvedAbortPolicy(
+                assignment: assignment,
+                mission: environment.template
+            )
             let baseCommand = Self.fleetVehicleCommand(for: resolved)
             let issued: MissionRunIssuedCommand?
             if let baseCommand,
@@ -109,7 +112,7 @@ final class MissionRunPlannerSubsystem {
                     command: baseCommand,
                     issuer: .missionControl,
                     issuerKey: MissionRunCommandIssuerKey.plannerAbort,
-                    category: .paladin
+                    category: .missionControl
                 )
             } else {
                 issued = nil
@@ -333,13 +336,13 @@ final class MissionRunPlannerSubsystem {
 
     private func apply(_ mutation: MissionControlPlanMutation, on environment: MissionRunEnvironment) -> Bool {
         switch mutation {
-        case let .upsertTaskStartDelay(taskID, startDelayMinutes):
-            let clamped = min(59, max(0, startDelayMinutes))
+        case let .upsertTaskStartDelay(taskID, startDelayValue, startDelayUnit):
+            let row = TaskStartDelay(taskId: taskID, startDelayValue: startDelayValue, startDelayUnit: startDelayUnit)
             var delays = environment.taskStartDelays
             if let idx = delays.firstIndex(where: { $0.taskId == taskID }) {
-                delays[idx].startDelayMinutes = clamped
+                delays[idx] = row
             } else {
-                delays.append(TaskStartDelay(taskId: taskID, startDelayMinutes: clamped))
+                delays.append(row)
             }
             environment.taskStartDelays = delays
             return true

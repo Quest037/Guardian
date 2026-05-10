@@ -32,7 +32,7 @@ enum GuardianSemanticColors {
             return (infoBackground, infoForeground)
         case .completed:
             return (infoBackground, infoForeground)
-        case .failed:
+        case .aborting, .aborted:
             return (dangerBackground, dangerForeground)
         }
     }

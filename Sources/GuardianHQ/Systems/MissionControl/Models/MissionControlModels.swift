@@ -5,10 +5,16 @@ enum MissionRunSessionPhase: String, Equatable {
     case compiled
     /// Plan is ready; waiting for a scheduled execution instant (e.g. one-off future start) before staging/mission passes run.
     case staging
+    /// Task force is executing its mission.
     case executing
+    /// Success wind-down after execution (return to launch / recovery protocol).
     case recovery
+    /// Run finished successfully (paired with ``MissionRunStatus/completed`` after operator confirms).
     case completed
-    case failed
+    /// Abort protocol active after execution (while ``MissionRunStatus`` remains ``MissionRunStatus/running`` or ``MissionRunStatus/paused``).
+    case aborting
+    /// All enabled tasks have acknowledged abort, or run failed terminally (``MissionRunLifecycleSubsystem/markFailed``).
+    case aborted
 }
 
 /// Per-task lifecycle label for Mission Control runtime (derived on ``MissionRunEnvironment``).
@@ -19,6 +25,7 @@ enum MissionTaskState: String, Codable, CaseIterable, Equatable, Hashable {
     case ready
     /// Task force is getting ready to execute (e.g. countdown, arming, manual prep).
     case staging
+    /// Task force is executing its mission.
     case executing
     /// Between-cycle behavior (delay / between-cycles commands) before the next cycle.
     case between
@@ -26,10 +33,10 @@ enum MissionTaskState: String, Codable, CaseIterable, Equatable, Hashable {
     case recovery
     /// Abort protocol in progress on the task force (MC-directed; aircraft confirm separately).
     case aborting
-    /// Abort protocol finished for this task (operator or future fleet confirmation).
-    case aborted
     /// Task force has finished recovery / wind-up for this task.
     case completed
+    /// Abort protocol finished for this task (operator or future fleet confirmation).
+    case aborted
 
     /// Short operator-facing title (MC-R task chip / triage banner).
     var displayTitle: String {
@@ -41,8 +48,8 @@ enum MissionTaskState: String, Codable, CaseIterable, Equatable, Hashable {
         case .between: return "Between"
         case .recovery: return "Recovery"
         case .aborting: return "Aborting"
-        case .aborted: return "Aborted"
         case .completed: return "Completed"
+        case .aborted: return "Aborted"
         }
     }
 }
@@ -61,12 +68,33 @@ enum MissionRunStatus: String, Codable, CaseIterable, Identifiable {
 enum MissionRunCompletionKind: String, Codable, Equatable {
     case operatorStoppedImmediate
     case operatorStoppedAfterCycle
+    /// Operator ended the run for orderly recovery (return to launch / home), not using abort policy.
+    case operatorCompletedImmediate
+    case operatorCompletedAfterCycle
     case oneOffAutopilotFinished
+}
+
+/// Queued “finish after this autopilot mission cycle” intent: **abort** uses abort-policy commands; **complete** uses recovery RTL wind-down.
+enum MissionRunGracefulStopKind: String, Codable, Equatable {
+    case none
+    case abortAfterCycle
+    case completeAfterCycle
+}
+
+/// Fleet-command scope for Mission Control orchestration (task today; squad / single slot later).
+enum MissionRunCommandTarget: Equatable, Hashable, Sendable {
+    case task(UUID)
+}
+
+/// Per-task “after this autopilot mission cycle” wind-down (does not use whole-run ``MissionRunGracefulStopKind``).
+enum MissionRunMissionTaskGracefulPendingKind: String, Codable, Equatable {
+    case abortAfterCycle
+    case completeAfterCycle
 }
 
 // MARK: - Abort (scheduling → planner → fleet commands)
 
-/// Autopilot-facing action when a run aborts (resolved per assignment via ``MissionRunPolicies`` / ``MissionRunAssignmentPolicies``).
+/// Autopilot-facing action when a run aborts (resolved **assignment → task → mission** via ``MissionRunPolicyResolution``).
 enum MissionRunAbortPolicy: String, Codable, Equatable, CaseIterable, Identifiable {
     case returnToLaunch
     case holdPosition
@@ -88,6 +116,29 @@ enum MissionRunAbortPolicy: String, Codable, Equatable, CaseIterable, Identifiab
 
     /// MC Setup **Rules** abort dropdown ordering (**Return to Launch** first; includes all planner-backed values).
     static var setupPickerCases: [MissionRunAbortPolicy] {
+        [.returnToLaunch, .holdPosition, .land, .none]
+    }
+}
+
+/// Autopilot-facing action when a run completes for recovery (resolved **assignment → task → mission** via ``MissionRunPolicyResolution``).
+enum MissionRunCompletePolicy: String, Codable, Equatable, CaseIterable, Identifiable {
+    case returnToLaunch
+    case holdPosition
+    case land
+    case none
+
+    var id: String { rawValue }
+
+    var setupMenuLabel: String {
+        switch self {
+        case .returnToLaunch: return "Return to Launch"
+        case .holdPosition: return "Hold Position"
+        case .land: return "Land"
+        case .none: return "None"
+        }
+    }
+
+    static var setupPickerCases: [MissionRunCompletePolicy] {
         [.returnToLaunch, .holdPosition, .land, .none]
     }
 }
@@ -141,23 +192,57 @@ struct MissionRunEngagementRules: Codable, Equatable {
     static let `default` = MissionRunEngagementRules()
 }
 
-/// Run-level policy bundle for ``MissionRunEnvironment``.
+/// Run-level policy bundle for ``MissionRunEnvironment`` (engagement only; abort/complete live on ``Mission`` / ``MissionTask`` / ``MissionRunAssignmentPolicies``).
 struct MissionRunPolicies: Equatable {
-    var abort: MissionRunAbortPolicy
     var engagement: MissionRunEngagementRules
 
-    init(abort: MissionRunAbortPolicy = .returnToLaunch, engagement: MissionRunEngagementRules = .default) {
-        self.abort = abort
+    init(engagement: MissionRunEngagementRules = .default) {
         self.engagement = engagement
     }
 }
 
-/// Per-assignment policy overrides. ``abort`` of `nil` inherits the run’s ``MissionRunPolicies/abort``.
+/// Per-assignment policy overrides. Non-`nil` values override the owning task’s policy, which overrides the mission default.
 struct MissionRunAssignmentPolicies: Codable, Equatable {
     var abort: MissionRunAbortPolicy?
+    var complete: MissionRunCompletePolicy?
 
-    init(abort: MissionRunAbortPolicy? = nil) {
+    init(abort: MissionRunAbortPolicy? = nil, complete: MissionRunCompletePolicy? = nil) {
         self.abort = abort
+        self.complete = complete
+    }
+}
+
+/// Resolves abort / complete autopilot actions for a roster slot: **assignment → task → mission** (most specific wins).
+enum MissionRunPolicyResolution {
+    /// Effective task id for an assignment (explicit ``MissionRunAssignment/taskId``, or single enabled task when unambiguous).
+    static func resolvedTaskId(for assignment: MissionRunAssignment, mission: Mission?) -> UUID? {
+        if let taskId = assignment.taskId { return taskId }
+        guard let mission else { return nil }
+        let enabled = mission.routeMacro.tasks.filter(\.enabled)
+        if enabled.count == 1 { return enabled[0].id }
+        return nil
+    }
+
+    static func resolvedAbortPolicy(assignment: MissionRunAssignment, mission: Mission?) -> MissionRunAbortPolicy {
+        if let slot = assignment.policies.abort { return slot }
+        if let mission,
+           let tid = resolvedTaskId(for: assignment, mission: mission),
+           let task = mission.routeMacro.tasks.first(where: { $0.id == tid }),
+           let override = task.abortPolicyOverride {
+            return override
+        }
+        return mission?.routeMacro.rules.missionAbortPolicy ?? .returnToLaunch
+    }
+
+    static func resolvedCompletePolicy(assignment: MissionRunAssignment, mission: Mission?) -> MissionRunCompletePolicy {
+        if let slot = assignment.policies.complete { return slot }
+        if let mission,
+           let tid = resolvedTaskId(for: assignment, mission: mission),
+           let task = mission.routeMacro.tasks.first(where: { $0.id == tid }),
+           let override = task.completePolicyOverride {
+            return override
+        }
+        return mission?.routeMacro.rules.missionCompletePolicy ?? .returnToLaunch
     }
 }
 
@@ -167,22 +252,33 @@ enum MissionRunAbortTrigger: String, Equatable {
     case afterCycle
 }
 
-/// Per-run override (minutes) after Paladin begins execution before this task’s MAVLink mission upload/start. When absent, the mission template’s ``MissionTask/startDelay`` applies. MC Setup **Timing** tab **Tasks** card.
+/// Per-run override after Paladin begins execution before this task’s MAVLink mission upload/start (same value+unit model as ``MissionTask``). When absent, the mission template applies. MC Setup **Timing** tab **Tasks** card.
 struct TaskStartDelay: Codable, Equatable, Identifiable {
     var id: UUID { taskId }
     var taskId: UUID
-    /// Clamped 0…59; **0** is equivalent to omitting this task from the list.
-    var startDelayMinutes: Int
+    var startDelayValue: Double
+    var startDelayUnit: DelayUnit
+
+    var totalSeconds: TimeInterval {
+        MissionDelayPolicy.clampTotalSeconds(
+            MissionDelayPolicy.totalSeconds(value: startDelayValue, unit: startDelayUnit),
+            minimumTotalSeconds: 0
+        )
+    }
 
     enum CodingKeys: String, CodingKey {
         case taskId
         case legacyJSONTaskUUID = "pathId"
-        case startDelayMinutes
+        case startDelayValue
+        case startDelayUnit
+        case legacyStartDelayMinutes = "startDelayMinutes"
     }
 
-    init(taskId: UUID, startDelayMinutes: Int) {
+    init(taskId: UUID, startDelayValue: Double, startDelayUnit: DelayUnit) {
         self.taskId = taskId
-        self.startDelayMinutes = startDelayMinutes
+        let n = MissionDelayPolicy.normalizedTaskStart(value: startDelayValue, unit: startDelayUnit)
+        self.startDelayValue = n.0
+        self.startDelayUnit = n.1
     }
 
     init(from decoder: Decoder) throws {
@@ -190,13 +286,27 @@ struct TaskStartDelay: Codable, Equatable, Identifiable {
         taskId = try c.decodeIfPresent(UUID.self, forKey: .taskId)
             ?? c.decodeIfPresent(UUID.self, forKey: .legacyJSONTaskUUID)
             ?? UUID()
-        startDelayMinutes = try c.decodeIfPresent(Int.self, forKey: .startDelayMinutes) ?? 0
+        let rawValue: Double
+        let rawUnit: DelayUnit
+        if let v = try c.decodeIfPresent(Double.self, forKey: .startDelayValue),
+           let u = try c.decodeIfPresent(DelayUnit.self, forKey: .startDelayUnit) {
+            rawValue = v
+            rawUnit = u
+        } else {
+            let legacyMins = try c.decodeIfPresent(Int.self, forKey: .legacyStartDelayMinutes) ?? 0
+            rawValue = Double(legacyMins)
+            rawUnit = .mins
+        }
+        let n = MissionDelayPolicy.normalizedTaskStart(value: rawValue, unit: rawUnit)
+        startDelayValue = n.0
+        startDelayUnit = n.1
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(taskId, forKey: .taskId)
-        try c.encode(startDelayMinutes, forKey: .startDelayMinutes)
+        try c.encode(startDelayValue, forKey: .startDelayValue)
+        try c.encode(startDelayUnit, forKey: .startDelayUnit)
     }
 }
 
@@ -280,7 +390,7 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         try c.encode(attachedDevice, forKey: .attachedDevice)
         try c.encodeIfPresent(attachedFleetVehicleToken, forKey: .attachedFleetVehicleToken)
         try c.encodeIfPresent(simStartOverrideCoord, forKey: .simStartOverrideCoord)
-        if policies.abort != nil {
+        if policies.abort != nil || policies.complete != nil {
             try c.encode(policies, forKey: .policies)
         }
     }
@@ -327,11 +437,79 @@ enum MissionRunEventLevel: String, Equatable {
     case error
 }
 
-/// Speaker for mission runtime events. Mission Control is the default mission runner.
+/// Speaker for mission runtime events (log prefix / export). Use ``missionControl`` for MC automation;
+/// ``assistant(key:)`` for any AI / automation assistant (Paladin and future ones); ``operator`` for
+/// human-operator-attributed edits and commands (`displayName` is the operator callsign from
+/// `GeneralSettingsStore`, when set). Assistant `key` is resolved to a display name through
+/// ``MissionRunAssistantRegistry`` so adding a new assistant requires no renderer changes.
 enum MissionRunEventSpeaker: Equatable {
     case missionControl
-    case paladin
+    case assistant(key: String)
     case vehicleSlot(String)
+    case `operator`(displayName: String?)
+}
+
+/// Addressee for a mission runtime event ("@target"). Renders structurally between the speaker and the
+/// body in MCR rows and plain-text export — `[Wrapper][Speaker] @target body` — and gets its own color
+/// pulled from the canonical resolver (task map color, slot vehicle color, etc.). When unset, an
+/// `effectiveTarget` is derived from the speaker (see ``MissionRunEvent/effectiveTarget``); the
+/// default rule is "vehicles report to MissionControl". Assistant `key` resolves through
+/// ``MissionRunAssistantRegistry`` for display. Slot targets are id-keyed (assignment id) so renames
+/// stay live and same-name slots / deletions are unambiguous; the human callsign is resolved from the
+/// current ``MissionRunAssignment`` set at render time.
+enum MissionRunEventTarget: Equatable {
+    case missionControl
+    case assistant(key: String)
+    case task(id: UUID, name: String)
+    case slot(id: UUID)
+    case `operator`(displayName: String?)
+}
+
+// MARK: - Assistant registry
+
+/// Lightweight identity for an AI / automation assistant that participates in MC-R logging
+/// (e.g. Paladin). Held by ``MissionRunAssistantRegistry`` and resolved at render time so new
+/// assistants only need to register their `key -> displayName` to appear properly in `[Speaker]`
+/// prefixes and `@target` mentions.
+struct MissionRunAssistantProfile: Equatable {
+    let key: String
+    let displayName: String
+
+    init(key: String, displayName: String) {
+        self.key = key
+        self.displayName = displayName
+    }
+}
+
+/// Process-wide registry mapping ``MissionRunCommandIssuerKey``-style assistant keys to their
+/// human display names (used for `[Paladin]` / `@paladin` style log rendering). Assistants register
+/// themselves on init (e.g. ``PaladinMissionAssistant``) so renderers stay free of hardcoded
+/// assistant names — no renderer change is needed when a new assistant is added.
+@MainActor
+final class MissionRunAssistantRegistry {
+    static let shared = MissionRunAssistantRegistry()
+
+    private var profilesByKey: [String: MissionRunAssistantProfile] = [:]
+
+    private init() {}
+
+    func register(_ profile: MissionRunAssistantProfile) {
+        profilesByKey[profile.key] = profile
+    }
+
+    func unregister(forKey key: String) {
+        profilesByKey.removeValue(forKey: key)
+    }
+
+    func profile(forKey key: String) -> MissionRunAssistantProfile? {
+        profilesByKey[key]
+    }
+
+    /// Display name for a registered assistant; falls back to the raw key so unknown assistants
+    /// still render legibly in logs.
+    func displayName(forKey key: String) -> String {
+        profilesByKey[key]?.displayName ?? key
+    }
 }
 
 struct MissionRunEvent: Identifiable, Equatable {
@@ -343,9 +521,11 @@ struct MissionRunEvent: Identifiable, Equatable {
     /// Task name for `[Name]` tag and plain-text export.
     let taskLabel: String?
     let speaker: MissionRunEventSpeaker
-    /// Default English (or raw vehicle text); used when no template override is registered for `templateKey`.
+    /// Explicit addressee; when `nil`, ``effectiveTarget`` derives one from `speaker` + `taskID/Label`.
+    let target: MissionRunEventTarget?
+    /// Materialized default (export) line; normally from ``StructuredLogTemplateCatalog`` via `templateKey` + `templateParams` at append time.
     let message: String
-    /// Stable id for future localization / string tables (`{{param}}` in patterns).
+    /// Stable id for catalog / localization (`{{param}}` in patterns). New emissions should always set this.
     let templateKey: String?
     let templateParams: [String: String]
 
@@ -356,6 +536,7 @@ struct MissionRunEvent: Identifiable, Equatable {
         taskID: UUID? = nil,
         taskLabel: String? = nil,
         speaker: MissionRunEventSpeaker = .missionControl,
+        target: MissionRunEventTarget? = nil,
         message: String,
         templateKey: String? = nil,
         templateParams: [String: String] = [:]
@@ -366,9 +547,35 @@ struct MissionRunEvent: Identifiable, Equatable {
         self.taskID = taskID
         self.taskLabel = taskLabel
         self.speaker = speaker
+        self.target = target
         self.message = message
         self.templateKey = templateKey
         self.templateParams = templateParams
+    }
+
+    /// Resolved addressee for rendering. Explicit ``target`` wins. Otherwise we fall back to the
+    /// "directed messaging" default for that speaker:
+    /// - `vehicleSlot` (and `assistant` when no other context) → ``missionControl``
+    /// - `missionControl` → the task it was logging about (when `taskID`/`taskLabel` are set), else the operator
+    /// - `operator` → ``missionControl`` (operator with no explicit target is addressing the runtime as a whole)
+    var effectiveTarget: MissionRunEventTarget {
+        if let target { return target }
+        switch speaker {
+        case .vehicleSlot:
+            return .missionControl
+        case .assistant:
+            if let tid = taskID, let label = taskLabel, !label.isEmpty {
+                return .task(id: tid, name: label)
+            }
+            return .missionControl
+        case .missionControl:
+            if let tid = taskID, let label = taskLabel, !label.isEmpty {
+                return .task(id: tid, name: label)
+            }
+            return .operator(displayName: nil)
+        case .operator:
+            return .missionControl
+        }
     }
 }
 
@@ -399,7 +606,7 @@ extension MissionRunEvent {
             switch speaker {
             case .vehicleSlot(let s):
                 return s
-            case .paladin, .missionControl:
+            case .assistant, .missionControl, .operator:
                 guard let raw = templateParams["slot"] else { return nil }
                 let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
                 return s.isEmpty ? nil : s
@@ -453,7 +660,7 @@ struct MissionRunIssuedCommand: Identifiable, Equatable {
         command: FleetVehicleCommand,
         issuer: MissionRunCommandIssuer,
         issuerKey: String,
-        category: FleetVehicleCommandCategory = .paladin
+        category: FleetVehicleCommandCategory = .missionControl
     ) {
         self.id = id
         self.assignmentID = assignmentID
@@ -500,6 +707,8 @@ struct MissionRunAbortPlan: Equatable {
 /// Queue bucket; **when** is ``MissionRunQueuedCommandDispatch`` on each batch.
 enum MissionRunCommandQueueTag: String, CaseIterable, Hashable {
     case abort = "missionControl.queue.abort"
+    /// Recovery wind-down after the current mission cycle (``MissionRunCompletePolicy``), distinct from abort policy.
+    case complete = "missionControl.queue.complete"
     case missionStart = "missionControl.queue.missionStart"
 }
 
@@ -583,7 +792,7 @@ struct MissionControlPlan: Equatable {
 }
 
 enum MissionControlPlanMutation: Equatable {
-    case upsertTaskStartDelay(taskID: UUID, startDelayMinutes: Int)
+    case upsertTaskStartDelay(taskID: UUID, startDelayValue: Double, startDelayUnit: DelayUnit)
     case removeTaskStartDelay(taskID: UUID)
     case replaceAssignmentVehicleToken(assignmentID: UUID, vehicleTokenKey: String?)
     case updateAssignmentTask(assignmentID: UUID, taskID: UUID?)

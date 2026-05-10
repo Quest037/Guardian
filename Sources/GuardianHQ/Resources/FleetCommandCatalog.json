@@ -1,0 +1,92 @@
+{
+  "_blank": {
+    "label": "",
+    "description": "Copy this block, rename the key (e.g. \"myCommand\"), fill label/description, and add one array per vehicle class code (UAV-C, UAV-F, …).",
+    "commands": {
+      "UAV-C": [
+        { "step": "setMode", "mode": "hold" }
+      ],
+      "UAV-F": [],
+      "UAV-V": [],
+      "UGV-W": [],
+      "UGV-T": [],
+      "UGV-L": [],
+      "USV": [],
+      "UUV": []
+    }
+  },
+  "park": {
+    "label": "Park",
+    "description": "Land or stop motion, hold, then disarm when safe.",
+    "commands": {
+      "UAV-C": [
+        { "step": "land" },
+        { "step": "setMode", "mode": "hold" },
+        { "step": "disarm" }
+      ],
+      "UAV-F": [
+        { "step": "land" },
+        { "step": "setMode", "mode": "hold" },
+        { "step": "disarm" }
+      ],
+      "UAV-V": [
+        { "step": "land" },
+        { "step": "setMode", "mode": "hold" },
+        { "step": "disarm" }
+      ],
+      "UGV-W": [
+        { "step": "setMode", "mode": "manual" },
+        { "step": "setMode", "mode": "hold" },
+        { "step": "disarm" }
+      ],
+      "UGV-T": [
+        { "step": "setMode", "mode": "manual" },
+        { "step": "setMode", "mode": "hold" },
+        { "step": "disarm" }
+      ],
+      "UGV-L": [
+        { "step": "setMode", "mode": "manual" },
+        { "step": "setMode", "mode": "hold" },
+        { "step": "disarm" }
+      ],
+      "USV": [
+        { "step": "setMode", "mode": "manual" },
+        { "step": "setMode", "mode": "hold" },
+        { "step": "disarm" }
+      ],
+      "UUV": [
+        { "step": "surface" },
+        { "step": "setMode", "mode": "hold" },
+        { "step": "disarm" }
+      ]
+    }
+  },
+  "returnHome": {
+    "label": "Return home",
+    "description": "Navigate back toward home or launch.",
+    "commands": {
+      "UAV-C": [{ "step": "returnToHome" }],
+      "UAV-F": [{ "step": "returnToHome" }],
+      "UAV-V": [{ "step": "returnToHome" }],
+      "UGV-W": [{ "step": "returnToHome" }],
+      "UGV-T": [{ "step": "returnToHome" }],
+      "UGV-L": [{ "step": "returnToHome" }],
+      "USV": [{ "step": "returnToHome" }],
+      "UUV": [{ "step": "returnToHome" }]
+    }
+  },
+  "hold": {
+    "label": "Hold",
+    "description": "Hold position or attitude without a full park sequence.",
+    "commands": {
+      "UAV-C": [{ "step": "loiter" }],
+      "UAV-F": [{ "step": "loiter" }],
+      "UAV-V": [{ "step": "loiter" }],
+      "UGV-W": [{ "step": "setMode", "mode": "hold" }],
+      "UGV-T": [{ "step": "setMode", "mode": "hold" }],
+      "UGV-L": [{ "step": "setMode", "mode": "hold" }],
+      "USV": [{ "step": "setMode", "mode": "hold" }],
+      "UUV": [{ "step": "setMode", "mode": "hold" }]
+    }
+  }
+}

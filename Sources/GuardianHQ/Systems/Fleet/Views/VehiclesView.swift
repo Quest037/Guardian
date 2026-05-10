@@ -340,7 +340,7 @@ struct VehiclesView: View {
         Task { @MainActor in
             await fleetLink.stopManualControlStream(vehicleID: vehicleID)
             fleetLink.clearLiveDriveControlSessionVehicleIfMatches(vehicleID: vehicleID)
-            fleetLink.setCommandAuthorityGate(vehicleID: vehicleID, minimumCategory: .paladin)
+            fleetLink.setCommandAuthorityGate(vehicleID: vehicleID, minimumCategory: .missionControl)
         }
         if liveDriveStore.activeControlledVehicleID == vehicleID {
             liveDriveStore.discardActiveSessionRecording()

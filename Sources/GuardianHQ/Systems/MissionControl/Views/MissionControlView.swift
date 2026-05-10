@@ -129,6 +129,7 @@ struct MissionControlView: View {
                             } label: {
                                 MissionRunCard(
                                     run: run,
+                                    mission: missionStore.missions.first { $0.id == run.missionId },
                                     isSelected: selectedRunID == run.id
                                 )
                             }
@@ -145,9 +146,29 @@ struct MissionControlView: View {
 
 struct MissionRunStatusBadge: View {
     let status: MissionRunStatus
+    /// When set, running/paused runs in abort wind-down use abort styling instead of the coarse status alone.
+    var sessionPhase: MissionRunSessionPhase?
+
+    init(status: MissionRunStatus, sessionPhase: MissionRunSessionPhase? = nil) {
+        self.status = status
+        self.sessionPhase = sessionPhase
+    }
+
+    private var isAbortWindDownActive: Bool {
+        guard let sessionPhase else { return false }
+        return (status == .running || status == .paused)
+            && (sessionPhase == .aborting || sessionPhase == .aborted)
+    }
+
+    private var displayTitle: String {
+        if isAbortWindDownActive {
+            return sessionPhase == .aborted ? "Aborted" : "Aborting"
+        }
+        return status.rawValue.capitalized
+    }
 
     var body: some View {
-        Text(status.rawValue.capitalized)
+        Text(displayTitle)
             .font(.system(size: 10, weight: .heavy))
             .padding(.horizontal, 9)
             .padding(.vertical, 4)
@@ -157,6 +178,7 @@ struct MissionRunStatusBadge: View {
     }
 
     private var background: Color {
+        if isAbortWindDownActive { return GuardianSemanticColors.dangerBackground }
         switch status {
         case .running:
             return GuardianSemanticColors.successBackground
@@ -170,6 +192,7 @@ struct MissionRunStatusBadge: View {
     }
 
     private var foreground: Color {
+        if isAbortWindDownActive { return GuardianSemanticColors.dangerForeground }
         switch status {
         case .running:
             return GuardianSemanticColors.successForeground
@@ -183,78 +206,106 @@ struct MissionRunStatusBadge: View {
     }
 }
 
+private func gracefulStopKindGridLabel(_ kind: MissionRunGracefulStopKind) -> String {
+    switch kind {
+    case .none: return ""
+    case .abortAfterCycle: return "Abort after cycle"
+    case .completeAfterCycle: return "Complete after cycle"
+    }
+}
+
 private struct MissionRunCard: View {
     let run: MissionRunEnvironment
+    /// Template whose mission-card JPEG is shown (same asset as Missions grid / Add Run).
+    let mission: Mission?
     let isSelected: Bool
 
+    private static let runCardBannerHeight: CGFloat = 76
+    private static let runCardBannerThumb: CGFloat = 58
+    private static let runCardOuterCornerRadius: CGFloat = 10
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(run.missionName)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(GuardianDynamicColors.textPrimary)
-                    .lineLimit(1)
-                Spacer()
-                MissionRunStatusBadge(status: run.status)
-            }
+        VStack(alignment: .leading, spacing: 0) {
+            runCardMissionThumbnail
+                .clipShape(
+                    UnevenRoundedRectangle(
+                        cornerRadii: RectangleCornerRadii(
+                            topLeading: Self.runCardOuterCornerRadius,
+                            bottomLeading: 0,
+                            bottomTrailing: 0,
+                            topTrailing: Self.runCardOuterCornerRadius
+                        ),
+                        style: .continuous
+                    )
+                )
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text(run.missionName)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(GuardianDynamicColors.textPrimary)
+                        .lineLimit(1)
+                    Spacer()
+                    MissionRunStatusBadge(status: run.status, sessionPhase: run.sessionPhase)
+                }
 
-            HStack(spacing: 8) {
-                Image(systemName: scheduleIconName)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(GuardianDynamicColors.textTertiary)
-                Text(scheduleSummaryText)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(GuardianDynamicColors.textSecondary)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                if run.pendingGracefulCycleStop {
-                    Text("Stopping after cycle")
+                HStack(spacing: 8) {
+                    Image(systemName: scheduleIconName)
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(GuardianSemanticColors.warningForeground)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(GuardianSemanticColors.warningBackground)
-                        .clipShape(Capsule())
-                }
-            }
-
-            HStack(spacing: 8) {
-                statPill(label: "Slots", value: "\(run.assignments.count)")
-                statPill(label: "Assigned", value: "\(assignedSlots)")
-                statPill(label: "Unassigned", value: "\(unassignedSlots)")
-            }
-
-            if let progressLabel {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(progressLabel)
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
                         .foregroundStyle(GuardianDynamicColors.textTertiary)
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule()
-                                .fill(GuardianDynamicColors.borderSubtle)
-                            Capsule()
-                                .fill(progressFillColor)
-                                .frame(width: geo.size.width * progressFraction)
-                        }
+                    Text(scheduleSummaryText)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(GuardianDynamicColors.textSecondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    if run.gracefulStopKind != .none {
+                        Text(gracefulStopKindGridLabel(run.gracefulStopKind))
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(GuardianSemanticColors.warningForeground)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(GuardianSemanticColors.warningBackground)
+                            .clipShape(Capsule())
                     }
-                    .frame(height: 5)
                 }
+
+                HStack(spacing: 8) {
+                    statPill(label: "Slots", value: "\(run.assignments.count)")
+                    statPill(label: "Assigned", value: "\(assignedSlots)")
+                    statPill(label: "Unassigned", value: "\(unassignedSlots)")
+                }
+
+                if let progressLabel {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(progressLabel)
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(GuardianDynamicColors.textTertiary)
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Capsule()
+                                    .fill(GuardianDynamicColors.borderSubtle)
+                                Capsule()
+                                    .fill(progressFillColor)
+                                    .frame(width: geo.size.width * progressFraction)
+                            }
+                        }
+                        .frame(height: 5)
+                    }
+                }
+
+                Divider()
+                    .overlay(GuardianDynamicColors.borderSubtle)
+
+                Text(timelineSummaryText)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(GuardianDynamicColors.textTertiary)
+                    .lineLimit(1)
             }
-
-            Divider()
-                .overlay(GuardianDynamicColors.borderSubtle)
-
-            Text(timelineSummaryText)
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundStyle(GuardianDynamicColors.textTertiary)
-                .lineLimit(1)
+            .padding(12)
         }
-        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(isSelected ? GuardianDynamicColors.backgroundElevated : GuardianDynamicColors.backgroundRaised)
         .overlay {
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: Self.runCardOuterCornerRadius, style: .continuous)
                 .stroke(
                     isSelected
                         ? Color.blue.opacity(0.7)
@@ -262,7 +313,27 @@ private struct MissionRunCard: View {
                     lineWidth: isSelected ? 1.6 : 1
                 )
         }
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: Self.runCardOuterCornerRadius, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var runCardMissionThumbnail: some View {
+        if let mission {
+            MissionCardThumbnailView(
+                mission: mission,
+                gridBannerBarHeight: Self.runCardBannerHeight,
+                gridThumbnailSide: Self.runCardBannerThumb
+            )
+        } else {
+            ZStack {
+                Color(red: 0x12 / 255, green: 0x15 / 255, blue: 0x1c / 255)
+                Image(systemName: "shield.lefthalf.filled")
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(GuardianDynamicColors.textSecondary.opacity(0.75))
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: Self.runCardBannerHeight)
+        }
     }
 
     private var scheduleIconName: String { "calendar.badge.clock" }
@@ -292,7 +363,15 @@ private struct MissionRunCard: View {
         return 1
     }
 
+    private var isAbortProtocolWindDown: Bool {
+        (run.status == .running || run.status == .paused)
+            && (run.sessionPhase == .aborting || run.sessionPhase == .aborted)
+    }
+
     private var progressFillColor: Color {
+        if isAbortProtocolWindDown {
+            return GuardianSemanticColors.dangerForeground.opacity(0.92)
+        }
         switch run.status {
         case .running:
             return GuardianSemanticColors.successForeground.opacity(0.95)
@@ -308,6 +387,12 @@ private struct MissionRunCard: View {
     }
 
     private var timelineSummaryText: String {
+        if isAbortProtocolWindDown {
+            if let startedAt = run.startedAt {
+                return "Abort protocol after run started \(startedAt.formatted(date: .abbreviated, time: .shortened))"
+            }
+            return "Abort protocol in progress"
+        }
         switch run.status {
         case .setup:
             return "Created \(run.createdAt.formatted(date: .abbreviated, time: .shortened))"

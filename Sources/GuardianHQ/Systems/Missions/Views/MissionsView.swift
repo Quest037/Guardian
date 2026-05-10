@@ -2022,7 +2022,7 @@ private struct MissionWorkspaceView: View {
                     )
                 ) {
                     ForEach(DelayUnit.allCases) { unit in
-                        Text(unit.rawValue).tag(unit)
+                        Text(unit.missionDelayMenuLabel).tag(unit)
                     }
                 }
                 .pickerStyle(.menu)
@@ -2686,7 +2686,7 @@ private struct MissionWorkspaceView: View {
                             )
                         ) {
                             ForEach(DelayUnit.allCases) { unit in
-                                Text(unit.rawValue).tag(unit)
+                                Text(unit.missionDelayMenuLabel).tag(unit)
                             }
                         }
                         .pickerStyle(.menu)
@@ -3071,12 +3071,16 @@ private struct MissionTaskSettingsSidebar: View {
     }
 
     private var missionTaskStartDelayRow: some View {
-        missionTaskIntStepperFieldRow(
-            label: "Start Delay",
-            value: $task.startDelay,
-            range: 0...59,
-            unitSuffix: "mins"
-        )
+        missionTaskSettingsFieldRow(label: "Start Delay") {
+            MissionDelayValueUnitEditor(
+                label: "",
+                value: $task.startDelayValue,
+                unit: $task.startDelayUnit,
+                minimumTotalSeconds: 0,
+                numericFieldWidth: 96,
+                secondaryLabelColor: theme.textSecondary
+            )
+        }
     }
 
     private func missionTaskIntStepperFieldRow(
@@ -3105,12 +3109,16 @@ private struct MissionTaskSettingsSidebar: View {
     }
 
     private var missionTaskRegularityDelayRow: some View {
-        missionTaskIntStepperFieldRow(
-            label: "Regularity Delay",
-            value: $task.regularityDelayMinutes,
-            range: 1...60,
-            unitSuffix: "mins"
-        )
+        missionTaskSettingsFieldRow(label: "Regularity Delay") {
+            MissionDelayValueUnitEditor(
+                label: "",
+                value: $task.regularityDelayValue,
+                unit: $task.regularityDelayUnit,
+                minimumTotalSeconds: 1,
+                numericFieldWidth: 96,
+                secondaryLabelColor: theme.textSecondary
+            )
+        }
     }
 
     private var missionTaskCyclesRow: some View {

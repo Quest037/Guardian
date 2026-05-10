@@ -76,6 +76,8 @@ struct MissionControlRosterSlotCard: View {
     let onPickAndAssignSim: (() -> Void)?
     /// Bulk SIM spawn: dim card and show spinner on the slot currently being spawned for.
     let showsWorkingOverlay: Bool
+    /// Opens Mission Control slot settings (policies, etc.) in a trailing sidebar.
+    var onOpenSettings: (() -> Void)? = nil
 
     var body: some View {
         Group {
@@ -150,6 +152,16 @@ struct MissionControlRosterSlotCard: View {
                     .tint(.blue)
                     .controlSize(.small)
                     .help("Pick a simulator and assign it to this roster slot (same as Vehicles → Add Sim).")
+                }
+
+                if let onOpenSettings {
+                    Button(action: onOpenSettings) {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Slot settings")
                 }
             }
         }
@@ -236,6 +248,16 @@ struct MissionControlRosterSlotCard: View {
                         .font(.system(size: 11, weight: .semibold))
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+                }
+
+                if let onOpenSettings {
+                    Button(action: onOpenSettings) {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Slot settings")
                 }
 
                 Spacer(minLength: 0)
@@ -379,6 +401,7 @@ struct MissionRunDetailView: View {
     @ObservedObject var controlStore: MissionControlStore
     @ObservedObject var generalSettings: GeneralSettingsStore
     @EnvironmentObject private var sidebarOverlay: SidebarOverlay
+    @EnvironmentObject private var toastCenter: ToastCenter
     @StateObject private var runPromptCenter = MissionRunPromptCenter()
     let onBack: () -> Void
     let onUpdate: (MissionRunEnvironment) -> Void
@@ -391,22 +414,29 @@ struct MissionRunDetailView: View {
     /// owns the tile style, recenter nonce, and the per-tab content that gets
     /// pushed in via `.task(id:)`.
     @StateObject private var mapModel: GuardianMapModel
-    /// MC-R: focused task triage — filters Paladin log and roster to this task; shows triage sheet on Tasks card.
+    /// MC-R: focused task triage — filters the live mission log and roster to this task; shows triage sheet on Tasks card.
     @State private var focusedLiveTaskID: UUID? = nil
+    /// MC-R: focused roster slot triage — slides a vehicle detail sheet up over the Tasks card.
+    /// Mutually exclusive with ``focusedLiveTaskID`` so only one overlay is mounted at a time.
+    @State private var focusedLiveAssignmentID: UUID? = nil
     /// User dismissed the recovery status anchored prompt for this visit (does not change MRE).
     @State private var dismissedRecoveryStatusPrompt = false
+    /// User dismissed the abort-session status anchored prompt for this visit (does not change MRE).
+    @State private var dismissedAbortStatusPrompt = false
     @State private var liveConsoleMediaTab: LiveConsoleMediaTab = .map
-    @ObservedObject private var paladinLogTemplates: PaladinLogTemplateRegistry
+    @ObservedObject private var logTemplateRegistry: MissionRunLogTemplateRegistry
     @State private var startPreflightPresented = false
     @State private var rosterInfoSheetTitle: String?
     @State private var rosterInfoVehicleID: String?
     @State private var rosterInfoSitlSessionUUID: String?
-    /// Deferred one-off schedule: minutes to add when using **Go** on the running countdown banner.
-    @State private var scheduledStartPostponeMinutes: Int = 5
+    /// Deferred one-off schedule: value + unit for **Go** on the running countdown banner (same control model as MCS Timing Tasks).
+    @State private var scheduledStartPostponeValue: Double = 5
+    @State private var scheduledStartPostponeUnit: DelayUnit = .mins
     @State private var confirmSkipScheduledMissionStart = false
     @State private var confirmSkipScheduledMissionMessage = ""
-    /// Initial task mission start deferral: minutes to add when using **Go** in the Progress card.
-    @State private var taskStartDeferralPostponeMinutes: Int = 5
+    /// Per-task deferral Alter controls: value + unit (same model as scheduled start banner; covers initial and between-cycle MAVLink start waits).
+    @State private var taskStartDeferralPostponeValue: Double = 5
+    @State private var taskStartDeferralPostponeUnit: DelayUnit = .mins
     @State private var confirmSkipTaskStartDeferral = false
     @State private var confirmSkipTaskStartDeferralTaskID: UUID?
     @State private var confirmSkipTaskStartDeferralMessage = ""
@@ -428,6 +458,15 @@ struct MissionRunDetailView: View {
         let taskStartDef: MissionTaskStartDeferral?
         let barFraction: Double
         let barTint: Color
+    }
+
+    /// Which per-path fleet wind-down controls are enabled in MC-R triage (mutually exclusive graceful intents, whole-run graceful, deferrals, protocol phase).
+    private struct MissionLiveTaskWindDownAvailability: Equatable {
+        let abortNow: Bool
+        let abortGraceful: Bool
+        let completeNow: Bool
+        let completeGraceful: Bool
+        let revokeTaskGraceful: Bool
     }
 
     init(
@@ -461,11 +500,23 @@ struct MissionRunDetailView: View {
                 preserveView: true
             )
         )
-        _paladinLogTemplates = ObservedObject(wrappedValue: PaladinLogTemplateRegistry.shared)
+        _logTemplateRegistry = ObservedObject(wrappedValue: MissionRunLogTemplateRegistry.shared)
     }
 
     private var rosterPickerSpring: Animation {
         .spring(response: 0.36, dampingFraction: 0.88)
+    }
+
+    /// Applies operator alter-step cap; toasts when the requested change exceeds the cap (Settings › Missions).
+    private func clampedOperatorAlterStepSeconds(rawSeconds: Int, capSeconds: Int) -> Int {
+        let add = MissionDelayPolicy.clampPostponeStepSeconds(rawSeconds, capSeconds: capSeconds)
+        if rawSeconds > capSeconds {
+            toastCenter.show(
+                "Each Alter step is limited to \(MissionDelayPolicy.humanReadableDuration(seconds: TimeInterval(capSeconds))) (Settings › Missions).",
+                style: .info
+            )
+        }
+        return add
     }
 
     /// Clears ``rosterBulkSimSpawnWorkingAssignmentId`` after the roster card has had a chance to re-render as attached (avoids spinner vanishing before the SIM chrome appears).
@@ -474,6 +525,29 @@ struct MissionRunDetailView: View {
         await Task.yield()
         await Task.yield()
         rosterBulkSimSpawnWorkingAssignmentId = nil
+    }
+
+    /// Present the MC-R cog → mission policies + Rules-of-Engagement sidebar editor.
+    private func presentRunControlsSidebar() {
+        let anim = rosterPickerSpring
+        sidebarOverlay.present(
+            title: "Run controls",
+            preferredWidth: 420,
+            scrimTapDismisses: true,
+            animation: anim
+        ) {
+            ScrollView {
+                MissionRunControlsSidebarView(
+                    run: run,
+                    missionStore: missionStore,
+                    generalSettings: generalSettings,
+                    onChange: {
+                        syncRunFromStore()
+                        onUpdate(run)
+                    }
+                )
+            }
+        }
     }
 
     private func presentMissionRosterVehiclePicker(assignmentId: UUID) {
@@ -556,6 +630,61 @@ struct MissionRunDetailView: View {
                     sidebarOverlay.dismiss(animation: anim)
                 }
             )
+        }
+    }
+
+    private func presentTaskSettingsSidebar(task: MissionTask) {
+        let anim = rosterPickerSpring
+        sidebarOverlay.present(
+            title: nil,
+            preferredWidth: 400,
+            scrimTapDismisses: true,
+            animation: anim
+        ) {
+            SidebarOverlayChrome(title: "Task settings", onClose: { sidebarOverlay.dismiss(animation: anim) }) {
+                MissionRunTaskPolicyOverridesSidebarView(
+                    run: run,
+                    missionStore: missionStore,
+                    generalSettings: generalSettings,
+                    taskId: task.id,
+                    taskName: task.name,
+                    onChange: {
+                        syncRunFromStore()
+                        onUpdate(run)
+                    }
+                )
+            }
+        }
+    }
+
+    private func presentAssignmentSettingsSidebar(assignmentIndex: Int) {
+        presentAssignmentSettingsSidebar(assignmentID: run.assignments[assignmentIndex].id)
+    }
+
+    /// Id-based variant used by the MC-R vehicle overlay (and any other site that holds a stable id
+    /// rather than a positional index, which can shift if the roster is mutated under us).
+    private func presentAssignmentSettingsSidebar(assignmentID: UUID) {
+        guard let assignment = run.assignments.first(where: { $0.id == assignmentID }) else { return }
+        let anim = rosterPickerSpring
+        let slotTitle = assignment.slotName
+        sidebarOverlay.present(
+            title: nil,
+            preferredWidth: 400,
+            scrimTapDismisses: true,
+            animation: anim
+        ) {
+            SidebarOverlayChrome(title: "Slot settings", onClose: { sidebarOverlay.dismiss(animation: anim) }) {
+                MissionRunAssignmentPolicyOverridesSidebarView(
+                    run: run,
+                    generalSettings: generalSettings,
+                    assignmentId: assignmentID,
+                    slotTitle: slotTitle,
+                    onChange: {
+                        syncRunFromStore()
+                        onUpdate(run)
+                    }
+                )
+            }
         }
     }
 
@@ -812,6 +941,23 @@ struct MissionRunDetailView: View {
         .help("Close")
     }
 
+    /// Matches ``missionLiveSidebarStyleCloseButton`` weight; opens a settings sidebar (abort / complete policy overrides).
+    /// `helpText` defaults to the task-overlay phrasing for the most common caller; vehicle-overlay callers
+    /// override with slot-specific copy so the tooltip matches the sheet that opens.
+    private func missionLiveSidebarStyleCogButton(
+        helpText: String = "Task settings (abort & complete policy)",
+        _ action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: "gearshape")
+                .font(.system(size: 16, weight: .medium))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help(helpText)
+    }
+
     private func missionLiveTaskProgressDerived(
         task: RoutePath,
         taskIndex: Int,
@@ -900,24 +1046,60 @@ struct MissionRunDetailView: View {
     ) -> some View {
         let controlSize: ControlSize = hero ? .regular : .small
         HStack(alignment: .center, spacing: hero ? 10 : 8) {
-            Picker("Delay", selection: $taskStartDeferralPostponeMinutes) {
-                ForEach(1...30, id: \.self) { m in
-                    Text("\(m) min").tag(m)
-                }
-            }
-            .pickerStyle(.menu)
-            .frame(minWidth: hero ? 88 : 72, alignment: .leading)
-            .controlSize(controlSize)
-            Button("Go") {
-                run.systems.scheduling.extendMissionTaskStartDeferralByMinutes(
+            Spacer(minLength: 0)
+            MissionDelayPostponeValueUnitRow(
+                postponeLabelColor: GuardianDynamicColors.textPrimary,
+                value: $taskStartDeferralPostponeValue,
+                unit: $taskStartDeferralPostponeUnit,
+                minimumTotalSeconds: 1,
+                maximumTotalSeconds: TimeInterval(generalSettings.missionControlPostponeStepCapSeconds),
+                numericFieldWidth: hero ? 96 : 88,
+                unitPickerWidth: hero ? 72 : 68,
+                controlSize: controlSize
+            )
+            Button("Sooner") {
+                let raw = Int(
+                    MissionDelayPolicy.totalSeconds(
+                        value: taskStartDeferralPostponeValue,
+                        unit: taskStartDeferralPostponeUnit
+                    ).rounded()
+                )
+                let step = clampedOperatorAlterStepSeconds(
+                    rawSeconds: raw,
+                    capSeconds: generalSettings.missionControlPostponeStepCapSeconds
+                )
+                run.systems.scheduling.adjustMissionTaskStartDeferralBySeconds(
                     taskID: task.id,
-                    additionalMinutes: taskStartDeferralPostponeMinutes
+                    deltaSeconds: -step,
+                    referenceNow: now
                 )
                 syncRunFromStore()
                 onUpdate(run)
             }
             .buttonStyle(.borderedProminent)
-            .tint(.cyan.opacity(0.8))
+            .tint(.blue)
+            .controlSize(controlSize)
+            Button("Later") {
+                let raw = Int(
+                    MissionDelayPolicy.totalSeconds(
+                        value: taskStartDeferralPostponeValue,
+                        unit: taskStartDeferralPostponeUnit
+                    ).rounded()
+                )
+                let step = clampedOperatorAlterStepSeconds(
+                    rawSeconds: raw,
+                    capSeconds: generalSettings.missionControlPostponeStepCapSeconds
+                )
+                run.systems.scheduling.adjustMissionTaskStartDeferralBySeconds(
+                    taskID: task.id,
+                    deltaSeconds: step,
+                    referenceNow: now
+                )
+                syncRunFromStore()
+                onUpdate(run)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
             .controlSize(controlSize)
             compactVerticalControlSeparator()
                 .padding(.horizontal, hero ? 8 : 6)
@@ -932,23 +1114,240 @@ struct MissionRunDetailView: View {
                 confirmSkipTaskStartDeferral = true
             }
             .buttonStyle(.borderedProminent)
-            .tint(.cyan.opacity(0.88))
+            .tint(.blue)
             .controlSize(controlSize)
+            if hero {
+                Spacer(minLength: 0)
+            }
         }
         .fixedSize(horizontal: !hero, vertical: true)
         .frame(maxWidth: .infinity, alignment: hero ? .center : .trailing)
     }
 
+    /// Operator **Trigger** only when the task is not already in an active MAVLink cycle (see ``MissionTaskState/executing``).
+    private func showMissionTaskTrigger(for task: RoutePath) -> Bool {
+        guard run.status == .running, task.enabled, task.regularity == .operatorTriggered else { return false }
+        return run.taskStateByTaskID[task.id] != .executing
+    }
+
     private func missionLiveTaskProgressTriggerControl(task: RoutePath, hero: Bool) -> some View {
         let controlSize: ControlSize = hero ? .regular : .small
         return Button("Trigger") {
-            run.systems.scheduling.triggerOperatorTaskStart(taskID: task.id)
+            if run.startMissionTask(taskID: task.id) {
+                toastCenter.show("Task cycle starting: \(task.name)", style: .info)
+            } else {
+                toastCenter.show(
+                    "Could not start that task — check each slot has a primary vehicle with token, task has waypoints, and the mission log for planner errors.",
+                    style: .error
+                )
+            }
             syncRunFromStore()
             onUpdate(run)
         }
         .buttonStyle(.borderedProminent)
         .tint(.blue)
         .controlSize(controlSize)
+    }
+
+    private func missionLiveTaskWindDownSectionVisible(task: RoutePath, now: Date) -> Bool {
+        guard task.enabled else { return false }
+        guard !run.assignmentsBoundToMissionTask(taskID: task.id).isEmpty else { return false }
+        guard run.status == .running || run.status == .paused else { return false }
+        let a = missionLiveTaskWindDownAvailability(task: task, now: now)
+        return a.revokeTaskGraceful || a.abortNow || a.abortGraceful || a.completeNow || a.completeGraceful
+    }
+
+    private func missionLiveTaskWindDownAvailability(task: RoutePath, now: Date) -> MissionLiveTaskWindDownAvailability {
+        let pending = run.pendingMissionTaskGracefulWindDownKindByTaskID[task.id]
+        let revokeTaskGraceful = pending != nil
+
+        let hasSlots = !run.assignmentsBoundToMissionTask(taskID: task.id).isEmpty
+        let runActive = run.status == .running || run.status == .paused
+        let inExecutingPhase = run.sessionPhase == .executing
+        let state = run.taskStateByTaskID[task.id] ?? .ready
+        let wholeRunGraceful = run.gracefulStopKind != .none
+        let abortIssued = run.missionTaskAbortWindDownIssuedTaskIDs.contains(task.id)
+        let completeIssued = run.missionTaskCompleteWindDownIssuedTaskIDs.contains(task.id)
+        let taskStartDef = run.taskStartDeferralByTaskID[task.id]
+        let inStartDeferral = task.enabled && run.status == .running && (taskStartDef.map { now < $0.startAt } ?? false)
+
+        let baseAPI = task.enabled
+            && hasSlots
+            && runActive
+            && inExecutingPhase
+            && !wholeRunGraceful
+
+        let protocolBlocksNewWindDown: Bool = {
+            switch state {
+            case .recovery, .aborting, .completed, .aborted:
+                return true
+            default:
+                return false
+            }
+        }()
+
+        let blockedByIssued = abortIssued || completeIssued
+
+        var abortNow = baseAPI && !protocolBlocksNewWindDown && !blockedByIssued
+        var abortGraceful = baseAPI && !protocolBlocksNewWindDown && !blockedByIssued && !inStartDeferral
+        var completeNow = baseAPI && !protocolBlocksNewWindDown && !blockedByIssued
+        var completeGraceful = baseAPI && !protocolBlocksNewWindDown && !blockedByIssued && !inStartDeferral
+
+        switch pending {
+        case .some(.abortAfterCycle):
+            completeNow = false
+            completeGraceful = false
+            abortGraceful = false
+        case .some(.completeAfterCycle):
+            abortNow = false
+            abortGraceful = false
+            completeGraceful = false
+        case .none:
+            break
+        }
+
+        return MissionLiveTaskWindDownAvailability(
+            abortNow: abortNow,
+            abortGraceful: abortGraceful,
+            completeNow: completeNow,
+            completeGraceful: completeGraceful,
+            revokeTaskGraceful: revokeTaskGraceful
+        )
+    }
+
+    @ViewBuilder
+    private func missionLiveTaskWindDownActionsSection(task: RoutePath, now: Date) -> some View {
+        let a = missionLiveTaskWindDownAvailability(task: task, now: now)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Path wind-down")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(GuardianDynamicColors.textSecondary)
+            Text("Abort and complete are opposite intents — only one graceful end-of-cycle schedule at a time for this path.")
+                .font(.system(size: 10))
+                .foregroundStyle(GuardianDynamicColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Button("Abort now") {
+                    applyTaskAbortNow(task: task)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .controlSize(.small)
+                .disabled(!a.abortNow)
+                .help(
+                    a.abortNow
+                        ? "Issue abort-policy fleet commands for this path’s slots immediately."
+                        : "Unavailable while another intent blocks it, this path is in recovery/abort protocol, a whole-run end-of-cycle stop is active, or the run is not executing."
+                )
+                Button("Abort after cycle") {
+                    applyTaskAbortGraceful(task: task)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .controlSize(.small)
+                .disabled(!a.abortGraceful)
+                .help(
+                    a.abortGraceful
+                        ? "Schedule abort-policy commands at the next shared autopilot mission cycle end for this path only."
+                        : "Unavailable if complete-after-cycle is already scheduled, during MAVLink start deferral, or while a whole-run graceful stop is active."
+                )
+            }
+            HStack(spacing: 8) {
+                Button("Complete now") {
+                    applyTaskCompleteNow(task: task)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                .controlSize(.small)
+                .disabled(!a.completeNow)
+                .help(
+                    a.completeNow
+                        ? "Issue complete-policy recovery wind-down for this path’s slots immediately."
+                        : "Unavailable while another intent blocks it, this path is in recovery/abort protocol, a whole-run end-of-cycle stop is active, or the run is not executing."
+                )
+                Button("Complete after cycle") {
+                    applyTaskCompleteGraceful(task: task)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                .controlSize(.small)
+                .disabled(!a.completeGraceful)
+                .help(
+                    a.completeGraceful
+                        ? "Schedule recovery wind-down at the next shared autopilot mission cycle end for this path only."
+                        : "Unavailable if abort-after-cycle is already scheduled, during MAVLink start deferral, or while a whole-run graceful stop is active."
+                )
+            }
+            if a.revokeTaskGraceful {
+                Button("Revoke scheduled path wind-down") {
+                    applyTaskRevokeGracefulWindDown(task: task)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .controlSize(.small)
+                .help("Cancel the scheduled end-of-cycle wind-down for this path only (does not change a whole-run graceful stop).")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.primary.opacity(0.04))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(GuardianDynamicColors.borderSubtle, lineWidth: 1)
+                )
+        )
+    }
+
+    private func applyTaskAbortNow(task: RoutePath) {
+        run.attachServices(fleetLink: fleetLink, sitl: sitl)
+        if run.abortMissionTask(.task(task.id)) {
+            toastCenter.show("Abort issued for path \"\(task.name)\".", style: .info)
+        } else {
+            toastCenter.show("Could not abort this path — check the mission log and that the run is executing.", style: .error)
+        }
+        syncRunFromStore()
+        onUpdate(run)
+    }
+
+    private func applyTaskAbortGraceful(task: RoutePath) {
+        if run.abortMissionTaskGraceful(.task(task.id)) {
+            toastCenter.show("Abort after cycle scheduled for path \"\(task.name)\".", style: .info)
+        } else {
+            toastCenter.show("Could not schedule path abort after cycle — a whole-run stop may be active or there are no bound slots.", style: .error)
+        }
+        syncRunFromStore()
+        onUpdate(run)
+    }
+
+    private func applyTaskCompleteNow(task: RoutePath) {
+        run.attachServices(fleetLink: fleetLink, sitl: sitl)
+        if run.completeMissionTask(.task(task.id)) {
+            toastCenter.show("Complete wind-down issued for path \"\(task.name)\".", style: .info)
+        } else {
+            toastCenter.show("Could not complete this path — check policies, the mission log, and that the run is executing.", style: .error)
+        }
+        syncRunFromStore()
+        onUpdate(run)
+    }
+
+    private func applyTaskCompleteGraceful(task: RoutePath) {
+        if run.completeMissionTaskGraceful(.task(task.id)) {
+            toastCenter.show("Complete after cycle scheduled for path \"\(task.name)\".", style: .info)
+        } else {
+            toastCenter.show("Could not schedule path complete after cycle — a whole-run stop may be active or there are no bound slots.", style: .error)
+        }
+        syncRunFromStore()
+        onUpdate(run)
+    }
+
+    private func applyTaskRevokeGracefulWindDown(task: RoutePath) {
+        run.revokeMissionTaskGracefulWindDown(forTaskID: task.id)
+        toastCenter.show("Revoked scheduled wind-down for path \"\(task.name)\".", style: .info)
+        syncRunFromStore()
+        onUpdate(run)
     }
 
     private func missionLiveTaskTriageProgressHero(task: RoutePath, taskIndex: Int, mission: Mission, now: Date) -> some View {
@@ -971,7 +1370,7 @@ struct MissionRunDetailView: View {
                     hero: true
                 )
                 .padding(.top, 4)
-            } else if run.status == .running && task.enabled && task.regularity == .operatorTriggered {
+            } else if showMissionTaskTrigger(for: task) {
                 HStack {
                     Spacer(minLength: 0)
                     missionLiveTaskProgressTriggerControl(task: task, hero: true)
@@ -996,21 +1395,34 @@ struct MissionRunDetailView: View {
         )
     }
 
-    private func applyStopImmediate() {
+    private func applyAbortImmediate() {
         run.attachServices(fleetLink: fleetLink, sitl: sitl)
         run.systems.scheduling.abortNow()
         onUpdate(run)
         syncRunFromStore()
     }
 
-    private func applyStopAfterCycle() {
+    private func applyAbortAfterCycle() {
         run.systems.scheduling.abortAfterCycle()
         onUpdate(run)
         syncRunFromStore()
     }
 
-    private func applyRevokeAbortAfterCycle() {
-        run.systems.scheduling.revokeAbortAfterCycle()
+    private func applyCompleteImmediate() {
+        run.attachServices(fleetLink: fleetLink, sitl: sitl)
+        run.systems.scheduling.completeNow()
+        onUpdate(run)
+        syncRunFromStore()
+    }
+
+    private func applyCompleteAfterCycle() {
+        run.systems.scheduling.completeAfterCycle()
+        onUpdate(run)
+        syncRunFromStore()
+    }
+
+    private func applyRevokeGracefulStopIntent() {
+        run.systems.scheduling.revokeGracefulAfterCycleStop()
         onUpdate(run)
         syncRunFromStore()
     }
@@ -1094,7 +1506,7 @@ struct MissionRunDetailView: View {
     /// Live log lines for MC-R: all events when no task focus; when focused, task-tagged lines **plus** vehicle
     /// narrative for roster slots tied to that task (same rules as ``filteredLiveRosterAssignments``), so
     /// telemetry lines are not dropped when role-track context omitted `taskID` on the event.
-    private var paladinLiveEventsFiltered: [MissionRunEvent] {
+    private var liveLogEventsFiltered: [MissionRunEvent] {
         let events = run.events
         guard let focus = focusedLiveTaskID else { return events }
         guard let mission = resolvedMission else {
@@ -1140,17 +1552,41 @@ struct MissionRunDetailView: View {
         )
     }
 
-    private func syncGracefulStopPromptIfNeeded() {
-        guard run.pendingGracefulCycleStop, run.status == .running || run.status == .paused else { return }
-        guard run.status != .recovery else { return }
+    private func syncAbortSessionPromptIfNeeded() {
+        guard run.status == .running || run.status == .paused else { return }
+        guard run.sessionPhase == .aborting || run.sessionPhase == .aborted else { return }
+        guard !dismissedAbortStatusPrompt else { return }
         guard runPromptCenter.activePrompt == nil else { return }
+        runPromptCenter.present(
+            "Abort protocol in progress. When fleet actions for your abort policy are finished and task confirmations are done, mark this run completed.",
+            style: .info,
+            onDismiss: { dismissedAbortStatusPrompt = true }
+        )
+    }
+
+    private func syncGracefulStopPromptIfNeeded() {
+        guard run.gracefulStopKind != .none, run.status == .running || run.status == .paused else { return }
+        guard run.status != .recovery else { return }
+        guard run.sessionPhase != .aborting, run.sessionPhase != .aborted else { return }
+        guard runPromptCenter.activePrompt == nil else { return }
+        let message: String = {
+            switch run.gracefulStopKind {
+            case .abortAfterCycle:
+                return "This run will stop after the current autopilot mission cycle using your abort policy (hold, land, return to launch, or none). No further mission cycles will be scheduled."
+            case .completeAfterCycle:
+                return "This run will stop after the current autopilot mission cycle for recovery using your complete policy (hold, land, return to launch, or none) on bound slots. When recovery is done, mark the run completed from the recovery screen."
+            case .none:
+                return ""
+            }
+        }()
+        guard !message.isEmpty else { return }
         runPromptCenter.presentChoice(
-            "Finishing the current run — when it completes, this mission stops. No further loop or continuous cycles will be scheduled.",
+            message,
             style: .warning,
             confirmTitle: "Keep running",
             dismissTitle: "Dismiss",
             onConfirm: {
-                applyRevokeAbortAfterCycle()
+                applyRevokeGracefulStopIntent()
             },
             onDismiss: nil
         )
@@ -1269,23 +1705,10 @@ struct MissionRunDetailView: View {
                                 } else {
                                     runSetupActionButtons(referenceNow: Date())
                                 }
-                            } else if run.status == .running || run.status == .paused {
-                                Menu {
-                                    Button("Immediate", role: .destructive) {
-                                        applyStopImmediate()
-                                    }
-                                    Button("After current cycle", role: .destructive) {
-                                        applyStopAfterCycle()
-                                    }
-                                } label: {
-                                    Text("Stop run")
-                                        .font(.system(size: 12, weight: .semibold))
-                                }
-                                .menuStyle(.button)
-                                .buttonStyle(.borderedProminent)
-                                .tint(.red)
-                                .controlSize(.regular)
-                            } else if run.status == .recovery {
+                            } else if run.status == .recovery
+                                || ((run.status == .running || run.status == .paused)
+                                    && (run.sessionPhase == .aborting || run.sessionPhase == .aborted))
+                            {
                                 Button("Mark Completed") {
                                     run.systems.lifecycle.markCompleted(kind: run.completionKind)
                                     syncRunFromStore()
@@ -1294,6 +1717,37 @@ struct MissionRunDetailView: View {
                                 .buttonStyle(.borderedProminent)
                                 .tint(.blue)
                                 .controlSize(.regular)
+                            } else if run.status == .running || run.status == .paused {
+                                Menu {
+                                    Button("Abort", role: .destructive) {
+                                        applyAbortImmediate()
+                                    }
+                                    Button("Graceful abort", role: .destructive) {
+                                        applyAbortAfterCycle()
+                                    }
+                                    Button("Complete") {
+                                        applyCompleteImmediate()
+                                    }
+                                    Button("Graceful complete") {
+                                        applyCompleteAfterCycle()
+                                    }
+                                } label: {
+                                    Text("Stop run")
+                                        .font(.system(size: 12, weight: .semibold))
+                                }
+                                .menuStyle(.button)
+                                .buttonStyle(.bordered)
+                                .controlSize(.regular)
+
+                                Button {
+                                    presentRunControlsSidebar()
+                                } label: {
+                                    Image(systemName: "gearshape")
+                                        .appIconGlyph()
+                                }
+                                .buttonStyle(.bordered)
+                                .uniformIconButton()
+                                .help("Run policies & rules of engagement")
                             } else if run.status == .completed {
                                 Button("Back to setup") {
                                     applyResetToSetup()
@@ -1315,9 +1769,43 @@ struct MissionRunDetailView: View {
                                 oneOffDeferredExecutionBanner(
                                     deferred: deferred,
                                     now: context.date,
-                                    postponeMinutes: $scheduledStartPostponeMinutes,
-                                    onPostpone: {
-                                        run.systems.scheduling.postponeDeferredOneOffExecutionByMinutes(scheduledStartPostponeMinutes) {
+                                    postponeValue: $scheduledStartPostponeValue,
+                                    postponeUnit: $scheduledStartPostponeUnit,
+                                    onAlterLater: {
+                                        let raw = Int(
+                                            MissionDelayPolicy.totalSeconds(
+                                                value: scheduledStartPostponeValue,
+                                                unit: scheduledStartPostponeUnit
+                                            ).rounded()
+                                        )
+                                        let step = clampedOperatorAlterStepSeconds(
+                                            rawSeconds: raw,
+                                            capSeconds: generalSettings.missionControlPostponeStepCapSeconds
+                                        )
+                                        run.systems.scheduling.adjustDeferredOneOffExecutionBySeconds(
+                                            step,
+                                            referenceNow: context.date
+                                        ) {
+                                            onStart(run)
+                                        }
+                                        syncRunFromStore()
+                                        onUpdate(run)
+                                    },
+                                    onAlterSooner: {
+                                        let raw = Int(
+                                            MissionDelayPolicy.totalSeconds(
+                                                value: scheduledStartPostponeValue,
+                                                unit: scheduledStartPostponeUnit
+                                            ).rounded()
+                                        )
+                                        let step = clampedOperatorAlterStepSeconds(
+                                            rawSeconds: raw,
+                                            capSeconds: generalSettings.missionControlPostponeStepCapSeconds
+                                        )
+                                        run.systems.scheduling.adjustDeferredOneOffExecutionBySeconds(
+                                            -step,
+                                            referenceNow: context.date
+                                        ) {
                                             onStart(run)
                                         }
                                         syncRunFromStore()
@@ -1405,7 +1893,7 @@ struct MissionRunDetailView: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 16) {
                             missionCompletedReportCards
-                            completedPaladinLogExportSection
+                            completedMissionLogExportSection
                         }
                         .padding(.horizontal, 24)
                         .padding(.vertical, 18)
@@ -1520,6 +2008,8 @@ struct MissionRunDetailView: View {
             )
         }
         .onAppear {
+            run.attachServices(fleetLink: fleetLink, sitl: sitl)
+            installMissionTemplatePersister()
             syncRunFromStore()
             mapModel.recenter()
             syncSimBatteryDrainForRunStatus()
@@ -1527,6 +2017,7 @@ struct MissionRunDetailView: View {
                 pruneStaleRosterFleetAssignmentsIfNeeded()
             }
             syncRecoveryPromptIfNeeded()
+            syncAbortSessionPromptIfNeeded()
             syncGracefulStopPromptIfNeeded()
         }
         .onChange(of: setupMapBoundsSignature) { _ in
@@ -1545,8 +2036,10 @@ struct MissionRunDetailView: View {
         .onChange(of: run.status) { newStatus in
             syncSimBatteryDrainForRunStatus()
             if newStatus == .setup || newStatus == .completed {
-                focusedLiveTaskID = nil
+                focusLiveTask(nil)
+                focusLiveAssignment(nil)
                 dismissedRecoveryStatusPrompt = false
+                dismissedAbortStatusPrompt = false
                 runPromptCenter.dismiss()
                 if newStatus == .setup {
                     pruneStaleRosterFleetAssignmentsIfNeeded()
@@ -1562,6 +2055,17 @@ struct MissionRunDetailView: View {
                 sidebarOverlay.dismiss()
             }
         }
+        .onChange(of: run.sessionPhase) { newPhase in
+            guard run.status == .running || run.status == .paused else { return }
+            if newPhase == .aborting {
+                dismissedAbortStatusPrompt = false
+                runPromptCenter.dismiss()
+                syncAbortSessionPromptIfNeeded()
+                sidebarOverlay.dismiss()
+            } else if newPhase == .aborted {
+                syncAbortSessionPromptIfNeeded()
+            }
+        }
         .onChange(of: setupMainTab) { newTab in
             sidebarOverlay.dismiss()
             if newTab == .rosters, rosterSetupExpandedTaskIDs.isEmpty, let mission = resolvedMission {
@@ -1571,8 +2075,8 @@ struct MissionRunDetailView: View {
         .onChange(of: run.assignments) { _ in
             syncSimBatteryDrainForRunStatus()
         }
-        .onChange(of: run.pendingGracefulCycleStop) { pending in
-            if pending {
+        .onChange(of: run.gracefulStopKind) { kind in
+            if kind != .none {
                 syncGracefulStopPromptIfNeeded()
             } else {
                 runPromptCenter.dismiss()
@@ -1722,8 +2226,10 @@ struct MissionRunDetailView: View {
     private func oneOffDeferredExecutionBanner(
         deferred: MissionOneOffDeferredExecution,
         now: Date,
-        postponeMinutes: Binding<Int>,
-        onPostpone: @escaping () -> Void,
+        postponeValue: Binding<Double>,
+        postponeUnit: Binding<DelayUnit>,
+        onAlterLater: @escaping () -> Void,
+        onAlterSooner: @escaping () -> Void,
         onRequestStartNow: @escaping () -> Void
     ) -> some View {
         let remaining = max(0, deferred.executeAt.timeIntervalSince(now))
@@ -1747,15 +2253,25 @@ struct MissionRunDetailView: View {
                 }
                 Spacer(minLength: 8)
                 HStack(alignment: .center, spacing: 8) {
-                    Picker("Delay", selection: postponeMinutes) {
-                        ForEach(1...30, id: \.self) { m in
-                            Text("\(m) min").tag(m)
-                        }
+                    MissionDelayPostponeValueUnitRow(
+                        postponeLabel: "Alter",
+                        postponeLabelColor: .white.opacity(0.92),
+                        value: postponeValue,
+                        unit: postponeUnit,
+                        minimumTotalSeconds: 1,
+                        maximumTotalSeconds: TimeInterval(generalSettings.missionControlPostponeStepCapSeconds),
+                        numericFieldWidth: 88,
+                        unitPickerWidth: 68,
+                        controlSize: .small
+                    )
+                    Button("Sooner") {
+                        onAlterSooner()
                     }
-                    .pickerStyle(.menu)
-                    .frame(minWidth: 88, alignment: .leading)
-                    Button("Go") {
-                        onPostpone()
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
+                    .controlSize(.small)
+                    Button("Later") {
+                        onAlterLater()
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(.blue)
@@ -1801,7 +2317,7 @@ struct MissionRunDetailView: View {
     private let liveConsoleStackSpacing: CGFloat = 10
     private let liveConsoleStackGutter: CGFloat = 10
 
-    /// Running / paused: **70%** map + roster + Paladin log; **30%** Tasks card (overview or task triage sheet).
+    /// Running / paused: **70%** map + roster + live mission log; **30%** Tasks card (overview or task triage sheet).
     private var missionLiveConsole: some View {
         let gutter = liveConsoleStackGutter
         let mapH = liveConsoleMapHeight
@@ -1851,32 +2367,66 @@ struct MissionRunDetailView: View {
         .clipped()
     }
 
-    /// Right column: task list, or in-sheet triage when a task is selected.
+    /// Spring used by the task triage sheet's slide-up / slide-down transition.
+    /// Defined as a per-call `Animation` (rather than a static let) because SwiftUI's
+    /// `.spring(response:dampingFraction:)` is not `Sendable` and a static would
+    /// require `@MainActor` isolation that fights the surrounding `View` body builder.
+    private var triageSheetSpring: Animation {
+        .spring(response: 0.42, dampingFraction: 0.86)
+    }
+
+    /// Right column: tasks list base layer with the triage sheet (focused task) **or** the
+    /// vehicle detail sheet (focused roster slot) sliding up over it. All three layers stay
+    /// mounted inside the same card so transitions are purely visual and view state isn't lost.
+    /// Task and vehicle overlays are mutually exclusive (see ``focusLiveTask(_:)`` / ``focusLiveAssignment(_:)``).
     private var missionLiveTasksSideCard: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if let mission = resolvedMission,
-               let focusID = focusedLiveTaskID,
-               let task = mission.routeMacro.tasks.first(where: { $0.id == focusID }) {
-                missionLiveTaskTriageInnerSheet(task: task, mission: mission)
-            } else if resolvedMission != nil, focusedLiveTaskID != nil {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .center, spacing: 12) {
-                        Text("This task is not in the current mission template.")
-                            .font(.system(size: 11))
-                            .foregroundStyle(GuardianDynamicColors.textSecondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        missionLiveSidebarStyleCloseButton {
-                            focusedLiveTaskID = nil
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            } else if let mission = resolvedMission {
+        ZStack(alignment: .top) {
+            missionLiveTasksBaseLayer
+            missionLiveTaskTriageOverlay
+            missionLiveVehicleOverlay
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(GuardianDynamicColors.backgroundRaised)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(liveConsoleCardStroke, lineWidth: 1)
+        )
+    }
+
+    // MARK: - Tasks card overlay focus helpers
+
+    /// Focus a task triage. Vehicle and task overlays stack independently
+    /// (Tasks → Task triage → Vehicle detail) — no exclusivity enforced here.
+    /// All callers funnel through this helper to share the same spring.
+    private func focusLiveTask(_ id: UUID?) {
+        withAnimation(triageSheetSpring) {
+            focusedLiveTaskID = id
+        }
+    }
+
+    /// Focus a roster slot vehicle overlay. Toggles when the same id is re-tapped (open ↔ close)
+    /// so a second click on the live roster health card dismisses the sheet.
+    private func focusLiveAssignment(_ id: UUID?) {
+        withAnimation(triageSheetSpring) {
+            if let id, focusedLiveAssignmentID == id {
+                focusedLiveAssignmentID = nil
+            } else {
+                focusedLiveAssignmentID = id
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var missionLiveTasksBaseLayer: some View {
+        if let mission = resolvedMission {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Tasks")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(GuardianDynamicColors.textPrimary)
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Tasks")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(GuardianDynamicColors.textSecondary)
+                    LazyVStack(alignment: .leading, spacing: 14) {
                         if run.status == .running,
                            !run.taskStartDeferralByTaskID.isEmpty
                         {
@@ -1889,37 +2439,127 @@ struct MissionRunDetailView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                Text("No mission template")
-                    .font(.system(size: 11))
-                    .foregroundStyle(GuardianDynamicColors.textSecondary)
-                    .padding(.top, 4)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else {
+            Text("No mission template")
+                .font(.system(size: 11))
+                .foregroundStyle(GuardianDynamicColors.textSecondary)
+                .padding(.top, 4)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .padding(10)
+    }
+
+    @ViewBuilder
+    private var missionLiveTaskTriageOverlay: some View {
+        if let mission = resolvedMission, focusedLiveTaskID != nil {
+            Group {
+                if let focusID = focusedLiveTaskID,
+                   let task = mission.routeMacro.tasks.first(where: { $0.id == focusID }) {
+                    missionLiveTaskTriageInnerSheet(task: task, mission: mission)
+                } else {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(alignment: .center, spacing: 12) {
+                            Text("This task is not in the current mission template.")
+                                .font(.system(size: 11))
+                                .foregroundStyle(GuardianDynamicColors.textSecondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            missionLiveSidebarStyleCloseButton {
+                                focusLiveTask(nil)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(GuardianDynamicColors.backgroundRaised)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .zIndex(1)
+        }
+    }
+
+    /// Vehicle (roster slot) detail sheet that slides up over the Tasks list when a slot health
+    /// card is tapped. Header mirrors the task triage overlay (title + cog + close) so MC-R stays
+    /// visually uniform; cog opens the existing assignment policy overrides sidebar.
+    @ViewBuilder
+    private var missionLiveVehicleOverlay: some View {
+        if let assignmentID = focusedLiveAssignmentID,
+           let assignment = run.assignments.first(where: { $0.id == assignmentID })
+        {
+            missionLiveVehicleDetailSheet(assignment: assignment)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(GuardianDynamicColors.backgroundRaised)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .zIndex(2)
+        }
+    }
+
+    /// In-card vehicle detail body: header (slot callsign + cog + close) and a placeholder content area
+    /// reserved for richer per-vehicle telemetry. Kept intentionally lean so we can layer in details
+    /// (battery / GPS / link / mission progress) iteratively without churning the overlay shell.
+    private func missionLiveVehicleDetailSheet(assignment: MissionRunAssignment) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center, spacing: 8) {
+                Text(assignment.slotName)
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(GuardianDynamicColors.textPrimary)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.85)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                missionLiveSidebarStyleCogButton(
+                    helpText: "Vehicle settings (abort & complete policy)"
+                ) {
+                    presentAssignmentSettingsSidebar(assignmentID: assignment.id)
+                }
+                missionLiveSidebarStyleCloseButton {
+                    focusLiveAssignment(nil)
+                }
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    if let device = resolvedMission?.rosterDevices.first(where: { $0.id == assignment.rosterDeviceId }) {
+                        Text(rosterRoleSubtitle(device))
+                            .font(.system(size: 11))
+                            .foregroundStyle(GuardianDynamicColors.textSecondary)
+                    }
+                    if let vid = telemetryVehicleID(for: assignment) {
+                        Text(vid)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(GuardianDynamicColors.textTertiary)
+                            .help("Bridge vehicle key: \(vid)")
+                    } else {
+                        Text("No bridge link")
+                            .font(.system(size: 11))
+                            .foregroundStyle(GuardianDynamicColors.textTertiary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .padding(.top, 12)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(GuardianDynamicColors.backgroundRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(liveConsoleCardStroke, lineWidth: 1)
-        )
     }
 
     /// In-card triage sheet for the selected task: hero progress, deferral / trigger controls, sidebar-style close.
     private func missionLiveTaskTriageInnerSheet(task: RoutePath, mission: Mission) -> some View {
         let taskIndex = mission.routeMacro.tasks.firstIndex(where: { $0.id == task.id }) ?? 0
         return VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .center, spacing: 12) {
+            HStack(alignment: .center, spacing: 8) {
                 Text(task.name)
                     .font(.system(size: 16, weight: .bold))
                     .foregroundStyle(task.enabled ? GuardianDynamicColors.textPrimary : GuardianDynamicColors.textSecondary)
                     .lineLimit(2)
                     .minimumScaleFactor(0.85)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                missionLiveSidebarStyleCogButton {
+                    presentTaskSettingsSidebar(task: task)
+                }
                 missionLiveSidebarStyleCloseButton {
-                    focusedLiveTaskID = nil
+                    focusLiveTask(nil)
                 }
             }
 
@@ -1928,6 +2568,15 @@ struct MissionRunDetailView: View {
 
             missionLiveTaskEndProtocolAcknowledgementBlock(task: task, compact: false)
                 .padding(.bottom, 10)
+
+            if run.status == .running || run.status == .paused {
+                TimelineView(.periodic(from: .now, by: 0.25)) { context in
+                    if missionLiveTaskWindDownSectionVisible(task: task, now: context.date) {
+                        missionLiveTaskWindDownActionsSection(task: task, now: context.date)
+                            .padding(.bottom, 10)
+                    }
+                }
+            }
 
             if task.enabled, task.regularity == .continuous || task.regularity == .continuousWithDelay {
                 Text(
@@ -1974,11 +2623,11 @@ struct MissionRunDetailView: View {
 
     private func missionLiveTaskProgressRow(task: RoutePath, taskIndex: Int, mission: Mission, now: Date) -> some View {
         let d = missionLiveTaskProgressDerived(task: task, taskIndex: taskIndex, mission: mission, now: now)
-        return VStack(alignment: .leading, spacing: 4) {
+        return VStack(alignment: .leading, spacing: 8) {
             Button {
-                focusedLiveTaskID = task.id
+                focusLiveTask(task.id)
             } label: {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         missionLiveTaskStateBadge(run.taskStateByTaskID[task.id] ?? .ready)
                         missionLiveTaskTitleRow(task: task)
@@ -2002,18 +2651,16 @@ struct MissionRunDetailView: View {
                     now: now,
                     hero: false
                 )
-                .padding(.top, 2)
-            } else if run.status == .running && task.enabled && task.regularity == .operatorTriggered {
+            } else if showMissionTaskTrigger(for: task) {
                 HStack {
                     Spacer(minLength: 0)
                     missionLiveTaskProgressTriggerControl(task: task, hero: false)
                 }
-                .padding(.top, 2)
             } else if missionLiveTaskEndProtocolAcknowledgementVisible(for: task) {
                 missionLiveTaskEndProtocolAcknowledgementBlock(task: task, compact: true)
-                    .padding(.top, 2)
             }
         }
+        .padding(.vertical, 4)
     }
 
     /// Live progress caption while a task awaits its initial MAVLink mission start (see ``MissionTaskStartDeferral``).
@@ -2215,7 +2862,10 @@ struct MissionRunDetailView: View {
                             vehicleClassForBundledDeviceArt: deviceArtVehicleClass,
                             vehicleModel: vehicleID.map { fleetLink.vehicleOperationalModel(forVehicleID: $0) }
                                 ?? FleetVehicleOperationalModel(hub: nil, lifecycleStatus: nil),
-                            slotHeight: liveConsoleRosterHeight
+                            slotHeight: liveConsoleRosterHeight,
+                            onTap: {
+                                focusLiveAssignment(assignment.id)
+                            }
                         )
                     }
                 }
@@ -2225,7 +2875,7 @@ struct MissionRunDetailView: View {
         }
     }
 
-    /// Paladin log card; `maxTotalHeight` is the **entire** card height (live console: all space below map + roster).
+    /// Live mission log card; `maxTotalHeight` is the **entire** card height (live console: all space below map + roster).
     private func missionLiveLogPlaceholder(maxTotalHeight: CGFloat) -> some View {
         /// Padding, title row, spacing, divider — scroll gets whatever is left (never inflate past `maxTotalHeight`).
         let nonScrollChrome: CGFloat = 74
@@ -2253,7 +2903,7 @@ struct MissionRunDetailView: View {
                             .padding(.vertical, 2)
                             .background(phaseStyle.background)
                             .clipShape(Capsule())
-                        Text(paladinCondensedHeaderMetadata(plan: compiledPlan))
+                        Text(condensedHeaderMetadata(plan: compiledPlan))
                             .font(.system(size: 10, design: .monospaced))
                             .foregroundStyle(GuardianDynamicColors.textTertiary)
                             .lineLimit(1)
@@ -2265,20 +2915,20 @@ struct MissionRunDetailView: View {
                 Spacer(minLength: 8)
 
                 Button("Copy log") {
-                    copyPaladinLiveLogToPasteboard()
+                    copyLiveLogToPasteboard()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .disabled(paladinLiveEventsFiltered.isEmpty)
+                .disabled(liveLogEventsFiltered.isEmpty)
             }
 
-            if !paladinLiveEventsFiltered.isEmpty {
+            if !liveLogEventsFiltered.isEmpty {
                 Divider().opacity(0.18)
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(paladinLiveEventsFiltered.suffix(80)) { event in
-                            paladinLogEventRow(event: event)
+                        ForEach(liveLogEventsFiltered.suffix(80)) { event in
+                            logEventRow(event: event)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -2287,6 +2937,9 @@ struct MissionRunDetailView: View {
                     minHeight: scrollMax > 0 ? min(scrollMin, scrollMax) : 0,
                     maxHeight: scrollMax
                 )
+                .environment(\.openURL, OpenURLAction { url in
+                    handleMcrLogURL(url)
+                })
             } else {
                 Text(
                     focusedLiveTaskID == nil
@@ -2309,27 +2962,27 @@ struct MissionRunDetailView: View {
         .clipped()
     }
 
-    private func paladinCondensedHeaderMetadata(plan: MissionControlPlan) -> String {
+    private func condensedHeaderMetadata(plan: MissionControlPlan) -> String {
         "\(plan.taskTopology.rawValue) · \(plan.teamTopology.rawValue) · \(plan.roleTracks.count) trk"
     }
 
-    private func paladinCondensedHeaderLine(phase: MissionRunSessionPhase, plan: MissionControlPlan) -> String {
-        "\(phase.rawValue) · \(paladinCondensedHeaderMetadata(plan: plan))"
+    private func condensedHeaderLine(phase: MissionRunSessionPhase, plan: MissionControlPlan) -> String {
+        "\(phase.rawValue) · \(condensedHeaderMetadata(plan: plan))"
     }
 
-    func paladinLiveLogPlainText(
+    func liveLogPlainText(
         events: [MissionRunEvent],
         phase: MissionRunSessionPhase,
         plan: MissionControlPlan?
     ) -> String {
-        let header = plan.map { "Logs - \(paladinCondensedHeaderLine(phase: phase, plan: $0))" } ?? "Mission log"
+        let header = plan.map { "Logs - \(condensedHeaderLine(phase: phase, plan: $0))" } ?? "Mission log"
         let body = events.map {
             $0.plainTextLine(mission: resolvedMission, assignments: run.assignments)
         }
         return ([header] + body).joined(separator: "\n")
     }
 
-    private func paladinColorFromMapHex(_ hex: String) -> Color {
+    private func colorFromMapHex(_ hex: String) -> Color {
         var s = hex.trimmingCharacters(in: .whitespacesAndNewlines)
         if s.hasPrefix("#") { s.removeFirst() }
         guard s.count == 6, let n = UInt32(s, radix: 16) else {
@@ -2341,7 +2994,7 @@ struct MissionRunDetailView: View {
         return Color(red: r, green: g, blue: b)
     }
 
-    private func paladinLogSeverityBorderColor(_ level: MissionRunEventLevel) -> Color {
+    private func logSeverityBorderColor(_ level: MissionRunEventLevel) -> Color {
         switch level {
         case .info: return Color.white.opacity(0.22)
         case .warning: return Color.orange.opacity(0.9)
@@ -2349,8 +3002,7 @@ struct MissionRunDetailView: View {
         }
     }
 
-    @ViewBuilder
-    private func paladinLogEventRow(event: MissionRunEvent) -> some View {
+    private func logEventRow(event: MissionRunEvent) -> some View {
         let mission = resolvedMission
         let routeTint: Color? = {
             guard let pid = event.taskID, let mission else { return nil }
@@ -2364,13 +3016,12 @@ struct MissionRunDetailView: View {
             switch event.speaker {
             case .missionControl:
                 return GuardianDynamicColors.textPrimary
-            case .paladin:
+            case .assistant:
+                return GuardianDynamicColors.textPrimary
+            case .operator:
                 return GuardianDynamicColors.textPrimary
             case .vehicleSlot(let slot):
-                guard let a = run.assignments.first(where: { $0.slotName == slot }),
-                      let vid = resolvedFleetStreamVehicleID(assignment: a, fleetLink: fleetLink, sitl: sitl)
-                else { return Color.gray.opacity(0.9) }
-                return paladinColorFromMapHex(fleetLink.mapColorHex(forVehicleID: vid))
+                return slotSpeakerColor(slotName: slot)
             }
         }()
         let bodyColor: Color = {
@@ -2381,42 +3032,271 @@ struct MissionRunDetailView: View {
             }
         }()
 
-        HStack(alignment: .top, spacing: 0) {
+        // Build the line as a single Text concat: [Wrapper] + [Speaker] + AttributedString(@target body)
+        // — wrapper/speaker are static metadata (no link); target + body @handles are linkable.
+        var line = Text(verbatim: "")
+        if let pl = event.resolvedTaskLogPrefix(mission: resolvedMission, assignments: run.assignments) {
+            line = line + Text(verbatim: "[\(pl)]").foregroundColor(routeTextColor)
+        }
+        line = line + speakerLogText(event.speaker, color: speakerColor)
+        line = line + Text(attributedTargetAndBody(event: event, defaultColor: bodyColor))
+
+        return HStack(alignment: .top, spacing: 0) {
             Rectangle()
-                .fill(paladinLogSeverityBorderColor(event.level))
+                .fill(logSeverityBorderColor(event.level))
                 .frame(width: 3)
-            HStack(alignment: .firstTextBaseline, spacing: 0) {
-                if let pl = event.resolvedTaskLogPrefix(mission: resolvedMission, assignments: run.assignments) {
-                    Text("[\(pl)]")
-                        .foregroundStyle(routeTextColor)
-                }
-                switch event.speaker {
-                case .missionControl:
-                    Text("[MissionControl]")
-                        .foregroundStyle(speakerColor)
-                case .paladin:
-                    Text("[Paladin]")
-                        .foregroundStyle(speakerColor)
-                case .vehicleSlot(let s):
-                    Text("[\(s)]")
-                        .foregroundStyle(speakerColor)
-                }
-                Text(verbatim: " \(paladinLogTemplates.resolveDisplayBody(for: event))")
-                    .foregroundStyle(bodyColor)
-            }
-            .font(.system(size: 11, design: .monospaced))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.leading, 6)
-            .padding(.vertical, 2)
+            line
+                .font(.system(size: 11, design: .monospaced))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 6)
+                .padding(.vertical, 2)
         }
     }
 
-    private func copyPaladinLiveLogToPasteboard() {
-        guard !paladinLiveEventsFiltered.isEmpty else { return }
+    /// `[Speaker]` segment as a `Text` so it can be concatenated with the wrapper + attributed body.
+    /// Assistant display names are resolved through ``MissionRunAssistantRegistry`` so adding a new
+    /// assistant only requires a one-time profile registration — no renderer changes here.
+    private func speakerLogText(_ speaker: MissionRunEventSpeaker, color: Color) -> Text {
+        switch speaker {
+        case .missionControl:
+            return Text(verbatim: "[MissionControl]").foregroundColor(color)
+        case .assistant(let key):
+            let name = MissionRunAssistantRegistry.shared.displayName(forKey: key)
+            return Text(verbatim: "[\(name)]").foregroundColor(color)
+        case .vehicleSlot(let s):
+            return Text(verbatim: "[\(s)]").foregroundColor(color)
+        case .operator(let displayName):
+            let trimmed = displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return Text(verbatim: trimmed.isEmpty ? "[Operator]" : "[Operator][\(trimmed)]")
+                .foregroundColor(color)
+        }
+    }
+
+    /// Combined `@target body` AttributedString — structural addressee mention plus any free-form
+    /// `@handle` mentions inside the body. Each mention carries `.foregroundColor` (canonical task /
+    /// slot / role color) and a `.link` URL like `guardian://mcr/task/<uuid>` /
+    /// `guardian://mcr/slot/<uuid>` so clicks open the matching MCR overlay
+    /// (intercepted by ``handleMcrLogURL(_:)`` via `OpenURLAction`).
+    private func attributedTargetAndBody(event: MissionRunEvent, defaultColor: Color) -> AttributedString {
+        var result = AttributedString("")
+        var leadingSpace = AttributedString(" ")
+        leadingSpace.foregroundColor = defaultColor
+        result.append(leadingSpace)
+
+        let target = event.effectiveTarget
+        var mention = AttributedString("@\(mcrTargetDisplayName(target))")
+        mention.foregroundColor = mcrTargetColor(target)
+        if let url = mcrTargetLinkURL(target) {
+            mention.link = url
+        }
+        result.append(mention)
+
+        let body = " " + logTemplateRegistry.resolveDisplayBody(for: event)
+        result.append(buildAttributedBody(body, defaultColor: defaultColor))
+        return result
+    }
+
+    /// Universal `@handle` body renderer. Walks the body and turns any `@<uuid>` (preferred,
+    /// id-keyed) **or** `@<Name>` (back-compat, longest-prefix name match) substring matching a
+    /// known task or slot into a colored, clickable AttributedString span.
+    ///
+    /// Id-based path is unambiguous (no name collisions, survives renames, surfaces deletions as
+    /// `@<deleted>`) and is the canonical authoring form — catalog templates emit `@{{taskID}}` /
+    /// `@{{slotID}}` (assignment id) and the catalog `{{...}}` interpolation hands a literal UUID
+    /// string to this renderer. The name path stays as a fallback for handwritten / legacy
+    /// templates so nothing breaks during migration.
+    ///
+    /// Future MCR sites can just emit `@<id>` in their template body and this renderer will tint +
+    /// link it automatically — no changes needed at the call site or in the catalog.
+    private func buildAttributedBody(_ body: String, defaultColor: Color) -> AttributedString {
+        struct NameCandidate {
+            let name: String
+            let color: Color
+            let url: URL?
+        }
+        var nameCandidates: [NameCandidate] = []
+        if let mission = resolvedMission {
+            for (idx, task) in mission.routeMacro.tasks.enumerated() where !task.name.isEmpty {
+                nameCandidates.append(
+                    NameCandidate(
+                        name: task.name,
+                        color: MissionTaskMapColor.swiftUIColor(forTaskIndex: idx),
+                        url: URL(string: "guardian://mcr/task/\(task.id.uuidString)")
+                    )
+                )
+            }
+        }
+        for assignment in run.assignments where !assignment.slotName.isEmpty {
+            nameCandidates.append(
+                NameCandidate(
+                    name: assignment.slotName,
+                    color: slotSpeakerColor(slotName: assignment.slotName),
+                    url: URL(string: "guardian://mcr/slot/\(assignment.id.uuidString)")
+                )
+            )
+        }
+        nameCandidates.sort { $0.name.count > $1.name.count }
+
+        let mutedColor = Color.gray.opacity(0.6)
+        let deletedDisplay = "deleted"
+
+        var result = AttributedString("")
+        var i = body.startIndex
+        var pending = ""
+
+        func flushPending() {
+            if !pending.isEmpty {
+                var p = AttributedString(pending)
+                p.foregroundColor = defaultColor
+                result.append(p)
+                pending = ""
+            }
+        }
+
+        func appendMention(display: String, color: Color, url: URL?) {
+            flushPending()
+            var mention = AttributedString("@\(display)")
+            mention.foregroundColor = color
+            if let url { mention.link = url }
+            result.append(mention)
+        }
+
+        while i < body.endIndex {
+            if body[i] == "@" {
+                let after = body.index(after: i)
+
+                if let uuidEnd = body.index(after, offsetBy: 36, limitedBy: body.endIndex) {
+                    let candidate = String(body[after..<uuidEnd])
+                    if let uuid = UUID(uuidString: candidate) {
+                        if let assignment = run.assignments.first(where: { $0.id == uuid }) {
+                            appendMention(
+                                display: assignment.slotName.isEmpty
+                                    ? "slot:\(uuid.uuidString.prefix(8))"
+                                    : assignment.slotName,
+                                color: slotSpeakerColor(slotName: assignment.slotName),
+                                url: URL(string: "guardian://mcr/slot/\(uuid.uuidString)")
+                            )
+                            i = uuidEnd
+                            continue
+                        }
+                        if let mission = resolvedMission,
+                           let idx = mission.routeMacro.tasks.firstIndex(where: { $0.id == uuid }) {
+                            let task = mission.routeMacro.tasks[idx]
+                            appendMention(
+                                display: task.name.isEmpty ? "task:\(uuid.uuidString.prefix(8))" : task.name,
+                                color: MissionTaskMapColor.swiftUIColor(forTaskIndex: idx),
+                                url: URL(string: "guardian://mcr/task/\(uuid.uuidString)")
+                            )
+                            i = uuidEnd
+                            continue
+                        }
+                        appendMention(display: deletedDisplay, color: mutedColor, url: nil)
+                        i = uuidEnd
+                        continue
+                    }
+                }
+
+                let suffix = body[after...]
+                if let match = nameCandidates.first(where: { suffix.hasPrefix($0.name) }) {
+                    appendMention(display: match.name, color: match.color, url: match.url)
+                    i = body.index(i, offsetBy: match.name.count + 1)
+                    continue
+                }
+            }
+            pending.append(body[i])
+            i = body.index(after: i)
+        }
+        flushPending()
+        return result
+    }
+
+    /// Display token for an `@target` mention. Lower-case for role kinds (`missionControl`,
+    /// `operator`) so they read like handles; task / slot resolve to their current human name from
+    /// the live mission / assignment set (id-keyed for slots so renames stay live and deleted slots
+    /// surface as `slot:<short uuid>`); assistants use their registered display name from
+    /// ``MissionRunAssistantRegistry`` (lower-cased to read like a handle, e.g. `@paladin`).
+    private func mcrTargetDisplayName(_ target: MissionRunEventTarget) -> String {
+        switch target {
+        case .missionControl: return "missionControl"
+        case .assistant(let key):
+            let name = MissionRunAssistantRegistry.shared.displayName(forKey: key)
+            return name.isEmpty ? key : name.lowercased()
+        case .task(_, let name): return name
+        case .slot(let id):
+            if let name = run.assignments.first(where: { $0.id == id })?.slotName, !name.isEmpty {
+                return name
+            }
+            return "slot:\(id.uuidString.prefix(8))"
+        case .operator(let displayName):
+            let trimmed = displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return trimmed.isEmpty ? "operator" : trimmed
+        }
+    }
+
+    private func mcrTargetColor(_ target: MissionRunEventTarget) -> Color {
+        switch target {
+        case .missionControl: return GuardianDynamicColors.textPrimary
+        case .assistant: return GuardianDynamicColors.textPrimary
+        case .task(let id, _):
+            if let idx = resolvedMission?.routeMacro.tasks.firstIndex(where: { $0.id == id }) {
+                return MissionTaskMapColor.swiftUIColor(forTaskIndex: idx)
+            }
+            return Color.gray.opacity(0.85)
+        case .slot(let id):
+            if let name = run.assignments.first(where: { $0.id == id })?.slotName, !name.isEmpty {
+                return slotSpeakerColor(slotName: name)
+            }
+            return Color.gray.opacity(0.6)
+        case .operator: return GuardianDynamicColors.textPrimary
+        }
+    }
+
+    private func mcrTargetLinkURL(_ target: MissionRunEventTarget) -> URL? {
+        switch target {
+        case .missionControl, .assistant, .operator:
+            return nil
+        case .task(let id, _):
+            return URL(string: "guardian://mcr/task/\(id.uuidString)")
+        case .slot(let id):
+            return URL(string: "guardian://mcr/slot/\(id.uuidString)")
+        }
+    }
+
+    /// `OpenURLAction` handler installed on the MCR log scroll: routes `guardian://mcr/...` clicks
+    /// to the matching `focusLive*` helper so `@Alpha` opens the vehicle overlay and `@Continuous`
+    /// opens the task triage. Returns `.discarded` for unrecognized hosts so they don't leak out
+    /// to the system handler.
+    private func handleMcrLogURL(_ url: URL) -> OpenURLAction.Result {
+        guard url.scheme == "guardian", url.host == "mcr" else { return .discarded }
+        let parts = url.pathComponents.filter { $0 != "/" }
+        guard parts.count == 2, let id = UUID(uuidString: parts[1]) else { return .discarded }
+        switch parts[0] {
+        case "task":
+            focusLiveTask(id)
+            return .handled
+        case "slot":
+            focusLiveAssignment(id)
+            return .handled
+        default:
+            return .discarded
+        }
+    }
+
+    /// Canonical color for a roster slot's speaker / mention attribution: bound vehicle map
+    /// color when telemetry resolves, otherwise a neutral gray (matches the prior fallback).
+    private func slotSpeakerColor(slotName: String) -> Color {
+        guard let a = run.assignments.first(where: { $0.slotName == slotName }),
+              let vid = resolvedFleetStreamVehicleID(assignment: a, fleetLink: fleetLink, sitl: sitl)
+        else { return Color.gray.opacity(0.9) }
+        return colorFromMapHex(fleetLink.mapColorHex(forVehicleID: vid))
+    }
+
+    private func copyLiveLogToPasteboard() {
+        guard !liveLogEventsFiltered.isEmpty else { return }
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(
-            paladinLiveLogPlainText(events: paladinLiveEventsFiltered, phase: run.sessionPhase, plan: run.compiledPlan),
+            liveLogPlainText(events: liveLogEventsFiltered, phase: run.sessionPhase, plan: run.compiledPlan),
             forType: .string
         )
     }
@@ -2690,6 +3570,16 @@ struct MissionRunDetailView: View {
                 .buttonStyle(.plain)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
+                Button {
+                    presentTaskSettingsSidebar(task: task)
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Task settings")
+
                 if fleetLink.isSimulateEnabled {
                     Button {
                         bulkSpawnSimsConfirmKind = .singleTask(task.id)
@@ -2763,31 +3653,70 @@ struct MissionRunDetailView: View {
     private var setupRulesTabContent: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Abort Policy")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(GuardianDynamicColors.textPrimary)
-                Text(
-                    "The global mission abort policy tells vehicles what to do if mission is aborted."
-                )
-                .font(.system(size: 12))
-                .foregroundStyle(GuardianDynamicColors.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-                HStack(alignment: .center, spacing: 12) {
+                if resolvedMission != nil {
                     Text("Abort Policy")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(GuardianDynamicColors.textPrimary)
-                    Spacer(minLength: 12)
-                    Picker("", selection: runAbortPolicyBinding) {
-                        ForEach(MissionRunAbortPolicy.setupPickerCases, id: \.self) { policy in
-                            Text(policy.setupMenuLabel).tag(policy)
+                    Text(
+                        "Mission-wide default when a task (or roster slot) does not set its own abort policy."
+                    )
+                    .font(.system(size: 12))
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(alignment: .center, spacing: 12) {
+                        Text("Abort Policy")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(GuardianDynamicColors.textPrimary)
+                        Spacer(minLength: 12)
+                        Picker("", selection: missionAbortPolicyBinding) {
+                            ForEach(MissionRunAbortPolicy.setupPickerCases, id: \.self) { policy in
+                                Text(policy.setupMenuLabel).tag(policy)
+                            }
                         }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(minWidth: 160, alignment: .trailing)
                     }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .frame(minWidth: 160, alignment: .trailing)
+                    .padding(.vertical, 4)
+
+                    Text("Complete Policy")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(GuardianDynamicColors.textPrimary)
+                        .padding(.top, 8)
+                    Text(
+                        "Mission-wide default for recovery wind-down when a task or roster slot does not override it."
+                    )
+                    .font(.system(size: 12))
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(alignment: .center, spacing: 12) {
+                        Text("Complete Policy")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(GuardianDynamicColors.textPrimary)
+                        Spacer(minLength: 12)
+                        Picker("", selection: missionCompletePolicyBinding) {
+                            ForEach(MissionRunCompletePolicy.setupPickerCases, id: \.self) { policy in
+                                Text(policy.setupMenuLabel).tag(policy)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(minWidth: 160, alignment: .trailing)
+                    }
+                    .padding(.vertical, 4)
+                } else {
+                    Text("Mission defaults unavailable")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(GuardianDynamicColors.textPrimary)
+                    Text(
+                        "This run’s mission is not in the library (or failed to load). Add or restore the mission to edit abort/complete defaults."
+                    )
+                    .font(.system(size: 12))
+                    .foregroundStyle(GuardianDynamicColors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.vertical, 4)
             }
             .padding(MissionRunPrepLayout.scheduleCardPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2835,11 +3764,62 @@ struct MissionRunDetailView: View {
         }
     }
 
-    private var runAbortPolicyBinding: Binding<MissionRunAbortPolicy> {
+    private func persistMissionMutation(_ mutate: (inout Mission) -> Void) {
+        guard var mission = missionStore.missions.first(where: { $0.id == run.missionId }) else { return }
+        mutate(&mission)
+        missionStore.updateMission(mission)
+        if let fresh = missionStore.missions.first(where: { $0.id == mission.id }) {
+            run.updateTemplate(fresh)
+        } else {
+            run.updateTemplate(mission)
+        }
+        onUpdate(run)
+    }
+
+    /// Wires the MRE template persister so mission / task policy edits routed through
+    /// ``MissionRunEnvironment`` policy APIs (cog sidebar, future assistants) survive a refresh
+    /// by writing through to the ``MissionStore``.
+    private func installMissionTemplatePersister() {
+        run.missionTemplatePersister = { [weak missionStore, weak run] mission in
+            guard let missionStore else { return }
+            missionStore.updateMission(mission)
+            if let fresh = missionStore.missions.first(where: { $0.id == mission.id }) {
+                run?.updateTemplate(fresh)
+            } else {
+                run?.updateTemplate(mission)
+            }
+        }
+    }
+
+    /// Local operator credential for MRE policy / Rules-of-Engagement edits made from this screen.
+    /// `displayName` is the live callsign so log lines render as `[Operator][<callsign>]`.
+    private var localOperatorCredential: MissionRunPolicyEditCredential {
+        .localOperator(callsign: generalSettings.callsign)
+    }
+
+    private var missionAbortPolicyBinding: Binding<MissionRunAbortPolicy> {
         Binding(
-            get: { run.policies.abort },
+            get: {
+                missionStore.missions.first(where: { $0.id == run.missionId })?.routeMacro.rules.missionAbortPolicy
+                    ?? .returnToLaunch
+            },
             set: { newValue in
-                run.policies = MissionRunPolicies(abort: newValue, engagement: run.policies.engagement)
+                _ = run.updateMissionAbortPolicy(newValue, credential: localOperatorCredential)
+                syncRunFromStore()
+                onUpdate(run)
+            }
+        )
+    }
+
+    private var missionCompletePolicyBinding: Binding<MissionRunCompletePolicy> {
+        Binding(
+            get: {
+                missionStore.missions.first(where: { $0.id == run.missionId })?.routeMacro.rules.missionCompletePolicy
+                    ?? .returnToLaunch
+            },
+            set: { newValue in
+                _ = run.updateMissionCompletePolicy(newValue, credential: localOperatorCredential)
+                syncRunFromStore()
                 onUpdate(run)
             }
         )
@@ -2851,66 +3831,84 @@ struct MissionRunDetailView: View {
                 run.resolvedEngagementDisposition(for: action)
             },
             set: { newDisposition in
-                var rules = run.policies.engagement
-                var map = rules.perAction
-                if newDisposition == .autonomous {
-                    map.removeValue(forKey: action)
-                } else {
-                    map[action] = MissionRunEngagementRule(disposition: newDisposition)
-                }
-                rules.perAction = map
-                run.policies.engagement = rules
+                _ = run.updateMissionEngagementDisposition(
+                    action: action,
+                    disposition: newDisposition,
+                    credential: localOperatorCredential
+                )
                 onUpdate(run)
             }
         )
     }
 
-    /// Effective minutes: run override if present, otherwise the mission task’s ``MissionTask/startDelay``.
-    private func taskStartDelayBinding(for task: MissionTask) -> Binding<Int> {
+    private func templateMissionTask(forTaskId taskId: UUID) -> MissionTask? {
+        resolvedMission?.routeMacro.tasks.first(where: { $0.id == taskId })
+    }
+
+    private func commitTaskStartDelayOverride(taskId: UUID, value: Double, unit: DelayUnit, template: MissionTask) {
+        let newRow = TaskStartDelay(taskId: taskId, startDelayValue: value, startDelayUnit: unit)
+        var list = run.taskStartDelays
+        list.removeAll { $0.taskId == taskId }
+        let tSecs = Int(template.startDelayTotalSeconds.rounded())
+        let nSecs = Int(newRow.totalSeconds.rounded())
+        if tSecs != nSecs {
+            list.append(newRow)
+        }
+        run.taskStartDelays = list
+        onUpdate(run)
+    }
+
+    /// Run override if present, otherwise the mission template task’s start delay (same value+unit model as Missions authoring).
+    private func taskStartDelayValueBinding(for task: MissionTask) -> Binding<Double> {
         Binding(
             get: {
                 if let o = run.taskStartDelays.first(where: { $0.taskId == task.id }) {
-                    return o.startDelayMinutes
+                    return o.startDelayValue
                 }
-                return resolvedMission?.routeMacro.tasks.first(where: { $0.id == task.id })?.startDelay ?? task.startDelay
+                return templateMissionTask(forTaskId: task.id)?.startDelayValue ?? task.startDelayValue
             },
-            set: { newValue in
-                let clamped = min(59, max(0, newValue))
-                let templateMinutes = resolvedMission?.routeMacro.tasks.first(where: { $0.id == task.id })?.startDelay ?? task.startDelay
-                var list = run.taskStartDelays
-                list.removeAll { $0.taskId == task.id }
-                if clamped != templateMinutes {
-                    list.append(TaskStartDelay(taskId: task.id, startDelayMinutes: clamped))
-                }
-                run.taskStartDelays = list
-                onUpdate(run)
+            set: { newVal in
+                let tmpl = templateMissionTask(forTaskId: task.id) ?? task
+                let unit = run.taskStartDelays.first(where: { $0.taskId == task.id })?.startDelayUnit ?? tmpl.startDelayUnit
+                commitTaskStartDelayOverride(taskId: task.id, value: newVal, unit: unit, template: tmpl)
             }
         )
     }
 
-    private var mcSetupTaskFieldLabelFont: Font { .system(size: 13) }
+    private func taskStartDelayUnitBinding(for task: MissionTask) -> Binding<DelayUnit> {
+        Binding(
+            get: {
+                run.taskStartDelays.first(where: { $0.taskId == task.id })?.startDelayUnit
+                    ?? templateMissionTask(forTaskId: task.id)?.startDelayUnit
+                    ?? task.startDelayUnit
+            },
+            set: { newUnit in
+                let tmpl = templateMissionTask(forTaskId: task.id) ?? task
+                let val = run.taskStartDelays.first(where: { $0.taskId == task.id })?.startDelayValue ?? tmpl.startDelayValue
+                commitTaskStartDelayOverride(taskId: task.id, value: val, unit: newUnit, template: tmpl)
+            }
+        )
+    }
 
     private func missionControlTaskStartDelayFieldRow(task: MissionTask) -> some View {
-        let binding = taskStartDelayBinding(for: task)
-        return HStack(alignment: .center, spacing: 10) {
+        HStack(alignment: .center, spacing: 10) {
             Text(task.name)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(task.enabled ? GuardianDynamicColors.textPrimary : GuardianDynamicColors.textSecondary.opacity(0.72))
                 .lineLimit(2)
-                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-            HStack(spacing: 6) {
-                Stepper(value: binding, in: 0...59) {
-                    Text(String(binding.wrappedValue))
-                        .font(mcSetupTaskFieldLabelFont)
-                        .monospacedDigit()
-                        .foregroundStyle(GuardianDynamicColors.textPrimary)
-                        .frame(minWidth: 28, alignment: .trailing)
-                }
-                Text("mins")
-                    .font(mcSetupTaskFieldLabelFont)
-                    .foregroundStyle(GuardianDynamicColors.textSecondary)
-            }
-            .fixedSize()
+                .multilineTextAlignment(.leading)
+            Spacer(minLength: 8)
+            MissionDelayValueUnitEditor(
+                label: "",
+                value: taskStartDelayValueBinding(for: task),
+                unit: taskStartDelayUnitBinding(for: task),
+                minimumTotalSeconds: 0,
+                numericFieldWidth: 88,
+                unitPickerWidth: 68,
+                labelColumnWidth: 0,
+                secondaryLabelColor: GuardianDynamicColors.textSecondary,
+                controlSize: .regular
+            )
         }
         .opacity(task.enabled ? 1 : 0.55)
     }
@@ -3223,7 +4221,10 @@ struct MissionRunDetailView: View {
             onPickAndAssignSim: fleetLink.isSimulateEnabled && !slotFilled
                 ? { presentRosterSimPickerForAssignment(assignmentId: assignmentId) }
                 : nil,
-            showsWorkingOverlay: rosterBulkSimSpawnWorkingAssignmentId == assignmentId
+            showsWorkingOverlay: rosterBulkSimSpawnWorkingAssignmentId == assignmentId,
+            onOpenSettings: {
+                presentAssignmentSettingsSidebar(assignmentIndex: assignmentIndex)
+            }
         )
     }
 
@@ -3279,5 +4280,5 @@ struct MissionRunDetailView: View {
     }
 }
 
-/// One vehicle column in Mission Control: vehicle-type thumbnail + slot title / roster role subtitle, battery/GPS, MAVSDK health. Top-trailing reserved for a future cog menu.
+/// One vehicle column in Mission Control: vehicle-type thumbnail + slot title / roster role subtitle, battery/GPS, MAVSDK health, and slot actions (including settings).
 

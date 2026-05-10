@@ -1,8 +1,11 @@
 import Foundation
 import Mavsdk
 
-/// Who is allowed to preempt lower-priority command streams (keyboard takeover, free roam, Paladin).
+/// Who is allowed to preempt lower-priority command streams (Mission Control automation, Paladin assistant, free roam, Live Drive takeover).
 enum FleetVehicleCommandCategory: String, Equatable, Comparable {
+    /// Mission Control run automation (arms, mission starts, staging, teardown) — same authority tier as ``paladin``.
+    case missionControl
+    /// Paladin assistant–issued fleet commands (same tier as ``missionControl``).
     case paladin
     case freeRoamKeyboard
     case manualTakeover
@@ -10,14 +13,17 @@ enum FleetVehicleCommandCategory: String, Equatable, Comparable {
     /// Higher rejects lower when `commandGateMinimumPriority` is raised.
     var arbitrationPriority: Int {
         switch self {
-        case .paladin: return 0
+        case .missionControl, .paladin: return 0
         case .freeRoamKeyboard: return 1
         case .manualTakeover: return 2
         }
     }
 
     static func < (lhs: FleetVehicleCommandCategory, rhs: FleetVehicleCommandCategory) -> Bool {
-        lhs.arbitrationPriority < rhs.arbitrationPriority
+        if lhs.arbitrationPriority != rhs.arbitrationPriority {
+            return lhs.arbitrationPriority < rhs.arbitrationPriority
+        }
+        return lhs.rawValue < rhs.rawValue
     }
 }
 
@@ -192,8 +198,8 @@ enum FleetVehicleCommandStatus: Equatable {
     case failed(String)
 }
 
-/// MAVSDK Completable result surfaced to Mission Control / Paladin (upload, arm, goto, etc.).
-enum PaladinFleetCommandAsyncOutcome: Equatable {
+/// MAVSDK Completable result surfaced to Mission Control and other callers (upload, arm, goto, etc.).
+enum FleetCommandAsyncOutcome: Equatable {
     case succeeded
     case failed(String)
 }
@@ -210,7 +216,7 @@ struct FleetVehicleCommandRecord: Identifiable, Equatable {
         id: UUID = UUID(),
         issuedAt: Date = Date(),
         source: String,
-        category: FleetVehicleCommandCategory = .paladin,
+        category: FleetVehicleCommandCategory = .missionControl,
         command: FleetVehicleCommand,
         status: FleetVehicleCommandStatus = .queued
     ) {
@@ -246,7 +252,7 @@ struct FleetVehicleModel: Equatable {
     struct Functions: Equatable {
         var commandHistory: [FleetVehicleCommandRecord] = []
         var lastCommandError: String?
-        /// Commands with `category.arbitrationPriority` below this value are rejected (e.g. manual takeover sets 2 so Paladin at 0 is blocked).
+        /// Commands with `category.arbitrationPriority` below this value are rejected (e.g. manual takeover sets 2 so MC / Paladin at tier 0 are blocked).
         var commandGateMinimumPriority: Int = 0
     }
 

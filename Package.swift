@@ -28,6 +28,7 @@ let package = Package(
                 .copy("Resources/Px4SitlBundle"),
                 .copy("Resources/SimulationDevices"),
                 .copy("Resources/MissionBadge"),
+                .copy("Resources/FleetCommandCatalog.json"),
                 .copy("Resources/SitlDefaultParams/ArduPilotGuardianBattery.parm"),
             ],
             linkerSettings: [

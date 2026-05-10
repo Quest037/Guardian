@@ -9,6 +9,7 @@ final class MissionRunSystems {
     let projections: MissionRunProjectionsSubsystem
     let executor: MissionRunExecutionSubsystem
     let scheduling: MissionRunSchedulingSubsystem
+    let policyAuthority: MissionRunPolicyAuthoritySubsystem
 
     init(
         lifecycle: MissionRunLifecycleSubsystem,
@@ -17,7 +18,8 @@ final class MissionRunSystems {
         planner: MissionRunPlannerSubsystem,
         projections: MissionRunProjectionsSubsystem,
         executor: MissionRunExecutionSubsystem,
-        scheduling: MissionRunSchedulingSubsystem
+        scheduling: MissionRunSchedulingSubsystem,
+        policyAuthority: MissionRunPolicyAuthoritySubsystem
     ) {
         self.lifecycle = lifecycle
         self.logging = logging
@@ -26,5 +28,6 @@ final class MissionRunSystems {
         self.projections = projections
         self.executor = executor
         self.scheduling = scheduling
+        self.policyAuthority = policyAuthority
     }
 }

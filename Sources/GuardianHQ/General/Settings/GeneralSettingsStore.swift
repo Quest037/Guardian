@@ -141,6 +141,10 @@ struct SimSpawnDefaults: Equatable, Codable {
 final class GeneralSettingsStore: ObservableObject {
     private static let defaultsKey = "guardian.generalSettings.v1"
 
+    /// Allowed range for ``missionControlPostponeStepCapSeconds`` (1 min … 48 h).
+    static let minMissionPostponeStepCapSeconds = 60
+    static let maxMissionPostponeStepCapSeconds = 48 * 3600
+
     /// Default stack for **in-app SITL** when the user does not pick ArduPilot vs PX4 per spawn.
     @Published var defaultSimulationPlatform: SimulationPlatform {
         didSet {
@@ -181,10 +185,31 @@ final class GeneralSettingsStore: ObservableObject {
         }
     }
 
+    /// Operator name or call sign for the local user (logs, Mission Control attribution, etc.).
+    @Published var callsign: String {
+        didSet {
+            guard callsign != oldValue else { return }
+            save()
+        }
+    }
+
     /// Default simulated battery drain rate used by LD/MC-R when enabling drain.
     @Published var defaultSimBatteryDrainRate: SimBatteryDrainRate {
         didSet {
             guard defaultSimBatteryDrainRate != oldValue else { return }
+            save()
+        }
+    }
+
+    /// Largest one-shot Alter step (Sooner / Later) in Mission Control: scheduled start, task MAVLink deferrals, between-cycle restarts.
+    @Published var missionControlPostponeStepCapSeconds: Int {
+        didSet {
+            let clamped = Self.clampMissionPostponeStepCapSeconds(missionControlPostponeStepCapSeconds)
+            if missionControlPostponeStepCapSeconds != clamped {
+                missionControlPostponeStepCapSeconds = clamped
+                return
+            }
+            guard missionControlPostponeStepCapSeconds != oldValue else { return }
             save()
         }
     }
@@ -218,7 +243,11 @@ final class GeneralSettingsStore: ObservableObject {
             appearanceMode = loaded.appearanceMode ?? .system
             mainSidebarLaunchMode = loaded.mainSidebarLaunchMode ?? .collapsed
             defaultSimBatteryDrainRate = loaded.defaultSimBatteryDrainRate ?? .normal
+            missionControlPostponeStepCapSeconds = Self.clampMissionPostponeStepCapSeconds(
+                loaded.missionControlPostponeStepCapSeconds ?? MissionDelayPolicy.defaultOperatorPostponeStepCapSeconds
+            )
             simSpawnDefaults = loaded.simSpawnDefaults ?? .default
+            callsign = loaded.callsign ?? ""
         } else {
             defaultSimulationPlatform = .ardupilot
             defaultMapTileStyle = .standard
@@ -226,8 +255,14 @@ final class GeneralSettingsStore: ObservableObject {
             appearanceMode = .system
             mainSidebarLaunchMode = .collapsed
             defaultSimBatteryDrainRate = .normal
+            missionControlPostponeStepCapSeconds = MissionDelayPolicy.defaultOperatorPostponeStepCapSeconds
             simSpawnDefaults = .default
+            callsign = ""
         }
+    }
+
+    private static func clampMissionPostponeStepCapSeconds(_ seconds: Int) -> Int {
+        min(maxMissionPostponeStepCapSeconds, max(minMissionPostponeStepCapSeconds, seconds))
     }
 
     private func save(userDefaults: UserDefaults = .standard) {
@@ -238,7 +273,9 @@ final class GeneralSettingsStore: ObservableObject {
             appearanceMode: appearanceMode,
             mainSidebarLaunchMode: mainSidebarLaunchMode,
             defaultSimBatteryDrainRate: defaultSimBatteryDrainRate,
-            simSpawnDefaults: simSpawnDefaults
+            missionControlPostponeStepCapSeconds: missionControlPostponeStepCapSeconds,
+            simSpawnDefaults: simSpawnDefaults,
+            callsign: callsign
         )
         if let data = try? JSONEncoder().encode(snapshot) {
             userDefaults.set(data, forKey: Self.defaultsKey)
@@ -262,7 +299,11 @@ final class GeneralSettingsStore: ObservableObject {
         var mainSidebarLaunchMode: MainSidebarLaunchMode?
         /// Omitted in older saves; treated as `.normal`.
         var defaultSimBatteryDrainRate: SimBatteryDrainRate?
+        /// Omitted in older saves; treated as ``MissionDelayPolicy/defaultOperatorPostponeStepCapSeconds``.
+        var missionControlPostponeStepCapSeconds: Int?
         /// Omitted in older saves; treated as `.default`.
         var simSpawnDefaults: SimSpawnDefaults?
+        /// Omitted in older saves; treated as empty string.
+        var callsign: String?
     }
 }

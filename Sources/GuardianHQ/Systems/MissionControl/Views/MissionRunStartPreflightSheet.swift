@@ -154,8 +154,8 @@ struct MissionRunStartPreflightSheet: View {
                 vehicleID: vehicleID,
                 command: .disarm,
                 source: "missionControl.preflightAbandon",
-                category: .paladin,
-                onPaladinCommandOutcome: nil
+                category: .missionControl,
+                onCommandOutcome: nil
             )
         }
         vehicleIDsArmedDuringProbe = []

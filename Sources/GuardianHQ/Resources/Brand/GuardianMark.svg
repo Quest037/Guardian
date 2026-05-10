@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 174" fill="none" role="img" aria-label="Guardian mark">
+  <title>Guardian</title>
+  <!-- Inverted equilateral triangle (side 200) with G-shaped negative space; brand purple #6B3DDB (GuardianBrand.purple). -->
+  <!-- If you edit cutouts, sync ``GuardianMarkVectorPaths`` in Sources/GuardianHQ/General/DesignSystem/GuardianPointedGMark.swift (Canvas fallback when NSImage cannot decode SVG). -->
+  <defs>
+    <mask id="guardian-mark-g-cutouts" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse">
+      <rect width="200" height="174" fill="white"/>
+      <!-- Upper slot from the right + diagonal cut parallel to the left triangle edge -->
+      <path fill="black" d="M 200 14 L 118 14 L 96 44 L 200 44 Z"/>
+      <!-- Middle slot (horizontal bar of the G) -->
+      <path fill="black" d="M 200 50 L 124 50 L 124 72 L 200 72 Z"/>
+      <!-- Lower opening toward apex (bowl / counter) -->
+      <path fill="black" d="M 200 78 L 128 78 L 100 138 L 84 120 L 112 78 Z"/>
+    </mask>
+  </defs>
+  <!-- Equilateral triangle height = 200 * sin(60°) -->
+  <path
+    fill="#6B3DDB"
+    mask="url(#guardian-mark-g-cutouts)"
+    d="M 0 0 L 200 0 L 100 173.20508075688773 Z"
+  />
+</svg>

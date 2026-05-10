@@ -90,16 +90,24 @@ struct MissionsView: View {
 
     private var missionList: some View {
         VStack(spacing: 0) {
-            HStack {
-                Button(displayMode == .list ? "Grid View" : "List View") {
-                    displayMode = displayMode == .list ? .grid : .list
-                }
-                .buttonStyle(.bordered)
+            HStack(spacing: 8) {
+                GuardianThemedButton(
+                    title: displayMode == .list ? "Grid View" : "List View",
+                    accent: .neutral,
+                    surface: .outline,
+                    size: .small,
+                    shape: .cornered,
+                    action: { displayMode = displayMode == .list ? .grid : .list }
+                )
 
-                Button(showArchivedMissions ? "Hide Archived" : "Show Archived") {
-                    showArchivedMissions.toggle()
-                }
-                .buttonStyle(.bordered)
+                GuardianThemedButton(
+                    title: showArchivedMissions ? "Hide Archived" : "Show Archived",
+                    accent: .neutral,
+                    surface: .outline,
+                    size: .small,
+                    shape: .cornered,
+                    action: { showArchivedMissions.toggle() }
+                )
 
                 Picker("", selection: $sortMode) {
                     ForEach(SortMode.allCases) { mode in
@@ -111,11 +119,9 @@ struct MissionsView: View {
 
                 Spacer()
 
-                Button("Add Mission") {
+                GuardianPrimaryProminentButton(title: "Add Mission") {
                     showingAddMission = true
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.blue)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -134,7 +140,7 @@ struct MissionsView: View {
                 }
             } else if displayMode == .list {
                 ScrollView {
-                    LazyVStack(spacing: 12) {
+                    LazyVStack(spacing: 10) {
                         ForEach(sortedMissions) { mission in
                             MissionRow(
                                 mission: mission,
@@ -164,7 +170,12 @@ struct MissionsView: View {
             } else {
                 ScrollView {
                     LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 320), spacing: 12)],
+                        columns: [
+                            GridItem(.flexible(), spacing: 12),
+                            GridItem(.flexible(), spacing: 12),
+                            GridItem(.flexible(), spacing: 12),
+                            GridItem(.flexible(), spacing: 12),
+                        ],
                         spacing: 12
                     ) {
                         ForEach(sortedMissions) { mission in
@@ -300,7 +311,7 @@ private struct MissionWorkspaceView: View {
     @State private var focusedTransitionCameraFieldKey: String?
     @State private var suppressNextMapClick = false
     @State private var detailsDescriptionEditorHeight: CGFloat = 96
-    /// Task settings panel hosted **inside** this view so `draft` updates refresh pickers (global ``SidebarOverlay`` does not re-run with mission `@State`).
+    /// Task settings panel hosted **inside** this view so `draft` updates refresh pickers (global ``AppDrawer`` does not re-run with mission `@State`).
     @State private var taskSettingsOverlayTaskIndex: Int?
     /// Roster-tab vehicle edit panel (same scrim + slide pattern as task settings).
     @State private var rosterDeviceEditContext: RosterDeviceEditOverlayContext?
@@ -309,7 +320,7 @@ private struct MissionWorkspaceView: View {
     /// Coalesces disk writes while typing mission name / description on the Details tab.
     @State private var debouncedPersistMissionTask: Task<Void, Never>?
     @Environment(\.colorScheme) private var colorScheme
-    @EnvironmentObject private var sidebarOverlay: SidebarOverlay
+    @EnvironmentObject private var appDrawer: AppDrawer
     @EnvironmentObject private var osmRoutingService: OSMRoutingService
 
     /// Outgoing leg mode for the **next** map click when extending the path.
@@ -322,6 +333,17 @@ private struct MissionWorkspaceView: View {
     let onToast: (String, ToastStyle) -> Void
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
+    /// Shown in the workspace sub-bar after Back (uses live `draft.name`).
+    private var missionWorkspaceToolbarTitle: String {
+        let t = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? "Untitled mission" : t
+    }
+
+    /// Matches system ``TextField`` / `.roundedBorder` fill (light: white; dark: field dark).
+    private static var missionFormTextFieldBackground: Color {
+        Color(nsColor: .textBackgroundColor)
+    }
 
     /// Matches wingman/reserve “Leader” label + menu footprint so the add row does not jump when Slot changes.
     private static let rosterAddRowSupportsColumnWidth: CGFloat = 264
@@ -353,48 +375,71 @@ private struct MissionWorkspaceView: View {
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
-                HStack {
-                    Picker("", selection: $activeTab) {
-                        ForEach(WorkspaceTab.allCases) { tab in
-                            Text(tab.rawValue).tag(tab)
+                HStack(spacing: 10) {
+                    HStack(spacing: 10) {
+                        GuardianThemedButton(
+                            accent: .neutral,
+                            surface: .outline,
+                            size: .small,
+                            shape: .cornered,
+                            contentSizing: .squareToolbarCell,
+                            action: onBack,
+                            label: {
+                                Image(systemName: "arrow.left")
+                                    .font(.system(size: 14, weight: .semibold))
+                            }
+                        )
+                        .help("Back to missions")
+
+                        Text(missionWorkspaceToolbarTitle)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(theme.textPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(minWidth: 0, maxWidth: 100, alignment: .leading)
+
+                        Picker("", selection: $activeTab) {
+                            ForEach(WorkspaceTab.allCases) { tab in
+                                Text(tab.rawValue).tag(tab)
+                            }
                         }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: 420)
                     }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 360, alignment: .leading)
+                    .fixedSize(horizontal: true, vertical: false)
 
-                    Spacer()
+                    Spacer(minLength: 12)
 
-                    Button {
-                        onBack()
-                    } label: {
-                        Image(systemName: "arrow.left")
-                            .appIconGlyph()
-                    }
-                    .buttonStyle(.bordered)
-                    .uniformIconButton()
-
-                    Button {
-                        showingDeleteMissionConfirm = true
-                    } label: {
-                        Image(systemName: "trash")
-                            .appIconGlyph()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
+                    GuardianThemedButton(
+                        accent: .danger,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        contentSizing: .squareToolbarCell,
+                        action: { showingDeleteMissionConfirm = true },
+                        label: {
+                            Image(systemName: "trash")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                    )
                     .help("Delete Mission")
-                    .uniformIconButton()
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
                 .frame(maxWidth: .infinity)
                 .background(theme.backgroundRaised)
+                .overlay(alignment: .bottom) {
+                    Rectangle()
+                        .fill(theme.borderSubtle)
+                        .frame(height: 1)
+                }
 
                 if activeTab == .tasks {
                     tasksTab
                 } else {
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 14) {
+                        VStack(alignment: .leading, spacing: 16) {
                             switch activeTab {
                             case .details:
                                 detailsTab
@@ -404,8 +449,8 @@ private struct MissionWorkspaceView: View {
                                 EmptyView()
                             }
                         }
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 18)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 16)
                         .frame(maxWidth: .infinity)
                     }
                     .background(theme.backgroundBase)
@@ -446,7 +491,7 @@ private struct MissionWorkspaceView: View {
         .onChange(of: editingTaskIndex) { newIndex in
             clearPreviewFocusState()
             if newIndex != nil {
-                sidebarOverlay.dismiss()
+                appDrawer.dismiss()
                 taskSettingsOverlayTaskIndex = nil
                 rosterDeviceEditContext = nil
             }
@@ -456,7 +501,7 @@ private struct MissionWorkspaceView: View {
         }
         .onChange(of: activeTab) { tab in
             if tab != .tasks {
-                sidebarOverlay.dismiss()
+                appDrawer.dismiss()
                 taskSettingsOverlayTaskIndex = nil
                 clearPreviewFocusState()
             }
@@ -514,70 +559,98 @@ private struct MissionWorkspaceView: View {
     }
 
     private var detailsTab: some View {
-        Group {
-            card("Edit Mission") {
-                VStack(alignment: .leading, spacing: 20) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Mission Name")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(theme.textPrimary)
+        GuardianCard(
+            configuration: GuardianCardConfiguration(
+                border: .subtle,
+                cornerRadius: GuardianCardLayout.cornerRadius,
+                bodyPadding: GuardianCardLayout.defaultBodyPadding
+            ),
+            header: {
+                Text("Edit Mission")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(theme.textPrimary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            },
+            body: {
+                VStack(alignment: .leading, spacing: 16) {
+                    GuardianLabeledFormField(label: "Mission name") {
                         TextField("", text: $draft.name, prompt: Text("Mission name").foregroundColor(theme.textTertiary))
                             .textFieldStyle(.roundedBorder)
+                            .controlSize(.small)
                     }
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Mission Description")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(theme.textPrimary)
+                    GuardianLabeledFormField(label: "Mission description") {
                         AutoGrowingTextEditor(
                             text: $draft.description,
                             measuredHeight: $detailsDescriptionEditorHeight,
                             placeholder: "Description",
                             minHeight: 96,
-                            maxHeight: 220
+                            maxHeight: 220,
+                            fieldBackground: Self.missionFormTextFieldBackground
                         )
                     }
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Type")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(theme.textPrimary)
+                    GuardianLabeledFormField(label: "Type") {
                         Picker("", selection: $draft.type) {
                             Text("mobile").tag(MissionType.mobile)
                             Text("static").tag(MissionType.staticType)
                         }
                         .labelsHidden()
                         .pickerStyle(.segmented)
+                        .frame(maxWidth: 280, alignment: .leading)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-        }
+        )
     }
 
     private var rosterTab: some View {
-        Group {
-            VStack(alignment: .leading, spacing: 14) {
-                card("Roster") {
-                    Text("Vehicles per task")
+        VStack(alignment: .leading, spacing: 16) {
+            GuardianCard(
+                configuration: GuardianCardConfiguration(
+                    border: .subtle,
+                    cornerRadius: GuardianCardLayout.cornerRadius,
+                    bodyPadding: GuardianCardLayout.defaultBodyPadding
+                ),
+                header: {
+                    Text("Roster")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(theme.textPrimary)
-                    Text(
-                        "Each mission task lists the vehicles you expect on that route. Use callsigns and slots for planning; "
-                            + "you will bind real aircraft in Mission Control."
-                    )
-                    .font(.system(size: 12))
-                    .foregroundStyle(theme.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                },
+                body: {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Vehicles per task")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(theme.textPrimary)
+                        Text(
+                            "Each mission task lists the vehicles you expect on that route. Use callsigns and slots for planning; "
+                                + "you will bind real aircraft in Mission Control."
+                        )
+                        .font(.system(size: 12))
+                        .foregroundStyle(theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+            )
 
-                if draft.routeMacro.tasks.isEmpty {
-                    card("Tasks") {
+            if draft.routeMacro.tasks.isEmpty {
+                GuardianCard(
+                    configuration: GuardianCardConfiguration(
+                        border: .subtle,
+                        cornerRadius: GuardianCardLayout.cornerRadius,
+                        bodyPadding: GuardianCardLayout.defaultBodyPadding
+                    ),
+                    body: {
                         Text("No tasks yet. Add tasks on the Tasks tab, then assign vehicles to each task here.")
+                            .font(.system(size: 12))
                             .foregroundStyle(theme.textSecondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                } else {
-                    ForEach(Array(draft.routeMacro.tasks.enumerated()), id: \.element.id) { taskIndex, _ in
-                        taskRosterCard(taskIndex: taskIndex)
-                    }
+                )
+            } else {
+                ForEach(Array(draft.routeMacro.tasks.enumerated()), id: \.element.id) { taskIndex, _ in
+                    taskRosterCard(taskIndex: taskIndex)
                 }
             }
         }
@@ -586,241 +659,251 @@ private struct MissionWorkspaceView: View {
     private func taskRosterCard(taskIndex: Int) -> some View {
         let path = draft.routeMacro.tasks[taskIndex]
         let taskId = path.id
-        return VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline) {
-                TextField(
-                    "Task name",
-                    text: Binding(
-                        get: { draft.routeMacro.tasks[taskIndex].name },
-                        set: { draft.routeMacro.tasks[taskIndex].name = $0 }
-                    )
-                )
-                .textFieldStyle(.plain)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(theme.textPrimary)
-
-                Spacer(minLength: 8)
-
-                Button {
-                    presentTaskSettingsSidebar(taskIndex: taskIndex)
-                } label: {
-                    Image(systemName: "gearshape.fill")
-                        .appIconGlyph()
-                }
-                .buttonStyle(.bordered)
-                .uniformIconButton()
-                .help("Task settings")
-
-                Text("\(path.waypoints.count) waypoints")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(theme.textSecondary)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(theme.backgroundElevated)
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Vehicles on this task")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(theme.textSecondary)
-
-                if path.rosterDeviceIds.isEmpty {
-                    Text("None yet — use the row below.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(theme.textTertiary)
-                } else {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(taskRosterDisplayRows(for: path)) { row in
-                            if let device = draft.rosterDevices.first(where: { $0.id == row.deviceId }) {
-                                HStack(alignment: .center, spacing: 8) {
-                                    Text(device.name)
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundStyle(theme.textPrimary)
-                                        .lineLimit(1)
-                                        .truncationMode(.tail)
-
-                                    rosterDeviceInlineBadges(device: device)
-                                        .lineLimit(1)
-                                        .minimumScaleFactor(0.78)
-                                        .layoutPriority(0)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                                    Button {
-                                        presentRosterDeviceEdit(taskIndex: taskIndex, deviceId: row.deviceId)
-                                    } label: {
-                                        Image(systemName: "pencil")
-                                            .appIconGlyph()
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .controlSize(.small)
-                                    .uniformIconButton(width: 30, height: 26)
-                                    .help("Edit vehicle")
-
-                                    Button {
-                                        requestRemoveRosterDevice(taskIndex: taskIndex, deviceId: row.deviceId)
-                                    } label: {
-                                        Image(systemName: "trash")
-                                            .appIconGlyph()
-                                    }
-                                    .buttonStyle(.borderedProminent)
-                                    .tint(.red)
-                                    .controlSize(.small)
-                                    .uniformIconButton(width: 30, height: 26)
-                                    .help("Remove vehicle")
-                                }
-                                .padding(.leading, CGFloat(row.indentLevel) * Self.rosterSlotGroupIndentStep)
-                                .padding(.vertical, 4)
-                                .accessibilityElement(children: .combine)
-                            }
-                        }
-                    }
-                }
-
-                Divider().overlay(theme.borderSubtle)
-
-                HStack(alignment: .center, spacing: 8) {
+        return GuardianCard(
+            configuration: GuardianCardConfiguration(
+                border: .subtle,
+                cornerRadius: GuardianCardLayout.cornerRadius,
+                bodyPadding: GuardianCardLayout.defaultBodyPadding
+            ),
+            header: {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
                     TextField(
-                        "Callsign",
+                        "Task name",
                         text: Binding(
-                            get: { taskRosterDrafts[taskId]?.name ?? "" },
-                            set: { v in
-                                var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
-                                d.name = v
-                                taskRosterDrafts[taskId] = d
-                            }
+                            get: { draft.routeMacro.tasks[taskIndex].name },
+                            set: { draft.routeMacro.tasks[taskIndex].name = $0 }
                         )
                     )
-                    .textFieldStyle(.roundedBorder)
-                    .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
-                    .layoutPriority(0)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(theme.textPrimary)
 
-                    Picker(
-                        "Class",
-                        selection: Binding(
-                            get: { taskRosterDrafts[taskId]?.vehicleClass ?? .unknown },
-                            set: { v in
-                                var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
-                                d.vehicleClass = v
-                                taskRosterDrafts[taskId] = d
-                            }
-                        )
-                    ) {
-                        ForEach(FleetVehicleType.allCases, id: \.self) { t in
-                            Text(t.classCode).tag(t)
+                    Spacer(minLength: 8)
+
+                    GuardianThemedButton(
+                        accent: .neutral,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        contentSizing: .squareToolbarCell,
+                        action: { presentTaskSettingsSidebar(taskIndex: taskIndex) },
+                        label: {
+                            Image(systemName: "gearshape.fill")
+                                .font(.system(size: 14, weight: .semibold))
                         }
-                    }
-                    .pickerStyle(.menu)
-                    .frame(minWidth: 100, idealWidth: 120, maxWidth: 160, alignment: .leading)
-                    .layoutPriority(1)
+                    )
+                    .help("Task settings")
 
-                    Picker(
-                        "Role",
-                        selection: Binding(
-                            get: { taskRosterDrafts[taskId]?.role ?? .none },
-                            set: { v in
-                                var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
-                                d.role = v
-                                taskRosterDrafts[taskId] = d
-                            }
-                        )
-                    ) {
-                        ForEach(RosterRole.allCases) { c in
-                            Text(c.rawValue.capitalized).tag(c)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .frame(minWidth: 148, idealWidth: 168, maxWidth: 220, alignment: .leading)
-                    .layoutPriority(1)
+                    Text("\(path.waypoints.count) waypoints")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(theme.textSecondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            },
+            body: {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Vehicles on this task")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(theme.textSecondary)
 
-                    Picker(
-                        "Slot",
-                        selection: Binding(
-                            get: { taskRosterDrafts[taskId]?.slot ?? .primary },
-                            set: { v in
-                                var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
-                                d.slot = v
-                                if v != .wingman && v != .reserve { d.leaderRosterDeviceId = nil }
-                                taskRosterDrafts[taskId] = d
-                            }
-                        )
-                    ) {
-                        ForEach(MissionRosterSlotRole.allCases) { r in
-                            Text(r.rawValue.capitalized).tag(r)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .frame(minWidth: 148, idealWidth: 168, maxWidth: 220, alignment: .leading)
-                    .layoutPriority(1)
+                    if path.rosterDeviceIds.isEmpty {
+                        Text("None yet — use the row below.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(theme.textTertiary)
+                    } else {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(taskRosterDisplayRows(for: path)) { row in
+                                if let device = draft.rosterDevices.first(where: { $0.id == row.deviceId }) {
+                                    HStack(alignment: .center, spacing: 8) {
+                                        Text(device.name)
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundStyle(theme.textPrimary)
+                                            .lineLimit(1)
+                                            .truncationMode(.tail)
 
-                    // Reserve width so switching Slot away from wingman/reserve does not collapse or jump the row.
-                    Group {
-                        let slotNeedsLeader = {
-                            let s = taskRosterDrafts[taskId]?.slot ?? .primary
-                            return s == .wingman || s == .reserve
-                        }()
-                        let primaries = primaryRosterDevices(on: path)
-                        if slotNeedsLeader {
-                            HStack(spacing: 8) {
-                                Text("Leader")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(theme.textSecondary)
-                                    .fixedSize()
-                                    .padding(.leading, 4)
-                                if primaries.isEmpty {
-                                    Text("—")
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(theme.textTertiary)
-                                        .lineLimit(1)
-                                } else {
-                                    Picker(
-                                        "Leader",
-                                        selection: Binding(
-                                            get: { taskRosterDrafts[taskId]?.leaderRosterDeviceId },
-                                            set: { v in
-                                                var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
-                                                d.leaderRosterDeviceId = v
-                                                taskRosterDrafts[taskId] = d
+                                        rosterDeviceInlineBadges(device: device)
+                                            .lineLimit(1)
+                                            .minimumScaleFactor(0.78)
+                                            .layoutPriority(0)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                                        GuardianThemedButton(
+                                            accent: .primary,
+                                            surface: .outline,
+                                            size: .small,
+                                            shape: .cornered,
+                                            contentSizing: .squareToolbarCell,
+                                            action: { presentRosterDeviceEdit(taskIndex: taskIndex, deviceId: row.deviceId) },
+                                            label: {
+                                                Image(systemName: "pencil")
+                                                    .font(.system(size: 14, weight: .semibold))
                                             }
                                         )
-                                    ) {
-                                        Text("Auto").tag(UUID?.none)
-                                        ForEach(primaries) { p in
-                                            Text(p.name).tag(Optional(p.id))
-                                        }
+                                        .help("Edit vehicle")
+
+                                        GuardianThemedButton(
+                                            accent: .danger,
+                                            surface: .outline,
+                                            size: .small,
+                                            shape: .cornered,
+                                            contentSizing: .squareToolbarCell,
+                                            action: { requestRemoveRosterDevice(taskIndex: taskIndex, deviceId: row.deviceId) },
+                                            label: {
+                                                Image(systemName: "trash")
+                                                    .font(.system(size: 14, weight: .semibold))
+                                            }
+                                        )
+                                        .help("Remove vehicle")
                                     }
-                                    .labelsHidden()
-                                    .pickerStyle(.menu)
-                                    .frame(minWidth: 120, idealWidth: 140, maxWidth: 200, alignment: .leading)
-                                    .accessibilityLabel("Leader")
+                                    .padding(.leading, CGFloat(row.indentLevel) * Self.rosterSlotGroupIndentStep)
+                                    .padding(.vertical, 4)
+                                    .accessibilityElement(children: .combine)
                                 }
                             }
-                        } else {
-                            Color.clear
-                                .accessibilityHidden(true)
                         }
                     }
-                    .frame(width: Self.rosterAddRowSupportsColumnWidth, alignment: .leading)
-                    .layoutPriority(1)
 
-                    Button("Add") {
-                        addRosterDeviceToTask(taskIndex: taskIndex)
+                    Divider().overlay(theme.borderSubtle)
+
+                    HStack(alignment: .center, spacing: 8) {
+                        TextField(
+                            "Callsign",
+                            text: Binding(
+                                get: { taskRosterDrafts[taskId]?.name ?? "" },
+                                set: { v in
+                                    var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
+                                    d.name = v
+                                    taskRosterDrafts[taskId] = d
+                                }
+                            )
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .controlSize(.small)
+                        .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
+                        .layoutPriority(0)
+
+                        Picker(
+                            "Class",
+                            selection: Binding(
+                                get: { taskRosterDrafts[taskId]?.vehicleClass ?? .unknown },
+                                set: { v in
+                                    var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
+                                    d.vehicleClass = v
+                                    taskRosterDrafts[taskId] = d
+                                }
+                            )
+                        ) {
+                            ForEach(FleetVehicleType.allCases, id: \.self) { t in
+                                Text(t.classCode).tag(t)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .controlSize(.small)
+                        .frame(minWidth: 100, idealWidth: 120, maxWidth: 160, alignment: .leading)
+                        .layoutPriority(1)
+
+                        Picker(
+                            "Role",
+                            selection: Binding(
+                                get: { taskRosterDrafts[taskId]?.role ?? .none },
+                                set: { v in
+                                    var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
+                                    d.role = v
+                                    taskRosterDrafts[taskId] = d
+                                }
+                            )
+                        ) {
+                            ForEach(RosterRole.allCases) { c in
+                                Text(c.rawValue.capitalized).tag(c)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .controlSize(.small)
+                        .frame(minWidth: 148, idealWidth: 168, maxWidth: 220, alignment: .leading)
+                        .layoutPriority(1)
+
+                        Picker(
+                            "Slot",
+                            selection: Binding(
+                                get: { taskRosterDrafts[taskId]?.slot ?? .primary },
+                                set: { v in
+                                    var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
+                                    d.slot = v
+                                    if v != .wingman && v != .reserve { d.leaderRosterDeviceId = nil }
+                                    taskRosterDrafts[taskId] = d
+                                }
+                            )
+                        ) {
+                            ForEach(MissionRosterSlotRole.allCases) { r in
+                                Text(r.rawValue.capitalized).tag(r)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .controlSize(.small)
+                        .frame(minWidth: 148, idealWidth: 168, maxWidth: 220, alignment: .leading)
+                        .layoutPriority(1)
+
+                        // Reserve width so switching Slot away from wingman/reserve does not collapse or jump the row.
+                        Group {
+                            let slotNeedsLeader = {
+                                let s = taskRosterDrafts[taskId]?.slot ?? .primary
+                                return s == .wingman || s == .reserve
+                            }()
+                            let primaries = primaryRosterDevices(on: path)
+                            if slotNeedsLeader {
+                                HStack(spacing: 8) {
+                                    Text("Leader")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(theme.textSecondary)
+                                        .fixedSize()
+                                        .padding(.leading, 4)
+                                    if primaries.isEmpty {
+                                        Text("—")
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(theme.textTertiary)
+                                            .lineLimit(1)
+                                    } else {
+                                        Picker(
+                                            "Leader",
+                                            selection: Binding(
+                                                get: { taskRosterDrafts[taskId]?.leaderRosterDeviceId },
+                                                set: { v in
+                                                    var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
+                                                    d.leaderRosterDeviceId = v
+                                                    taskRosterDrafts[taskId] = d
+                                                }
+                                            )
+                                        ) {
+                                            Text("Auto").tag(UUID?.none)
+                                            ForEach(primaries) { p in
+                                                Text(p.name).tag(Optional(p.id))
+                                            }
+                                        }
+                                        .labelsHidden()
+                                        .pickerStyle(.menu)
+                                        .controlSize(.small)
+                                        .frame(minWidth: 120, idealWidth: 140, maxWidth: 200, alignment: .leading)
+                                        .accessibilityLabel("Leader")
+                                    }
+                                }
+                            } else {
+                                Color.clear
+                                    .accessibilityHidden(true)
+                            }
+                        }
+                        .frame(width: Self.rosterAddRowSupportsColumnWidth, alignment: .leading)
+                        .layoutPriority(1)
+
+                        GuardianPrimaryProminentButton(title: "Add") {
+                            addRosterDeviceToTask(taskIndex: taskIndex)
+                        }
+                        .layoutPriority(1)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.blue)
-                    .layoutPriority(1)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(theme.backgroundElevated)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(theme.borderSubtle, lineWidth: 1)
         )
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
@@ -1043,7 +1126,7 @@ private struct MissionWorkspaceView: View {
         let panelWidth = CGFloat(min(560, max(260, 400)))
         HStack(spacing: 0) {
             Spacer(minLength: 0)
-            SidebarOverlayChrome(title: title, onClose: dismissMissionTaskSettingsOverlay) {
+            AppDrawerChrome(title: title, onClose: dismissMissionTaskSettingsOverlay) {
                 MissionTaskSettingsSidebar(
                     task: Binding(
                         get: { draft.routeMacro.tasks[taskIndex] },
@@ -1082,7 +1165,7 @@ private struct MissionWorkspaceView: View {
         let primaries = primaryRosterDevices(on: path)
         HStack(spacing: 0) {
             Spacer(minLength: 0)
-            SidebarOverlayChrome(title: title, onClose: dismissRosterDeviceEditOverlay) {
+            AppDrawerChrome(title: title, onClose: dismissRosterDeviceEditOverlay) {
                 if let deviceIndex = draft.rosterDevices.firstIndex(where: { $0.id == deviceId }) {
                     MissionRosterDeviceSettingsSidebar(
                         device: Binding(
@@ -1322,121 +1405,165 @@ private struct MissionWorkspaceView: View {
                 }
                 .frame(width: mapWidth, height: geo.size.height, alignment: .top)
 
+                Rectangle()
+                    .fill(theme.borderSubtle)
+                    .frame(width: 1)
+                    .frame(height: geo.size.height)
+
                 ZStack(alignment: .topTrailing) {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 12) {
-                            HStack {
+                            HStack(alignment: .center, spacing: 10) {
                                 Text("Tasks")
-                                    .font(.system(size: 15, weight: .semibold))
+                                    .font(.system(size: 14, weight: .semibold))
                                     .foregroundStyle(theme.textPrimary)
                                 Spacer(minLength: 0)
-                                Button {
-                                    let nextNum = draft.routeMacro.tasks.count + 1
-                                    draft.routeMacro.tasks.append(MissionTask(name: "Task \(nextNum)"))
-                                    selectedTaskIndex = draft.routeMacro.tasks.count - 1
-                                    editingTaskIndex = nil
-                                    selectedWaypointIndex = nil
-                                } label: {
-                                    Image(systemName: "plus")
-                                        .appIconGlyph()
-                                }
-                                .buttonStyle(.bordered)
-                                .uniformIconButton()
+                                GuardianThemedButton(
+                                    accent: .primary,
+                                    surface: .solid,
+                                    size: .small,
+                                    shape: .cornered,
+                                    contentSizing: .squareToolbarCell,
+                                    action: {
+                                        let nextNum = draft.routeMacro.tasks.count + 1
+                                        draft.routeMacro.tasks.append(MissionTask(name: "Task \(nextNum)"))
+                                        selectedTaskIndex = draft.routeMacro.tasks.count - 1
+                                        editingTaskIndex = nil
+                                        selectedWaypointIndex = nil
+                                    },
+                                    label: {
+                                        Image(systemName: "plus")
+                                            .font(.system(size: 14, weight: .semibold))
+                                    }
+                                )
+                                .help("Add task")
                             }
 
                             if draft.routeMacro.tasks.isEmpty {
                                 Text("No tasks yet")
+                                    .font(.system(size: 12))
                                     .foregroundStyle(theme.textSecondary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             } else {
                                 ForEach(Array(draft.routeMacro.tasks.enumerated()), id: \.offset) { index, path in
-                                    HStack(alignment: .center, spacing: 12) {
-                                        VStack(alignment: .leading, spacing: 6) {
-                                            TextField(
-                                                "Task name",
-                                                text: Binding(
-                                                    get: { path.name },
-                                                    set: { newValue in
-                                                        draft.routeMacro.tasks[index].name = newValue
+                                    GuardianCard(
+                                        configuration: GuardianCardConfiguration(
+                                            border: .subtle,
+                                            cornerRadius: GuardianCardLayout.cornerRadius,
+                                            bodyPadding: 14
+                                        ),
+                                        body: {
+                                            HStack(alignment: .center, spacing: 12) {
+                                                VStack(alignment: .leading, spacing: 6) {
+                                                    TextField(
+                                                        "Task name",
+                                                        text: Binding(
+                                                            get: { path.name },
+                                                            set: { newValue in
+                                                                draft.routeMacro.tasks[index].name = newValue
+                                                            }
+                                                        )
+                                                    )
+                                                    .textFieldStyle(.plain)
+                                                    .font(.system(size: 15, weight: .semibold))
+                                                    .foregroundStyle(theme.textPrimary)
+
+                                                    VStack(alignment: .leading, spacing: 2) {
+                                                        Text("\(path.waypoints.count) wp")
+                                                            .foregroundStyle(theme.textSecondary)
+                                                        Text(distanceLabel(for: path))
+                                                            .foregroundStyle(theme.textSecondary)
+                                                        Text(durationLabel(for: path))
+                                                            .foregroundStyle(theme.textSecondary)
                                                     }
-                                                )
-                                            )
-                                            .textFieldStyle(.plain)
-                                            .font(.system(size: 15, weight: .semibold))
-                                            .foregroundStyle(theme.textPrimary)
+                                                    .font(.system(size: 12, weight: .medium))
+                                                }
+                                                .frame(maxWidth: .infinity, alignment: .leading)
 
-                                            VStack(alignment: .leading, spacing: 2) {
-                                                Text("\(path.waypoints.count) wp")
-                                                    .foregroundStyle(theme.textSecondary)
-                                                Text(distanceLabel(for: path))
-                                                    .foregroundStyle(theme.textSecondary)
-                                                Text(durationLabel(for: path))
-                                                    .foregroundStyle(theme.textSecondary)
-                                            }
-                                            .font(.system(size: 12, weight: .medium))
-                                        }
-                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                                HStack(spacing: 8) {
+                                                    GuardianThemedButton(
+                                                        accent: .neutral,
+                                                        surface: .outline,
+                                                        size: .small,
+                                                        shape: .cornered,
+                                                        contentSizing: .squareToolbarCell,
+                                                        action: { presentTaskSettingsSidebar(taskIndex: index) },
+                                                        label: {
+                                                            Image(systemName: "gearshape.fill")
+                                                                .font(.system(size: 14, weight: .semibold))
+                                                        }
+                                                    )
+                                                    .help("Task settings")
 
-                                        HStack(spacing: 8) {
-                                            Button {
-                                                presentTaskSettingsSidebar(taskIndex: index)
-                                            } label: {
-                                                Image(systemName: "gearshape.fill")
-                                                    .appIconGlyph()
-                                            }
-                                            .buttonStyle(.bordered)
-                                            .uniformIconButton()
-                                            .help("Task settings")
-
-                                            if editingTaskIndex == index {
-                                                Button {
-                                                    if shouldOfferCloseLoop(path) {
-                                                        pendingCloseLoopTaskIndex = index
+                                                    if editingTaskIndex == index {
+                                                        GuardianThemedButton(
+                                                            accent: .primary,
+                                                            surface: .solid,
+                                                            size: .small,
+                                                            shape: .cornered,
+                                                            contentSizing: .squareToolbarCell,
+                                                            action: {
+                                                                if shouldOfferCloseLoop(path) {
+                                                                    pendingCloseLoopTaskIndex = index
+                                                                } else {
+                                                                    editingTaskIndex = nil
+                                                                    selectedWaypointIndex = nil
+                                                                    persistMissionToStoreNow()
+                                                                    onToast("Task edit mode disabled", .info)
+                                                                }
+                                                            },
+                                                            label: {
+                                                                Image(systemName: "pencil")
+                                                                    .font(.system(size: 14, weight: .semibold))
+                                                            }
+                                                        )
+                                                        .help("Exit task edit mode")
                                                     } else {
-                                                        editingTaskIndex = nil
-                                                        selectedWaypointIndex = nil
-                                                        persistMissionToStoreNow()
-                                                        onToast("Task edit mode disabled", .info)
+                                                        GuardianThemedButton(
+                                                            accent: .primary,
+                                                            surface: .outline,
+                                                            size: .small,
+                                                            shape: .cornered,
+                                                            contentSizing: .squareToolbarCell,
+                                                            action: {
+                                                                editingTaskIndex = index
+                                                                selectedTaskIndex = index
+                                                                pendingOutgoingSegmentKind = .direct
+                                                                onToast("Task edit mode enabled. Click map to add waypoints.", .info)
+                                                            },
+                                                            label: {
+                                                                Image(systemName: "pencil")
+                                                                    .font(.system(size: 14, weight: .semibold))
+                                                            }
+                                                        )
+                                                        .help("Edit route on map")
                                                     }
-                                                } label: {
-                                                    Image(systemName: "pencil")
-                                                        .appIconGlyph()
-                                                }
-                                                .buttonStyle(.borderedProminent)
-                                                .tint(.blue)
-                                                .uniformIconButton()
-                                            } else {
-                                                Button {
-                                                    editingTaskIndex = index
-                                                    selectedTaskIndex = index
-                                                    pendingOutgoingSegmentKind = .direct
-                                                    onToast("Task edit mode enabled. Click map to add waypoints.", .info)
-                                                } label: {
-                                                    Image(systemName: "pencil")
-                                                        .appIconGlyph()
-                                                }
-                                                .buttonStyle(.bordered)
-                                                .uniformIconButton()
-                                            }
 
-                                            Button {
-                                                pendingDeleteTaskIndex = index
-                                            } label: {
-                                                Image(systemName: "trash")
-                                                    .appIconGlyph()
+                                                    GuardianThemedButton(
+                                                        accent: .danger,
+                                                        surface: .outline,
+                                                        size: .small,
+                                                        shape: .cornered,
+                                                        contentSizing: .squareToolbarCell,
+                                                        action: { pendingDeleteTaskIndex = index },
+                                                        label: {
+                                                            Image(systemName: "trash")
+                                                                .font(.system(size: 14, weight: .semibold))
+                                                        }
+                                                    )
+                                                    .help("Delete task")
+                                                }
                                             }
-                                            .buttonStyle(.borderedProminent)
-                                            .tint(.red)
-                                            .uniformIconButton()
                                         }
-                                    }
+                                    )
                                     .contentShape(Rectangle())
                                     .onTapGesture { selectedTaskIndex = index }
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 16)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(theme.backgroundRaised)
-                                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                                    .overlay {
+                                        if selectedTaskIndex == index {
+                                            RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous)
+                                                .strokeBorder(GuardianSemanticColors.infoForeground.opacity(0.45), lineWidth: 2)
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1796,7 +1923,7 @@ private struct MissionWorkspaceView: View {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .center, spacing: 8) {
                     Text("Waypoints")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(theme.textPrimary)
                     Text("\(anchorCount)")
                         .font(.system(size: 12, weight: .bold))
@@ -1814,27 +1941,37 @@ private struct MissionWorkspaceView: View {
                     .labelsHidden()
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 148)
-                    Button {
-                        openBulkWaypointEditor(taskIndex: taskIndex)
-                    } label: {
-                        Image(systemName: "gearshape")
-                            .appIconGlyph()
-                    }
-                    .buttonStyle(.bordered)
+                    GuardianThemedButton(
+                        accent: .neutral,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        contentSizing: .squareToolbarCell,
+                        action: { openBulkWaypointEditor(taskIndex: taskIndex) },
+                        label: {
+                            Image(systemName: "gearshape")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                    )
                     .help("Bulk edit all waypoints")
-                    .uniformIconButton()
-                    Button {
-                        finishEditingTaskFromSidebar(taskIndex: taskIndex)
-                    } label: {
-                        Image(systemName: "checkmark")
-                            .appIconGlyph()
-                    }
-                    .buttonStyle(.borderedProminent)
+                    GuardianThemedButton(
+                        accent: .primary,
+                        surface: .solid,
+                        size: .small,
+                        shape: .cornered,
+                        contentSizing: .squareToolbarCell,
+                        action: { finishEditingTaskFromSidebar(taskIndex: taskIndex) },
+                        label: {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                    )
                     .help("Finish task editing")
-                    .uniformIconButton()
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
+                .frame(maxWidth: .infinity)
+                .background(theme.backgroundRaised)
 
                 Rectangle()
                     .fill(theme.borderSubtle)
@@ -1896,7 +2033,7 @@ private struct MissionWorkspaceView: View {
                 if isSelected {
                     Text("Selected")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(GuardianSemanticColors.infoForeground)
                 }
             }
             Text(waypointPathRoleLabel(waypoint))
@@ -2571,26 +2708,26 @@ private struct MissionWorkspaceView: View {
     }
 
     private func bulkWaypointEditorSheet(taskIndex: Int) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text("Bulk Edit Waypoints")
-                    .font(.system(size: 17, weight: .semibold))
-                Spacer()
-                Button("Cancel") {
-                    bulkWaypointEditorSheetContext = nil
+        Modal(
+            title: "Bulk Edit Waypoints",
+            headerActions: {
+                HStack(spacing: 8) {
+                    GuardianThemedButton(
+                        title: "Cancel",
+                        accent: .danger,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        action: { bulkWaypointEditorSheetContext = nil }
+                    )
+                    GuardianPrimaryProminentButton(title: "Apply") {
+                        applyBulkWaypointValues(taskIndex: taskIndex)
+                    }
                 }
-                .buttonStyle(.bordered)
-                Button("Apply") {
-                    applyBulkWaypointValues(taskIndex: taskIndex)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.blue)
-            }
-            .controlSize(.small)
-            .padding(.bottom, 4)
-
-            ScrollView {
-                Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 10) {
+            },
+            bodyContent: {
+                ScrollView {
+                    Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 10) {
                     GridRow {
                         bulkRowLabel("Altitude")
                         numericInput(
@@ -2821,14 +2958,12 @@ private struct MissionWorkspaceView: View {
                         .disabled(bulkWaypointDraft.transition.cameraMode != .manualBearing)
                         Color.clear
                     }
+                    }
+                    .textFieldStyle(.roundedBorder)
                 }
-                .textFieldStyle(.roundedBorder)
             }
-            .padding(.top, 4)
-        }
-        .padding(16)
+        )
         .frame(minWidth: 700, minHeight: 520)
-        .background(theme.backgroundElevated)
     }
 
     private func bulkRowLabel(_ text: String) -> some View {
@@ -2836,31 +2971,6 @@ private struct MissionWorkspaceView: View {
             .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(theme.textSecondary)
             .frame(width: 132, alignment: .leading)
-    }
-
-    private func card<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        card(title, trailing: { EmptyView() }, content: content)
-    }
-
-    private func card<Trailing: View, Content: View>(
-        _ title: String,
-        @ViewBuilder trailing: () -> Trailing,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(title)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(theme.textPrimary)
-                Spacer()
-                trailing()
-            }
-            content()
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(theme.backgroundRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
     private struct TaskRosterDraft: Equatable {
@@ -2969,11 +3079,7 @@ private struct MissionRosterDeviceSettingsSidebar: View {
                 }
 
                 HStack {
-                    Button("Save") {
-                        onSave()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.blue)
+                    GuardianPrimaryProminentButton(title: "Save", action: onSave)
                     Spacer(minLength: 0)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -3161,11 +3267,7 @@ private struct MissionTaskSettingsSidebar: View {
                 }
 
                 HStack {
-                    Button("Save") {
-                        onSave()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.blue)
+                    GuardianPrimaryProminentButton(title: "Save", action: onSave)
                     Spacer(minLength: 0)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -3186,6 +3288,85 @@ private struct MissionTaskSettingsSidebar: View {
                 content()
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+// MARK: - Mission list / grid cards (shared chrome)
+
+private struct MissionCardMetricBadges: View {
+    let taskCount: Int
+    let vehicleCount: Int
+
+    var body: some View {
+        HStack(spacing: 6) {
+            GuardianBadge(
+                text: "\(taskCount) tasks",
+                accent: .secondary,
+                paint: .outline,
+                size: .small,
+                shape: .cornered
+            )
+            GuardianBadge(
+                text: "\(vehicleCount) vehicles",
+                accent: .secondary,
+                paint: .outline,
+                size: .small,
+                shape: .cornered
+            )
+        }
+    }
+}
+
+private struct MissionCardActionButtons: View {
+    let isArchived: Bool
+    let onArchiveToggle: () -> Void
+    let onClone: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            GuardianThemedButton(
+                accent: .neutral,
+                surface: .outline,
+                size: .small,
+                shape: .cornered,
+                contentSizing: .squareToolbarCell,
+                action: onArchiveToggle,
+                label: {
+                    Image(systemName: isArchived ? "archivebox.fill" : "archivebox")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+            )
+            .help(isArchived ? "Unarchive mission" : "Archive mission")
+
+            GuardianThemedButton(
+                accent: .primary,
+                surface: .outline,
+                size: .small,
+                shape: .cornered,
+                contentSizing: .squareToolbarCell,
+                action: onClone,
+                label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+            )
+            .help("Clone mission")
+
+            GuardianThemedButton(
+                accent: .danger,
+                surface: .outline,
+                size: .small,
+                shape: .cornered,
+                contentSizing: .squareToolbarCell,
+                action: onDelete,
+                label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+            )
+            .help("Delete mission")
         }
     }
 }
@@ -3229,76 +3410,50 @@ private struct MissionRow: View {
     private var vehicleCount: Int { mission.rosterDevices.count }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top, spacing: 12) {
-                MissionCardThumbnailView(mission: mission, fixedLength: 56)
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(alignment: .firstTextBaseline) {
+        GuardianCard(
+            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 10, bodyPadding: 12),
+            body: {
+                HStack(alignment: .center, spacing: 10) {
+                    MissionCardThumbnailView(mission: mission, fixedLength: 52)
+
+                    VStack(alignment: .leading, spacing: 4) {
                         Text(mission.name)
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(.system(size: 15, weight: .semibold))
                             .foregroundStyle(theme.textPrimary)
-                        Spacer()
-                        if mission.isArchived {
-                            Text("Archived")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(theme.textSecondary)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2)
-                                .background(theme.backgroundElevated)
-                                .clipShape(Capsule())
+                            .lineLimit(1)
+
+                        Text(mission.description.isEmpty ? "No description" : mission.description)
+                            .font(.system(size: 11))
+                            .foregroundStyle(theme.textSecondary)
+                            .lineLimit(1)
+
+                        HStack(spacing: 6) {
+                            if mission.isArchived {
+                                GuardianBadge(
+                                    text: "Archived",
+                                    accent: .neutral,
+                                    paint: .light,
+                                    size: .small,
+                                    shape: .pill
+                                )
+                            }
+                            MissionTypeCapsuleBadge(type: mission.type)
+                            MissionCardMetricBadges(taskCount: taskCount, vehicleCount: vehicleCount)
                         }
-                        MissionTypeCapsuleBadge(type: mission.type)
                     }
-                    Text(mission.description.isEmpty ? "No description" : mission.description)
-                        .foregroundStyle(theme.textSecondary)
-                        .lineLimit(2)
-                }
-            }
-            Divider().overlay(.gray.opacity(0.25))
-            Text("Tasks: \(taskCount)")
-                .font(.system(size: 12))
-                .foregroundStyle(theme.textSecondary)
-            Text("Vehicles: \(vehicleCount)")
-                .font(.system(size: 12))
-                .foregroundStyle(theme.textSecondary)
-            HStack(spacing: 8) {
-                Spacer(minLength: 0)
-                Button {
-                    onArchiveToggle()
-                } label: {
-                    Image(systemName: mission.isArchived ? "archivebox.fill" : "archivebox")
-                        .appIconGlyph()
-                }
-                .buttonStyle(.bordered)
-                .uniformIconButton(width: 30, height: 26)
-                .help(mission.isArchived ? "Unarchive mission" : "Archive mission")
 
-                Button {
-                    onClone()
-                } label: {
-                    Image(systemName: "doc.on.doc")
-                        .appIconGlyph()
-                }
-                .buttonStyle(.bordered)
-                .uniformIconButton(width: 30, height: 26)
-                .help("Clone mission")
+                    Spacer(minLength: 6)
 
-                Button {
-                    onDelete()
-                } label: {
-                    Image(systemName: "trash")
-                        .appIconGlyph()
+                    MissionCardActionButtons(
+                        isArchived: mission.isArchived,
+                        onArchiveToggle: onArchiveToggle,
+                        onClone: onClone,
+                        onDelete: onDelete
+                    )
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .uniformIconButton(width: 30, height: 26)
-                .help("Delete mission")
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(theme.backgroundRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        )
         .contentShape(Rectangle())
         .onTapGesture {
             onOpen()
@@ -3320,72 +3475,49 @@ private struct MissionCard: View {
     private var vehicleCount: Int { mission.rosterDevices.count }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            MissionCardThumbnailView(mission: mission, gridBannerBarHeight: 120, gridThumbnailSide: 100)
-            HStack(alignment: .firstTextBaseline) {
-                Text(mission.name)
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(theme.textPrimary)
-                Spacer()
-                if mission.isArchived {
-                    Text("Archived")
-                        .font(.system(size: 10, weight: .semibold))
+        GuardianCard(
+            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 10, bodyPadding: 14),
+            media: {
+                MissionCardThumbnailView(mission: mission, gridBannerBarHeight: 120, gridThumbnailSide: 100)
+            },
+            body: {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(mission.name)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    HStack(alignment: .center, spacing: 6) {
+                        if mission.isArchived {
+                            GuardianBadge(
+                                text: "Archived",
+                                accent: .neutral,
+                                paint: .light,
+                                size: .small,
+                                shape: .pill
+                            )
+                        }
+                        MissionTypeCapsuleBadge(type: mission.type)
+                        MissionCardMetricBadges(taskCount: taskCount, vehicleCount: vehicleCount)
+                        Spacer(minLength: 4)
+                        MissionCardActionButtons(
+                            isArchived: mission.isArchived,
+                            onArchiveToggle: onArchiveToggle,
+                            onClone: onClone,
+                            onDelete: onDelete
+                        )
+                    }
+
+                    Text(mission.description.isEmpty ? "No description" : mission.description)
+                        .font(.system(size: 12))
                         .foregroundStyle(theme.textSecondary)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(theme.backgroundElevated)
-                        .clipShape(Capsule())
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                MissionTypeCapsuleBadge(type: mission.type)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Text(mission.description.isEmpty ? "No description" : mission.description)
-                .foregroundStyle(theme.textSecondary)
-                .lineLimit(2)
-            Divider().overlay(.gray.opacity(0.25))
-            Text("Tasks: \(taskCount)")
-                .font(.system(size: 12))
-                .foregroundStyle(theme.textSecondary)
-            Text("Vehicles: \(vehicleCount)")
-                .font(.system(size: 12))
-                .foregroundStyle(theme.textSecondary)
-            HStack(spacing: 8) {
-                Spacer(minLength: 0)
-                Button {
-                    onArchiveToggle()
-                } label: {
-                    Image(systemName: mission.isArchived ? "archivebox.fill" : "archivebox")
-                        .appIconGlyph()
-                }
-                .buttonStyle(.bordered)
-                .uniformIconButton(width: 30, height: 26)
-                .help(mission.isArchived ? "Unarchive mission" : "Archive mission")
-
-                Button {
-                    onClone()
-                } label: {
-                    Image(systemName: "doc.on.doc")
-                        .appIconGlyph()
-                }
-                .buttonStyle(.bordered)
-                .uniformIconButton(width: 30, height: 26)
-                .help("Clone mission")
-
-                Button {
-                    onDelete()
-                } label: {
-                    Image(systemName: "trash")
-                        .appIconGlyph()
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .uniformIconButton(width: 30, height: 26)
-                .help("Delete mission")
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(theme.backgroundRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        )
         .contentShape(Rectangle())
         .onTapGesture {
             onOpen()
@@ -3398,6 +3530,9 @@ private struct AddMissionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var store: MissionStore
     @EnvironmentObject private var toastCenter: ToastCenter
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     @State private var name = ""
     @State private var description = ""
@@ -3413,24 +3548,31 @@ private struct AddMissionSheet: View {
             title: "New Mission",
             headerActions: {
                 HStack(spacing: 8) {
-                    Button("Cancel") {
-                        dismiss()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
-
-                    Button("Save Mission") {
-                        store.addMission(
-                            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-                            description: description.trimmingCharacters(in: .whitespacesAndNewlines),
-                            type: type
-                        )
-                        toastCenter.show("Mission created", style: .success)
-                        dismiss()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.blue)
-                    .disabled(!canSave)
+                    GuardianThemedButton(
+                        title: "Cancel",
+                        accent: .danger,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        action: { dismiss() }
+                    )
+                    GuardianThemedButton(
+                        title: "Save Mission",
+                        accent: .primary,
+                        surface: .solid,
+                        size: .small,
+                        shape: .cornered,
+                        isEnabled: canSave,
+                        action: {
+                            store.addMission(
+                                name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                                description: description.trimmingCharacters(in: .whitespacesAndNewlines),
+                                type: type
+                            )
+                            toastCenter.show("Mission created", style: .success)
+                            dismiss()
+                        }
+                    )
                 }
             },
             bodyContent: {
@@ -3463,6 +3605,10 @@ private struct CloneMissionSheet: View {
     let onCancel: () -> Void
     let onClone: (String) -> Void
 
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
     @State private var cloneName: String
 
     init(sourceMissionName: String, onCancel: @escaping () -> Void, onClone: @escaping (String) -> Void) {
@@ -3481,31 +3627,37 @@ private struct CloneMissionSheet: View {
             title: "Clone Mission",
             headerActions: {
                 HStack(spacing: 8) {
-                    Button("Cancel") {
-                        onCancel()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
-
-                    Button("Clone Mission") {
-                        onClone(cloneName)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.blue)
-                    .disabled(!canClone)
+                    GuardianThemedButton(
+                        title: "Cancel",
+                        accent: .danger,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        action: onCancel
+                    )
+                    GuardianThemedButton(
+                        title: "Clone Mission",
+                        accent: .primary,
+                        surface: .solid,
+                        size: .small,
+                        shape: .cornered,
+                        isEnabled: canClone,
+                        action: { onClone(cloneName) }
+                    )
                 }
             },
             bodyContent: {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Source mission")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.textSecondary)
                     Text(sourceMissionName)
                         .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(theme.textPrimary)
 
                     Text("New mission name")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.textSecondary)
                     TextField("Mission name", text: $cloneName)
                         .textFieldStyle(.roundedBorder)
                 }
@@ -3521,6 +3673,12 @@ private struct AutoGrowingTextEditor: View {
     let placeholder: String
     let minHeight: CGFloat
     let maxHeight: CGFloat
+    /// Match adjacent `TextField` / `.roundedBorder` fill (`NSColor.textBackgroundColor`).
+    var fieldBackground: Color = Color(nsColor: .textBackgroundColor)
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     private var clampedHeight: CGFloat {
         min(max(max(measuredHeight, minHeight), minHeight), maxHeight)
@@ -3530,20 +3688,22 @@ private struct AutoGrowingTextEditor: View {
         ZStack(alignment: .topLeading) {
             if text.isEmpty {
                 Text(placeholder)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textTertiary)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 8)
             }
             TextEditor(text: $text)
                 .font(.system(size: 14))
+                .foregroundStyle(theme.textPrimary)
+                .scrollContentBackground(.hidden)
                 .frame(height: clampedHeight)
                 .background(
                     RoundedRectangle(cornerRadius: 8)
-                        .fill(Color(NSColor.textBackgroundColor))
+                        .fill(fieldBackground)
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                        .strokeBorder(theme.borderSubtle, lineWidth: 1)
                 )
                 .background(
                     Text(text.isEmpty ? " " : text + "\n")

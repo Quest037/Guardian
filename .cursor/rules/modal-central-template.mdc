@@ -1,0 +1,14 @@
+---
+description: Sheets and structured modals must use the central Modal template
+alwaysApply: true
+---
+
+# Modal central template
+
+When adding or editing a **sheet, popover, or any structured window** that has a title row + body (Guardian HQ style):
+
+- **Must** use ``Modal`` from ``Sources/GuardianHQ/General/Utilities/Templates/Modal.swift`` — do not hand-roll a `VStack` title strip + ad-hoc `Divider` / borders for the same chrome.
+- **Must not** add a second rule line under the header inside ``bodyContent``; ``Modal`` already draws exactly one ``GuardianModalHeaderSeparator`` (1pt ``theme.borderSubtle``). Extra `Divider`s there cause inconsistent headers across the app.
+- Use ``GuardianModalLayout`` for the only supported header/body padding constants; do not duplicate those numbers on individual screens.
+- Prefer shared action buttons (e.g. ``GuardianPrimaryProminentButton``, ``GuardianThemedButton``) in ``headerActions`` so modal actions match the rest of the theme.
+- Reference implementation and live preview: **Theme** panel → sections **Typography** (above) then **Modal shell**.

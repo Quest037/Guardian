@@ -8,7 +8,9 @@ enum AppSection: String, CaseIterable, Identifiable {
     case logs = "Logs"
     case missions = "Missions"
     case missionControl = "Mission Control"
+    case theme = "Theme"
     case settings = "Settings"
+    case plugins = "Plugins"
 
     var id: String { rawValue }
 
@@ -26,8 +28,12 @@ enum AppSection: String, CaseIterable, Identifiable {
             return "list.bullet.rectangle.portrait"
         case .missionControl:
             return "slider.horizontal.3"
+        case .theme:
+            return "paintpalette.fill"
         case .settings:
             return "gearshape.fill"
+        case .plugins:
+            return "puzzlepiece.extension.fill"
         }
     }
 
@@ -45,9 +51,26 @@ enum AppSection: String, CaseIterable, Identifiable {
             return "Server and vehicle log streams."
         case .missionControl:
             return "Operate active missions in real time."
+        case .theme:
+            return "UI chrome catalog and layout defaults."
         case .settings:
             return "MAVSDK, link, and app preferences."
+        case .plugins:
+            return "Built-in integrations and assistants."
         }
+    }
+}
+
+extension AppSection {
+    /// Upper sidebar scroll area (core destinations + ``GuardianPluginSidebarPlacement/primary`` contributions).
+    static var primarySidebarRail: [AppSection] {
+        [.dashboard, .missions, .missionControl, .devices, .liveDrive, .logs]
+    }
+
+    /// Built-in entries for the lower ``GuardianPluginSidebarPlacement/secondary`` rail (Settings, Plugins), above version.
+    /// Plugin rows using ``GuardianPluginSidebarPlacement/secondary`` render before these.
+    static var secondarySidebarSections: [AppSection] {
+        [.settings, .plugins]
     }
 }
 
@@ -57,11 +80,12 @@ struct GuardianHQApp: App {
     @State private var selection: AppSection = .dashboard
     @State private var showingSplash = true
     @StateObject private var toastCenter = ToastCenter()
-    @StateObject private var sidebarOverlay = SidebarOverlay()
+    @StateObject private var appDrawer = AppDrawer()
     @StateObject private var fleetLinkService = FleetLinkService()
     @StateObject private var sitlService = SitlService()
     @StateObject private var generalSettingsStore = GeneralSettingsStore()
     @StateObject private var osmRoutingService = OSMRoutingService()
+    @StateObject private var pluginPreferences = PluginPreferencesStore()
 
     init() {
         NSWindow.allowsAutomaticWindowTabbing = false
@@ -81,9 +105,9 @@ struct GuardianHQApp: App {
                         sitlService: sitlService,
                         generalSettingsStore: generalSettingsStore
                     )
-                        .withSidebarOverlay()
+                        .withAppDrawer()
                         .environmentObject(toastCenter)
-                        .environmentObject(sidebarOverlay)
+                        .environmentObject(appDrawer)
                         .environmentObject(osmRoutingService)
                         .onAppear {
                             // SwiftPM / early launch: re-run after splash so permission + System Settings registration line up with a real NSApplication + window session.
@@ -97,8 +121,13 @@ struct GuardianHQApp: App {
                     UserNotificationService.shared.configure()
                 }
             }
+            .environmentObject(pluginPreferences)
+            .environmentObject(GuardianPluginRegistry.shared)
             .onAppear {
                 sitlService.attachFleetLink(fleetLinkService)
+                GuardianPluginRegistry.shared.bindPreferences(pluginPreferences)
+                GuardianPluginBootstrap.ensureRegistered()
+                FleetCommandsCatalogueBootstrap.ensureRegistered()
             }
             .task {
                 guard showingSplash else { return }

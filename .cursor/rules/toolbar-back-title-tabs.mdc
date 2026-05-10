@@ -1,0 +1,23 @@
+---
+description: Back + title + tabs grouped leading; actions trailing in toolbars
+alwaysApply: true
+---
+
+# Toolbar — back, title, and tabs on the left
+
+When a horizontal **sub-bar / toolbar / chrome strip** combines:
+
+- A **back** (or “up”) control  
+- A **contextual title** (screen or entity name)  
+- **Mode tabs** (e.g. `Picker` with `.segmented`, or equivalent tab buttons)
+
+then lay them out as **one leading cluster**, left to right:
+
+**Back → Title → Tabs** (contiguous, small consistent spacing between items).
+
+- **Do not** put a flexible `Spacer()` (or `frame(maxWidth: .infinity)` on the title) **between** the title and the tabs — that pushes tabs away from the title toward the center or trailing edge.
+- **Leading cluster width:** wrap **Back + Title + Tabs** in an inner `HStack` and apply **`fixedSize(horizontal: true, vertical: false)`** on that stack so a **segmented `Picker` does not stretch** to fill the bar (which visually detaches tabs from the title). Keep the title to a **modest `maxWidth`** (e.g. ≤ **100** for a callsign-style mission name) so long names truncate instead of pushing the tab control.
+- After the leading cluster, use **`Spacer(minLength: …)`** (or equivalent) so **secondary actions** (delete, overflow menu, save, etc.) sit on the **trailing** edge.
+- **Destructive** or **screen-level** actions belong **trailing**, not inside the back/title/tabs group.
+
+Apply this pattern for new inspectors and when refactoring existing strips (e.g. mission workspace, settings subtrees, any “drill-in” header).

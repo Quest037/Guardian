@@ -26,8 +26,12 @@ struct MissionLiveVehicleHealthCard: View {
     /// MC-R vehicle overlay on the Tasks card). The empty-roster placeholder leaves this nil.
     var onTap: (() -> Void)?
 
-    private let cardFill = GuardianDynamicColors.backgroundElevated
-    private let cardStrokeNeutral = GuardianDynamicColors.borderSubtle
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
+    private var cardFill: Color { theme.backgroundElevated }
+    private var cardStrokeNeutral: Color { theme.borderSubtle }
 
     var body: some View {
         Group {
@@ -52,11 +56,11 @@ struct MissionLiveVehicleHealthCard: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(slotTitle)
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(GuardianDynamicColors.textPrimary)
+                            .foregroundStyle(theme.textPrimary)
                             .lineLimit(1)
                         Text(rosterSubtitle)
                             .font(.system(size: 10))
-                            .foregroundStyle(GuardianDynamicColors.textSecondary)
+                            .foregroundStyle(theme.textSecondary)
                             .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -65,7 +69,7 @@ struct MissionLiveVehicleHealthCard: View {
                 if let vehicleID {
                     Text(displayVehicleID(vehicleID))
                         .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(GuardianDynamicColors.textTertiary)
+                        .foregroundStyle(theme.textTertiary)
                         .lineLimit(1)
                         .help("Bridge vehicle key: \(vehicleID)")
                 }
@@ -78,7 +82,7 @@ struct MissionLiveVehicleHealthCard: View {
                     Spacer(minLength: 0)
                     Text("No telemetry")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(GuardianDynamicColors.textSecondary)
+                        .foregroundStyle(theme.textSecondary)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -138,34 +142,34 @@ struct MissionLiveVehicleHealthCard: View {
                         .help(batteryHoverText)
                     Text(batteryPercentText)
                         .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(GuardianDynamicColors.textPrimary.opacity(0.94))
+                        .foregroundStyle(theme.textPrimary.opacity(0.94))
                         .lineLimit(1)
                 }
                 Text(vehicleModel.battery.trendText)
                     .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(GuardianDynamicColors.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Text(vehicleModel.battery.etaText)
                     .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(GuardianDynamicColors.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Rectangle()
-                .fill(GuardianDynamicColors.borderSubtle.opacity(0.9))
+                .fill(theme.borderSubtle.opacity(0.9))
                 .frame(width: 1, height: 58)
 
             VStack(alignment: .trailing, spacing: 4) {
                 Text(vehicleModel.gps.titleText)
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(GuardianDynamicColors.textPrimary.opacity(0.92))
+                    .foregroundStyle(theme.textPrimary.opacity(0.92))
                     .lineLimit(1)
                 Text(vehicleModel.movement.titleText)
                     .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(GuardianDynamicColors.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .trailing)

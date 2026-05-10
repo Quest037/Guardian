@@ -9,7 +9,7 @@ extension MissionRunDetailView {
             HStack(alignment: .firstTextBaseline) {
                 Text("Mission report")
                     .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(GuardianDynamicColors.textPrimary)
+                    .foregroundStyle(theme.textPrimary)
                 Spacer()
                 MissionRunStatusBadge(status: .completed)
             }
@@ -27,10 +27,10 @@ extension MissionRunDetailView {
         return completedReportCardChrome(title: "Outcome", accent: accent) {
             Text(completedOutcomeTitle)
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(GuardianDynamicColors.textPrimary)
+                .foregroundStyle(theme.textPrimary)
             Text(completedOutcomeDetail)
                 .font(.system(size: 13))
-                .foregroundStyle(GuardianDynamicColors.textSecondary)
+                .foregroundStyle(theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -132,14 +132,14 @@ extension MissionRunDetailView {
             if run.assignments.isEmpty {
                 Text("No roster slots.")
                     .font(.system(size: 13))
-                    .foregroundStyle(GuardianDynamicColors.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
             } else {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(run.assignments) { a in
                         let bound = a.attachedFleetVehicleToken != nil || !a.attachedDevice.isEmpty
                         Text("• \(a.slotName)\(bound ? "" : " — unassigned")")
                             .font(.system(size: 13, design: .monospaced))
-                            .foregroundStyle(GuardianDynamicColors.textSecondary)
+                            .foregroundStyle(theme.textSecondary)
                     }
                 }
             }
@@ -154,7 +154,7 @@ extension MissionRunDetailView {
             if run.events.isEmpty {
                 Text("No mission log entries are stored for this run.")
                     .font(.system(size: 13))
-                    .foregroundStyle(GuardianDynamicColors.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
             } else {
                 let events = run.events.count
                 labeledReportRow("Events recorded", "\(events)")
@@ -163,7 +163,7 @@ extension MissionRunDetailView {
                 if errs == 0, warns == 0 {
                     Text("No warnings or errors in the mission log.")
                         .font(.system(size: 12))
-                        .foregroundStyle(GuardianDynamicColors.textTertiary)
+                        .foregroundStyle(theme.textTertiary)
                         .padding(.top, 4)
                 }
             }
@@ -181,58 +181,67 @@ extension MissionRunDetailView {
     var completedMissionLogExportSection: some View {
         let text = liveLogPlainText(events: run.events, phase: run.sessionPhase, plan: run.compiledPlan)
         return VStack(alignment: .leading, spacing: 10) {
-            HStack {
+            HStack(spacing: 8) {
                 Text("Mission log")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(GuardianDynamicColors.textPrimary)
+                    .foregroundStyle(theme.textPrimary)
                 Spacer()
-                Button("Copy") {
-                    copyCompletedLog()
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(text.isEmpty)
+                GuardianThemedButton(
+                    title: "Copy",
+                    accent: .primary,
+                    surface: .solid,
+                    size: .small,
+                    shape: .cornered,
+                    isEnabled: !text.isEmpty,
+                    action: { copyCompletedLog() }
+                )
 
-                Button("Save…") {
-                    saveCompletedLog()
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(text.isEmpty)
+                GuardianThemedButton(
+                    title: "Save…",
+                    accent: .neutral,
+                    surface: .outline,
+                    size: .small,
+                    shape: .cornered,
+                    isEnabled: !text.isEmpty,
+                    action: { saveCompletedLog() }
+                )
 
-                Button("Print…") {
-                    printCompletedLog()
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(text.isEmpty)
+                GuardianThemedButton(
+                    title: "Print…",
+                    accent: .neutral,
+                    surface: .outline,
+                    size: .small,
+                    shape: .cornered,
+                    isEnabled: !text.isEmpty,
+                    action: { printCompletedLog() }
+                )
             }
 
             if text.isEmpty {
                 Text("No mission log entries for this run.")
                     .font(.system(size: 13))
-                    .foregroundStyle(GuardianDynamicColors.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
             } else {
                 ScrollView {
                     Text(text)
                         .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(GuardianDynamicColors.textTertiary)
+                        .foregroundStyle(theme.textTertiary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
                 }
                 .frame(minHeight: 220, idealHeight: 320, maxHeight: 480)
                 .padding(10)
-                .background(GuardianDynamicColors.backgroundElevated)
+                .background(theme.backgroundElevated)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(GuardianDynamicColors.borderSubtle, lineWidth: 1)
+                        .strokeBorder(theme.borderSubtle, lineWidth: 1)
                 )
             }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(GuardianDynamicColors.backgroundRaised)
+        .background(theme.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
@@ -248,7 +257,7 @@ extension MissionRunDetailView {
             VStack(alignment: .leading, spacing: 10) {
                 Text(title)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(GuardianDynamicColors.textPrimary)
+                    .foregroundStyle(theme.textPrimary)
                 content()
             }
             .padding(.leading, 12)
@@ -256,7 +265,7 @@ extension MissionRunDetailView {
             .padding(.trailing, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(GuardianDynamicColors.backgroundRaised)
+        .background(theme.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
@@ -264,11 +273,11 @@ extension MissionRunDetailView {
         HStack(alignment: .firstTextBaseline) {
             Text(label)
                 .font(.system(size: 12))
-                .foregroundStyle(GuardianDynamicColors.textSecondary)
+                .foregroundStyle(theme.textSecondary)
             Spacer(minLength: 12)
             Text(value)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(GuardianDynamicColors.textPrimary)
+                .foregroundStyle(theme.textPrimary)
                 .multilineTextAlignment(.trailing)
         }
     }

@@ -1,17 +1,65 @@
 # TODO
 
+## Clean Up
+- Replace references to "path" with "task" so that we can get rid of legacy concept.
+
+## Theme
+
+- **`guardianInsetCard` / `guardianInsetCardCompact` (`GuardianUIChrome.swift`):** still use `GuardianDynamicColors` for raised surface + border; switch to `GuardianTheme.palette(for:)` (or an environment-backed equivalent) so inset cards match the rest of the tokenized theme and follow SwiftUI `ColorScheme` the same way as modals, sidebars, and MC chrome.
+
+## App System
+
+- Make clicking non-input UI areas unfocus the currently focused input field (desktop blur-on-background-click behavior).
+- **Turn project into real .app:** this allows us to access lots of systems and permissions that our current swift build cannot.
+- **UserNotifications:** hook into MacOS user notifications system so that MC-R can keep user updated if app is running in background. Include **MissionRunEnvironment → operator prompts** (see **Operator prompts subsystem** under `### MissionRunEnvironment`) when replacing the prompt stub with delivered notifications.
+- **Internationalization (i18n):** expand localization coverage beyond Paladin log templates to full UI copy, formatting rules, and locale-aware defaults.
+- **Extended Display Mode:** - convert app into extended display mode aware to allow user to have different main tabs on different displays (vehicles, logs, missions), and to allow them to do the same for MC-R.
+
+## Plugins System
+
+- **Registry:**
+  - Fix up how plugins register to extend the app
+
 ## Vehicles System
 
 - **Vehicle Calibration:**
-  - Catalogue of calibration methods per telemetry element
-    - If A is not working, calibration method is B
-    - If C is not working, calibration method is D
+  - Finalise `Sources/GuardianHQ/Systems/Fleet/Models/FleetTelemetryFieldCatalog.swift` — review every group assignment, display label, and formatter; tighten the per-system field lists used by the Vehicle Inspector calibration tab. Anything not yet catalogued falls through to the Telemetry tab "Other" chip.
+  - Fine tune `Sources/GuardianHQ/Resources/FleetCalibrationAnchors.json` marker positions against the vehicle class artwork.
+  - Soft barometer signal: treat `altitudeAmslM != nil` as "barometer alive" so ArduPilot SITL goes green without `SCALED_PRESSURE` flowing through MAVSDK.
+  - Synthesise `healthAllOk` from the AND of the six per-flag health booleans so Estimator clears "Awaiting telemetry" once all `health` events have arrived.
+  - RC presence gating: hide the RC marker (or label it "No RC bound") until `rcWasAvailableOnce == true`, so it stops being an amber line in pure-sim runs.
+  - Catalogue of calibration methods per telemetry element. **Layer 0 (Fleet Commands
+    Catalogue) ships the comprehensive command set** — see `CommandsCatalogueDoc.md` §6
+    and `CommandsRecipesToDo.md` Stage A. Twenty-one `do.calibrate.*` descriptors are
+    registered, with PX4 wiring the autopilot-driven sensor procedures via the MAVSDK
+    Calibration plugin, raw MAVLink-only procedures through the Guardian
+    `COMMAND_LONG` sender, and both stacks wiring the param-driven cals. The next
+    pass is the **Layer 1
+    recipe catalogue** — Stage C of `CommandsRecipesToDo.md` — which composes the
+    "if A is not working, calibration method is B" routing on top of Layer 0:
+    `recipe.fleet.calibrate.compass`, `.accelerometer`, `.gyro`, `.baro`, `.level`, etc.,
+    each branching on `error.calibrationDeclined` / `.calibrationDidNotConverge` /
+    `.notImplemented` and routing to alternate calibration paths or operator escalation.
   - Manual Calibration Process
     - Create a wizard process to calibrate a vehicle (live)
     - Create a wizard process to calibrate a vehicle (sim)
   
 - **Vehicle Preflight:**
   - Attempt to arm, get errors and utilise calibration catalogue to solve
+  - **Live-mission preflight override surfaces.** The default-deny gate now lives in
+    `MissionControlStore.runSingleVehiclePreflightProbe` (parameter
+    `allowDuringLiveMission: Bool = false`) and the Vehicle Inspector header shows a
+    "Preflight locked" pill when a vehicle is bound to a `.running` / `.paused` /
+    `.recovery` run. Wire deliberate override paths for the legitimate cases:
+    - Reserve drone swap-in (operator confirms before fleet repointing).
+    - Drone-recovery flow (vehicle dropped link / went offline mid-mission and we
+      need to re-probe arm before sending it back to its task).
+    - Plugin authority — Paladin and any future autonomous controller should be able
+      to call the probe with `allowDuringLiveMission: true` from their own
+      reasoning, with an audit-line attribution.
+    Each surface needs a clear confirmation step and an audit entry on the FVM
+    preflight history (`source` field) so post-mission review can see exactly which
+    operator / plugin overrode the gate and why.
 
 
 ### Commands Catalogue
@@ -43,17 +91,6 @@ The controllers system is designed to allow a user to control a linked vehicle w
 
 #### Joystick
 
-
-## Clean Up
-- Replace references to "path" with "task" so that we can get rid of legacy concept.
-
-## App System
-
-- Make clicking non-input UI areas unfocus the currently focused input field (desktop blur-on-background-click behavior).
-- **Turn project into real .app:** this allows us to access lots of systems and permissions that our current swift build cannot.
-- **UserNotifications:** hook into MacOS user notifications system so that MC-R can keep user updated if app is running in background. Include **MissionRunEnvironment → operator prompts** (see **Operator prompts subsystem** under `### MissionRunEnvironment`) when replacing the prompt stub with delivered notifications.
-- **Internationalization (i18n):** expand localization coverage beyond Paladin log templates to full UI copy, formatting rules, and locale-aware defaults.
-- **Extended Display Mode:** - convert app into extended display mode aware to allow user to have different main tabs on different displays (vehicles, logs, missions), and to allow them to do the same for MC-R.
 
 ## Utilities System
 
@@ -159,6 +196,28 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 
 #### Executor
 
+- **Migrate MRE off bespoke `FleetVehicleCommand` dispatch onto the new
+  `FleetCommandsCatalogue` + Recipes system:**
+  - `MissionRunCommandSubsystem` currently builds `FleetVehicleCommand` cases directly
+    (`.arm`, `.gotoCoordinate`, `.uploadAndStartMission`, `.returnToLaunch`, …) and
+    hands them to `FleetLinkService.executeVehicleCommand`. Forward-port it to invoke
+    Layer 1 recipes (Stage B) by name, with the executor running one recipe thread per
+    assigned vehicle and branching on the typed `FleetCommandResponse` taxonomy
+    (`success / error.<kind> / cancelled / timeout`) instead of the current
+    free-form failure strings.
+  - Replace the implicit upload+arm+start composite (`runUploadArmStartMissionPipeline`
+    / `FleetVehicleCommand.uploadAndStartMission`) with the planned
+    `do.mission.upload.start` composite command (or its recipe equivalent), so the
+    only place upload+arm+start logic lives is the catalogue / recipes — not in MRE.
+  - Once every MRE call site goes through a recipe, retire
+    `FleetVehicleCommand.uploadAndStartMission`. The older `FleetCommandCatalog.json`
+    park / returnHome / hold compatibility path has already been deleted in
+    `CommandsRecipesToDo.md` Stage B0; those behaviours now flow through the new
+    Layer 0 command atoms.
+  - Track operator prompts MRE raises today as **escalation events** from the recipe
+    runner rather than ad-hoc `MissionRunPromptCenter` calls so wizards / plugins /
+    UserNotifications all consume the same channel.
+
 #### Commander
 
 #### Logging
@@ -235,3 +294,53 @@ Paladin is Guardian's mission running brain. It takes a mission template into mi
 
 - **Paladin Fleet readiness:**
   - Allow Paladin to auto-calibrate vehicles if possible.
+
+### FleetCommands
+
+Mission atoms still to add under `command.fleet.vehicle.do.mission.*` (already wired:
+`do.mission.upload`):
+
+- clear mission (`do.mission.clear` — MAVSDK `Mission.clearMission()`)
+- start mission (`do.mission.start` — MAVSDK `Mission.startMission()`)
+- pause mission (`do.mission.pause` — MAVSDK `Mission.pauseMission()`)
+- jump to mission item (`do.mission.jumpTo` — MAVSDK `Mission.setCurrentMissionItem(index:)`)
+- download mission (`do.mission.download` — MAVSDK `Mission.downloadMission()`)
+- upload mission with progress stream (variant of `do.mission.upload` — MAVSDK `Mission.uploadMissionWithProgress`)
+- download mission with progress stream (variant of `do.mission.download` — MAVSDK `Mission.downloadMissionWithProgress`)
+- cancel an in-flight mission upload (`cancel.mission.upload` — MAVSDK `Mission.cancelMissionUpload`)
+- cancel an in-flight mission download (`cancel.mission.download` — MAVSDK `Mission.cancelMissionDownload`)
+- check whether mission has finished (`get.mission.finished` — MAVSDK `Mission.isMissionFinished()`)
+- read / write the "RTL after mission completes" flag (`get.mission.rtlAfter`, `do.mission.rtlAfter.set` — MAVSDK `Mission.getReturnToLaunchAfterMission` / `setReturnToLaunchAfterMission`)
+- subscribe to mission progress stream (deferred — `subscribe` verb is post-Stage-A; MAVSDK `Mission.subscribeMissionProgress`)
+
+Composite commands (command-contains-commands, 1 level deep):
+
+- `do.mission.upload.start` — items: `[do.mission.upload, do.mission.start]`
+
+## App Errors
+
+Cross-cutting error system. Foundation only — does not block Commands & Recipes work;
+pull in once the catalogue + recipe runner are settled. Approach is **protocol, not
+envelope**: a core `GuardianError` protocol that each system's existing typed enum
+conforms to, so closed taxonomies stay first-class instead of being type-erased into a
+wrapper.
+
+- Define `GuardianError` protocol with cross-cutting metadata: `system`, `subsystem`,
+  `severity`, `humanDetail`, `stableKindToken`, `cause`, `metadata`.
+- Add supporting `GuardianSystemTag` and `GuardianErrorSeverity` enums (severity
+  drives toast vs persistent log vs UserNotifications routing).
+- Build a kind-token registry so `any GuardianError` round-trips through `Codable`
+  (mirrors the `FleetCommandsCatalogueBootstrap` pattern: each conforming type
+  registers `(stableKindToken, decoder-closure)` at boot).
+- Conform the existing per-system error enums: `FleetLinkError`,
+  `FleetLinkParameterError`, `FleetCommandNameError`, `SitlError`,
+  `OSMRoutingError`, `GuardianPluginIDError`.
+- Add `FleetCommandError: GuardianError` as the typed-error sibling to
+  `FleetCommandResponse` (wraps `FleetCommandErrorKind` + detail + elapsed). Layer 1
+  recipe escalation events use this as their payload type.
+- Switch UI / log / UserNotifications surfaces (`appendVehicleLog`, toast publisher,
+  `MissionRunPromptCenter`, persistent log) to render `any GuardianError` via a
+  single helper. Plain-string paths stay supported during migration.
+- Cause-chain rendering (top-level summary + nested causes, expandable in UI).
+- Persistence: new logs use the `GuardianError`-shape; legacy plain-string log entries
+  stay read-only.

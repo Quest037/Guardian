@@ -9,7 +9,7 @@ struct LiveDriveView: View {
     @ObservedObject var manualControlSettings: ManualControlSettingsStore
     @ObservedObject var generalSettings: GeneralSettingsStore
     @EnvironmentObject private var toastCenter: ToastCenter
-    @EnvironmentObject private var sidebarOverlay: SidebarOverlay
+    @EnvironmentObject private var appDrawer: AppDrawer
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var mapModel = GuardianMapModel(preserveView: true)
     @State private var vehiclePickerVisible = false
@@ -47,7 +47,7 @@ struct LiveDriveView: View {
 
             GeometryReader { geo in
                 let spacing: CGFloat = 14
-                let outerPadding: CGFloat = 16
+                let outerPadding: CGFloat = 20
                 let totalW = geo.size.width
                 let totalH = geo.size.height
                 let contentW = max(0, totalW - (outerPadding * 2))
@@ -92,14 +92,15 @@ struct LiveDriveView: View {
             handleWindowResignKey()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .onChange(of: sidebarOverlay.presentationRevision) { _ in
-            if sidebarOverlay.presented == nil {
+        .background(theme.backgroundBase)
+        .onChange(of: appDrawer.presentationRevision) { _ in
+            if appDrawer.presented == nil {
                 vehiclePickerVisible = false
                 simControlsSidebarVisible = false
             }
         }
         .onDisappear {
-            sidebarOverlay.dismiss()
+            appDrawer.dismiss()
         }
         .sheet(item: $preflightPurpose) { purpose in
             if let vehicle = selectedPickableVehicle,
@@ -165,9 +166,22 @@ struct LiveDriveView: View {
         )
     }
 
+    /// Menu trigger styled like ``GuardianThemedButton`` outline chips (``Menu`` cannot nest a ``Button``).
+    private func subBarMenuChip(_ title: String, foreground: Color, stroke: Color) -> some View {
+        Text(title)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(foreground)
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(stroke, lineWidth: 1.5)
+            )
+    }
+
     private var subBar: some View {
         HStack(spacing: 10) {
-            
             Picker("", selection: $mediaTab) {
                 Text("Map").tag(LiveDriveMediaTab.map)
                 Text("Camera").tag(LiveDriveMediaTab.camera)
@@ -182,24 +196,32 @@ struct LiveDriveView: View {
                 if let sessionStatusText {
                     Text(sessionStatusText)
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(sessionStatusIsError ? Color.orange.opacity(0.95) : .gray)
+                        .foregroundStyle(
+                            sessionStatusIsError ? GuardianSemanticColors.warningStroke : theme.textSecondary
+                        )
                         .lineLimit(1)
                 }
                 if let lastKeyboardCommandText {
                     Text(lastKeyboardCommandText)
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(lastKeyboardCommandFailed ? Color.orange.opacity(0.95) : .gray.opacity(0.92))
+                        .foregroundStyle(
+                            lastKeyboardCommandFailed ? GuardianSemanticColors.warningStroke : theme.textSecondary
+                        )
                         .lineLimit(1)
                 }
 
-                Button("Clear Vehicle") {
-                    Task { await clearLiveDriveVehicleIfIdle() }
-                }
-                .buttonStyle(.bordered)
-                .disabled(selectedVehicleID == nil || store.hasActiveSession)
+                GuardianThemedButton(
+                    title: "Clear Vehicle",
+                    accent: .neutral,
+                    surface: .outline,
+                    size: .small,
+                    shape: .cornered,
+                    isEnabled: selectedVehicleID != nil && !store.hasActiveSession,
+                    action: { Task { await clearLiveDriveVehicleIfIdle() } }
+                )
 
                 if selectedVehicleID != nil {
-                    Menu("Sessions (\(store.completedSessions.count))") {
+                    Menu {
                         Button("Export completed sessions (JSON)…") {
                             if store.promptExportCompletedSessionsToJSON(activeVehicleIDForMeta: selectedVehicleID) {
                                 sessionStatusText = "Exported Live Drive session history."
@@ -207,65 +229,88 @@ struct LiveDriveView: View {
                             }
                         }
                         .disabled(store.completedSessions.isEmpty)
+                    } label: {
+                        subBarMenuChip(
+                            "Sessions (\(store.completedSessions.count))",
+                            foreground: theme.textPrimary,
+                            stroke: theme.borderSubtle
+                        )
                     }
-                    .buttonStyle(.bordered)
+                    .menuStyle(.borderlessButton)
                 }
 
                 if store.hasActiveSession {
-                    Menu("End Session") {
+                    Menu {
                         ForEach(endSessionActions(for: selectedVehicleClass), id: \.label) { action in
                             Button(action.label) {
                                 endLiveDriveSession(with: action.command, label: action.label)
                             }
                         }
+                    } label: {
+                        subBarMenuChip(
+                            "End Session",
+                            foreground: GuardianSemanticColors.dangerForeground,
+                            stroke: GuardianSemanticColors.dangerStroke.opacity(0.65)
+                        )
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
+                    .menuStyle(.borderlessButton)
                 } else {
-                    Button("Start Session") {
-                        if vehicleIsInLiveMission {
-                            startMissionSession()
-                        } else {
-                            startFreestyleSession()
+                    GuardianThemedButton(
+                        title: "Start Session",
+                        accent: .primary,
+                        surface: .solid,
+                        size: .small,
+                        shape: .cornered,
+                        isEnabled: selectedVehicleID != nil && !sessionStartInFlight,
+                        action: {
+                            if vehicleIsInLiveMission {
+                                startMissionSession()
+                            } else {
+                                startFreestyleSession()
+                            }
                         }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.blue)
-                    .disabled(selectedVehicleID == nil || sessionStartInFlight)
+                    )
                 }
 
                 if let selectedVehicleID, isSimulationVehicle(vehicleID: selectedVehicleID) {
-                    Button {
-                        liveSimBatteryDrainRate = generalSettings.defaultSimBatteryDrainRate
-                        if simControlsSidebarVisible {
-                            sidebarOverlay.dismiss(animation: liveDriveSidebarAnimation)
-                            simControlsSidebarVisible = false
-                        } else {
-                            vehiclePickerVisible = false
-                            simControlsSidebarVisible = true
-                            presentLiveDriveSimControlsSidebar()
+                    GuardianNeutralBorderedButton(
+                        systemImage: "gearshape",
+                        help: "SIM live settings",
+                        action: {
+                            liveSimBatteryDrainRate = generalSettings.defaultSimBatteryDrainRate
+                            if simControlsSidebarVisible {
+                                appDrawer.dismiss(animation: liveDriveSidebarAnimation)
+                                simControlsSidebarVisible = false
+                            } else {
+                                vehiclePickerVisible = false
+                                simControlsSidebarVisible = true
+                                presentLiveDriveSimControlsSidebar()
+                            }
                         }
-                    } label: {
-                        Image(systemName: "gearshape")
-                    }
-                    .buttonStyle(.bordered)
-                    .help("SIM live settings")
+                    )
                 }
             } else {
                 Spacer(minLength: 2)
-                Button {
-                    if vehiclePickerVisible {
-                        sidebarOverlay.dismiss(animation: liveDriveSidebarAnimation)
-                        vehiclePickerVisible = false
-                    } else {
-                        simControlsSidebarVisible = false
-                        vehiclePickerVisible = true
-                        presentLiveDriveVehiclePickerSidebar()
+                GuardianThemedButton(
+                    accent: .neutral,
+                    surface: .outline,
+                    size: .small,
+                    shape: .cornered,
+                    action: {
+                        if vehiclePickerVisible {
+                            appDrawer.dismiss(animation: liveDriveSidebarAnimation)
+                            vehiclePickerVisible = false
+                        } else {
+                            simControlsSidebarVisible = false
+                            vehiclePickerVisible = true
+                            presentLiveDriveVehiclePickerSidebar()
+                        }
+                    },
+                    label: {
+                        Label("Vehicle Picker", systemImage: "line.3.horizontal.decrease.circle")
+                            .labelStyle(.titleAndIcon)
                     }
-                } label: {
-                    Label("Vehicle Picker", systemImage: "line.3.horizontal.decrease.circle")
-                }
-                .buttonStyle(.bordered)
+                )
             }
             
         }
@@ -293,36 +338,49 @@ struct LiveDriveView: View {
         .help(store.hasActiveSession ? "End the session to change input device" : "Choose keyboard or controller")
     }
 
-    /// Body only; title + close come from ``SidebarOverlay`` / ``SidebarOverlayChrome``.
+    /// Body only; title + close come from ``AppDrawer`` / ``AppDrawerChrome``.
     private var liveSimControlsSidebarBody: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Battery drain")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(theme.textPrimary)
-            Toggle("Enable drain", isOn: $liveSimBatteryDrainEnabled)
-                .toggleStyle(.switch)
+        GuardianCard(
+            configuration: GuardianCardConfiguration(
+                border: .subtle,
+                cornerRadius: GuardianCardLayout.cornerRadius,
+                bodyPadding: GuardianCardLayout.defaultBodyPadding
+            ),
+            body: {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Battery drain")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(theme.textPrimary)
+                    Toggle("Enable drain", isOn: $liveSimBatteryDrainEnabled)
+                        .toggleStyle(.switch)
 
-            Picker("Drain rate", selection: $liveSimBatteryDrainRate) {
-                ForEach(SimBatteryDrainRate.allCases) { rate in
-                    Text(rate.displayName).tag(rate)
+                    Picker("Drain rate", selection: $liveSimBatteryDrainRate) {
+                        ForEach(SimBatteryDrainRate.allCases) { rate in
+                            Text(rate.displayName).tag(rate)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+
+                    GuardianThemedButton(
+                        title: "Apply",
+                        accent: .primary,
+                        surface: .solid,
+                        size: .small,
+                        shape: .cornered,
+                        isEnabled: selectedVehicleID != nil,
+                        action: { applyLiveSimBatteryDrainSettings() }
+                    )
+
+                    Spacer(minLength: 0)
                 }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-
-            Button("Apply") {
-                applyLiveSimBatteryDrainSettings()
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.blue)
-            .disabled(selectedVehicleID == nil)
-
-            Spacer(minLength: 0)
-        }
+        )
     }
 
     private func presentLiveDriveVehiclePickerSidebar() {
-        sidebarOverlay.present(
+        appDrawer.present(
             title: nil,
             preferredWidth: 380,
             scrimTapDismisses: true,
@@ -333,18 +391,18 @@ struct LiveDriveView: View {
                 selectedVehicleID: selectedVehicleID,
                 onSelect: { vehicle in
                     store.selectVehicle(resolvedVehicleID(for: vehicle))
-                    sidebarOverlay.dismiss(animation: liveDriveSidebarAnimation)
+                    appDrawer.dismiss(animation: liveDriveSidebarAnimation)
                     mapModel.recenter()
                 },
                 onClose: {
-                    sidebarOverlay.dismiss(animation: liveDriveSidebarAnimation)
+                    appDrawer.dismiss(animation: liveDriveSidebarAnimation)
                 }
             )
         }
     }
 
     private func presentLiveDriveSimControlsSidebar() {
-        sidebarOverlay.present(
+        appDrawer.present(
             title: "SIM Live Settings",
             preferredWidth: 340,
             scrimTapDismisses: true,
@@ -571,165 +629,195 @@ struct LiveDriveView: View {
     }
 
     private var mediaCard: some View {
-        Group {
-            switch mediaTab {
-            case .map:
-                GuardianMapView(
-                    model: mapModel,
-                    contextMenuPolicy: GuardianMapContextMenuPolicy(
-                        vehicleActions: [.followVehicle, .stopFollowingVehicle, .centerMarker],
-                        waypointActions: [],
-                        homeActions: []
-                    ),
-                    onContextAction: { event in
-                        guard event.markerType == .vehicle else { return }
-                        switch event.action {
-                        case .followVehicle:
-                            if let markerID = event.markerID, !markerID.isEmpty {
-                                mapModel.followedVehicleMarkerID = markerID
-                                sessionStatusText = "Map follow enabled."
-                                sessionStatusIsError = false
+        GuardianCard(
+            configuration: GuardianCardConfiguration(
+                border: .subtle,
+                cornerRadius: GuardianCardLayout.cornerRadius,
+                bodyPadding: GuardianCardLayout.defaultBodyPadding
+            ),
+            media: {
+                Group {
+                    switch mediaTab {
+                    case .map:
+                        GuardianMapView(
+                            model: mapModel,
+                            contextMenuPolicy: GuardianMapContextMenuPolicy(
+                                vehicleActions: [.followVehicle, .stopFollowingVehicle, .centerMarker],
+                                waypointActions: [],
+                                homeActions: []
+                            ),
+                            onContextAction: { event in
+                                guard event.markerType == .vehicle else { return }
+                                switch event.action {
+                                case .followVehicle:
+                                    if let markerID = event.markerID, !markerID.isEmpty {
+                                        mapModel.followedVehicleMarkerID = markerID
+                                        sessionStatusText = "Map follow enabled."
+                                        sessionStatusIsError = false
+                                    }
+                                case .stopFollowingVehicle:
+                                    mapModel.followedVehicleMarkerID = nil
+                                    sessionStatusText = "Map follow disabled."
+                                    sessionStatusIsError = false
+                                case .centerMarker:
+                                    break
+                                case .deleteWaypoint:
+                                    break
+                                }
                             }
-                        case .stopFollowingVehicle:
-                            mapModel.followedVehicleMarkerID = nil
-                            sessionStatusText = "Map follow disabled."
-                            sessionStatusIsError = false
-                        case .centerMarker:
-                            break
-                        case .deleteWaypoint:
-                            break
+                        )
+                        .task(id: liveDriveMarkerSignature) {
+                            mapModel.vehicleMarkers = selectedVehicleMarker
+                            if let followID = mapModel.followedVehicleMarkerID,
+                               !selectedVehicleMarker.contains(where: { $0.id == followID }) {
+                                mapModel.followedVehicleMarkerID = nil
+                            }
+                        }
+                    case .camera:
+                        ZStack {
+                            theme.backgroundElevated
+                            VStack(spacing: 8) {
+                                Image(systemName: "video")
+                                    .font(.system(size: 30, weight: .medium))
+                                    .foregroundStyle(theme.textSecondary)
+                                Text("Camera view placeholder")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(theme.textSecondary)
+                            }
                         }
                     }
-                )
-                    .task(id: liveDriveMarkerSignature) {
-                        mapModel.vehicleMarkers = selectedVehicleMarker
-                        if let followID = mapModel.followedVehicleMarkerID,
-                           !selectedVehicleMarker.contains(where: { $0.id == followID }) {
-                            mapModel.followedVehicleMarkerID = nil
-                        }
-                    }
-            case .camera:
-                ZStack {
-                    Color.black.opacity(0.35)
-                    VStack(spacing: 8) {
-                        Image(systemName: "video")
-                            .font(.system(size: 30, weight: .medium))
-                            .foregroundStyle(theme.textSecondary)
-                        Text("Camera view placeholder")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(theme.textSecondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay(alignment: .bottomLeading) {
+                    if let label = lastKeyboardCommandText, store.hasActiveSession {
+                        Text(label)
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(
+                                lastKeyboardCommandFailed
+                                    ? GuardianSemanticColors.warningForeground
+                                    : theme.textPrimary
+                            )
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(theme.backgroundRaised.opacity(0.92))
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .strokeBorder(theme.borderSubtle, lineWidth: 1)
+                            )
+                            .padding(8)
                     }
                 }
             }
-        }
-        .overlay(alignment: .bottomLeading) {
-            if let label = lastKeyboardCommandText, store.hasActiveSession {
-                Text(label)
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(lastKeyboardCommandFailed ? Color.orange.opacity(0.95) : Color.white.opacity(0.92))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.black.opacity(0.35))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .padding(8)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(theme.backgroundRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        )
     }
 
     private var telemetryCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 10) {
-                if let vehicle = selectedPickableVehicle {
-                    HStack(spacing: 10) {
-                        telemetryVehicleBadge(for: vehicle)
-                            .frame(width: 34, height: 28)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(telemetryHeaderName(for: vehicle))
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(theme.textPrimary)
-                            Text(telemetryHeaderSubtitle(for: vehicle))
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(theme.textSecondary)
-                        }
-                    }
-                } else {
-                    Text("Vehicle health / telemetry")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(theme.textPrimary)
-                }
-                Spacer(minLength: 8)
-                if let hub = selectedHub {
-                    HStack(spacing: 8) {
-                        telemetryPill("Mode", hub.flightMode.isEmpty ? "—" : hub.flightMode)
-                        telemetryPill(
-                            "Armed",
-                            hub.isArmed ? "Yes" : "No",
-                            accent: hub.isArmed ? Color.green : Color.gray.opacity(0.7)
-                        )
-                        telemetryPill("Battery", hub.batteryRemainingPercent.map { "\(Int(round($0)))%" } ?? "—")
-                        telemetryPill("GPS", hub.gpsFixType ?? "—")
-                    }
-                }
-            }
-            if let hub = selectedHub {
+        GuardianCard(
+            configuration: GuardianCardConfiguration(
+                border: .none,
+                cornerRadius: GuardianCardLayout.cornerRadius,
+                bodyPadding: 12
+            ),
+            header: {
                 HStack(alignment: .top, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 8) {
-                            telemetryPrimaryBox(
-                                "Altitude",
-                                displayAltitudeText(for: hub)
-                            )
-                            telemetryPrimaryBox(
-                                "Heading",
-                                hub.headingDeg.map { String(format: "%.0f°", $0) } ?? "—"
-                            )
+                    if let vehicle = selectedPickableVehicle {
+                        HStack(spacing: 10) {
+                            telemetryVehicleBadge(for: vehicle)
+                                .frame(width: 34, height: 28)
+                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(telemetryHeaderName(for: vehicle))
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(theme.textPrimary)
+                                Text(telemetryHeaderSubtitle(for: vehicle))
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(theme.textSecondary)
+                            }
                         }
-
+                    } else {
+                        Text("Vehicle health / telemetry")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(theme.textPrimary)
+                    }
+                    Spacer(minLength: 8)
+                    if let hub = selectedHub {
                         HStack(spacing: 8) {
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(theme.borderSubtle.opacity(0.5))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .strokeBorder(theme.borderSubtle, lineWidth: 1)
-                                )
+                            telemetryPill("Mode", hub.flightMode.isEmpty ? "—" : hub.flightMode)
+                            telemetryPill(
+                                "Armed",
+                                hub.isArmed ? "Yes" : "No",
+                                accent: hub.isArmed
+                                    ? GuardianSemanticColors.successBackground
+                                    : theme.borderSubtle
+                            )
+                            telemetryPill("Battery", hub.batteryRemainingPercent.map { "\(Int(round($0)))%" } ?? "—")
+                            telemetryPill("GPS", hub.gpsFixType ?? "—")
                         }
-                        .frame(height: 42)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Messages")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(theme.textSecondary)
-                        Text("No active messages.")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(theme.textTertiary)
-                            .lineLimit(3)
-                    }
-                    .padding(8)
-                    .frame(width: 220, alignment: .topLeading)
-                    .background(theme.borderSubtle.opacity(0.4))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
-            } else {
-                Text("Select a vehicle to view telemetry.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(theme.textSecondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            },
+            body: {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let hub = selectedHub {
+                        HStack(alignment: .top, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(spacing: 8) {
+                                    telemetryPrimaryBox(
+                                        "Altitude",
+                                        displayAltitudeText(for: hub)
+                                    )
+                                    telemetryPrimaryBox(
+                                        "Heading",
+                                        hub.headingDeg.map { String(format: "%.0f°", $0) } ?? "—"
+                                    )
+                                }
+
+                                HStack(spacing: 8) {
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .fill(theme.borderSubtle.opacity(0.5))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                .strokeBorder(theme.borderSubtle, lineWidth: 1)
+                                        )
+                                }
+                                .frame(height: 42)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Messages")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(theme.textSecondary)
+                                Text("No active messages.")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(theme.textTertiary)
+                                    .lineLimit(3)
+                            }
+                            .padding(8)
+                            .frame(width: 220, alignment: .topLeading)
+                            .background(theme.backgroundElevated)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .strokeBorder(theme.borderSubtle, lineWidth: 1)
+                            )
+                        }
+                    } else {
+                        Text("Select a vehicle to view telemetry.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(theme.textSecondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
-            Spacer(minLength: 0)
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(theme.backgroundRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(telemetryCardBorderColor, lineWidth: 1.5)
         )
+        .overlay {
+            RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous)
+                .strokeBorder(telemetryCardBorderColor, lineWidth: 1.5)
+        }
     }
 
     private var telemetryCardBorderColor: Color {
@@ -777,35 +865,38 @@ struct LiveDriveView: View {
     }
 
     private var logCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(logHeaderTitle)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(theme.textPrimary)
-                Spacer(minLength: 8)
-                if selectedVehicleID != nil {
-                    Button {
-                        copyLiveDriveLogToPasteboard()
-                    } label: {
-                        Label("Copy", systemImage: "doc.on.doc")
+        GuardianCard(
+            configuration: GuardianCardConfiguration(
+                border: .subtle,
+                cornerRadius: GuardianCardLayout.cornerRadius,
+                bodyPadding: GuardianCardLayout.defaultBodyPadding
+            ),
+            header: {
+                HStack(spacing: 10) {
+                    Text(logHeaderTitle)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(theme.textPrimary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if selectedVehicleID != nil {
+                        GuardianPrimaryProminentButton(title: "Copy") {
+                            copyLiveDriveLogToPasteboard()
+                        }
+                        .help("Copy log text to the clipboard")
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("Copy log text to the clipboard")
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            },
+            body: {
+                ScrollView {
+                    Text(logText)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(theme.textTertiary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
-
-            ScrollView {
-                Text(logText)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(theme.textTertiary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-        }
-        .padding(12)
-        .background(theme.backgroundRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        )
     }
 
     private var logHeaderTitle: String {
@@ -1229,7 +1320,7 @@ private struct LiveDriveVehiclePickerSidebar: View {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 18, weight: .medium))
                         .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.textSecondary)
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.cancelAction)
@@ -1252,48 +1343,54 @@ private struct LiveDriveVehiclePickerSidebar: View {
                             Button {
                                 onSelect(vehicle)
                             } label: {
-                                VStack(alignment: .leading, spacing: 10) {
-                                    ZStack(alignment: .topTrailing) {
-                                        HStack(spacing: 14) {
-                                            vehicleThumbnail(vehicle)
-                                                .frame(width: 72, height: 56)
-                                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                GuardianCard(
+                                    configuration: GuardianCardConfiguration(
+                                        border: .none,
+                                        cornerRadius: GuardianCardLayout.cornerRadius,
+                                        bodyPadding: GuardianCardLayout.defaultBodyPadding
+                                    ),
+                                    body: {
+                                        VStack(alignment: .leading, spacing: 10) {
+                                            ZStack(alignment: .topTrailing) {
+                                                HStack(spacing: 14) {
+                                                    vehicleThumbnail(vehicle)
+                                                        .frame(width: 72, height: 56)
+                                                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-                                            VStack(alignment: .leading, spacing: 4) {
-                                                Text(vehicle.title)
-                                                    .font(.system(size: 15, weight: .semibold))
-                                                    .foregroundStyle(theme.textPrimary)
-                                                    .multilineTextAlignment(.leading)
-                                                Text(vehicle.lifecycleStatus.mediumLabel)
-                                                    .font(.system(size: 11, weight: .semibold))
-                                                    .foregroundStyle(vehicle.lifecycleStatus.color.uiColor.opacity(0.95))
-                                                    .lineLimit(1)
-                                                Text(vehicle.vehicleShortID)
-                                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                                    .foregroundStyle(theme.textSecondary)
-                                                    .lineLimit(1)
-                                            }
-                                            Spacer(minLength: 0)
-                                        }
+                                                    VStack(alignment: .leading, spacing: 4) {
+                                                        Text(vehicle.title)
+                                                            .font(.system(size: 15, weight: .semibold))
+                                                            .foregroundStyle(theme.textPrimary)
+                                                            .multilineTextAlignment(.leading)
+                                                        Text(vehicle.lifecycleStatus.mediumLabel)
+                                                            .font(.system(size: 11, weight: .semibold))
+                                                            .foregroundStyle(vehicle.lifecycleStatus.color.uiColor.opacity(0.95))
+                                                            .lineLimit(1)
+                                                        Text(vehicle.vehicleShortID)
+                                                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                                            .foregroundStyle(theme.textSecondary)
+                                                            .lineLimit(1)
+                                                    }
+                                                    Spacer(minLength: 0)
+                                                }
 
-                                        HStack(spacing: 8) {
-                                            FleetAutopilotStackBadge(stack: vehicle.autopilotStack)
-                                            FleetLiveSimBadge(isSimulation: vehicle.isSimulation)
-                                            if isSelected(vehicle) {
-                                                Image(systemName: "checkmark.circle.fill")
-                                                    .foregroundStyle(.blue)
+                                                HStack(spacing: 8) {
+                                                    FleetAutopilotStackBadge(stack: vehicle.autopilotStack)
+                                                    FleetLiveSimBadge(isSimulation: vehicle.isSimulation)
+                                                    if isSelected(vehicle) {
+                                                        Image(systemName: "checkmark.circle.fill")
+                                                            .foregroundStyle(GuardianSemanticColors.infoForeground)
+                                                    }
+                                                }
                                             }
                                         }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
                                     }
-                                }
-                                .padding(12)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(theme.backgroundRaised)
-                                .clipShape(RoundedRectangle(cornerRadius: 10))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 10)
-                                        .strokeBorder(vehicle.lifecycleStatus.color.uiColor.opacity(0.7), lineWidth: 1)
                                 )
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous)
+                                        .strokeBorder(vehicle.lifecycleStatus.color.uiColor.opacity(0.7), lineWidth: 1)
+                                }
                             }
                             .buttonStyle(.plain)
                         }

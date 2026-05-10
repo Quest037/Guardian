@@ -44,6 +44,17 @@ final class FleetLinkService: ObservableObject {
     @Published private(set) var vehicleStatusByVehicleID: [String: VehicleLifecycleStatus] = [:]
     @Published private(set) var isSimulateEnabled = true
 
+    /// Publishes intermediate and terminal events from in-flight MAVSDK Calibration
+    /// plugin procedures. Layer 1 recipe runners / Layer 2 wizards / plugins subscribe
+    /// here to surface progress percentages, operator prompts ("Rotate vehicle"), and
+    /// cancellation. The Layer 0 catalogue still returns one terminal
+    /// ``FleetCommandResponse`` per `do.calibrate.*` invocation; this side channel is
+    /// purely supplementary.
+    var calibrationProgressEventsPublisher: AnyPublisher<FleetCalibrationProgressEvent, Never> {
+        calibrationProgressSubject.eraseToAnyPublisher()
+    }
+    private let calibrationProgressSubject = PassthroughSubject<FleetCalibrationProgressEvent, Never>()
+
     private final class VehicleSession {
         let vehicleID: String
         let systemID: Int
@@ -699,6 +710,40 @@ final class FleetLinkService: ObservableObject {
         return FleetVehicleModel.defaultMapColorHex(forVehicleID: vehicleID)
     }
 
+    /// Records a single-vehicle preflight probe outcome on the FVM.
+    ///
+    /// Designed to be called by **either** the manual calibration modal (e.g. `source = "calibrationModal.manual"`)
+    /// or in-process plugins running their own preflight / auto-calibrate cycles (e.g. Paladin
+    /// `source = "paladin.autocal.armCheck"`). The newest entry is overlaid onto
+    /// ``FleetVehicleModel.collections.calibration`` so a refused arm escalates the matching marker on
+    /// the canvas. History is capped to ``FleetVehicleModel.preflightHistoryCap`` entries.
+    func recordPreflightResult(
+        vehicleID: String,
+        result: SingleVehiclePreflightProbeResult,
+        source: String
+    ) {
+        ensureVehicleModel(vehicleID: vehicleID, systemID: nil, initialStatus: .init(stage: .connecting))
+        guard var model = vehicleModelsByVehicleID[vehicleID] else { return }
+        let entry = PreflightProbeHistoryEntry(source: source, result: result)
+        model.recordPreflight(entry)
+        vehicleModelsByVehicleID[vehicleID] = model
+        appendVehicleLog(
+            "Preflight outcome recorded [source=\(source)] \(result.passed ? "passed" : "failed"): \(result.detail)",
+            vehicleID: vehicleID
+        )
+    }
+
+    /// Clears the FVM preflight history (operator dismiss in the calibration modal banner, or plugin
+    /// reset before a new auto-calibrate sequence). Recomputes the calibration collection so any
+    /// preflight overlay is removed from the canvas.
+    func clearPreflightHistory(vehicleID: String) {
+        guard var model = vehicleModelsByVehicleID[vehicleID] else { return }
+        guard !model.functions.preflightHistory.isEmpty else { return }
+        model.clearPreflightHistory()
+        vehicleModelsByVehicleID[vehicleID] = model
+        appendVehicleLog("Preflight history cleared.", vehicleID: vehicleID)
+    }
+
     /// Raise the gate so lower-priority sources stop issuing (e.g. `.manualTakeover` blocks automation until reset to `.missionControl` / `.paladin`).
     func setCommandAuthorityGate(vehicleID: String, minimumCategory: FleetVehicleCommandCategory) {
         ensureVehicleModel(vehicleID: vehicleID, systemID: nil, initialStatus: .init(stage: .connecting))
@@ -809,12 +854,54 @@ final class FleetLinkService: ObservableObject {
             )
         case .uploadAndStartMission:
             preconditionFailure("uploadAndStartMission must use runUploadArmStartMissionPipeline")
+        case .uploadMission(let items):
+            completion = completionForUploadMissionOnly(
+                items: items,
+                vehicleID: vehicleID,
+                session: session
+            )
         case .manualControl(let manual):
             completion = completionForManualControl(
                 manual,
                 vehicleID: vehicleID,
                 session: session
             )
+        case .calibrateMavsdk(let kind):
+            completion = completionForMavsdkCalibration(
+                kind: kind,
+                vehicleID: vehicleID,
+                session: session
+            )
+        case .mavlinkCommandLong(let request):
+            completion = completionForMavlinkCommandLong(
+                request: request,
+                vehicleID: vehicleID,
+                session: session
+            )
+        case .cancelCalibration:
+            completion = session.drone.calibration.cancel()
+        case .setParameterFloat(let name, let value):
+            completion = completionForSetParameterFloatWithReadBack(
+                name: name,
+                value: Float(value),
+                vehicleID: vehicleID,
+                session: session
+            )
+        case .setParameterInt(let name, let value):
+            completion = completionForSetParameterIntWithReadBack(
+                name: name,
+                value: value,
+                vehicleID: vehicleID,
+                session: session
+            )
+        case .setMode(let mode):
+            completion = completionForSetMode(
+                mode: mode,
+                vehicleID: vehicleID,
+                session: session
+            )
+        case .rebootAutopilot:
+            completion = session.drone.action.reboot()
         }
 
         completion
@@ -1943,6 +2030,8 @@ final class FleetLinkService: ObservableObject {
             )
         case .uploadAndStartMission(let items):
             return "uploadAndStartMission(\(items.count) items)"
+        case .uploadMission(let items):
+            return "uploadMission(\(items.count) items)"
         case .returnToLaunch:
             return "returnToLaunch"
         case .land:
@@ -1951,7 +2040,161 @@ final class FleetLinkService: ObservableObject {
             return "idle(manualMode)"
         case .manualControl(let manual):
             return "manualControl(intent=\(manual.intent.rawValue) class=\(manual.vehicleClass.rawValue))"
+        case .calibrateMavsdk(let kind):
+            return "calibrateMavsdk(\(kind.rawValue))"
+        case .mavlinkCommandLong(let request):
+            return "mavlinkCommandLong(\(request.command) \(request.humanLabel))"
+        case .cancelCalibration:
+            return "cancelCalibration"
+        case .setParameterFloat(let name, let value):
+            return String(format: "setParameterFloat(name=%@ value=%.6f)", name, value)
+        case .setParameterInt(let name, let value):
+            return "setParameterInt(name=\(name) value=\(value))"
+        case .setMode(let mode):
+            return "setMode(\(mode.rawValue))"
+        case .rebootAutopilot:
+            return "rebootAutopilot"
         }
+    }
+
+    /// Upload-only mission dispatch.
+    ///
+    /// Mirrors the **upload prelude** of ``runUploadArmStartMissionPipeline`` (upload the
+    /// plan, then reset the autopilot's current waypoint to 0 so a re-uploaded plan
+    /// always starts from the first item) — but **stops there**. Arm and start are
+    /// caller / recipe responsibilities. Powers `command.fleet.vehicle.do.mission.upload`
+    /// via ``FleetVehicleCommand/uploadMission(items:)``.
+    private func completionForUploadMissionOnly(
+        items: [Mavsdk.Mission.MissionItem],
+        vehicleID: String,
+        session: VehicleSession
+    ) -> Completable {
+        let plan = Mavsdk.Mission.MissionPlan(missionItems: items)
+        let drone = session.drone
+        appendVehicleLog(
+            "Uploading mission plan (\(items.count) item(s)); will reset current waypoint to 0…",
+            vehicleID: vehicleID
+        )
+        return drone.mission.uploadMission(missionPlan: plan)
+            .andThen(drone.mission.setCurrentMissionItem(index: 0))
+    }
+
+    /// Bridge a MAVSDK Calibration plugin `Observable<ProgressData>` into the existing
+    /// `Completable` dispatch shape used by `executeVehicleCommand`.
+    ///
+    /// MAVSDK's calibration entrypoints (`calibrateGyro`, `calibrateAccelerometer`, …)
+    /// emit a stream of progress events and terminate on `onCompleted` (success) or
+    /// `onError` (failure / operator cancel via `calibration.cancel()`). We discard the
+    /// progress payloads in v1 — recipes (Stage B) and the operator wizard (Stage E) get
+    /// a single terminal outcome until we add a progress-aware response shape.
+    ///
+    /// Returning a `Disposables.create` around the inner subscription means a downstream
+    /// `dispose()` (e.g. `session.bag` torn down on disconnect) propagates into the
+    /// MAVSDK calibration stream, releasing it cleanly.
+    private func completionForMavsdkCalibration(
+        kind: MavsdkCalibrationKind,
+        vehicleID: String,
+        session: VehicleSession
+    ) -> Completable {
+        let observable: Observable<Calibration.ProgressData>
+        switch kind {
+        case .gyro:
+            observable = session.drone.calibration.calibrateGyro()
+        case .accelerometer:
+            observable = session.drone.calibration.calibrateAccelerometer()
+        case .magnetometer:
+            observable = session.drone.calibration.calibrateMagnetometer()
+        case .levelHorizon:
+            observable = session.drone.calibration.calibrateLevelHorizon()
+        case .gimbalAccelerometer:
+            observable = session.drone.calibration.calibrateGimbalAccelerometer()
+        }
+        let subject = self.calibrationProgressSubject
+        return Completable.create { completable in
+            let inner = observable.subscribe(
+                onNext: { progress in
+                    let phase: FleetCalibrationProgressEvent.Phase
+                    let fraction: Double?
+                    if progress.hasProgress {
+                        fraction = Double(progress.progress)
+                        phase = .progress
+                    } else if progress.hasStatusText {
+                        fraction = nil
+                        phase = .operatorPrompt
+                    } else {
+                        fraction = nil
+                        phase = .progress
+                    }
+                    subject.send(
+                        FleetCalibrationProgressEvent(
+                            vehicleID: vehicleID,
+                            kind: kind,
+                            phase: phase,
+                            progressFraction: fraction,
+                            statusText: progress.hasStatusText ? progress.statusText : nil,
+                            timestamp: Date()
+                        )
+                    )
+                },
+                onError: { error in
+                    let detail = (error as NSError).localizedDescription
+                    if Self.isCalibrationCancellationDetail(detail) {
+                        subject.send(
+                            FleetCalibrationProgressEvent(
+                                vehicleID: vehicleID,
+                                kind: kind,
+                                phase: .cancelled,
+                                progressFraction: nil,
+                                statusText: nil,
+                                timestamp: Date()
+                            )
+                        )
+                    } else {
+                        subject.send(
+                            FleetCalibrationProgressEvent(
+                                vehicleID: vehicleID,
+                                kind: kind,
+                                phase: .failed(detail: detail),
+                                progressFraction: nil,
+                                statusText: nil,
+                                timestamp: Date()
+                            )
+                        )
+                    }
+                    completable(.error(error))
+                },
+                onCompleted: {
+                    subject.send(
+                        FleetCalibrationProgressEvent(
+                            vehicleID: vehicleID,
+                            kind: kind,
+                            phase: .completed,
+                            progressFraction: 1.0,
+                            statusText: nil,
+                            timestamp: Date()
+                        )
+                    )
+                    completable(.completed)
+                }
+            )
+            return Disposables.create { inner.dispose() }
+        }
+    }
+
+    /// Heuristic for "this MAVSDK Calibration error means the calibration was
+    /// cancelled". Mirrored by the catalogue's stack-converter normaliser so the
+    /// Layer 0 outcome surfaces as ``FleetCommandResponse/Outcome/cancelled`` rather
+    /// than `.error(.unknown)`. Kept narrow because false positives (treating a
+    /// genuine failure as a cancellation) would mute real errors.
+    nonisolated static func isCalibrationCancellationDetail(_ detail: String) -> Bool {
+        let lower = detail.lowercased()
+        if lower.contains("cancelled") || lower.contains("canceled") {
+            return true
+        }
+        if lower.contains("mav_result_canceled") || lower.contains("mav_result_cancelled") {
+            return true
+        }
+        return false
     }
 
     private func completionForManualControl(
@@ -2105,6 +2348,151 @@ final class FleetLinkService: ObservableObject {
         }
     }
 
+    /// Set the autopilot's flight / drive mode using a real, stack-specific transport.
+    ///
+    /// PX4 → raw MAVLink `SET_MODE` to PX4's GCS UDP port via ``Px4ModeCommander``.
+    /// MAVSDK Swift's `Action` plugin has no `setMode(...)` helper, and the `Shell`
+    /// plugin path silently drops `commander mode <name>` because PX4 SITL doesn't
+    /// run a `mavlink_shell` instance on the Onboard link that `mavsdk_server`
+    /// connects through. See ``Px4ModeCommander`` for the long-form rationale.
+    ///
+    /// ArduPilot → `mode <name>` over the MAVSDK `Shell` plugin. AP SITL routes shell
+    /// bytes through its mavlink_shell so this path actually changes mode.
+    ///
+    /// `unknown` stack → try the AP shell path first; if it errors, fall back to the
+    /// PX4 raw path. Same heuristic as ``completionForIdleManualMode``.
+    ///
+    /// Failure detail strings include the literal phrase `"mode not supported"` for
+    /// stack/mode combinations the autopilot cannot honour, so the catalogue's
+    /// outcome normaliser classifies them as ``FleetCommandErrorKind/modeNotSupported``.
+    private func completionForSetMode(
+        mode: FleetVehicleMode,
+        vehicleID: String,
+        session: VehicleSession
+    ) -> Completable {
+        let stack = vehicleModelsByVehicleID[vehicleID]?.data.telemetry?.autopilotStack
+            ?? hubTelemetryByVehicleID[vehicleID]?.autopilotStack
+            ?? .unknown
+        let universalClass = vehicleModelsByVehicleID[vehicleID]?.data.vehicleType.universalClass
+            ?? .unknown
+
+        switch stack {
+        case .px4:
+            return px4SetModeCompletable(
+                mode: mode,
+                vehicleID: vehicleID,
+                session: session
+            )
+        case .ardupilot:
+            return ardupilotSetModeCompletable(
+                mode: mode,
+                vehicleID: vehicleID,
+                session: session,
+                vehicleClass: universalClass
+            )
+        case .unknown:
+            return ardupilotSetModeCompletable(
+                mode: mode,
+                vehicleID: vehicleID,
+                session: session,
+                vehicleClass: universalClass
+            )
+            .catch { _ in
+                self.px4SetModeCompletable(
+                    mode: mode,
+                    vehicleID: vehicleID,
+                    session: session
+                )
+            }
+        }
+    }
+
+    /// PX4 SET_MODE dispatch. `brake` returns a "mode not supported" failure because
+    /// PX4 has no Brake mode (recipes can branch on `.modeNotSupported`).
+    private func px4SetModeCompletable(
+        mode: FleetVehicleMode,
+        vehicleID: String,
+        session: VehicleSession
+    ) -> Completable {
+        guard let mapping = Self.px4MainSubMode(for: mode) else {
+            return Completable.error(NSError(
+                domain: "FleetLinkService",
+                code: 9,
+                userInfo: [NSLocalizedDescriptionKey: "PX4 mode '\(mode.rawValue)' is not supported (mode not supported)."]
+            ))
+        }
+        return sendPx4SetModeCompletable(
+            vehicleID: vehicleID,
+            session: session,
+            mainMode: mapping.main,
+            subMode: mapping.sub,
+            logTag: "do.mode=\(mode.rawValue)"
+        )
+    }
+
+    /// PX4 main-mode + AUTO sub-mode mapping. AUTO modes encode the sub-mode in
+    /// `custom_mode`'s high byte; non-AUTO modes leave it at zero.
+    /// Source: PX4's `commander/px4_custom_mode.h`.
+    private static func px4MainSubMode(
+        for mode: FleetVehicleMode
+    ) -> (main: Px4ModeCommander.MainMode, sub: UInt8)? {
+        switch mode {
+        case .manual:    return (.manual,   0)
+        case .hold:      return (.auto,     3)   // PX4 AUTO_LOITER
+        case .auto:      return (.auto,     4)   // PX4 AUTO_MISSION
+        case .mission:   return (.auto,     4)
+        case .rtl:       return (.auto,     5)   // PX4 AUTO_RTL
+        case .landMode:  return (.auto,     6)   // PX4 AUTO_LAND
+        case .guided:    return (.offboard, 0)   // closest analogue PX4 has
+        case .brake:     return nil               // PX4 has no brake mode
+        case .surface:   return nil               // PX4 has no UUV stack / SURFACE mode
+        }
+    }
+
+    /// ArduPilot `mode <name>` dispatch via MAVSDK Shell plugin. Hold maps to the
+    /// class-correct shell mode (`mode hold` for rovers / boats, `mode loiter` for
+    /// UAVs / UUVs); brake is sent verbatim because AP Copter accepts it but AP
+    /// Rover / Plane will reject — the rejection bubbles up through the Shell
+    /// completable and the converter classifies it as `.modeNotSupported`.
+    private func ardupilotSetModeCompletable(
+        mode: FleetVehicleMode,
+        vehicleID: String,
+        session: VehicleSession,
+        vehicleClass: UniversalVehicleClass
+    ) -> Completable {
+        let name = Self.ardupilotShellModeName(for: mode, vehicleClass: vehicleClass)
+        appendVehicleLog(
+            "ArduPilot SHELL `mode \(name)` sent (do.mode=\(mode.rawValue), class=\(vehicleClass.rawValue)).",
+            vehicleID: vehicleID
+        )
+        return session.drone.shell.send(command: "mode \(name)")
+    }
+
+    /// ArduPilot shell mode-name picker. The mapping is intentionally tight — every
+    /// value here has been verified against ArduCopter / ArduPlane / Rover / Sub
+    /// firmware. New modes are a deliberate extension.
+    private static func ardupilotShellModeName(
+        for mode: FleetVehicleMode,
+        vehicleClass: UniversalVehicleClass
+    ) -> String {
+        switch mode {
+        case .hold:
+            // Rover / boat: "hold". UAV / UUV / unknown: "loiter".
+            switch vehicleClass {
+            case .ugv, .usv: return "hold"
+            case .uav, .uuv, .unknown: return "loiter"
+            }
+        case .manual:   return "manual"
+        case .auto:     return "auto"
+        case .rtl:      return "rtl"
+        case .guided:   return "guided"
+        case .mission:  return "auto"   // ArduPilot "auto" runs the loaded mission
+        case .landMode: return "land"
+        case .brake:    return "brake"  // Copter-only; non-Copter airframes will reject
+        case .surface:  return "surface"  // Sub-only (ArduSub mode 9); non-Sub airframes will reject
+        }
+    }
+
     /// Wrap `Px4ModeCommander.setMode(...)` in a `Completable` so the existing
     /// command-pipeline plumbing (queueing, status tracking, async outcome
     /// reporting) keeps working without leaking async/await everywhere.
@@ -2112,6 +2500,7 @@ final class FleetLinkService: ObservableObject {
         vehicleID: String,
         session: VehicleSession,
         mainMode: Px4ModeCommander.MainMode,
+        subMode: UInt8 = 0,
         logTag: String
     ) -> Completable {
         guard let port = px4GcsUdpPort(for: session) else {
@@ -2130,16 +2519,150 @@ final class FleetLinkService: ObservableObject {
                 await Px4ModeCommander.setMode(
                     port: port,
                     targetSystem: target,
-                    mainMode: mainMode
+                    mainMode: mainMode,
+                    subMode: subMode
                 )
                 self?.appendVehicleLog(
-                    "PX4 SET_MODE \(mainMode) sent (\(logTag), gcs udp 127.0.0.1:\(port), target_system=\(target)).",
+                    "PX4 SET_MODE \(mainMode) (sub=\(subMode)) sent (\(logTag), gcs udp 127.0.0.1:\(port), target_system=\(target)).",
                     vehicleID: vehicleID
                 )
                 observer(.completed)
             }
             return Disposables.create()
         }
+    }
+
+    /// Wrap one raw MAVLink v2 `COMMAND_LONG` send in a `Completable`. This is the
+    /// command-catalogue escape hatch for MAVLink atoms that MAVSDK Swift does not
+    /// generate, especially calibration procedures.
+    private func completionForMavlinkCommandLong(
+        request: MavlinkCommandLongRequest,
+        vehicleID: String,
+        session: VehicleSession
+    ) -> Completable {
+        let stack = vehicleModelsByVehicleID[vehicleID]?.data.telemetry?.autopilotStack
+            ?? hubTelemetryByVehicleID[vehicleID]?.autopilotStack
+            ?? .unknown
+        guard let port = rawMavlinkUdpPort(for: session, stack: stack) else {
+            return Completable.error(NSError(
+                domain: "FleetLinkService",
+                code: 8,
+                userInfo: [NSLocalizedDescriptionKey: "Raw MAVLink COMMAND_LONG UDP port could not be derived from \(session.mavlinkConnectionURL)"]
+            ))
+        }
+        let target = UInt8(clamping: session.systemID)
+        return Completable.create { [weak self] observer in
+            Task { @MainActor [weak self] in
+                do {
+                    try await MavlinkCommandLongSender.send(
+                        request: request,
+                        port: port,
+                        targetSystem: target
+                    )
+                    self?.appendVehicleLog(
+                        "MAVLink COMMAND_LONG \(request.command) (\(request.humanLabel)) sent (udp 127.0.0.1:\(port), target_system=\(target)).",
+                        vehicleID: vehicleID
+                    )
+                    observer(.completed)
+                } catch {
+                    observer(.error(error))
+                }
+            }
+            return Disposables.create()
+        }
+    }
+
+    // MARK: - PARAM_SET with read-back verification (catalogue calibration path)
+
+    /// Wraps `Drone.param.setParamFloat(name:value:)` with a follow-up
+    /// `getParamFloat(name:)` and a tolerance-aware equality check. Emits a recognisable
+    /// `"PARAM_SET read-back mismatch: …"` error string on mismatch so the catalogue's
+    /// stack-converter normaliser (see ``FleetCommandStackConverterShared``) can map
+    /// the outcome to ``FleetCommandErrorKind/parameterReadBackMismatch``.
+    ///
+    /// Used exclusively by the catalogue's `.setParameterFloat` dispatch path —
+    /// fire-and-forget param helpers (`setVehicleFloatParameter`, internal bootstrap
+    /// writes) deliberately stay un-verified because their callers are diagnostic /
+    /// log-only and do not feed the recipe outcome taxonomy.
+    ///
+    /// **Tolerance:** the autopilot stores params as IEEE-754 single precision and may
+    /// silently clamp / quantize on write. We accept a Float round-trip within
+    /// `max(1e-4, |expected| * 5e-4)` (≈ 0.05% relative or an absolute floor of `1e-4`)
+    /// — tight enough to surface clamping or rejection, loose enough to tolerate
+    /// MAVLink wire-quantization.
+    private func completionForSetParameterFloatWithReadBack(
+        name: String,
+        value: Float,
+        vehicleID: String,
+        session: VehicleSession
+    ) -> Completable {
+        let logVehicleID = vehicleID
+        let set = session.drone.param.setParamFloat(name: name, value: value)
+        let verify: Completable = session.drone.param.getParamFloat(name: name)
+            .observe(on: MainScheduler.asyncInstance)
+            .flatMapCompletable { [weak self] actual -> Completable in
+                let tolerance = max(Float(1e-4), abs(value) * Float(5e-4))
+                if abs(actual - value) <= tolerance {
+                    Task { @MainActor [weak self] in
+                        self?.appendVehicleLog(
+                            "Param verified \(name)=\(actual) (expected \(value), tol \(tolerance))",
+                            vehicleID: logVehicleID
+                        )
+                    }
+                    return Completable.empty()
+                }
+                let detail = "PARAM_SET read-back mismatch: \(name) expected \(value), autopilot reports \(actual)"
+                Task { @MainActor [weak self] in
+                    self?.appendVehicleLog(detail, vehicleID: logVehicleID)
+                }
+                return Completable.error(NSError(
+                    domain: "FleetLinkService.Param.ReadBack",
+                    code: 9,
+                    userInfo: [NSLocalizedDescriptionKey: detail]
+                ))
+            }
+        return set.andThen(verify)
+    }
+
+    /// Wraps `Drone.param.setParamInt(name:value:)` with a follow-up
+    /// `getParamInt(name:)` and an exact-equality check. Emits the same
+    /// `"PARAM_SET read-back mismatch: …"` error string on mismatch as the float
+    /// variant so the catalogue normaliser can map the outcome to
+    /// ``FleetCommandErrorKind/parameterReadBackMismatch``.
+    ///
+    /// Int params are quantized exactly, so any difference between the requested and
+    /// reported value is a real outcome (silent clamp, locked param, type coercion).
+    private func completionForSetParameterIntWithReadBack(
+        name: String,
+        value: Int32,
+        vehicleID: String,
+        session: VehicleSession
+    ) -> Completable {
+        let logVehicleID = vehicleID
+        let set = session.drone.param.setParamInt(name: name, value: value)
+        let verify: Completable = session.drone.param.getParamInt(name: name)
+            .observe(on: MainScheduler.asyncInstance)
+            .flatMapCompletable { [weak self] actual -> Completable in
+                if actual == value {
+                    Task { @MainActor [weak self] in
+                        self?.appendVehicleLog(
+                            "Param verified \(name)=\(actual)",
+                            vehicleID: logVehicleID
+                        )
+                    }
+                    return Completable.empty()
+                }
+                let detail = "PARAM_SET read-back mismatch: \(name) expected \(value), autopilot reports \(actual)"
+                Task { @MainActor [weak self] in
+                    self?.appendVehicleLog(detail, vehicleID: logVehicleID)
+                }
+                return Completable.error(NSError(
+                    domain: "FleetLinkService.Param.ReadBack",
+                    code: 9,
+                    userInfo: [NSLocalizedDescriptionKey: detail]
+                ))
+            }
+        return set.andThen(verify)
     }
 
     /// PX4 SITL exposes its "Normal/GCS" MAVLink instance at UDP `18570 + px4_instance`,
@@ -2158,6 +2681,32 @@ final class FleetLinkService: ObservableObject {
         let gcs = 18_570 + instance
         guard gcs <= UInt16.max else { return nil }
         return UInt16(gcs)
+    }
+
+    /// Resolve the local UDP endpoint that should accept raw MAVLink injections for
+    /// this stack. PX4 uses its dedicated GCS port; ArduPilot SITL uses MAVProxy's
+    /// default output port, which is the same ingress port already handed to
+    /// mavsdk_server by `SitlLaunchRecipe`.
+    private func rawMavlinkUdpPort(for session: VehicleSession, stack: FleetAutopilotStack) -> UInt16? {
+        switch stack {
+        case .px4:
+            return px4GcsUdpPort(for: session)
+        case .ardupilot:
+            return mavsdkIngressUdpPort(for: session)
+        case .unknown:
+            return px4GcsUdpPort(for: session) ?? mavsdkIngressUdpPort(for: session)
+        }
+    }
+
+    private func mavsdkIngressUdpPort(for session: VehicleSession) -> UInt16? {
+        guard let url = URL(string: session.mavlinkConnectionURL),
+              let host = url.host,
+              host.contains("0.0.0.0") || host.contains("127.0.0.1") || host.isEmpty || host == "*",
+              let port = url.port,
+              port > 0,
+              port <= UInt16.max
+        else { return nil }
+        return UInt16(port)
     }
 
     /// Resolve `.idle` to the per-stack shell command that drops the autopilot into its

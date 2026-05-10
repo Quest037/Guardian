@@ -25,14 +25,20 @@ struct MissionRunStartPreflightSheet: View {
             title: "Paladin preflight",
             subtitle: "Checking all vehicles are ready to be armed.",
             headerActions: {
-                Button("Close") {
-                    disarmPreflightArmsThenAbandon()
-                    dismiss()
-                    onAbandonWithoutStart()
-                }
+                GuardianThemedButton(
+                    title: "Close",
+                    accent: .danger,
+                    surface: .outline,
+                    size: .small,
+                    shape: .cornered,
+                    isEnabled: !(probeRunning || allSlotsPassed),
+                    action: {
+                        disarmPreflightArmsThenAbandon()
+                        dismiss()
+                        onAbandonWithoutStart()
+                    }
+                )
                 .keyboardShortcut(.cancelAction)
-                .buttonStyle(.bordered)
-                .disabled(probeRunning || allSlotsPassed)
             },
             bodyContent: {
                 VStack(alignment: .leading, spacing: 0) {
@@ -56,11 +62,11 @@ struct MissionRunStartPreflightSheet: View {
                         } else if allSlotsPassed {
                             Label("All vehicles armed successfully.", systemImage: "checkmark.circle.fill")
                                 .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(Color.green.opacity(0.9))
+                                .foregroundStyle(GuardianSemanticColors.successStroke)
                         } else {
                             Label("One or more slots failed — fix and try again.", systemImage: "exclamationmark.triangle.fill")
                                 .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(Color.orange.opacity(0.95))
+                                .foregroundStyle(GuardianSemanticColors.warningStroke)
                         }
                         Spacer(minLength: 0)
                     }
@@ -110,10 +116,10 @@ struct MissionRunStartPreflightSheet: View {
 
     private func iconTint(for phase: MissionRunPreflightSlotPhase) -> Color {
         switch phase {
-        case .pending: return .gray.opacity(0.55)
-        case .testing: return .blue.opacity(0.85)
-        case .passed: return .green.opacity(0.9)
-        case .failed: return .red.opacity(0.9)
+        case .pending: return theme.textTertiary
+        case .testing: return GuardianSemanticColors.infoForeground
+        case .passed: return GuardianSemanticColors.successStroke
+        case .failed: return GuardianSemanticColors.dangerStroke
         }
     }
 

@@ -1,12 +1,12 @@
 import SwiftUI
-import AppKit
 
 struct RootView: View {
     @Binding var selection: AppSection
     @ObservedObject var fleetLinkService: FleetLinkService
     @ObservedObject var sitlService: SitlService
     @ObservedObject var generalSettingsStore: GeneralSettingsStore
-    @EnvironmentObject private var sidebarOverlay: SidebarOverlay
+    @EnvironmentObject private var appDrawer: AppDrawer
+    @EnvironmentObject private var pluginRegistry: GuardianPluginRegistry
     @StateObject private var missionStore = MissionStore()
     @StateObject private var missionControlStore = MissionControlStore()
     @StateObject private var liveDriveStore = LiveDriveStore()
@@ -49,7 +49,7 @@ struct RootView: View {
             VStack(spacing: 0) {
                 topBar
                     .frame(height: 52)
-                    .background(theme.backgroundElevated)
+                    .background(theme.backgroundRaised)
 
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -95,83 +95,164 @@ struct RootView: View {
             }
         }
         .onChange(of: selection) { _ in
-            sidebarOverlay.dismiss()
+            appDrawer.dismiss()
         }
     }
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        isSidebarCollapsed.toggle()
+            HStack(alignment: .center, spacing: 0) {
+                if isSidebarCollapsed {
+                    HStack {
+                        Spacer(minLength: 0)
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                isSidebarCollapsed = false
+                            }
+                        } label: {
+                            GuardianSidebarLogoView(maxHeight: 28)
+                                .frame(width: 44, height: 28)
+                        }
+                        .buttonStyle(.plain)
+                        .contentShape(Rectangle())
+                        .help("Expand sidebar")
+                        .accessibilityLabel("Guardian")
+                        .accessibilityHint("Expands the sidebar")
+                        Spacer(minLength: 0)
                     }
-                } label: {
-                    Image(systemName: "line.3.horizontal")
-                        .font(.system(size: 14, weight: .semibold))
-                        .frame(width: 24, height: 24)
+                    .frame(maxWidth: .infinity)
+                } else {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            isSidebarCollapsed = true
+                        }
+                    } label: {
+                        GuardianSidebarLogoView(maxHeight: 32)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .help("Collapse sidebar")
+                    .accessibilityLabel("Guardian")
+                    .accessibilityHint("Collapses the sidebar")
+                    .transition(.opacity.combined(with: .move(edge: .leading)))
                 }
-                .buttonStyle(.bordered)
-                .tint(.gray.opacity(0.35))
-
-                if !isSidebarCollapsed {
-                    Text("Guardian")
-                        .font(.system(size: 22, weight: .bold))
-                        .foregroundStyle(theme.textPrimary)
-                        .transition(.opacity.combined(with: .move(edge: .leading)))
-                }
-                Spacer(minLength: 0)
             }
             .padding(.horizontal, 12)
             .padding(.top, 16)
             .padding(.bottom, 8)
 
-            ForEach(AppSection.allCases) { section in
-                Button {
-                    selection = section
-                } label: {
-                    Group {
-                        if isSidebarCollapsed {
-                            Image(systemName: section.systemImage)
-                                .font(.system(size: 16, weight: .semibold))
-                                .frame(maxWidth: .infinity, alignment: .center)
-                        } else {
-                            HStack {
-                                Image(systemName: section.systemImage)
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .frame(width: 18, height: 18)
-                            Text(section.rawValue)
-                                .font(.system(size: 14, weight: section == selection ? .semibold : .regular))
-                                Spacer(minLength: 0)
-                            }
-                        }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(AppSection.primarySidebarRail, id: \.self) { section in
+                        sidebarSectionRow(section: section)
                     }
-                    .padding(.horizontal, isSidebarCollapsed ? 8 : 14)
-                    .padding(.vertical, 10)
-                    .frame(maxWidth: .infinity)
-                    .background(section == selection ? theme.backgroundActive : Color.clear)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .contentShape(Rectangle())
+                    ForEach(pluginRegistry.sidebarItems(for: .primary)) { item in
+                        sidebarPluginRow(item: item)
+                    }
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(theme.textPrimary)
                 .padding(.horizontal, 10)
-                .frame(maxWidth: .infinity)
-                .help(section.rawValue)
+                .padding(.bottom, 6)
             }
+            .frame(maxHeight: .infinity)
 
-            Spacer()
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(pluginRegistry.sidebarItems(for: .secondary)) { item in
+                    sidebarPluginRow(item: item)
+                }
+                ForEach(AppSection.secondarySidebarSections, id: \.self) { section in
+                    sidebarSectionRow(section: section)
+                }
 
-            VStack(alignment: isSidebarCollapsed ? .center : .leading, spacing: 4) {
-                Text(isSidebarCollapsed ? AppMetadata.releaseVersion : appVersionLabel)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(theme.textSecondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
+                VStack(alignment: isSidebarCollapsed ? .center : .leading, spacing: 4) {
+                    Text(isSidebarCollapsed ? AppMetadata.releaseVersion : appVersionLabel)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
+                .frame(maxWidth: .infinity, alignment: isSidebarCollapsed ? .center : .leading)
+                .padding(.top, 4)
             }
-            .frame(maxWidth: .infinity, alignment: isSidebarCollapsed ? .center : .leading)
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 10)
             .padding(.bottom, 14)
+        }
+    }
+
+    private func sidebarSectionRow(section: AppSection) -> some View {
+        Button {
+            selection = section
+        } label: {
+            Group {
+                if isSidebarCollapsed {
+                    Image(systemName: section.systemImage)
+                        .font(.system(size: 16, weight: .semibold))
+                        .frame(maxWidth: .infinity, alignment: .center)
+                } else {
+                    HStack {
+                        Image(systemName: section.systemImage)
+                            .font(.system(size: 14, weight: .semibold))
+                            .frame(width: 18, height: 18)
+                        Text(section.rawValue)
+                            .font(.system(size: 14, weight: section == selection ? .semibold : .regular))
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+            .padding(.horizontal, isSidebarCollapsed ? 8 : 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity)
+            .background(section == selection ? theme.backgroundActive : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(theme.textPrimary)
+        .frame(maxWidth: .infinity)
+        .help(section.rawValue)
+    }
+
+    private func sidebarPluginRow(item: GuardianPluginSidebarItem) -> some View {
+        Button {
+            switch item.tapAction {
+            case .openAppSection(let section):
+                selection = section
+            }
+        } label: {
+            Group {
+                if isSidebarCollapsed {
+                    Image(systemName: item.systemImage)
+                        .font(.system(size: 16, weight: .semibold))
+                        .frame(maxWidth: .infinity, alignment: .center)
+                } else {
+                    HStack {
+                        Image(systemName: item.systemImage)
+                            .font(.system(size: 14, weight: .semibold))
+                            .frame(width: 18, height: 18)
+                        Text(item.title)
+                            .font(.system(size: 14, weight: sidebarPluginRowIsSelected(item) ? .semibold : .regular))
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+            .padding(.horizontal, isSidebarCollapsed ? 8 : 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity)
+            .background(sidebarPluginRowIsSelected(item) ? theme.backgroundActive : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(theme.textPrimary)
+        .frame(maxWidth: .infinity)
+        .help(item.title)
+    }
+
+    private func sidebarPluginRowIsSelected(_ item: GuardianPluginSidebarItem) -> Bool {
+        switch item.tapAction {
+        case .openAppSection(let section):
+            return selection == section
         }
     }
 
@@ -275,12 +356,16 @@ struct RootView: View {
                     manualControlSettings: manualControlSettings,
                     generalSettings: generalSettingsStore
                 )
+            case .theme:
+                ThemePanelView()
             case .settings:
                 SettingsView(
                     selectedPane: $settingsPane,
                     generalSettings: generalSettingsStore,
                     manualControlSettings: manualControlSettings
                 )
+            case .plugins:
+                PluginsView()
             case .logs:
                 LogsView(fleetLink: fleetLinkService)
             }

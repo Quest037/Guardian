@@ -18,11 +18,12 @@ extension MissionRunLogTemplateKey {
 /// Paladin's logging surface fully self-contained inside its own module.
 ///
 /// Pattern for adding more Paladin lines: define a new key constant in the
-/// ``MissionRunLogTemplateKey`` extension above, then add a `registerTemplate` call in
-/// ``registerTemplates()`` below. No core-catalog changes required.
+/// ``MissionRunLogTemplateKey`` extension above, then add a ``StructuredLogTemplateCatalog/registerTemplate(pluginID:forKey:defaultPattern:mcr:)``
+/// call in ``registerTemplates()`` below. No core-catalog changes required.
 enum PaladinLogTemplateCatalog {
     static func registerTemplates() {
         StructuredLogTemplateCatalog.registerTemplate(
+            pluginID: .paladin,
             forKey: MissionRunLogTemplateKey.paladinExecutionStarted,
             defaultPattern: "Paladin execution started.",
             mcr: "Paladin · execution started"

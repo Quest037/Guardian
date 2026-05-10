@@ -39,15 +39,26 @@ struct MissionCardThumbnailView: View {
                     .frame(width: side, height: side)
                     .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
             case .gridBanner(let barHeight, let thumbSide):
+                let topBannerRadius = GuardianCardLayout.cornerRadius
                 ZStack {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Self.bannerWellColor)
+                    // Square bottom so the well meets header/body hairlines flush; outer ``GuardianCard`` clips the shell.
+                    UnevenRoundedRectangle(
+                        cornerRadii: RectangleCornerRadii(
+                            topLeading: topBannerRadius,
+                            bottomLeading: 0,
+                            bottomTrailing: 0,
+                            topTrailing: topBannerRadius
+                        ),
+                        style: .continuous
+                    )
+                    .fill(Self.bannerWellColor)
                     thumbSquare(corner: 8)
                         .frame(width: thumbSide, height: thumbSide)
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
                 .frame(maxWidth: .infinity)
                 .frame(height: barHeight)
+                .clipped()
             }
         }
         .task(id: thumbnailTaskID) {

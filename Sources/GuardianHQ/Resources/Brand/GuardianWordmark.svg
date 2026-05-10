@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 188 34" fill="none" role="img" aria-label="Guardian">
+  <!-- Pointed G mark + word (reference art; main sidebar header uses ``GuardianSidebarLogoView`` / sidebar_logo.png) -->
+  <path
+    d="M18 6C11 6 6 11 6 18s5 12 12 12c2 0 4-.5 5.5-1.5"
+    stroke="#6B3DDB"
+    stroke-width="3.4"
+    stroke-linecap="round"
+  />
+  <polygon fill="#6B3DDB" points="14.5,15 22.5,15 28.5,18 22.5,21 14.5,21" />
+  <text
+    x="36"
+    y="25"
+    fill="#6B3DDB"
+    font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+    font-size="22"
+    font-weight="700"
+  >uardian</text>
+</svg>

@@ -37,6 +37,15 @@ enum FleetVehicleCommand: Equatable {
     case gotoCoordinate(RouteCoordinate, relativeAltitudeM: Double, yawDeg: Double)
     /// Upload items to the autopilot, arm, then start mission execution (MAVSDK Mission plugin).
     case uploadAndStartMission(items: [Mavsdk.Mission.MissionItem])
+    /// Upload a mission plan to the autopilot — atomic upload step only.
+    ///
+    /// Routes to `Drone.mission.uploadMission(missionPlan:)` followed by
+    /// `Drone.mission.setCurrentMissionItem(index: 0)` (resetting the current waypoint
+    /// matches the multi-step `uploadAndStartMission` pipeline so a re-uploaded plan
+    /// always starts from item 0). Does **not** arm and does **not** start the mission;
+    /// callers compose those as separate commands (`.arm`, plus a future "start mission"
+    /// atom). This atom is what `command.fleet.vehicle.do.mission.upload` dispatches.
+    case uploadMission(items: [Mavsdk.Mission.MissionItem])
     /// Command the autopilot to return to launch / home (MAVSDK Action plugin).
     case returnToLaunch
     /// Command the autopilot to land now (where supported).
@@ -51,6 +60,133 @@ enum FleetVehicleCommand: Equatable {
     case idle
     /// High-level manual-control intent routed through FleetLink per vehicle class.
     case manualControl(ManualControlIntentCommand)
+    /// Run one of the MAVSDK Calibration plugin procedures end-to-end.
+    /// Routed via `Drone.calibration.calibrate*()` which emits an `Observable<ProgressData>`;
+    /// `FleetLinkService` bridges that stream into the standard `Completable` outcome shape
+    /// (`onCompleted` → `.succeeded`, `onError` → `.failed(detail)`). Progress events are
+    /// not yet surfaced — recipes get a single terminal outcome in v1.
+    /// PX4-friendly today; raw MAVLink-only calibration atoms use
+    /// ``FleetVehicleCommand/mavlinkCommandLong(_:)``.
+    case calibrateMavsdk(MavsdkCalibrationKind)
+    /// Send one raw MAVLink v2 `COMMAND_LONG` packet. Used for calibration procedures
+    /// that are in MAVLink but absent from MAVSDK Swift's generated plugin surface.
+    case mavlinkCommandLong(MavlinkCommandLongRequest)
+    /// Cancel any MAVSDK Calibration plugin procedure that is currently in flight.
+    /// No-op if nothing is running. Routes to `Drone.calibration.cancel()` (Completable).
+    case cancelCalibration
+    /// Write a single autopilot parameter as a float via MAVSDK Param plugin. Used by
+    /// stack converters to implement param-driven "calibrations" (declination, battery
+    /// scale, gimbal neutral offsets, …) as a single round-trip.
+    case setParameterFloat(name: String, value: Double)
+    /// Write a single autopilot parameter as an int32 via MAVSDK Param plugin. Used by
+    /// stack converters to implement param-driven "calibrations" with integer-typed
+    /// params (battery capacity in mAh, servo PWM endpoints, RC trim values, …).
+    case setParameterInt(name: String, value: Int32)
+    /// Set the autopilot's flight / drive mode using a real, stack-specific transport.
+    /// PX4 dispatches a raw MAVLink `SET_MODE` packet via ``Px4ModeCommander``;
+    /// ArduPilot dispatches `mode <name>` via the MAVSDK `Shell` plugin; the
+    /// stack-`unknown` path tries the AP shell first and falls back to PX4 raw MAVLink.
+    /// Modes that the target stack genuinely cannot honour (e.g. `brake` on PX4) fail
+    /// with a `mode not supported` detail so stack converters classify the response as
+    /// ``FleetCommandErrorKind/modeNotSupported``.
+    case setMode(FleetVehicleMode)
+    /// Reboot the autopilot (`MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`, dispatched via
+    /// MAVSDK `Action.reboot()`). Heavy hammer used to clear all transient autopilot
+    /// state — sticky pre-arm faults, latched failsafe acks, hung calibrations, etc.
+    /// Because MAVLink and MAVSDK do not expose a generic "clear all errors" command,
+    /// `command.fleet.vehicle.do.reboot.autopilot` is the closest universal reset; the
+    /// recipe layer composes it with re-arm / mode-restore steps after the autopilot
+    /// comes back up. Risk-tier `groundOnly` — recipes must never invoke this in a
+    /// live mission.
+    case rebootAutopilot
+}
+
+/// Stack-agnostic autopilot mode token. Used by ``FleetVehicleCommand/setMode(_:)``
+/// and by the catalogue's `command.fleet.vehicle.do.mode` translation. Each value
+/// has a stack-specific implementation in ``FleetLinkService`` — the converter
+/// produces this token, the link service does the per-stack SET_MODE dispatch.
+///
+/// Coverage matrix (v1):
+///
+/// | Token       | PX4 SET_MODE             | ArduPilot shell                  | Notes                                                |
+/// |-------------|--------------------------|----------------------------------|------------------------------------------------------|
+/// | `.hold`     | AUTO + AUTO_LOITER (3)   | `mode loiter` / `mode hold`      | AP rover uses `hold`; UAV / UUV use `loiter`         |
+/// | `.manual`   | MANUAL                   | `mode manual`                    |                                                      |
+/// | `.auto`     | AUTO + AUTO_MISSION (4)  | `mode auto`                      | AP "auto" semantically *is* mission                  |
+/// | `.rtl`      | AUTO + AUTO_RTL (5)      | `mode rtl`                       |                                                      |
+/// | `.guided`   | OFFBOARD                 | `mode guided`                    | PX4 has no "guided"; OFFBOARD is the closest analogue|
+/// | `.mission`  | AUTO + AUTO_MISSION (4)  | `mode auto`                      | Same end-state as `.auto`; reserved for clarity      |
+/// | `.landMode` | AUTO + AUTO_LAND (6)     | `mode land`                      |                                                      |
+/// | `.brake`    | not supported            | `mode brake` (Copter only)       | PX4 returns `mode not supported`                     |
+/// | `.surface`  | not supported            | `mode surface` (Sub only)        | ArduSub mode 9; PX4 has no UUV stack                 |
+enum FleetVehicleMode: String, Equatable, Codable, CaseIterable, Sendable {
+    case hold
+    case manual
+    case auto
+    case rtl
+    case guided
+    case mission
+    case landMode
+    case brake
+    /// ArduSub-only "automatically return to surface" mode (mode number 9). PX4 has
+    /// no UUV stack; both PX4 and non-Sub ArduPilot firmware reject this mode.
+    /// `command.fleet.vehicle.do.surface` is the high-level operator entry point —
+    /// recipes can also reach it via `command.fleet.vehicle.do.mode mode=surface`.
+    case surface
+}
+
+/// Discriminator for `FleetVehicleCommand.calibrateMavsdk(_:)`. Each case maps 1:1 to
+/// one of the MAVSDK `Calibration` plugin's `calibrate*()` `Observable<ProgressData>`
+/// streams. The set is deliberately limited to what the MAVSDK Swift port exposes today;
+/// extra calibrations (baro, ESC, RC, airspeed, compass-motor) require a different
+/// transport (raw MAVLink command-long) and stay out of this enum until that lands.
+enum MavsdkCalibrationKind: String, Equatable, Codable, CaseIterable {
+    case gyro
+    case accelerometer
+    case magnetometer
+    case levelHorizon
+    case gimbalAccelerometer
+}
+
+/// Progress event emitted by ``FleetLinkService`` while a MAVSDK Calibration plugin
+/// procedure is in flight. Layer 1 recipe runners and Layer 2 wizards / plugins
+/// subscribe to ``FleetLinkService/calibrationProgressEventsPublisher`` and filter
+/// by `vehicleID` (and optionally `kind`).
+///
+/// A run is terminated by exactly one of the three terminal phases: `.completed`,
+/// `.cancelled`, or `.failed(detail:)`. Any number of `.progress` and / or
+/// `.operatorPrompt` events may appear before the terminal one.
+struct FleetCalibrationProgressEvent: Equatable, Sendable {
+    let vehicleID: String
+    let kind: MavsdkCalibrationKind
+    let phase: Phase
+    /// `0...1` while in `.progress`; `nil` for non-progress phases or when the
+    /// autopilot did not include a percentage in this MAVSDK ProgressData sample.
+    let progressFraction: Double?
+    /// Operator-facing instruction extracted from MAVSDK `ProgressData.statusText`
+    /// (e.g. `"Hold still"`, `"Rotate vehicle"`). Carried on `.progress` and
+    /// `.operatorPrompt` phases when the autopilot supplied one.
+    let statusText: String?
+    let timestamp: Date
+
+    enum Phase: Equatable, Sendable {
+        /// Mid-procedure tick — `progressFraction` and / or `statusText` populated.
+        case progress
+        /// Mid-procedure tick whose `statusText` is an operator instruction the
+        /// autopilot wants surfaced (`hasStatusText && progressFraction == nil`,
+        /// or `statusText` matches an "operator action" cue from MAVSDK). The
+        /// recipe / wizard layer is responsible for routing this into UI / toast /
+        /// UserNotifications surfaces.
+        case operatorPrompt
+        /// Terminal: the calibration converged successfully.
+        case completed
+        /// Terminal: the calibration was cancelled mid-flight (`Drone.calibration
+        /// .cancel()` was issued or the autopilot self-cancelled).
+        case cancelled
+        /// Terminal: the calibration failed. `detail` is the raw failure message
+        /// surfaced by MAVSDK.
+        case failed(detail: String)
+    }
 }
 
 enum UniversalVehicleClass: String, Equatable, Codable, CaseIterable {
@@ -229,6 +365,29 @@ struct FleetVehicleCommandRecord: Identifiable, Equatable {
     }
 }
 
+/// One stamped preflight probe outcome on a vehicle. Used by both the manual calibration modal and
+/// any plugin-driven preflight (e.g. Paladin autonomous arm-check) so all readiness signals share
+/// one history channel that downstream views and analytics can hook.
+struct PreflightProbeHistoryEntry: Equatable, Identifiable {
+    let id: UUID
+    let recordedAt: Date
+    /// Free-form origin tag (e.g. `"calibrationModal.manual"`, `"paladin.autocal"`, `"liveDrive.preStart"`).
+    let source: String
+    let result: SingleVehiclePreflightProbeResult
+
+    init(
+        id: UUID = UUID(),
+        recordedAt: Date = Date(),
+        source: String,
+        result: SingleVehiclePreflightProbeResult
+    ) {
+        self.id = id
+        self.recordedAt = recordedAt
+        self.source = source
+        self.result = result
+    }
+}
+
 /// Canonical per-vehicle model: raw data, grouped collections, and domain functions.
 struct FleetVehicleModel: Equatable {
     struct DataState: Equatable {
@@ -247,6 +406,7 @@ struct FleetVehicleModel: Equatable {
         var lifecycleStatus: VehicleLifecycleStatus
         var telemetrySnapshot: FleetTelemetrySnapshot?
         var operational: FleetVehicleOperationalModel
+        var calibration: FleetCalibrationCollection
     }
 
     struct Functions: Equatable {
@@ -254,7 +414,16 @@ struct FleetVehicleModel: Equatable {
         var lastCommandError: String?
         /// Commands with `category.arbitrationPriority` below this value are rejected (e.g. manual takeover sets 2 so MC / Paladin at tier 0 are blocked).
         var commandGateMinimumPriority: Int = 0
+        /// Recent single-vehicle preflight probe outcomes (newest first, capped to ``preflightHistoryCap``).
+        ///
+        /// Plugins (e.g. Paladin's autonomous preflight / auto-calibrate) and the manual calibration modal
+        /// both write here via ``FleetLinkService.recordPreflightResult``. The most recent failed entry is
+        /// also overlaid onto ``Collections/calibration`` so a refused arm escalates the matching marker on
+        /// the canvas without losing live telemetry-driven updates.
+        var preflightHistory: [PreflightProbeHistoryEntry] = []
     }
+
+    static let preflightHistoryCap: Int = 3
 
     var data: DataState
     var collections: Collections
@@ -289,7 +458,8 @@ struct FleetVehicleModel: Equatable {
         self.collections = Collections(
             lifecycleStatus: initialStatus,
             telemetrySnapshot: nil,
-            operational: emptyOperational
+            operational: emptyOperational,
+            calibration: .empty
         )
         self.functions = Functions()
     }
@@ -311,6 +481,12 @@ struct FleetVehicleModel: Equatable {
             hub: data.telemetry,
             lifecycleStatus: collections.lifecycleStatus
         )
+        collections.calibration = FleetCalibrationCollection.make(
+            hub: data.telemetry,
+            lifecycleStatus: collections.lifecycleStatus,
+            vehicleType: data.vehicleType,
+            latestPreflight: functions.preflightHistory.first
+        )
     }
 
     mutating func applyTelemetryMutation(_ mutate: (inout FleetHubVehicleTelemetry) -> Void) {
@@ -322,6 +498,38 @@ struct FleetVehicleModel: Equatable {
         collections.operational = FleetVehicleOperationalModel(
             hub: hub,
             lifecycleStatus: collections.lifecycleStatus
+        )
+        collections.calibration = FleetCalibrationCollection.make(
+            hub: hub,
+            lifecycleStatus: collections.lifecycleStatus,
+            vehicleType: data.vehicleType,
+            latestPreflight: functions.preflightHistory.first
+        )
+    }
+
+    /// Records a preflight probe outcome (manual or plugin-driven), keeping the newest first and
+    /// capping the buffer at ``preflightHistoryCap``. Recomputes ``Collections/calibration`` so the
+    /// canvas reflects the new overlay (failed pattern → matching system marker escalates to `.error`).
+    mutating func recordPreflight(_ entry: PreflightProbeHistoryEntry) {
+        functions.preflightHistory.insert(entry, at: 0)
+        if functions.preflightHistory.count > Self.preflightHistoryCap {
+            functions.preflightHistory.removeLast(functions.preflightHistory.count - Self.preflightHistoryCap)
+        }
+        collections.calibration = FleetCalibrationCollection.make(
+            hub: data.telemetry,
+            lifecycleStatus: collections.lifecycleStatus,
+            vehicleType: data.vehicleType,
+            latestPreflight: functions.preflightHistory.first
+        )
+    }
+
+    mutating func clearPreflightHistory() {
+        functions.preflightHistory.removeAll(keepingCapacity: false)
+        collections.calibration = FleetCalibrationCollection.make(
+            hub: data.telemetry,
+            lifecycleStatus: collections.lifecycleStatus,
+            vehicleType: data.vehicleType,
+            latestPreflight: nil
         )
     }
 

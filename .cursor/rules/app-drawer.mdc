@@ -1,0 +1,17 @@
+---
+description: Trailing drawers must use AppDrawer (central template); sidebar means main nav rail
+alwaysApply: true
+---
+
+# App drawer (slide-in panel + scrim)
+
+**Vocabulary:** In Guardian, **drawer** means the app-wide trailing ``AppDrawer`` (scrim + slide-in panel). **Sidebar** means the main navigation rail in ``RootView`` — not ``AppDrawer``.
+
+When adding or changing an **app-wide trailing drawer**:
+
+- **Must** use the central template: ``AppDrawer`` + ``View/withAppDrawer()`` (see ``Sources/GuardianHQ/General/Utilities/Templates/AppDrawer.swift``). Do not invent a parallel scrim + slide-in host or local `ZStack` scrims + `transition(.move(edge: .trailing))` for app-wide trailing drawers.
+- Inject ``@EnvironmentObject private var appDrawer: AppDrawer`` and call ``present(title:preferredWidth:scrimTapDismisses:animation:content:)`` / ``dismiss()``.
+- Use ``title: nil`` when the content view already includes a full custom header (e.g. segmented control in the header). Use a non-nil ``title`` when the shared ``AppDrawerChrome`` (title + close) should wrap the body.
+- Dismiss overlays when leaving a screen if needed (e.g. ``onDisappear``); tab changes already call ``dismiss()`` from ``RootView``.
+- Modifier order on the window root: ``withToasts()`` **then** ``withAppDrawer()`` so drawers stack above toasts.
+- Reference: **Theme** panel → **App drawer** section (scrim swatches, ``AppDrawerChrome`` preview, live sample ``present``).

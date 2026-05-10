@@ -1,0 +1,47 @@
+---
+description: Add XCTest coverage for new features in the GuardianHQTests target as part of the same coherent pass
+alwaysApply: true
+---
+
+# Add Tests For New Features
+
+When introducing or substantially extending a feature in this repo, add **XCTest coverage** for it in `Tests/GuardianHQTests/` as part of the **same coherent pass** as the feature work, not as a follow-up.
+
+## What counts as a "new feature"
+
+- New public/internal type, command, recipe, service API, or model field with logic.
+- New control-flow branch in an existing API (e.g. a new error kind, a new descriptor, a new normalisation heuristic, a new validator rule).
+- New plugin / catalogue contribution (new command name, new recipe name).
+- Bug fixes whose intent is "this case should now behave differently" — add a regression test that fails before the fix.
+
+## What does **not** require a test
+
+- Pure cosmetic SwiftUI / styling changes (colors, spacing, copy).
+- Refactors with no behavior change (renames, file moves, extracting helpers with identical semantics).
+- TODO / documentation / comment edits.
+
+## What to test (priority order)
+
+1. **Pure-Swift logic** (validators, classifiers, parsers, converters, name / namespace rules, parameter schemas). Cheap, fast, deterministic — always testable.
+2. **Stateful registries** (catalogues, registries, plugin bootstraps). Test idempotency, contained keys, and shape after registration.
+3. **Normalisation / heuristics** that map free-form strings (e.g. autopilot failure messages) into typed enums. Pin every keyword branch.
+4. **Failure / `.notImplemented` paths**, not just happy paths. Operators / recipes rely on those branches.
+
+## Things that legitimately can't be unit-tested here
+
+- SITL-only flows (real MAVSDK sessions, network transport, UDP injection). These belong in the SITL smoke item on the Stage B0 backlog, not as hand-rolled mocks.
+- SwiftUI view rendering. Unless a view contains non-trivial pure logic that can be extracted, skip.
+
+## Conventions
+
+- One `XCTestCase` subclass per logical surface, named `<Type>Tests.swift`.
+- Use `@MainActor final class` for tests that touch `@MainActor` singletons (e.g. `FleetCommandsCatalogue.shared`).
+- Use `@testable import GuardianHQ` so internal symbols are visible.
+- Prefer many small `test_<thing>_<condition>` methods over a few omnibus tests — readable failure output beats compact source.
+
+## Workflow
+
+1. Implement the feature.
+2. Add the tests in the same pass.
+3. After the user approves a build, run `swift test` (or just `swift build --build-tests`) once to confirm both compile and all tests pass.
+4. If a test fails, fix the implementation or the test in one follow-up batch per the build-once rule — don't drip per-test fixes.

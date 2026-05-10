@@ -94,15 +94,10 @@ struct MissionControlView: View {
     private var missionRunGrid: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Mission Runs")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(theme.textPrimary)
-                Spacer()
-                Button("Add Run") {
+                Spacer(minLength: 0)
+                GuardianPrimaryProminentButton(title: "Add Run") {
                     showingAddRunSheet = true
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.blue)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -220,100 +215,103 @@ private struct MissionRunCard: View {
     let mission: Mission?
     let isSelected: Bool
 
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
     private static let runCardBannerHeight: CGFloat = 76
     private static let runCardBannerThumb: CGFloat = 58
-    private static let runCardOuterCornerRadius: CGFloat = 10
+
+    private var cardConfiguration: GuardianCardConfiguration {
+        GuardianCardConfiguration(
+            border: isSelected ? .none : .subtle,
+            cornerRadius: GuardianCardLayout.cornerRadius,
+            bodyPadding: 12
+        )
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            runCardMissionThumbnail
-                .clipShape(
-                    UnevenRoundedRectangle(
-                        cornerRadii: RectangleCornerRadii(
-                            topLeading: Self.runCardOuterCornerRadius,
-                            bottomLeading: 0,
-                            bottomTrailing: 0,
-                            topTrailing: Self.runCardOuterCornerRadius
-                        ),
-                        style: .continuous
-                    )
-                )
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Text(run.missionName)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(GuardianDynamicColors.textPrimary)
-                        .lineLimit(1)
-                    Spacer()
-                    MissionRunStatusBadge(status: run.status, sessionPhase: run.sessionPhase)
-                }
+        GuardianCard(
+            configuration: cardConfiguration,
+            media: {
+                runCardMissionThumbnail
+            },
+            body: {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text(run.missionName)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(theme.textPrimary)
+                            .lineLimit(1)
+                        Spacer()
+                        MissionRunStatusBadge(status: run.status, sessionPhase: run.sessionPhase)
+                    }
 
-                HStack(spacing: 8) {
-                    Image(systemName: scheduleIconName)
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(GuardianDynamicColors.textTertiary)
-                    Text(scheduleSummaryText)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(GuardianDynamicColors.textSecondary)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                    if run.gracefulStopKind != .none {
-                        Text(gracefulStopKindGridLabel(run.gracefulStopKind))
+                    HStack(spacing: 8) {
+                        Image(systemName: scheduleIconName)
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(GuardianSemanticColors.warningForeground)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            .background(GuardianSemanticColors.warningBackground)
-                            .clipShape(Capsule())
-                    }
-                }
-
-                HStack(spacing: 8) {
-                    statPill(label: "Slots", value: "\(run.assignments.count)")
-                    statPill(label: "Assigned", value: "\(assignedSlots)")
-                    statPill(label: "Unassigned", value: "\(unassignedSlots)")
-                }
-
-                if let progressLabel {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(progressLabel)
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(GuardianDynamicColors.textTertiary)
-                        GeometryReader { geo in
-                            ZStack(alignment: .leading) {
-                                Capsule()
-                                    .fill(GuardianDynamicColors.borderSubtle)
-                                Capsule()
-                                    .fill(progressFillColor)
-                                    .frame(width: geo.size.width * progressFraction)
-                            }
+                            .foregroundStyle(theme.textTertiary)
+                        Text(scheduleSummaryText)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(theme.textSecondary)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                        if run.gracefulStopKind != .none {
+                            Text(gracefulStopKindGridLabel(run.gracefulStopKind))
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(GuardianSemanticColors.warningForeground)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(GuardianSemanticColors.warningBackground)
+                                .clipShape(Capsule())
                         }
-                        .frame(height: 5)
                     }
+
+                    HStack(spacing: 8) {
+                        statPill(label: "Slots", value: "\(run.assignments.count)")
+                        statPill(label: "Assigned", value: "\(assignedSlots)")
+                        statPill(label: "Unassigned", value: "\(unassignedSlots)")
+                    }
+
+                    if let progressLabel {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(progressLabel)
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(theme.textTertiary)
+                            GeometryReader { geo in
+                                ZStack(alignment: .leading) {
+                                    Capsule()
+                                        .fill(theme.borderSubtle)
+                                    Capsule()
+                                        .fill(progressFillColor)
+                                        .frame(width: geo.size.width * progressFraction)
+                                }
+                            }
+                            .frame(height: 5)
+                        }
+                    }
+
+                    Rectangle()
+                        .fill(theme.borderSubtle)
+                        .frame(height: 1)
+                        .frame(maxWidth: .infinity)
+
+                    Text(timelineSummaryText)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(theme.textTertiary)
+                        .lineLimit(1)
                 }
-
-                Divider()
-                    .overlay(GuardianDynamicColors.borderSubtle)
-
-                Text(timelineSummaryText)
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    .foregroundStyle(GuardianDynamicColors.textTertiary)
-                    .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(12)
-        }
+        )
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(isSelected ? GuardianDynamicColors.backgroundElevated : GuardianDynamicColors.backgroundRaised)
         .overlay {
-            RoundedRectangle(cornerRadius: Self.runCardOuterCornerRadius, style: .continuous)
-                .stroke(
-                    isSelected
-                        ? Color.blue.opacity(0.7)
-                        : GuardianDynamicColors.borderSubtle,
-                    lineWidth: isSelected ? 1.6 : 1
-                )
+            if isSelected {
+                RoundedRectangle(cornerRadius: cardConfiguration.cornerRadius, style: .continuous)
+                    .strokeBorder(GuardianSemanticColors.infoForeground.opacity(0.55), lineWidth: 2)
+                    .allowsHitTesting(false)
+            }
         }
-        .clipShape(RoundedRectangle(cornerRadius: Self.runCardOuterCornerRadius, style: .continuous))
     }
 
     @ViewBuilder
@@ -329,7 +327,7 @@ private struct MissionRunCard: View {
                 Color(red: 0x12 / 255, green: 0x15 / 255, blue: 0x1c / 255)
                 Image(systemName: "shield.lefthalf.filled")
                     .font(.system(size: 22, weight: .medium))
-                    .foregroundStyle(GuardianDynamicColors.textSecondary.opacity(0.75))
+                    .foregroundStyle(theme.textSecondary.opacity(0.75))
             }
             .frame(maxWidth: .infinity)
             .frame(height: Self.runCardBannerHeight)
@@ -376,9 +374,9 @@ private struct MissionRunCard: View {
         case .running:
             return GuardianSemanticColors.successForeground.opacity(0.95)
         case .setup:
-            return GuardianDynamicColors.textSecondary.opacity(0.85)
+            return theme.textSecondary.opacity(0.85)
         case .paused:
-            return GuardianDynamicColors.textSecondary.opacity(0.9)
+            return theme.textSecondary.opacity(0.9)
         case .recovery:
             return GuardianSemanticColors.infoForeground.opacity(0.95)
         case .completed:
@@ -422,15 +420,15 @@ private struct MissionRunCard: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
                 .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .foregroundStyle(GuardianDynamicColors.textTertiary)
+                .foregroundStyle(theme.textTertiary)
             Text(value)
                 .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundStyle(GuardianDynamicColors.textPrimary)
+                .foregroundStyle(theme.textPrimary)
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(GuardianDynamicColors.backgroundElevated)
+        .background(theme.backgroundElevated)
         .clipShape(RoundedRectangle(cornerRadius: 7))
     }
 }
@@ -452,10 +450,15 @@ private struct AddMissionRunSheet: View {
         Modal(
             title: "Select Mission",
             headerActions: {
-                Button("Close") {
-                    dismiss()
-                }
-                .buttonStyle(.bordered)
+                GuardianThemedButton(
+                    title: "Close",
+                    accent: .danger,
+                    surface: .outline,
+                    size: .small,
+                    shape: .cornered,
+                    action: { dismiss() }
+                )
+                .keyboardShortcut(.cancelAction)
             },
             bodyContent: {
                 VStack(alignment: .leading, spacing: 12) {

@@ -28,9 +28,8 @@ enum GuardianStructuredLogLinePresentation: Sendable {
 /// Two layers of entries:
 /// - **Core entries** — registered inline below (fleet, telemetry, lifecycle, etc.). Owned by the
 ///   `GuardianHQ` core; one source of truth for app-wide wording.
-/// - **Plugin entries** — registered at runtime via ``registerTemplate(forKey:defaultPattern:mcr:)``
-///   or ``registerTemplates(_:)`` so other modules (assistant plugins like Paladin, future
-///   integrations) can ship their own templates without editing the core file. Plugin entries take
+/// - **Plugin entries** — registered at runtime via ``registerTemplate(pluginID:forKey:defaultPattern:mcr:)``
+///   or ``registerTemplates(pluginID:_:)`` with a validated ``GuardianPluginID``. Plugin entries take
 ///   precedence over core entries with the same key (last-write-wins), so plugins can override
 ///   core wording when needed.
 ///
@@ -42,6 +41,8 @@ enum GuardianStructuredLogLinePresentation: Sendable {
 /// templates are available before any of their emissions fire.
 enum StructuredLogTemplateCatalog: Sendable {
     private static let pluginEntries = OSAllocatedUnfairLock<[String: StructuredLogTemplateEntry]>(initialState: [:])
+    /// Log template keys registered by ``registerTemplate(pluginID:forKey:defaultPattern:mcr:)`` → owning plugin raw id.
+    private static let templateOwnership = OSAllocatedUnfairLock<[String: String]>(initialState: [:])
 
     private static let entries: [String: StructuredLogTemplateEntry] = {
         var e: [String: StructuredLogTemplateEntry] = [:]
@@ -449,11 +450,10 @@ enum StructuredLogTemplateCatalog: Sendable {
         }
     }
 
-    /// Plugin registration: add (or override) a single template entry. Idempotent — last write
-    /// wins. Safe to call from any actor / thread; lookup sees the new entry immediately.
-    /// Typical site: an assistant / domain `init` so the template is available before its first
-    /// emission fires.
+    /// Plugin registration: add (or override) a single template entry owned by ``pluginID``.
+    /// Idempotent — last write wins. Safe to call from any actor / thread.
     static func registerTemplate(
+        pluginID: GuardianPluginID,
         forKey key: String,
         defaultPattern: String,
         mcr: String? = nil
@@ -461,15 +461,41 @@ enum StructuredLogTemplateCatalog: Sendable {
         pluginEntries.withLock { entries in
             entries[key] = StructuredLogTemplateEntry(defaultPattern: defaultPattern, mcrPattern: mcr)
         }
+        templateOwnership.withLock { ownership in
+            ownership[key] = pluginID.rawValue
+        }
     }
 
-    /// Plugin registration: bulk-add multiple template entries. Each key follows the same
-    /// last-write-wins rule as ``registerTemplate(forKey:defaultPattern:mcr:)``.
-    static func registerTemplates(_ contributions: [String: StructuredLogTemplateEntry]) {
+    /// Bulk plugin registration; every key is attributed to ``pluginID`` for later teardown.
+    static func registerTemplates(
+        pluginID: GuardianPluginID,
+        _ contributions: [String: StructuredLogTemplateEntry]
+    ) {
         guard !contributions.isEmpty else { return }
         pluginEntries.withLock { entries in
             for (k, v) in contributions {
                 entries[k] = v
+            }
+        }
+        templateOwnership.withLock { ownership in
+            for k in contributions.keys {
+                ownership[k] = pluginID.rawValue
+            }
+        }
+    }
+
+    /// Removes every plugin-registered template row owned by this plugin id.
+    static func unregisterAllTemplates(forPlugin pluginID: GuardianPluginID) {
+        let keys = templateOwnership.withLock { ownership -> [String] in
+            let keys = ownership.filter { $0.value == pluginID.rawValue }.map(\.key)
+            for k in keys {
+                ownership.removeValue(forKey: k)
+            }
+            return keys
+        }
+        pluginEntries.withLock { entries in
+            for k in keys {
+                entries.removeValue(forKey: k)
             }
         }
     }
@@ -479,6 +505,9 @@ enum StructuredLogTemplateCatalog: Sendable {
     static func unregisterTemplate(forKey key: String) {
         _ = pluginEntries.withLock { entries in
             entries.removeValue(forKey: key)
+        }
+        _ = templateOwnership.withLock { ownership in
+            ownership.removeValue(forKey: key)
         }
     }
 

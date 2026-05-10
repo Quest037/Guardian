@@ -28,8 +28,11 @@ let package = Package(
                 .copy("Resources/Px4SitlBundle"),
                 .copy("Resources/SimulationDevices"),
                 .copy("Resources/MissionBadge"),
-                .copy("Resources/FleetCommandCatalog.json"),
+                .copy("Resources/FleetCalibrationAnchors.json"),
                 .copy("Resources/SitlDefaultParams/ArduPilotGuardianBattery.parm"),
+                .copy("Resources/sidebar_logo.png"),
+                .copy("Resources/Brand/GuardianMark.svg"),
+                .copy("Resources/Brand/GuardianWordmark.svg"),
             ],
             linkerSettings: [
                 // Embed a minimal Info.plist so NSBundle has a main bundle identifier
@@ -41,6 +44,11 @@ let package = Package(
                     "-Xlinker", "Sources/GuardianHQ/MainBundle-Info.plist",
                 ], .when(platforms: [.macOS])),
             ]
+        ),
+        .testTarget(
+            name: "GuardianHQTests",
+            dependencies: ["GuardianHQ"],
+            path: "Tests/GuardianHQTests"
         ),
     ]
 )

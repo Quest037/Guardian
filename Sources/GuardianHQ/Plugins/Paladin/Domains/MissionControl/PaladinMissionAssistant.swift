@@ -105,6 +105,7 @@ final class PaladinMissionAssistant {
     /// having to know about Paladin. Called from ``init(runID:)`` so any code path that constructs
     /// a Paladin assistant ensures both profile and templates are registered.
     static func registerProfile() {
+        guard GuardianPluginRegistry.shared.isPluginEnabled(.paladin) else { return }
         MissionRunAssistantRegistry.shared.register(
             MissionRunAssistantProfile(key: assistantKey, displayName: assistantDisplayName)
         )

@@ -4,13 +4,17 @@ import SwiftUI
 ///
 /// All edits route through ``MissionRunEnvironment``'s policy APIs as the local operator
 /// (``MissionRunPolicyEditCredential/localOperator``). The host wraps this view in
-/// ``SidebarOverlay`` with a non-`nil` title so chrome is provided by the host shell.
+/// ``AppDrawer`` with a non-`nil` title so chrome is provided by the host shell.
 struct MissionRunControlsSidebarView: View {
     @ObservedObject var run: MissionRunEnvironment
     @ObservedObject var missionStore: MissionStore
     @ObservedObject var generalSettings: GeneralSettingsStore
     /// Reflected view-side change so the parent can persist anything that doesn't already round-trip via `missionTemplatePersister`.
     let onChange: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     private var credential: MissionRunPolicyEditCredential {
         .localOperator(callsign: generalSettings.callsign)
@@ -41,7 +45,7 @@ struct MissionRunControlsSidebarView: View {
                 cases: MissionRunAbortPolicy.setupPickerCases
             ) { $0.setupMenuLabel }
 
-            Divider().overlay(GuardianDynamicColors.borderSubtle)
+            Divider().overlay(theme.borderSubtle)
 
             policyRow(
                 title: "Complete Policy",
@@ -51,7 +55,7 @@ struct MissionRunControlsSidebarView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(GuardianDynamicColors.backgroundRaised)
+        .background(theme.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
@@ -60,12 +64,12 @@ struct MissionRunControlsSidebarView: View {
             ForEach(MissionRunEngagementAction.allCases.indices, id: \.self) { idx in
                 let action = MissionRunEngagementAction.allCases[idx]
                 if idx > 0 {
-                    Divider().overlay(GuardianDynamicColors.borderSubtle)
+                    Divider().overlay(theme.borderSubtle)
                 }
                 HStack(alignment: .center, spacing: 12) {
                     Text(action.setupLabel)
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(GuardianDynamicColors.textPrimary)
+                        .foregroundStyle(theme.textPrimary)
                     Spacer(minLength: 12)
                     Picker("", selection: engagementDispositionBinding(for: action)) {
                         ForEach(MissionRunEngagementDisposition.allCases, id: \.self) { disposition in
@@ -81,7 +85,7 @@ struct MissionRunControlsSidebarView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(GuardianDynamicColors.backgroundRaised)
+        .background(theme.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
@@ -91,7 +95,7 @@ struct MissionRunControlsSidebarView: View {
     private func sectionTitle(_ text: String) -> some View {
         Text(text)
             .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(GuardianDynamicColors.textSecondary)
+            .foregroundStyle(theme.textSecondary)
             .padding(.bottom, 8)
     }
 
@@ -105,7 +109,7 @@ struct MissionRunControlsSidebarView: View {
         HStack(alignment: .center, spacing: 12) {
             Text(title)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(GuardianDynamicColors.textPrimary)
+                .foregroundStyle(theme.textPrimary)
             Spacer(minLength: 12)
             Picker("", selection: binding) {
                 ForEach(cases, id: \.self) { value in

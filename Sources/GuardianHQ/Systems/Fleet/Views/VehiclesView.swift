@@ -8,15 +8,12 @@ struct VehiclesView: View {
     @ObservedObject var missionControlStore: MissionControlStore
     @ObservedObject var liveDriveStore: LiveDriveStore
     @EnvironmentObject private var toastCenter: ToastCenter
-    @EnvironmentObject private var sidebarOverlay: SidebarOverlay
+    @EnvironmentObject private var appDrawer: AppDrawer
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var sidebarSpawnPlatform: SimulationPlatform = .ardupilot
-    @State private var infoSheetVehicleTitle: String?
-    @State private var infoSheetVehicleID: String?
-    @State private var infoSheetSitlSessionUUID: String?
     @State private var pendingSimStop: PendingSimStop?
-    @State private var preflightSheetContext: VehiclePreflightSheetContext?
+    @State private var calibrationSheetContext: VehicleCalibrationSheetContext?
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
@@ -65,61 +62,27 @@ struct VehiclesView: View {
                 toastCenter.show(newValue, style: .error, duration: 4.5)
             }
         }
-        .sheet(isPresented: infoSheetIsPresented) {
-            VehicleTelemetryInfoSheet(
-                title: infoSheetVehicleTitle ?? "Vehicle telemetry",
-                vehicleID: infoSheetVehicleID,
-                sitlSessionUUID: infoSheetSitlSessionUUID,
-                model: infoSheetVehicleID.flatMap(fleetLink.vehicleModel(forVehicleID:)),
-                hub: infoSheetVehicleID.flatMap(fleetLink.hubTelemetry(forVehicleID:)) ?? fleetLink.hubTelemetry
-            )
-        }
-        .sheet(item: $preflightSheetContext) { ctx in
-            VehiclePreflightSheet(
-                vehicleTitle: ctx.title,
-                vehicleID: ctx.vehicleID,
+        .sheet(item: $calibrationSheetContext) { ctx in
+            VehicleCalibrationModal(
                 fleetLink: fleetLink,
+                controlStore: missionControlStore,
                 sitl: sitl,
-                controlStore: missionControlStore
+                vehicleID: ctx.vehicleID,
+                fallback: ctx.fallback
             )
         }
     }
 
-    private struct VehiclePreflightSheetContext: Identifiable {
+    private struct VehicleCalibrationSheetContext: Identifiable {
         var id: String { vehicleID }
         let vehicleID: String
-        let title: String
+        let fallback: FleetVehicleModel?
     }
 
     private func fleetVehicleLiveMissionLockReason(vehicleID: String) -> String? {
         missionControlStore.isVehicleStreamUsedInLiveMission(vehicleID: vehicleID, fleetLink: fleetLink, sitl: sitl)
             ? "Vehicle is assigned to a live Mission Control run."
             : nil
-    }
-
-    /// Disables Vehicles **Test arm** using the same lifecycle gate as Mission Control arm preflight (`.live` = green on fleet card).
-    private func fleetVehicleTestArmDisabledReason(vehicleID: String) -> String? {
-        if let lock = fleetVehicleLiveMissionLockReason(vehicleID: vehicleID) { return lock }
-        guard let model = fleetLink.vehicleModel(forVehicleID: vehicleID) else {
-            return MissionControlStore.preflightProbeNoVehicleDetail
-        }
-        guard model.collections.lifecycleStatus.stage == .live else {
-            return MissionControlStore.preflightProbeNotConnectedDetail
-        }
-        return nil
-    }
-
-    private var infoSheetIsPresented: Binding<Bool> {
-        Binding(
-            get: { infoSheetVehicleTitle != nil },
-            set: { showing in
-                if !showing {
-                    infoSheetVehicleTitle = nil
-                    infoSheetVehicleID = nil
-                    infoSheetSitlSessionUUID = nil
-                }
-            }
-        )
     }
 
     /// Same layout as `serverOfflineMessage` (icon 44pt medium gray, title 20pt semibold white, subtitle 14pt gray, max 480pt, padding 32, centered in the pane).
@@ -159,22 +122,17 @@ struct VehiclesView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var devicesHeaderRow: some View {
-        HStack(alignment: .center, spacing: 16) {
-            Text("Vehicles")
-                .font(.system(size: 22, weight: .bold))
-                .foregroundStyle(theme.textPrimary)
-            Spacer(minLength: 8)
+    /// Strip under the window title bar: live link status and Add Sim (trailing).
+    private var vehiclesSubBar: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Spacer(minLength: 0)
+            telemetryHeaderIndicator
             if fleetLink.isSimulateEnabled {
-                Button("Add Sim") {
+                GuardianPrimaryProminentButton(title: "Add Sim") {
                     sidebarSpawnPlatform = generalSettings.defaultSimulationPlatform
                     presentAddSimulationSidebar()
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.blue)
-                .controlSize(.regular)
             }
-            telemetryHeaderIndicator
         }
     }
 
@@ -183,30 +141,28 @@ struct VehiclesView: View {
     }
 
     private var devicesContent: some View {
-        Group {
+        VStack(spacing: 0) {
+            vehiclesSubBar
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity)
+                .background(theme.backgroundRaised)
+
             if fleetGridEntries.isEmpty {
-                VStack(spacing: 0) {
-                    devicesHeaderRow
-                        .padding(.horizontal, 24)
-                        .padding(.top, 24)
-                    noVehiclesEmptyState
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                noVehiclesEmptyState
             } else {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        devicesHeaderRow
-                        vehicleFleetSection
-                    }
-                    .padding(24)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    vehicleFleetSection
+                        .padding(24)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func presentAddSimulationSidebar() {
-        sidebarOverlay.present(
+        appDrawer.present(
             title: nil,
             preferredWidth: 352,
             scrimTapDismisses: true,
@@ -220,10 +176,10 @@ struct VehiclesView: View {
                         platform: sidebarSpawnPlatform,
                         defaults: generalSettings.simSpawnDefaults
                     )
-                    sidebarOverlay.dismiss(animation: addSimSidebarSpring)
+                    appDrawer.dismiss(animation: addSimSidebarSpring)
                 },
                 onClose: {
-                    sidebarOverlay.dismiss(animation: addSimSidebarSpring)
+                    appDrawer.dismiss(animation: addSimSidebarSpring)
                 }
             )
         }
@@ -238,7 +194,6 @@ struct VehiclesView: View {
                 switch entry {
                 case .live(let vehicleID, let model):
                     let snapshot = model.collections.telemetrySnapshot
-                    let testArmBlock = fleetVehicleTestArmDisabledReason(vehicleID: vehicleID)
                     FleetVehicleGridCard(
                         autopilotStack: snapshot?.autopilotStack ?? .unknown,
                         simulationImageBasenames: nil,
@@ -246,18 +201,12 @@ struct VehiclesView: View {
                         vehicleModel: model,
                         sitlAlive: nil,
                         sitlExitCode: nil,
-                        onInfo: {
-                            infoSheetVehicleTitle = "Live vehicle telemetry"
-                            infoSheetVehicleID = vehicleID
-                            infoSheetSitlSessionUUID = nil
-                        },
-                        onTestArm: {
-                            preflightSheetContext = VehiclePreflightSheetContext(
+                        onCalibration: {
+                            calibrationSheetContext = VehicleCalibrationSheetContext(
                                 vehicleID: vehicleID,
-                                title: "Live vehicle"
+                                fallback: model
                             )
                         },
-                        testArmDisabledReason: testArmBlock,
                         onStopSim: nil,
                         stopSimDisabledReason: nil,
                         onDismissSim: nil,
@@ -273,36 +222,31 @@ struct VehiclesView: View {
                         instance: inst,
                         model: model
                     )
-                    let testArmBlock = fleetVehicleTestArmDisabledReason(vehicleID: resolvedVehicleID)
+                    let cardModel: FleetVehicleModel = {
+                        if var existing = model {
+                            existing.collections.lifecycleStatus = status
+                            return existing
+                        }
+                        return FleetVehicleModel(
+                            vehicleID: resolvedVehicleID,
+                            systemID: systemID,
+                            vehicleType: inst.preset.fleetVehicleType,
+                            initialStatus: status
+                        )
+                    }()
                     FleetVehicleGridCard(
                         autopilotStack: FleetAutopilotStack(simulationPlatform: inst.platform),
                         simulationImageBasenames: inst.preset.simulationDeviceImageBasenames,
                         isSimulation: true,
-                        vehicleModel: {
-                            if var existing = model {
-                                existing.collections.lifecycleStatus = status
-                                return existing
-                            }
-                            return FleetVehicleModel(
-                                vehicleID: resolvedVehicleID,
-                                systemID: systemID,
-                                initialStatus: status
-                            )
-                        }(),
+                        vehicleModel: cardModel,
                         sitlAlive: inst.isAlive,
                         sitlExitCode: inst.lastExitCode,
-                        onInfo: {
-                            infoSheetVehicleTitle = "\(inst.preset.displayName) telemetry"
-                            infoSheetVehicleID = resolvedVehicleID
-                            infoSheetSitlSessionUUID = inst.id.uuidString
-                        },
-                        onTestArm: {
-                            preflightSheetContext = VehiclePreflightSheetContext(
+                        onCalibration: {
+                            calibrationSheetContext = VehicleCalibrationSheetContext(
                                 vehicleID: resolvedVehicleID,
-                                title: "\(inst.preset.displayName) (sim)"
+                                fallback: cardModel
                             )
                         },
-                        testArmDisabledReason: testArmBlock,
                         onStopSim: {
                             pendingSimStop = PendingSimStop(
                                 id: inst.id,
@@ -381,7 +325,7 @@ struct VehiclesView: View {
         return rows
     }
 
-    /// Dot + two-word status on the same row as the "Vehicles" title (no subtitle).
+    /// Dot + two-word MAVLink bridge status for the sub-bar.
     private var telemetryHeaderIndicator: some View {
         HStack(spacing: 8) {
             Circle()

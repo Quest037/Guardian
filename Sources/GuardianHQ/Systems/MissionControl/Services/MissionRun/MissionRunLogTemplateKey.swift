@@ -7,6 +7,6 @@ import Foundation
 /// extend this same type from their own files (see e.g. ``PaladinLogTemplateCatalog``).
 ///
 /// Default + MCR wording for known keys lives in ``StructuredLogTemplateCatalog`` — registered
-/// inline for core entries, or via ``StructuredLogTemplateCatalog/registerTemplate(forKey:defaultPattern:mcr:)``
+/// inline for core entries, or via ``StructuredLogTemplateCatalog/registerTemplate(pluginID:forKey:defaultPattern:mcr:)``
 /// for plugin-owned ones.
 enum MissionRunLogTemplateKey {}

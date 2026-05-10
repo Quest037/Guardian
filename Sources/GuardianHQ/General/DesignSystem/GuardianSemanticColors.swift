@@ -5,10 +5,14 @@ enum GuardianSemanticColors {
     /// Success — same family as `ToastStyle.success` background tint.
     static let successBackground = Color.green.opacity(0.22)
     static let successForeground = Color.green
+    /// Vivid success accent for strokes / icons / dots / emphasis text on neutral surfaces.
+    static let successStroke = Color.green.opacity(0.92)
 
     /// Warning — amber-tinted surface; foreground stays **dark** so text stays legible on the yellow/amber fill in every appearance (badges, pills, banners).
     static let warningBackground = Color(red: 0.98, green: 0.86, blue: 0.42).opacity(0.36)
     static let warningForeground = Color.black.opacity(0.88)
+    /// Vivid warning accent for strokes / icons / dots / emphasis text on neutral surfaces — uses orange instead of plain yellow for legibility on light-gray panels.
+    static let warningStroke = Color.orange.opacity(0.95)
 
     /// Info (e.g. completed / neutral-positive emphasis).
     static let infoBackground = Color.blue.opacity(0.22)
@@ -17,6 +21,8 @@ enum GuardianSemanticColors {
     /// Danger / error emphasis.
     static let dangerBackground = Color.red.opacity(0.24)
     static let dangerForeground = Color.red.opacity(0.92)
+    /// Vivid danger accent for strokes / icons / dots / emphasis text (mirrors ``dangerForeground``).
+    static let dangerStroke = Color.red.opacity(0.92)
 
     static let neutralBadgeBackground = Color.white.opacity(0.1)
     static let neutralBadgeForeground = Color.gray.opacity(0.95)

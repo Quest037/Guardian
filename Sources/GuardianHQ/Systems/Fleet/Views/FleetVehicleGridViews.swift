@@ -9,10 +9,7 @@ struct FleetVehicleGridCard: View {
     let vehicleModel: FleetVehicleModel?
     let sitlAlive: Bool?
     let sitlExitCode: Int32?
-    let onInfo: (() -> Void)?
-    let onTestArm: (() -> Void)?
-    /// When non-`nil`, the Test button is disabled and this string is used for `.help`.
-    let testArmDisabledReason: String?
+    let onCalibration: (() -> Void)?
     let onStopSim: (() -> Void)?
     /// When non-`nil`, the Stop button is disabled and this string is used for `.help` (e.g. live Mission Control run).
     let stopSimDisabledReason: String?
@@ -23,47 +20,56 @@ struct FleetVehicleGridCard: View {
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
+    private var cardConfiguration: GuardianCardConfiguration {
+        GuardianCardConfiguration(
+            border: .none,
+            cornerRadius: GuardianCardLayout.cornerRadius,
+            bodyPadding: 12
+        )
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ZStack(alignment: .topLeading) {
-                imageBlock
-                    .aspectRatio(1, contentMode: .fit)
-                    .frame(maxWidth: .infinity)
-                    .clipped()
+        GuardianCard(
+            configuration: cardConfiguration,
+            media: {
+                ZStack(alignment: .topLeading) {
+                    imageBlock
+                        .aspectRatio(1, contentMode: .fit)
+                        .frame(maxWidth: .infinity)
+                        .clipped()
 
-                HStack(alignment: .top, spacing: 0) {
-                    FleetAutopilotStackBadge(stack: autopilotStack)
+                    HStack(alignment: .top, spacing: 0) {
+                        FleetAutopilotStackBadge(stack: autopilotStack)
 
-                    Spacer(minLength: 0)
+                        Spacer(minLength: 0)
 
+                        if isSimulation {
+                            FleetLiveSimBadge(isSimulation: true)
+                        }
+                    }
+                    .padding(8)
+                }
+            },
+            body: {
+                Group {
                     if isSimulation {
-                        FleetLiveSimBadge(isSimulation: true)
+                        simStatusRow
+                    } else {
+                        liveStatusRow
                     }
                 }
-                .padding(8)
             }
-
-            VStack(alignment: .leading, spacing: 6) {
-                if isSimulation {
-                    simStatusRow
-                } else {
-                    liveStatusRow
-                }
-            }
-            .padding(12)
-        }
-        .background(theme.backgroundRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: cardConfiguration.cornerRadius, style: .continuous)
                 .fill(statusColor.opacity(0.08))
                 .allowsHitTesting(false)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: cardConfiguration.cornerRadius, style: .continuous)
                 .strokeBorder(statusColor.opacity(0.55), lineWidth: 1)
                 .allowsHitTesting(false)
-        )
+        }
     }
 
     @ViewBuilder
@@ -94,27 +100,21 @@ struct FleetVehicleGridCard: View {
                     .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if onInfo != nil || onTestArm != nil {
+            if let onCalibration {
                 HStack(spacing: 8) {
-                    if let onTestArm {
-                        Button(action: onTestArm) {
-                            Image(systemName: "checkmark.circle")
-                                .appIconGlyph()
+                    GuardianThemedButton(
+                        accent: .neutral,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        contentSizing: .squareToolbarCell,
+                        action: onCalibration,
+                        label: {
+                            Image(systemName: "waveform.path.ecg.rectangle")
+                                .font(.system(size: 14, weight: .semibold))
                         }
-                        .buttonStyle(.bordered)
-                        .uniformIconButton(width: 30, height: 26)
-                        .disabled(testArmDisabledReason != nil)
-                        .help(testArmDisabledReason ?? "Run a one-shot arm check (same as Mission Control preflight).")
-                    }
-                    if let onInfo {
-                        Button(action: onInfo) {
-                            Image(systemName: "info.circle")
-                                .appIconGlyph()
-                        }
-                        .buttonStyle(.bordered)
-                        .uniformIconButton(width: 30, height: 26)
-                        .help("Vehicle telemetry details")
-                    }
+                    )
+                    .help("Open Vehicle Inspector (calibration, preflight, telemetry)")
                 }
             }
         }
@@ -132,53 +132,65 @@ struct FleetVehicleGridCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 8) {
-                if let onTestArm {
-                    Button(action: onTestArm) {
-                        Image(systemName: "checkmark.circle")
-                            .appIconGlyph()
-                    }
-                    .buttonStyle(.bordered)
-                    .uniformIconButton(width: 30, height: 26)
-                    .disabled(testArmDisabledReason != nil)
-                    .help(testArmDisabledReason ?? "Run a one-shot arm check (same as Mission Control preflight).")
-                }
-                if let onInfo {
-                    Button(action: onInfo) {
-                        Image(systemName: "info.circle")
-                            .appIconGlyph()
-                    }
-                    .buttonStyle(.bordered)
-                    .uniformIconButton(width: 30, height: 26)
-                    .help("Vehicle telemetry details")
+                if let onCalibration {
+                    GuardianThemedButton(
+                        accent: .neutral,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        contentSizing: .squareToolbarCell,
+                        action: onCalibration,
+                        label: {
+                            Image(systemName: "waveform.path.ecg.rectangle")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                    )
+                    .help("Open Vehicle Inspector (calibration, preflight, telemetry)")
                 }
                 if let clone = onCloneSim {
-                    Button(action: clone) {
-                        Image(systemName: "doc.on.doc")
-                            .appIconGlyph()
-                    }
-                    .buttonStyle(.bordered)
-                    .uniformIconButton(width: 30, height: 26)
+                    GuardianThemedButton(
+                        accent: .neutral,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        contentSizing: .squareToolbarCell,
+                        action: clone,
+                        label: {
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                    )
                     .help("Spawn another simulator with this vehicle preset")
                 }
                 if sitlAlive == true, let stop = onStopSim {
-                    Button(action: stop) {
-                        Image(systemName: "stop.circle")
-                            .appIconGlyph()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
-                    .uniformIconButton(width: 30, height: 26)
-                    .disabled(stopSimDisabledReason != nil)
+                    GuardianThemedButton(
+                        accent: .danger,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        isEnabled: stopSimDisabledReason == nil,
+                        contentSizing: .squareToolbarCell,
+                        action: stop,
+                        label: {
+                            Image(systemName: "trash")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                    )
                     .help(stopSimDisabledReason ?? "Stop the simulator process.")
                 } else if sitlAlive == false, let dismiss = onDismissSim {
-                    Button(action: dismiss) {
-                        Image(systemName: "xmark.circle")
-                            .appIconGlyph()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
-                    .uniformIconButton(width: 30, height: 26)
-                    .disabled(stopSimDisabledReason != nil)
+                    GuardianThemedButton(
+                        accent: .danger,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        isEnabled: stopSimDisabledReason == nil,
+                        contentSizing: .squareToolbarCell,
+                        action: dismiss,
+                        label: {
+                            Image(systemName: "trash")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                    )
                     .help(stopSimDisabledReason ?? "Remove this sim row from the grid.")
                 }
             }

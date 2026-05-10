@@ -40,6 +40,48 @@ Then **Product → Run** (⌘R). Xcode uses the same SwiftPM target.
 - **Prewarm both SITL stacks:** `make sitl-prewarm` (ArduPilot full prebuild), or include PX4 too: `PX4_AUTOPILOT_ROOT=/path/to/PX4-Autopilot make sitl-prewarm`
 - **MAVSDK-Python bridge:** `make bridge-deps`
 
+## SITL command-catalogue smoke tests
+
+End-to-end coverage for the Layer 0 fleet command catalogue (`command.fleet.vehicle.*`) ships as an **opt-in** XCTest suite, `GuardianHQSitlSmokeTests` in `Tests/GuardianHQTests/`. It is not part of normal `swift test` runs because it boots real **ArduPilot** and **PX4** SITL instances, starts `mavsdk_server` sessions, and drives the real `SitlService` → `FleetLinkService` → `FleetCommandsCatalogue` path against them.
+
+### Run the suite
+
+The canonical entry point is the repo script:
+
+```bash
+scripts/run_sitl_smoke_tests.sh
+```
+
+The script sets `GUARDIAN_RUN_SITL_SMOKE=1` and filters `swift test` to the smoke suite. Without that env var, the tests `XCTSkip` themselves so `swift test` (CI, dev loop) stays fast and deterministic.
+
+Prerequisites are the same as for in-app SITL: bundled ArduPilot tree (`make sitl-runtime` or developer checkout via `GUARDIAN_ARDUPILOT_ROOT`), PX4 SITL slice (`make px4-sitl-runtime` or `GUARDIAN_PX4_ROOT` pointing at a PX4-Autopilot checkout with `px4_sitl_default` already built), and the SITL Python deps (`make sitl-deps`).
+
+### What it covers
+
+In one shared session per stack, for both ArduPilot and PX4:
+
+- **Telemetry reads** — every `get.telemetry.*` descriptor returns a populated `keyValues` payload.
+- **Param-set calibration** — `do.calibrate.battery.capacity` round-trips through the catalogue's `PARAM_SET` + read-back path.
+- **Set-mode** — `do.mode mode=hold` succeeds and the autopilot's reported flight mode flips to a hold/loiter token.
+- **Arm / disarm** — `do.arm` succeeds once the vehicle reports `healthArmable`, telemetry transitions to armed, then `do.disarm` brings it back down.
+- **Loiter / return-home / land** — `do.loiter`, `do.return.home`, and `do.land` are accepted by the autopilot after re-arm.
+- **PX4 calibration plugin** (PX4 only) — `do.calibrate.{gyro, level, gimbal}` exercises the MAVSDK Calibration plugin transport and surfaces a non-transport outcome (success, declined, did-not-converge, busy, etc.).
+
+### Tuning timeouts
+
+The harness honours these environment variables when set; otherwise it uses the defaults shown:
+
+| Variable | Default (s) | Used for |
+| --- | --- | --- |
+| `GUARDIAN_SITL_SMOKE_BOOT_TIMEOUT` | `180` | Waiting for each SITL session to reach `.live` and for `healthArmable`. |
+| `GUARDIAN_SITL_SMOKE_COMMAND_TIMEOUT` | `45` | Per-command catalogue dispatch budget. |
+| `GUARDIAN_SITL_SMOKE_SIDE_EFFECT_TIMEOUT` | `20` | Waiting for telemetry side-effects (armed state, mode change). |
+| `GUARDIAN_SITL_SMOKE_CALIBRATION_TIMEOUT` | `90` | PX4 calibration plugin per-procedure budget. |
+
+### Extending it
+
+When you wire a new command in `FleetCommandsCatalogue`, add a matching smoke assertion to `GuardianHQSitlSmokeTests` (in the same shared-session loop) per the **Add Tests For New Features** rule. Use `invoke(...)` + `assertSuccess(...)` for happy-path commands, and `assertNoTransportFailure(...)` for procedures whose autopilot-side outcome is non-deterministic in SITL (e.g. calibration progress).
+
 ## SIM battery drain (SITL)
 
 Guardian can **turn simulated pack depletion on or off** for built-in SITL vehicles from **LiveDrive** and **Mission Control → Running**, so operational flows see realistic battery movement instead of a static 100%. This is **stack-agnostic in the app** but implemented with **different autopilot parameters** and **different simulator rules** on the wire.

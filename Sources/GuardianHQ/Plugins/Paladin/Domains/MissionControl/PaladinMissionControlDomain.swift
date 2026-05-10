@@ -53,7 +53,13 @@ final class PaladinMissionControlDomain: MissionControlRunObserver {
     }
 
     @discardableResult
-    private func attachAssistant(to run: MissionRunEnvironment) -> PaladinMissionAssistant {
+    private func attachAssistant(to run: MissionRunEnvironment) -> PaladinMissionAssistant? {
+        guard GuardianPluginRegistry.shared.isPluginEnabled(.paladin) else {
+            if assistantsByRunID[run.id] != nil {
+                detachAssistant(from: run)
+            }
+            return nil
+        }
         if let existing = assistantsByRunID[run.id] {
             existing.missionControlStore = missionControlStore
             existing.missionControlObserverToken = observerToken
@@ -75,5 +81,24 @@ final class PaladinMissionControlDomain: MissionControlRunObserver {
         }
         run.removeAssistant(forKey: PaladinMissionAssistant.assistantKey)
         assistantsByRunID.removeValue(forKey: run.id)
+    }
+
+    /// Removes Paladin assistants from every known run (e.g. plugin disabled in ``PluginsView``).
+    func detachAllAssistants() {
+        guard let store = missionControlStore else {
+            assistantsByRunID.removeAll()
+            return
+        }
+        for run in store.runs {
+            detachAssistant(from: run)
+        }
+    }
+
+    /// Attaches assistants after the plugin is re-enabled.
+    func resyncAssistantsForAllRuns() {
+        guard let store = missionControlStore else { return }
+        for run in store.runs {
+            _ = attachAssistant(to: run)
+        }
     }
 }

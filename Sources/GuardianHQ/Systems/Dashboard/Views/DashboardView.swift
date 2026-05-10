@@ -181,178 +181,205 @@ struct DashboardView: View {
     }
 
     private var dashboardMissionHealthCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Mission Health")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(theme.textSecondary)
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(missionHealthLabel)
-                    .font(.system(size: 30, weight: .heavy))
-                    .foregroundStyle(missionHealthColor)
-                Text("Runs: \(activeMissionRuns) active")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(theme.textSecondary)
+        GuardianCard(
+            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 12, bodyPadding: 14),
+            body: {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Mission Health")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(theme.textSecondary)
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(missionHealthLabel)
+                            .font(.system(size: 30, weight: .heavy))
+                            .foregroundStyle(missionHealthColor)
+                        Text("Runs: \(activeMissionRuns) active")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(theme.textSecondary)
+                    }
+                    if pausedMissionRuns > 0 {
+                        Text("Paused runs need operator confirmation.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.yellow.opacity(0.9))
+                    } else if activeMissionRuns == 0 {
+                        Text("No live mission runs right now.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(theme.textSecondary)
+                    } else {
+                        Text("Missions are currently advancing.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.green.opacity(0.85))
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
             }
-            if pausedMissionRuns > 0 {
-                Text("Paused runs need operator confirmation.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.yellow.opacity(0.9))
-            } else if activeMissionRuns == 0 {
-                Text("No live mission runs right now.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(theme.textSecondary)
-            } else {
-                Text("Missions are currently advancing.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.green.opacity(0.85))
-            }
-        }
-        .dashboardPanelStyle(minHeight: 148, background: theme.backgroundRaised)
+        )
     }
 
     private var dashboardFleetReadinessCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Fleet Readiness")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(theme.textSecondary)
-            HStack(spacing: 14) {
-                readinessCounter(title: "Ready", value: readyVehicleCount, color: .green)
-                readinessCounter(title: "Unready", value: notReadyVehicleCount, color: .orange)
-                readinessCounter(title: "Total", value: vehiclesTotalCount, color: theme.textPrimary.opacity(0.9))
-                readinessCounter(title: "SIM", value: simInstanceRowCount, color: .blue.opacity(0.9))
-                readinessCounter(title: "Live", value: liveVehicleCount, color: theme.textPrimary.opacity(0.9))
-            }
-            if readinessBreakdown.isEmpty {
-                Text("No active readiness blockers.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.green.opacity(0.85))
-            } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(readinessBreakdown) { row in
-                        Text("• \(row.label): \(row.count)")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(theme.textTertiary)
+        GuardianCard(
+            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 12, bodyPadding: 14),
+            body: {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Fleet Readiness")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(theme.textSecondary)
+                    HStack(spacing: 14) {
+                        readinessCounter(title: "Ready", value: readyVehicleCount, color: .green)
+                        readinessCounter(title: "Unready", value: notReadyVehicleCount, color: .orange)
+                        readinessCounter(title: "Total", value: vehiclesTotalCount, color: theme.textPrimary.opacity(0.9))
+                        readinessCounter(title: "SIM", value: simInstanceRowCount, color: .blue.opacity(0.9))
+                        readinessCounter(title: "Live", value: liveVehicleCount, color: theme.textPrimary.opacity(0.9))
+                    }
+                    if readinessBreakdown.isEmpty {
+                        Text("No active readiness blockers.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.green.opacity(0.85))
+                    } else {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(readinessBreakdown) { row in
+                                Text("• \(row.label): \(row.count)")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(theme.textTertiary)
+                            }
+                        }
                     }
                 }
+                .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
             }
-        }
-        .dashboardPanelStyle(minHeight: 148, background: theme.backgroundRaised)
+        )
     }
 
     private var dashboardUtilizationCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Fleet Utilization")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(theme.textSecondary)
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(utilizationRows) { row in
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack {
-                            Text(row.label)
-                                .font(.system(size: 11))
-                                .foregroundStyle(theme.textSecondary)
-                            Spacer(minLength: 0)
-                            Text("\(row.count)")
-                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(theme.textPrimary)
-                        }
-                        GeometryReader { geo in
-                            let ratio = CGFloat(row.count) / CGFloat(maxUtilizationCount)
-                            ZStack(alignment: .leading) {
-                                Capsule()
-                                    .fill(theme.borderSubtle)
-                                Capsule()
-                                    .fill(utilizationColor(for: row.label))
-                                    .frame(width: max(4, geo.size.width * ratio))
+        GuardianCard(
+            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 12, bodyPadding: 14),
+            body: {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Fleet Utilization")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(theme.textSecondary)
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(utilizationRows) { row in
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack {
+                                    Text(row.label)
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(theme.textSecondary)
+                                    Spacer(minLength: 0)
+                                    Text("\(row.count)")
+                                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                        .foregroundStyle(theme.textPrimary)
+                                }
+                                GeometryReader { geo in
+                                    let ratio = CGFloat(row.count) / CGFloat(maxUtilizationCount)
+                                    ZStack(alignment: .leading) {
+                                        Capsule()
+                                            .fill(theme.borderSubtle)
+                                        Capsule()
+                                            .fill(utilizationColor(for: row.label))
+                                            .frame(width: max(4, geo.size.width * ratio))
+                                    }
+                                }
+                                .frame(height: 8)
                             }
                         }
-                        .frame(height: 8)
                     }
                 }
+                .frame(maxWidth: .infinity, minHeight: 152, alignment: .topLeading)
             }
-        }
-        .dashboardPanelStyle(minHeight: 180, background: theme.backgroundRaised)
+        )
     }
 
     private var dashboardBatteryRiskCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Battery Risk Watchlist")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(theme.textSecondary)
-            if criticalBatteryRows.isEmpty {
-                Text("No vehicles below 35% battery.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.green.opacity(0.85))
-            } else {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(Array(criticalBatteryRows.prefix(6)), id: \.vehicleID) { row in
-                        HStack(spacing: 8) {
-                            Circle()
-                                .fill(row.isSimulation ? Color.blue.opacity(0.85) : Color.white.opacity(0.75))
-                                .frame(width: 7, height: 7)
-                            Text(row.shortID)
-                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(theme.textPrimary)
-                            Spacer(minLength: 0)
-                            Text(batteryText(for: row.batteryPercent))
-                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(.orange.opacity(0.95))
+        GuardianCard(
+            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 12, bodyPadding: 14),
+            body: {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Battery Risk Watchlist")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(theme.textSecondary)
+                    if criticalBatteryRows.isEmpty {
+                        Text("No vehicles below 35% battery.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.green.opacity(0.85))
+                    } else {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(criticalBatteryRows.prefix(6)), id: \.vehicleID) { row in
+                                HStack(spacing: 8) {
+                                    Circle()
+                                        .fill(row.isSimulation ? Color.blue.opacity(0.85) : Color.white.opacity(0.75))
+                                        .frame(width: 7, height: 7)
+                                    Text(row.shortID)
+                                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                        .foregroundStyle(theme.textPrimary)
+                                    Spacer(minLength: 0)
+                                    Text(batteryText(for: row.batteryPercent))
+                                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                        .foregroundStyle(.orange.opacity(0.95))
+                                }
+                            }
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, minHeight: 152, alignment: .topLeading)
             }
-        }
-        .dashboardPanelStyle(minHeight: 180, background: theme.backgroundRaised)
+        )
     }
 
     private var dashboardAlertsCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Active Alerts")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(theme.textSecondary)
-                Spacer(minLength: 0)
-                Text("Recent \(alertRows.count)")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(theme.textTertiary)
-            }
-            if alertRows.isEmpty {
-                Text("No high-signal alerts detected in current logs.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(theme.textSecondary)
-            } else {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(Array(alertRows.enumerated()), id: \.offset) { _, row in
-                        HStack(alignment: .top, spacing: 8) {
-                            Circle()
-                                .fill(row.severity.color)
-                                .frame(width: 7, height: 7)
-                                .padding(.top, 4)
-                            Text(row.text)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(theme.textTertiary)
-                                .lineLimit(2)
+        GuardianCard(
+            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 12, bodyPadding: 14),
+            body: {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Active Alerts")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(theme.textSecondary)
+                        Spacer(minLength: 0)
+                        Text("Recent \(alertRows.count)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                    if alertRows.isEmpty {
+                        Text("No high-signal alerts detected in current logs.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(theme.textSecondary)
+                    } else {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(alertRows.enumerated()), id: \.offset) { _, row in
+                                HStack(alignment: .top, spacing: 8) {
+                                    Circle()
+                                        .fill(row.severity.color)
+                                        .frame(width: 7, height: 7)
+                                        .padding(.top, 4)
+                                    Text(row.text)
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(theme.textTertiary)
+                                        .lineLimit(2)
+                                }
+                            }
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, minHeight: 192, alignment: .topLeading)
             }
-        }
-        .dashboardPanelStyle(minHeight: 220, background: theme.backgroundRaised)
+        )
     }
 
     private func dashboardStatCard(title: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(theme.textSecondary)
-            Text(value)
-                .font(.system(size: 32, weight: .heavy))
-                .foregroundStyle(theme.textPrimary)
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, minHeight: 120, alignment: .leading)
-        .background(theme.backgroundRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        GuardianCard(
+            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 12, bodyPadding: 16),
+            body: {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(theme.textSecondary)
+                    Text(value)
+                        .font(.system(size: 32, weight: .heavy))
+                        .foregroundStyle(theme.textPrimary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 88, alignment: .leading)
+            }
+        )
     }
 
     private func readinessCounter(title: String, value: Int, color: Color) -> some View {
@@ -416,16 +443,6 @@ private enum DashboardAlertSeverity {
         case .high: return .orange.opacity(0.95)
         case .critical: return .red.opacity(0.95)
         }
-    }
-}
-
-private extension View {
-    func dashboardPanelStyle(minHeight: CGFloat, background: Color) -> some View {
-        self
-            .padding(14)
-            .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .topLeading)
-            .background(background)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 }
 

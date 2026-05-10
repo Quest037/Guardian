@@ -115,10 +115,18 @@ final class MissionRunCommandSubsystem {
         case .holdPosition: return "hold"
         case .gotoCoordinate: return "goto"
         case .uploadAndStartMission(let items): return "upload+start mission (\(items.count) item(s))"
+        case .uploadMission(let items): return "upload mission (\(items.count) item(s))"
         case .returnToLaunch: return "return to launch"
         case .land: return "land"
         case .idle: return "idle (manual)"
         case .manualControl(let manual): return "manual \(manual.intent.rawValue)"
+        case .calibrateMavsdk(let kind): return "calibrate \(kind.rawValue)"
+        case .mavlinkCommandLong(let request): return "mavlink command \(request.command)"
+        case .cancelCalibration: return "cancel calibration"
+        case .setParameterFloat(let name, _): return "param \(name) (float)"
+        case .setParameterInt(let name, _): return "param \(name) (int)"
+        case .setMode(let mode): return "set mode \(mode.rawValue)"
+        case .rebootAutopilot: return "reboot autopilot"
         }
     }
 }

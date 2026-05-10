@@ -8,7 +8,7 @@ import SwiftUI
 ///
 /// Lives in its own `View` struct (rather than a `@ViewBuilder` method on the parent) so
 /// `@ObservedObject` on `run`, `missionStore`, and `generalSettings` is tracked inside the
-/// `SidebarOverlay` host's view tree — without it, the parent's `MissionStore` republishes
+/// ``AppDrawer`` host's view tree — without it, the parent's `MissionStore` republishes
 /// would not re-render the picker selection until the sidebar was reopened.
 struct MissionRunTaskPolicyOverridesSidebarView: View {
     @ObservedObject var run: MissionRunEnvironment
@@ -17,6 +17,10 @@ struct MissionRunTaskPolicyOverridesSidebarView: View {
     let taskId: UUID
     let taskName: String
     let onChange: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     private var credential: MissionRunPolicyEditCredential {
         .localOperator(callsign: generalSettings.callsign)
@@ -27,20 +31,14 @@ struct MissionRunTaskPolicyOverridesSidebarView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Text(taskName)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(GuardianDynamicColors.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
                 Text("Policy overrides apply to this task’s roster slots unless a slot sets its own.")
                     .font(.system(size: 11))
-                    .foregroundStyle(GuardianDynamicColors.textTertiary)
+                    .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                MissionRunPolicySidebarRows.optionalAbortRow(
-                    label: "Abort policy",
-                    selection: abortBinding
-                )
-                MissionRunPolicySidebarRows.optionalCompleteRow(
-                    label: "Complete policy",
-                    selection: completeBinding
-                )
+                MissionRunPolicyOptionalAbortRow(label: "Abort policy", selection: abortBinding)
+                MissionRunPolicyOptionalCompleteRow(label: "Complete policy", selection: completeBinding)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
@@ -96,6 +94,10 @@ struct MissionRunAssignmentPolicyOverridesSidebarView: View {
     let slotTitle: String
     let onChange: () -> Void
 
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
     private var credential: MissionRunPolicyEditCredential {
         .localOperator(callsign: generalSettings.callsign)
     }
@@ -105,20 +107,14 @@ struct MissionRunAssignmentPolicyOverridesSidebarView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Text(slotTitle)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(GuardianDynamicColors.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
                 Text("Slot policies override the task (and mission defaults).")
                     .font(.system(size: 11))
-                    .foregroundStyle(GuardianDynamicColors.textTertiary)
+                    .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                MissionRunPolicySidebarRows.optionalAbortRow(
-                    label: "Abort policy",
-                    selection: abortBinding
-                )
-                MissionRunPolicySidebarRows.optionalCompleteRow(
-                    label: "Complete policy",
-                    selection: completeBinding
-                )
+                MissionRunPolicyOptionalAbortRow(label: "Abort policy", selection: abortBinding)
+                MissionRunPolicyOptionalCompleteRow(label: "Complete policy", selection: completeBinding)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
@@ -152,20 +148,23 @@ struct MissionRunAssignmentPolicyOverridesSidebarView: View {
     }
 }
 
-// MARK: - Shared row helpers
+// MARK: - Shared policy picker rows
 
-enum MissionRunPolicySidebarRows {
-    @ViewBuilder
-    static func optionalAbortRow(
-        label: String,
-        selection: Binding<MissionRunAbortPolicy?>
-    ) -> some View {
+private struct MissionRunPolicyOptionalAbortRow: View {
+    let label: String
+    @Binding var selection: MissionRunAbortPolicy?
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
+    var body: some View {
         HStack(alignment: .center, spacing: 14) {
             Text(label)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(GuardianDynamicColors.textPrimary)
+                .foregroundStyle(theme.textPrimary)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Picker("", selection: selection) {
+            Picker("", selection: $selection) {
                 Text("Inherited").tag(nil as MissionRunAbortPolicy?)
                 ForEach(MissionRunAbortPolicy.setupPickerCases, id: \.self) { policy in
                     Text(policy.setupMenuLabel).tag(Optional(policy))
@@ -176,18 +175,23 @@ enum MissionRunPolicySidebarRows {
             .frame(width: 200, alignment: .trailing)
         }
     }
+}
 
-    @ViewBuilder
-    static func optionalCompleteRow(
-        label: String,
-        selection: Binding<MissionRunCompletePolicy?>
-    ) -> some View {
+private struct MissionRunPolicyOptionalCompleteRow: View {
+    let label: String
+    @Binding var selection: MissionRunCompletePolicy?
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
+    var body: some View {
         HStack(alignment: .center, spacing: 14) {
             Text(label)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(GuardianDynamicColors.textPrimary)
+                .foregroundStyle(theme.textPrimary)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Picker("", selection: selection) {
+            Picker("", selection: $selection) {
                 Text("Inherited").tag(nil as MissionRunCompletePolicy?)
                 ForEach(MissionRunCompletePolicy.setupPickerCases, id: \.self) { policy in
                     Text(policy.setupMenuLabel).tag(Optional(policy))

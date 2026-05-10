@@ -44,12 +44,16 @@ struct VehiclePreflightSheet: View {
             title: "Preflight check",
             subtitle: vehicleTitle,
             headerActions: {
-                Button("Close") {
-                    dismiss()
-                }
+                GuardianThemedButton(
+                    title: "Close",
+                    accent: .danger,
+                    surface: .outline,
+                    size: .small,
+                    shape: .cornered,
+                    isEnabled: !probeRunning,
+                    action: { dismiss() }
+                )
                 .keyboardShortcut(.cancelAction)
-                .buttonStyle(.bordered)
-                .disabled(probeRunning)
             },
             bodyContent: {
                 VStack(alignment: .leading, spacing: 14) {
@@ -86,12 +90,16 @@ struct VehiclePreflightSheet: View {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: result.passed ? "checkmark.circle.fill" : "xmark.octagon.fill")
                     .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(result.passed ? Color.green.opacity(0.9) : Color.red.opacity(0.9))
+                    .foregroundStyle(result.passed ? GuardianSemanticColors.successStroke : GuardianSemanticColors.dangerStroke)
                     .frame(width: 22, alignment: .center)
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(result.passed ? "Pass" : "Fail")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(theme.textPrimary)
+                    GuardianBadge(
+                        text: result.passed ? "Pass" : "Fail",
+                        accent: result.passed ? .success : .danger,
+                        paint: .solid,
+                        size: .medium,
+                        shape: .cornered
+                    )
                     Text(result.detail)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(theme.textTertiary)

@@ -3,8 +3,10 @@ import SwiftUI
 // MARK: - Presentation model
 
 /// One trailing slide-in panel + scrim. Content is type-erased so any screen can present from the shared host.
+///
+/// **Naming:** In Guardian, **drawer** means this ``AppDrawer`` host (trailing overlay). **Sidebar** means the app’s main navigation rail in ``RootView`` — do not conflate the two.
 @MainActor
-struct PresentedSidebar: Identifiable {
+struct PresentedAppDrawer: Identifiable {
     let id: UUID
     /// When non-`nil`, the host prepends the standard title row + close control above `content`.
     let title: String?
@@ -17,17 +19,19 @@ struct PresentedSidebar: Identifiable {
 
 // MARK: - App host
 
-/// App-wide trailing sidebar overlays (scrim + slide). Inject via environment and attach ``View/withSidebarOverlay()`` on the window root (after ``RootView``).
+/// App-wide trailing **drawer** (scrim + slide-in panel). Not the main navigation **sidebar**.
 ///
-/// Ephemeral app toasts use a separate ``View/withToasts()`` host on the **main content** column inside ``RootView`` so they do not cover the nav rail. Apply ``withSidebarOverlay()`` on the outer window root so drawers stack above primary UI.
+/// Inject via environment and attach ``View/withAppDrawer()`` on the window root (after ``RootView``).
+///
+/// Ephemeral app toasts use a separate ``View/withToasts()`` host on the **main content** column inside ``RootView`` so they do not cover the nav rail. Apply ``withAppDrawer()`` on the outer window root so drawers stack above primary UI.
 @MainActor
-final class SidebarOverlay: ObservableObject {
-    @Published private(set) var presented: PresentedSidebar?
+final class AppDrawer: ObservableObject {
+    @Published private(set) var presented: PresentedAppDrawer?
 
     /// Drives `animation(_:value:)` in the host so insert/remove animate reliably.
     @Published private(set) var presentationRevision: UInt = 0
 
-    /// Present or replace the current sidebar. Uses `withAnimation` internally.
+    /// Present or replace the current drawer. Uses `withAnimation` internally.
     func present<Content: View>(
         title: String?,
         preferredWidth: CGFloat = 380,
@@ -36,7 +40,7 @@ final class SidebarOverlay: ObservableObject {
         @ViewBuilder content: @escaping () -> Content
     ) {
         let clampedWidth = min(560, max(260, preferredWidth))
-        let payload = PresentedSidebar(
+        let payload = PresentedAppDrawer(
             id: UUID(),
             title: title,
             preferredWidth: clampedWidth,
@@ -61,8 +65,8 @@ final class SidebarOverlay: ObservableObject {
 
 // MARK: - Chrome (optional; use in custom panels when `title == nil`)
 
-/// Standard sidebar header matching Mission roster / Live Drive pickers: elevated strip, bold title, hierarchical close.
-struct SidebarOverlayChrome<Content: View>: View {
+/// Standard drawer header (title row + close): elevated strip, bold title, hierarchical close.
+struct AppDrawerChrome<Content: View>: View {
     let title: String
     let onClose: () -> Void
     @ViewBuilder let content: () -> Content
@@ -84,7 +88,7 @@ struct SidebarOverlayChrome<Content: View>: View {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 18, weight: .medium))
                         .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.textSecondary)
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.cancelAction)
@@ -93,6 +97,12 @@ struct SidebarOverlayChrome<Content: View>: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
             .background(theme.backgroundElevated)
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(theme.borderSubtle)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 1)
+            }
 
             content()
         }
@@ -101,8 +111,8 @@ struct SidebarOverlayChrome<Content: View>: View {
 
 // MARK: - Host
 
-private struct SidebarOverlayHostModifier: ViewModifier {
-    @EnvironmentObject private var sidebarOverlay: SidebarOverlay
+private struct AppDrawerHostModifier: ViewModifier {
+    @EnvironmentObject private var appDrawer: AppDrawer
     @Environment(\.colorScheme) private var colorScheme
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
@@ -111,22 +121,22 @@ private struct SidebarOverlayHostModifier: ViewModifier {
         ZStack {
             content
 
-            if sidebarOverlay.presented != nil {
+            if appDrawer.presented != nil {
                 theme.overlayScrim
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        guard sidebarOverlay.presented?.scrimTapDismisses == true else { return }
-                        sidebarOverlay.dismiss()
+                        guard appDrawer.presented?.scrimTapDismisses == true else { return }
+                        appDrawer.dismiss()
                     }
                     .transition(.opacity)
                     .zIndex(100)
             }
 
-            if let item = sidebarOverlay.presented {
+            if let item = appDrawer.presented {
                 HStack(spacing: 0) {
                     Spacer(minLength: 0)
-                    sidebarPanel(for: item)
+                    drawerPanel(for: item)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
                 .transition(.move(edge: .trailing))
@@ -134,16 +144,16 @@ private struct SidebarOverlayHostModifier: ViewModifier {
             }
         }
         .animation(
-            sidebarOverlay.presented?.animation ?? .easeInOut(duration: 0.2),
-            value: sidebarOverlay.presentationRevision
+            appDrawer.presented?.animation ?? .easeInOut(duration: 0.2),
+            value: appDrawer.presentationRevision
         )
     }
 
     @ViewBuilder
-    private func sidebarPanel(for item: PresentedSidebar) -> some View {
+    private func drawerPanel(for item: PresentedAppDrawer) -> some View {
         Group {
             if let title = item.title {
-                SidebarOverlayChrome(title: title, onClose: { sidebarOverlay.dismiss() }) {
+                AppDrawerChrome(title: title, onClose: { appDrawer.dismiss() }) {
                     item.content()
                 }
             } else {
@@ -159,13 +169,13 @@ private struct SidebarOverlayHostModifier: ViewModifier {
                 .frame(width: 1)
         }
         .onExitCommand {
-            sidebarOverlay.dismiss()
+            appDrawer.dismiss()
         }
     }
 }
 
 extension View {
-    func withSidebarOverlay() -> some View {
-        modifier(SidebarOverlayHostModifier())
+    func withAppDrawer() -> some View {
+        modifier(AppDrawerHostModifier())
     }
 }

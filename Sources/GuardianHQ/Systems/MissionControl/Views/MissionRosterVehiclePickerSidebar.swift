@@ -25,7 +25,7 @@ struct MissionRosterVehiclePickerSidebar: View {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 18, weight: .medium))
                         .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.textSecondary)
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.cancelAction)
@@ -98,7 +98,7 @@ struct MissionRosterVehiclePickerSidebar: View {
                 if !enabled, let reason, !reason.isEmpty {
                     Text(reason)
                         .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.orange.opacity(0.95))
+                        .foregroundStyle(GuardianSemanticColors.warningStroke)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }

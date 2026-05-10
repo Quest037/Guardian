@@ -269,8 +269,23 @@ final class MissionControlStore: ObservableObject {
     /// `FleetVehicleModel` exists but lifecycle is not **`.live`** (only `.live` yields green on the fleet card).
     static let preflightProbeNotConnectedDetail = "Not connected."
 
-    /// Before sending arm: require the same lifecycle gate as the fleet UI (green = `stage == .live`).
-    private func preflightProbeReadinessBlocker(vehicleID: String, fleetLink: FleetLinkService) -> SingleVehiclePreflightProbeResult? {
+    /// Default-deny gate: vehicle is currently bound to a `.running` / `.paused` / `.recovery` Mission Control run.
+    /// Operators can opt in to mid-mission preflight via the `allowDuringLiveMission` parameter on
+    /// ``runSingleVehiclePreflightProbe`` once the override surfaces (reserve swap-in, recovery flow,
+    /// plugin-authored auto-preflight) are wired — see `TODO.md`.
+    static let preflightProbeBlockedByLiveMissionDetail =
+        "Preflight is locked while this vehicle is assigned to an active Mission Control run."
+
+    /// Before sending arm:
+    /// 1. require the same lifecycle gate as the fleet UI (green = `stage == .live`),
+    /// 2. unless explicitly overridden, refuse to probe a vehicle that is bound to a live mission run
+    ///    (`.running` / `.paused` / `.recovery`).
+    private func preflightProbeReadinessBlocker(
+        vehicleID: String,
+        fleetLink: FleetLinkService,
+        sitl: SitlService,
+        allowDuringLiveMission: Bool
+    ) -> SingleVehiclePreflightProbeResult? {
         guard let model = fleetLink.vehicleModel(forVehicleID: vehicleID) else {
             return SingleVehiclePreflightProbeResult(
                 passed: false,
@@ -284,6 +299,15 @@ final class MissionControlStore: ObservableObject {
                 passed: false,
                 armedDuringProbe: false,
                 detail: Self.preflightProbeNotConnectedDetail,
+                remediationAdvice: nil
+            )
+        }
+        if !allowDuringLiveMission,
+           isVehicleStreamUsedInLiveMission(vehicleID: vehicleID, fleetLink: fleetLink, sitl: sitl) {
+            return SingleVehiclePreflightProbeResult(
+                passed: false,
+                armedDuringProbe: false,
+                detail: Self.preflightProbeBlockedByLiveMissionDetail,
                 remediationAdvice: nil
             )
         }
@@ -356,13 +380,26 @@ final class MissionControlStore: ObservableObject {
     }
 
     /// Single-vehicle preflight check (same semantics as one slot in `runSingleVehiclePreflightProbeForStartRun`).
+    ///
+    /// - Parameter allowDuringLiveMission: Default `false`. When `false`, the call is **blocked** if
+    ///   the vehicle is bound to any `.running` / `.paused` / `.recovery` Mission Control run, returning
+    ///   ``preflightProbeBlockedByLiveMissionDetail``. Pass `true` only from explicit operator override
+    ///   surfaces (reserve drone swap-in, recovery / re-link flows) or from plugin-authored auto-preflight
+    ///   that owns its own safety reasoning. The default keeps every UI caller (Vehicle Inspector,
+    ///   LiveDrive pre-session probe, etc.) safe by construction.
     func runSingleVehiclePreflightProbe(
         vehicleID: String,
         fleetLink: FleetLinkService,
         sitl: SitlService,
-        leaveArmed: Bool = false
+        leaveArmed: Bool = false,
+        allowDuringLiveMission: Bool = false
     ) async -> SingleVehiclePreflightProbeResult {
-        if let blocked = preflightProbeReadinessBlocker(vehicleID: vehicleID, fleetLink: fleetLink) {
+        if let blocked = preflightProbeReadinessBlocker(
+            vehicleID: vehicleID,
+            fleetLink: fleetLink,
+            sitl: sitl,
+            allowDuringLiveMission: allowDuringLiveMission
+        ) {
             return blocked
         }
 
@@ -460,7 +497,12 @@ final class MissionControlStore: ObservableObject {
                 continue
             }
 
-            if let blocked = preflightProbeReadinessBlocker(vehicleID: vehicleID, fleetLink: fleetLink) {
+            if let blocked = preflightProbeReadinessBlocker(
+                vehicleID: vehicleID,
+                fleetLink: fleetLink,
+                sitl: sitl,
+                allowDuringLiveMission: false
+            ) {
                 row.phase = .failed
                 row.detail = blocked.detail
                 rowUpdated(row)

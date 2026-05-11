@@ -1,0 +1,79 @@
+---
+description: Delete completed todo items and migrate any retained info to README.md
+alwaysApply: true
+---
+
+# Todo List Hygiene
+
+Operator preference: **empty todo lists feel better.** Marking items as completed
+inside a todo file is irrelevant — the source of truth for "what was done" is the
+git history. The todo file is for **what is still pending**.
+
+This applies to every todo / tracker file in the repo, including but not limited to:
+
+- `TODO.md`
+- `CommandsRecipesToDo.md`
+- any `*ToDo.md` / `*_TODO.md` / similar tracker the user adds in the future
+
+## When a task is complete
+
+1. **Migrate retained info to `README.md`** before deleting the task. Retained info
+   is anything a future contributor would need that **isn't already obvious from
+   the code itself**:
+   - Locked architectural decisions / conventions.
+   - Directory layout / file roles for new subsystems.
+   - Locked default values (timeouts, caps, retry policy, naming rules).
+   - Standing rules / "do not regress this" guidance.
+   - Extension points / hook locations for future work.
+   - Public-facing usage instructions (CLI scripts, build flags).
+2. **Delete the task** from the todo file entirely — do **not** leave it as `[x]`,
+   do **not** leave a closure note. The whole bullet (and any nested sub-bullets)
+   goes.
+3. **Do not** add a "Completed" / "Done" / "Closed" section. The git history is
+   the audit trail.
+
+## What does NOT need to migrate to README
+
+Skip migrating any of the following — these are task-history cruft, not docs:
+
+- "New files under X" lists (the source tree shows this).
+- "Tests added under Y" lists (discoverable in `Tests/`).
+- Phase / stage / item numbering (`Stage B1 item 3 done` etc.).
+- Closure narratives ("This pass landed …", "Implemented as part of …").
+
+## Concrete example
+
+### Before (bad — completed item left in place with closure notes)
+
+```markdown
+- [x] Define recipe JSON DSL:
+  - items: `invokeCommand(...)` and `invokeRecipe(...)`
+  - New files under `Sources/.../RecipesCatalogue/`: `FleetRecipeStepID.swift`, …
+  - Locked decisions baked in: predicate vocabulary has 8 kinds, …
+  - Tests added under `Tests/GuardianHQTests/`: …
+- [ ] Implement FleetRecipeRunner
+```
+
+### After (good — retained info moved to README, completed task deleted)
+
+```markdown
+- [ ] Implement FleetRecipeRunner
+```
+
+And `README.md` gains a section (e.g. "Fleet Commands & Recipes architecture")
+that documents the locked decisions / vocabulary / directory layout permanently.
+
+## When the todo file becomes empty
+
+If removing the last completed item leaves a section empty, **also remove the
+section header** so the file stays scannable. If removing the last section leaves
+the whole file empty, delete the file. Empty trackers exist; empty placeholders
+do not.
+
+## Exceptions
+
+- The user may explicitly ask for a closure note to remain (e.g. "leave a one-line
+  note that I migrated this last week"). Honour that, but it's the exception.
+- If retained info doesn't belong in `README.md` (e.g. it's specific to a single
+  subsystem and the subsystem has its own doc file), migrate there instead — the
+  point is "info lives somewhere durable", not specifically README.

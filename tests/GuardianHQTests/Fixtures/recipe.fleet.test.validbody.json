@@ -1,0 +1,15 @@
+{
+  "entryStepID": "calibrate",
+  "overallBudgetSeconds": 60,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "calibrate",
+      "command": "command.fleet.vehicle.do.calibrate.compass",
+      "matchers": [
+        { "when": { "kind": "success" }, "then": { "kind": "succeed" } },
+        { "when": { "kind": "any" }, "then": { "kind": "fail" } }
+      ]
+    }
+  ]
+}

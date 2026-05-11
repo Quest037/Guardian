@@ -28,22 +28,22 @@ struct LogsView: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 16) {
+        HStack(alignment: .top, spacing: GuardianSpacing.md) {
             GuardianCard(
                 configuration: filtersCardConfiguration,
                 header: {
                     Text("Filters")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(GuardianTypography.font(.sectionHeadingSemibold))
                         .foregroundStyle(theme.textPrimary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 },
                 body: {
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 10) {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                             DisclosureGroup(
                                 isExpanded: $vehiclesAccordionExpanded,
                                 content: {
-                                    VStack(alignment: .leading, spacing: 6) {
+                                    VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
                                         ForEach(fleetLink.vehicleLogIDs(), id: \.self) { vehicleID in
                                             Toggle(
                                                 fleetLink.displayShortID(forVehicleID: vehicleID),
@@ -62,11 +62,11 @@ struct LogsView: View {
                                             .foregroundStyle(theme.textSecondary)
                                         }
                                     }
-                                    .padding(.top, 6)
+                                    .padding(.top, GuardianSpacing.xsTight)
                                 },
                                 label: {
                                     Text("Vehicles")
-                                        .font(.system(size: 12, weight: .semibold))
+                                        .font(GuardianTypography.font(.inlineNoticeTitle))
                                         .foregroundStyle(theme.textPrimary)
                                 }
                             )
@@ -75,13 +75,13 @@ struct LogsView: View {
                                 isExpanded: $levelsAccordionExpanded,
                                 content: {
                                     Text("Coming soon")
-                                        .font(.system(size: 11))
+                                        .font(GuardianTypography.font(.denseFootnoteRegular))
                                         .foregroundStyle(theme.textSecondary)
-                                        .padding(.top, 6)
+                                        .padding(.top, GuardianSpacing.xsTight)
                                 },
                                 label: {
                                     Text("Levels")
-                                        .font(.system(size: 12, weight: .semibold))
+                                        .font(GuardianTypography.font(.inlineNoticeTitle))
                                         .foregroundStyle(theme.textPrimary)
                                 }
                             )
@@ -90,19 +90,19 @@ struct LogsView: View {
                                 isExpanded: $sessionsAccordionExpanded,
                                 content: {
                                     Text("Coming soon")
-                                        .font(.system(size: 11))
+                                        .font(GuardianTypography.font(.denseFootnoteRegular))
                                         .foregroundStyle(theme.textSecondary)
-                                        .padding(.top, 6)
+                                        .padding(.top, GuardianSpacing.xsTight)
                                 },
                                 label: {
                                     Text("Sessions")
-                                        .font(.system(size: 12, weight: .semibold))
+                                        .font(GuardianTypography.font(.inlineNoticeTitle))
                                         .foregroundStyle(theme.textPrimary)
                                 }
                             )
-                            .padding(.bottom, 2)
+                            .padding(.bottom, GuardianSpacing.micro)
                         }
-                        .padding(.trailing, 4)
+                        .padding(.trailing, GuardianSpacing.xxs)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -114,9 +114,9 @@ struct LogsView: View {
             GuardianCard(
                 configuration: logsCardConfiguration,
                 header: {
-                    HStack(spacing: 10) {
+                    HStack(spacing: GuardianSpacing.denseGutter) {
                         Text("Logs")
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(GuardianTypography.font(.sectionHeadingSemibold))
                             .foregroundStyle(theme.textPrimary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         GuardianPrimaryProminentButton(title: "Copy Logs") {
@@ -138,30 +138,31 @@ struct LogsView: View {
                 },
                 body: {
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                             if filteredLogs.isEmpty {
                                 Text("No log lines yet.")
-                                    .font(.system(size: 12))
+                                    .font(GuardianTypography.font(.denseCaption12Regular))
                                     .foregroundStyle(theme.textTertiary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.vertical, 4)
+                                    .padding(.vertical, GuardianSpacing.xxs)
                             } else {
                                 ForEach(Array(filteredLogs.enumerated()), id: \.offset) { _, line in
                                     Text(line)
-                                        .font(.system(size: 11, design: .monospaced))
+                                        .font(GuardianTypography.font(.telemetryMono11Regular))
                                         .foregroundStyle(theme.textSecondary)
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                 }
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .padding(24)
+        .padding(GuardianSpacing.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 

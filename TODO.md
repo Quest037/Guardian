@@ -3,10 +3,6 @@
 ## Clean Up
 - Replace references to "path" with "task" so that we can get rid of legacy concept.
 
-## Theme
-
-- **`guardianInsetCard` / `guardianInsetCardCompact` (`GuardianUIChrome.swift`):** still use `GuardianDynamicColors` for raised surface + border; switch to `GuardianTheme.palette(for:)` (or an environment-backed equivalent) so inset cards match the rest of the tokenized theme and follow SwiftUI `ColorScheme` the same way as modals, sidebars, and MC chrome.
-
 ## App System
 
 - Make clicking non-input UI areas unfocus the currently focused input field (desktop blur-on-background-click behavior).
@@ -215,7 +211,7 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
     `CommandsRecipesToDo.md` Stage B0; those behaviours now flow through the new
     Layer 0 command atoms.
   - Track operator prompts MRE raises today as **escalation events** from the recipe
-    runner rather than ad-hoc `MissionRunPromptCenter` calls so wizards / plugins /
+    runner rather than ad-hoc `GuardianBottomPromptCenter` calls so wizards / plugins /
     UserNotifications all consume the same channel.
 
 #### Commander
@@ -339,7 +335,7 @@ wrapper.
   `FleetCommandResponse` (wraps `FleetCommandErrorKind` + detail + elapsed). Layer 1
   recipe escalation events use this as their payload type.
 - Switch UI / log / UserNotifications surfaces (`appendVehicleLog`, toast publisher,
-  `MissionRunPromptCenter`, persistent log) to render `any GuardianError` via a
+  `GuardianBottomPromptCenter`, persistent log) to render `any GuardianError` via a
   single helper. Plain-string paths stay supported during migration.
 - Cause-chain rendering (top-level summary + nested causes, expandable in UI).
 - Persistence: new logs use the `GuardianError`-shape; legacy plain-string log entries

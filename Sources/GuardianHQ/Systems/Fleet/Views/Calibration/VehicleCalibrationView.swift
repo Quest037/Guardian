@@ -12,6 +12,7 @@ struct VehicleCalibrationView: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var selectedSystemID: FleetCalibrationSystemID?
+    @State private var selectedRecipeName: FleetRecipeName?
 
     init(
         vehicle: FleetVehicleModel,
@@ -32,12 +33,15 @@ struct VehicleCalibrationView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.cardBodyInset) {
             preflightBanner()
             calibrationCanvas
             statusPanel
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
+        .onChange(of: selectedSystemID) { _ in
+            selectedRecipeName = nil
+        }
     }
 
     private var calibrationCanvas: some View {
@@ -62,7 +66,7 @@ struct VehicleCalibrationView: View {
                 SimulationDeviceThumbnail(imageBasenames: vehicle.data.vehicleType.defaultSimulationDeviceImageBasenames)
                     .frame(width: imageSide, height: imageSide)
                     .clipShape(RoundedRectangle(cornerRadius: 16))
-                    .shadow(color: .black.opacity(0.22), radius: 18, y: 10)
+                    .guardianDropShadow(GuardianElevation.inspectorPanel)
                     .position(x: imageRect.midX, y: imageRect.midY)
 
                 if items.isEmpty {
@@ -82,19 +86,19 @@ struct VehicleCalibrationView: View {
     }
 
     private var emptyCalibrationOverlay: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: GuardianSpacing.xs) {
             Image(systemName: "waveform.path.ecg.rectangle")
-                .font(.system(size: 24, weight: .semibold))
+                .font(GuardianTypography.relativeFixed(size: 24, weight: .semibold, relativeTo: .title2))
                 .foregroundStyle(theme.textTertiary)
             Text("No calibration telemetry yet")
-                .font(.system(size: 13, weight: .semibold))
+                .font(GuardianTypography.font(.subsectionTitleSemibold))
                 .foregroundStyle(theme.textPrimary)
             Text("Calibration markers appear as the vehicle reports health and sensor data.")
-                .font(.system(size: 11))
+                .font(GuardianTypography.font(.denseFootnoteRegular))
                 .foregroundStyle(theme.textTertiary)
         }
         .multilineTextAlignment(.center)
-        .padding(18)
+        .padding(GuardianSpacing.sectionStack)
         .background(theme.backgroundElevated.opacity(0.86), in: RoundedRectangle(cornerRadius: 14))
     }
 
@@ -143,19 +147,19 @@ struct VehicleCalibrationView: View {
         return Button {
             selectedSystemID = item.id
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: GuardianSpacing.xsTight) {
                 Circle()
                     .fill(calibrationColor(for: item.status))
                     .frame(width: 8, height: 8)
                 Image(systemName: definition.iconSystemName)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(GuardianTypography.font(.denseCaption10Semibold))
                 Text(definition.title)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(GuardianTypography.font(.formFieldLabel))
                     .lineLimit(1)
             }
             .foregroundStyle(selected ? theme.textPrimary : theme.textSecondary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .padding(.horizontal, GuardianSpacing.denseGutter)
+            .padding(.vertical, GuardianSpacing.chromeTightInset)
             .background(
                 ZStack {
                     RoundedRectangle(cornerRadius: 10)
@@ -171,7 +175,7 @@ struct VehicleCalibrationView: View {
                     .strokeBorder(calibrationColor(for: item.status).opacity(selected ? 0.75 : 0.35), lineWidth: 1)
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(GuardianPointerPlainButtonStyle())
         .cursorPointer()
         .position(x: size.width * anchor.labelPoint.x, y: size.height * anchor.labelPoint.y)
     }
@@ -189,18 +193,18 @@ struct VehicleCalibrationView: View {
     /// the left, a compact vehicle overview on the right so the modal never feels empty before the
     /// operator picks a system.
     private var unselectedStatusBlock: some View {
-        HStack(alignment: .top, spacing: 16) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
+        HStack(alignment: .top, spacing: GuardianSpacing.md) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+                HStack(spacing: GuardianSpacing.xs) {
                     Image(systemName: "cursorarrow.click.2")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(GuardianTypography.font(.sectionHeadingSemibold))
                         .foregroundStyle(theme.textTertiary)
                     Text("Select a calibration marker")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
                         .foregroundStyle(theme.textPrimary)
                 }
                 Text("Click any line or label to inspect its message, remediation advice, and future manual calibration controls.")
-                    .font(.system(size: 11))
+                    .font(GuardianTypography.font(.denseFootnoteRegular))
                     .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -209,7 +213,7 @@ struct VehicleCalibrationView: View {
             VehicleOverviewDigest(vehicle: vehicle)
                 .frame(width: 260)
         }
-        .padding(14)
+        .padding(GuardianSpacing.cardBodyInset)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(theme.backgroundRaised, in: RoundedRectangle(cornerRadius: 14))
     }
@@ -219,22 +223,22 @@ struct VehicleCalibrationView: View {
         let controls = FleetCalibrationExtensionRegistry.controls(for: item.id, vehicle: vehicle, item: item)
         let telemetryFields = FleetTelemetryFieldCatalog.fields(forSystem: item.id)
 
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
+        return VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+            HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.denseGutter) {
                 Image(systemName: definition.iconSystemName)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(GuardianTypography.font(.panelSecondaryHeadingSemibold))
                     .foregroundStyle(calibrationColor(for: item.status))
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                     Text(definition.title)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(GuardianTypography.font(.sectionHeadingSemibold))
                         .foregroundStyle(theme.textPrimary)
                     Text(item.message)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(GuardianTypography.font(.inlineNoticeTitle))
                         .foregroundStyle(calibrationColor(for: item.status))
                         .fixedSize(horizontal: false, vertical: true)
                     if let detail = item.technicalDetail, !detail.isEmpty {
                         Text(detail)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(GuardianTypography.font(.telemetryMono11Regular))
                             .foregroundStyle(theme.textTertiary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -242,16 +246,21 @@ struct VehicleCalibrationView: View {
                 Spacer(minLength: 0)
             }
 
+            SystemRecipeActions(
+                systemID: item.id,
+                selectedRecipeName: $selectedRecipeName
+            )
+
             // Two-column row: remediation steps on the left, system-specific live telemetry on the
             // right. Each side gets a sensible empty placeholder so the column never disappears
             // and the layout doesn't jiggle as fields drop in.
-            HStack(alignment: .top, spacing: 16) {
-                VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: GuardianSpacing.md) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
                     if let advice = item.remediationAdvice {
                         PreflightProbeRemediationBlock(advice: advice)
                     } else {
                         Text("No remediation needed.")
-                            .font(.system(size: 11))
+                            .font(GuardianTypography.font(.denseFootnoteRegular))
                             .foregroundStyle(theme.textTertiary)
                     }
                 }
@@ -264,20 +273,20 @@ struct VehicleCalibrationView: View {
                 .frame(width: 260, alignment: .topLeading)
             }
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
                 if controls.isEmpty {
                     EmptyView()
                 } else {
-                    HStack(spacing: 8) {
+                    HStack(spacing: GuardianSpacing.xs) {
                         ForEach(Array(controls.enumerated()), id: \.offset) { _, control in
                             control
                         }
                     }
                 }
             }
-            .padding(.top, 2)
+            .padding(.top, GuardianSpacing.micro)
         }
-        .padding(14)
+        .padding(GuardianSpacing.cardBodyInset)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 14)
@@ -323,32 +332,32 @@ private struct SystemTelemetryColumn: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
+            HStack(spacing: GuardianSpacing.xsTight) {
                 Image(systemName: "waveform")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(GuardianTypography.font(.denseCaption10Semibold))
                     .foregroundStyle(theme.textTertiary)
                 Text("Live telemetry")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(GuardianTypography.font(.formFieldLabel))
                     .foregroundStyle(theme.textTertiary)
                     .textCase(.uppercase)
             }
 
             if rows.isEmpty {
                 Text("No additional telemetry fields available")
-                    .font(.system(size: 11))
+                    .font(GuardianTypography.font(.denseFootnoteRegular))
                     .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                     ForEach(rows, id: \.id) { row in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.xs) {
                             Text(row.label)
-                                .font(.system(size: 11, weight: .semibold))
+                                .font(GuardianTypography.font(.formFieldLabel))
                                 .foregroundStyle(theme.textSecondary)
                                 .frame(width: 110, alignment: .leading)
                             Text(row.value)
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(GuardianTypography.font(.telemetryMono11Regular))
                                 .foregroundStyle(theme.textPrimary.opacity(0.95))
                                 .lineLimit(1)
                                 .truncationMode(.middle)
@@ -358,7 +367,7 @@ private struct SystemTelemetryColumn: View {
                 }
             }
         }
-        .padding(10)
+        .padding(GuardianSpacing.denseGutter)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 10)
@@ -368,6 +377,177 @@ private struct SystemTelemetryColumn: View {
                         .strokeBorder(theme.borderSubtle.opacity(0.8), lineWidth: 1)
                 )
         )
+    }
+}
+
+// MARK: - System recipe actions
+
+/// Directory-driven action menus for the selected calibration system. Stage C resolves and displays
+/// recipe entries here; Stage E will replace the selection stub with the operator wizard runner.
+@MainActor
+private struct SystemRecipeActions: View {
+    let systemID: FleetCalibrationSystemID
+    @Binding var selectedRecipeName: FleetRecipeName?
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
+    private var resolved: FleetTelemetryFieldCatalog.ResolvedSystemRecipes {
+        FleetTelemetryFieldCatalog.resolveDescriptors(
+            forSystem: systemID,
+            against: FleetRecipesCatalogue.shared
+        )
+    }
+
+    private var selectedDescriptor: FleetRecipeDescriptor? {
+        guard let selectedRecipeName else { return nil }
+        let r = resolved
+        return (r.calibrate + r.errorFix).first { $0.name == selectedRecipeName }
+    }
+
+    var body: some View {
+        let r = resolved
+        VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
+            HStack(spacing: GuardianSpacing.xsTight) {
+                Image(systemName: "wand.and.stars")
+                    .font(GuardianTypography.font(.denseCaption10Semibold))
+                    .foregroundStyle(theme.textTertiary)
+                Text("Recipe actions")
+                    .font(GuardianTypography.font(.formFieldLabel))
+                    .foregroundStyle(theme.textTertiary)
+                    .textCase(.uppercase)
+            }
+
+            if r.isEmpty {
+                Text("No recipe actions registered for this system yet.")
+                    .font(GuardianTypography.font(.denseFootnoteRegular))
+                    .foregroundStyle(theme.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                HStack(spacing: GuardianSpacing.xs) {
+                    recipeMenu(
+                        title: "Calibrate",
+                        iconSystemName: "slider.horizontal.3",
+                        tint: GuardianSemanticColors.infoForeground,
+                        descriptors: r.calibrate
+                    )
+                    recipeMenu(
+                        title: "Fix",
+                        iconSystemName: "wrench.and.screwdriver",
+                        tint: GuardianSemanticColors.warningStroke,
+                        descriptors: r.errorFix
+                    )
+                }
+
+                if let selectedDescriptor {
+                    selectedRecipeSummary(selectedDescriptor)
+                }
+            }
+        }
+        .padding(GuardianSpacing.denseGutter)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(theme.backgroundElevated)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(theme.borderSubtle.opacity(0.8), lineWidth: 1)
+                )
+        )
+    }
+
+    @ViewBuilder
+    private func recipeMenu(
+        title: String,
+        iconSystemName: String,
+        tint: Color,
+        descriptors: [FleetRecipeDescriptor]
+    ) -> some View {
+        if descriptors.isEmpty {
+            RecipeMenuLabel(title: title, count: 0, iconSystemName: iconSystemName, tint: tint)
+                .opacity(0.45)
+                .help("No \(title.lowercased()) recipes are registered for this system.")
+        } else {
+            Menu {
+                ForEach(descriptors, id: \.name) { descriptor in
+                    Button {
+                        selectedRecipeName = descriptor.name
+                    } label: {
+                        Label(descriptor.humanLabel, systemImage: iconSystemName)
+                    }
+                }
+            } label: {
+                RecipeMenuLabel(
+                    title: title,
+                    count: descriptors.count,
+                    iconSystemName: iconSystemName,
+                    tint: tint
+                )
+            }
+            .menuStyle(.borderlessButton)
+            .guardianPointerOnHover()
+            .help("Select a registered \(title.lowercased()) recipe.")
+        }
+    }
+
+    private func selectedRecipeSummary(_ descriptor: FleetRecipeDescriptor) -> some View {
+        VStack(alignment: .leading, spacing: GuardianSpacing.micro) {
+            Text(descriptor.humanLabel)
+                .font(GuardianTypography.font(.inlineNoticeTitle))
+                .foregroundStyle(theme.textPrimary)
+            Text(descriptor.humanDescription)
+                .font(GuardianTypography.font(.denseFootnoteRegular))
+                .foregroundStyle(theme.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: GuardianSpacing.xs) {
+                Text(descriptor.name.rawValue)
+                    .font(GuardianTypography.font(.telemetryMono11Regular))
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if !descriptor.parameters.isEmpty {
+                    Text("\(descriptor.parameters.count) parameter\(descriptor.parameters.count == 1 ? "" : "s")")
+                        .font(GuardianTypography.font(.denseCaption10Semibold))
+                        .foregroundStyle(GuardianSemanticColors.warningStroke)
+                }
+            }
+            Text("Wizard execution lands in Stage E; this menu only verifies the directory resolves to registered recipes.")
+                .font(GuardianTypography.font(.denseCaption10Regular))
+                .foregroundStyle(theme.textTertiary)
+        }
+        .padding(.top, GuardianSpacing.micro)
+    }
+}
+
+private struct RecipeMenuLabel: View {
+    let title: String
+    let count: Int
+    let iconSystemName: String
+    let tint: Color
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
+    var body: some View {
+        HStack(spacing: GuardianSpacing.xsTight) {
+            Image(systemName: iconSystemName)
+            Text(title)
+            Text("\(count)")
+                .font(GuardianTypography.font(.denseCaption10Semibold))
+                .foregroundStyle(theme.textTertiary)
+        }
+        .font(GuardianTypography.font(.denseCaption12Medium))
+        .foregroundStyle(tint)
+        .padding(.horizontal, GuardianSpacing.denseGutter)
+        .frame(height: GuardianChromeSize.small.controlOuterHeight)
+        .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(tint.opacity(0.45), lineWidth: 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 
@@ -405,25 +585,25 @@ private struct VehicleOverviewDigest: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
+            HStack(spacing: GuardianSpacing.xsTight) {
                 Image(systemName: "rectangle.dashed")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(GuardianTypography.font(.denseCaption10Semibold))
                     .foregroundStyle(theme.textTertiary)
                 Text("Vehicle overview")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(GuardianTypography.font(.formFieldLabel))
                     .foregroundStyle(theme.textTertiary)
                     .textCase(.uppercase)
             }
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                 ForEach(rows, id: \.label) { row in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.xs) {
                         Text(row.label)
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(GuardianTypography.font(.formFieldLabel))
                             .foregroundStyle(theme.textSecondary)
                             .frame(width: 90, alignment: .leading)
                         Text(row.value)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(GuardianTypography.font(.telemetryMono11Regular))
                             .foregroundStyle(theme.textPrimary.opacity(0.95))
                             .lineLimit(1)
                             .truncationMode(.middle)
@@ -432,7 +612,7 @@ private struct VehicleOverviewDigest: View {
                 }
             }
         }
-        .padding(10)
+        .padding(GuardianSpacing.denseGutter)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 10)
@@ -477,14 +657,14 @@ struct VehicleCalibrationPreflightBanner: View {
 
     private var runningBlock: some View {
         bannerShell(strokeColor: GuardianSemanticColors.warningStroke, tint: GuardianSemanticColors.warningStroke) {
-            HStack(alignment: .center, spacing: 10) {
+            HStack(alignment: .center, spacing: GuardianSpacing.denseGutter) {
                 ProgressView().controlSize(.small)
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.micro) {
                     Text("Running preflight check…")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
                         .foregroundStyle(theme.textPrimary)
                     Text("Sending arm command and watching the autopilot response.")
-                        .font(.system(size: 11))
+                        .font(GuardianTypography.font(.denseFootnoteRegular))
                         .foregroundStyle(theme.textTertiary)
                 }
                 Spacer(minLength: 0)
@@ -498,29 +678,29 @@ struct VehicleCalibrationPreflightBanner: View {
             : GuardianSemanticColors.dangerStroke
 
         return bannerShell(strokeColor: stroke, tint: stroke) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+                HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.denseGutter) {
                     Image(systemName: entry.result.passed ? "checkmark.seal.fill" : "exclamationmark.octagon.fill")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(GuardianTypography.font(.panelSecondaryHeadingSemibold))
                         .foregroundStyle(stroke)
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: GuardianSpacing.micro) {
                         Text(entry.result.passed ? "Preflight passed" : "Preflight failed")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(GuardianTypography.font(.subsectionTitleSemibold))
                             .foregroundStyle(theme.textPrimary)
                         Text(headerSubtitle(entry: entry))
-                            .font(.system(size: 11))
+                            .font(GuardianTypography.font(.denseFootnoteRegular))
                             .foregroundStyle(theme.textTertiary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 0)
                     Button(action: onDismiss) {
                         Image(systemName: "xmark")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(GuardianTypography.font(.formFieldLabel))
                             .foregroundStyle(theme.textTertiary)
-                            .padding(6)
+                            .padding(GuardianSpacing.xsTight)
                             .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(GuardianPointerPlainButtonStyle())
                     .help("Dismiss preflight result")
                 }
 
@@ -528,7 +708,7 @@ struct VehicleCalibrationPreflightBanner: View {
                     PreflightProbeRemediationBlock(advice: advice)
                 } else if !entry.result.detail.isEmpty {
                     Text(entry.result.detail)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(GuardianTypography.font(.telemetryMono11Regular))
                         .foregroundStyle(theme.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -551,7 +731,7 @@ struct VehicleCalibrationPreflightBanner: View {
         @ViewBuilder content: () -> Inner
     ) -> some View {
         content()
-            .padding(12)
+            .padding(GuardianSpacing.sm)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 12)
@@ -583,11 +763,11 @@ struct VehicleTelemetryTabView: View {
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
             controlsBar
             Divider().opacity(0.2)
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.cardBodyInset) {
                     if visibleSections.isEmpty {
                         emptyState
                     } else {
@@ -596,34 +776,34 @@ struct VehicleTelemetryTabView: View {
                         }
                     }
                 }
-                .padding(.vertical, 4)
+                .padding(.vertical, GuardianSpacing.xxs)
             }
         }
     }
 
     private var controlsBar: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
+            HStack(spacing: GuardianSpacing.xs) {
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(GuardianTypography.font(.formFieldLabel))
                     .foregroundStyle(theme.textTertiary)
                 TextField("Search fields", text: $searchText)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12))
+                    .font(GuardianTypography.font(.denseCaption12Regular))
                     .foregroundStyle(theme.textPrimary)
                 if !searchText.isEmpty {
                     Button {
                         searchText = ""
                     } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 12))
+                            .font(GuardianTypography.font(.denseCaption12Regular))
                             .foregroundStyle(theme.textTertiary)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(GuardianPointerPlainButtonStyle())
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .padding(.horizontal, GuardianSpacing.denseGutter)
+            .padding(.vertical, GuardianSpacing.xsTight)
             .background(
                 RoundedRectangle(cornerRadius: 8)
                     .fill(theme.backgroundElevated)
@@ -634,13 +814,13 @@ struct VehicleTelemetryTabView: View {
             )
 
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
+                HStack(spacing: GuardianSpacing.xsTight) {
                     chip(label: "All", icon: "square.grid.2x2", group: nil)
                     ForEach(FleetTelemetryFieldCatalog.Group.allCases) { group in
                         chip(label: group.displayLabel, icon: group.iconSystemName, group: group)
                     }
                 }
-                .padding(.horizontal, 1)
+                .padding(.horizontal, GuardianSpacing.hairlineStack)
             }
         }
     }
@@ -654,14 +834,14 @@ struct VehicleTelemetryTabView: View {
         return Button {
             activeChip = group
         } label: {
-            HStack(spacing: 5) {
+            HStack(spacing: GuardianSpacing.stackDense) {
                 Image(systemName: icon)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(GuardianTypography.font(.denseCaption10Semibold))
                 Text(label)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(GuardianTypography.font(.formFieldLabel))
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
+            .padding(.horizontal, GuardianSpacing.denseGutter)
+            .padding(.vertical, GuardianSpacing.stackDense)
             .background(
                 RoundedRectangle(cornerRadius: 12)
                     .fill(active ? Color.blue.opacity(0.18) : theme.backgroundElevated)
@@ -672,20 +852,20 @@ struct VehicleTelemetryTabView: View {
             )
             .foregroundStyle(active ? Color.blue : theme.textSecondary)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(GuardianPointerPlainButtonStyle())
     }
 
     private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
             Text("No telemetry matches that filter")
-                .font(.system(size: 13, weight: .semibold))
+                .font(GuardianTypography.font(.subsectionTitleSemibold))
                 .foregroundStyle(theme.textPrimary)
             Text("Clear the search box, pick another chip, or wait for the autopilot to start streaming the requested fields.")
-                .font(.system(size: 11))
+                .font(GuardianTypography.font(.denseFootnoteRegular))
                 .foregroundStyle(theme.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(14)
+        .padding(GuardianSpacing.cardBodyInset)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(theme.backgroundRaised, in: RoundedRectangle(cornerRadius: 12))
     }
@@ -745,33 +925,33 @@ struct VehicleTelemetryTabView: View {
     }
 
     private func sectionView(_ section: Section) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+            HStack(spacing: GuardianSpacing.xsTight) {
                 Image(systemName: section.icon)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(GuardianTypography.font(.formFieldLabel))
                     .foregroundStyle(theme.textTertiary)
                 Text(section.title)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(GuardianTypography.font(.inlineNoticeTitle))
                     .foregroundStyle(theme.textPrimary)
                     .textCase(.uppercase)
                 Spacer(minLength: 0)
             }
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                 ForEach(section.rows, id: \.id) { row in
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.denseGutter) {
                         Text(row.label)
-                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .font(GuardianTypography.font(.telemetryMono12Semibold))
                             .foregroundStyle(theme.textSecondary)
                             .frame(width: 240, alignment: .leading)
                         Text(row.value)
-                            .font(.system(size: 12, design: .monospaced))
+                            .font(GuardianTypography.relativeFixed(size: 12, weight: .regular, design: .monospaced, relativeTo: .caption))
                             .foregroundStyle(theme.textPrimary.opacity(0.95))
                         Spacer(minLength: 0)
                     }
                 }
             }
         }
-        .padding(12)
+        .padding(GuardianSpacing.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(theme.backgroundRaised, in: RoundedRectangle(cornerRadius: 12))
     }
@@ -944,7 +1124,7 @@ struct VehicleCalibrationModal: View {
                 isEnabled: false,
                 action: {},
                 label: {
-                    HStack(spacing: 6) {
+                    HStack(spacing: GuardianSpacing.xsTight) {
                         ProgressView().controlSize(.small)
                         Text("Running…")
                     }
@@ -959,7 +1139,7 @@ struct VehicleCalibrationModal: View {
                 isEnabled: false,
                 action: {},
                 label: {
-                    HStack(spacing: 6) {
+                    HStack(spacing: GuardianSpacing.xsTight) {
                         Image(systemName: "lock.shield.fill")
                         Text("Preflight locked")
                     }
@@ -974,7 +1154,7 @@ struct VehicleCalibrationModal: View {
                 shape: .cornered,
                 action: runPreflight,
                 label: {
-                    HStack(spacing: 6) {
+                    HStack(spacing: GuardianSpacing.xsTight) {
                         Image(systemName: entry.result.passed ? "checkmark.seal.fill" : "exclamationmark.octagon.fill")
                         Text("Re-run preflight")
                     }
@@ -989,7 +1169,7 @@ struct VehicleCalibrationModal: View {
                 shape: .cornered,
                 action: runPreflight,
                 label: {
-                    HStack(spacing: 6) {
+                    HStack(spacing: GuardianSpacing.xsTight) {
                         Image(systemName: "checkmark.shield")
                         Text("Run preflight")
                     }
@@ -1037,7 +1217,7 @@ struct VehicleCalibrationSidebarPanel: View {
 
     var body: some View {
         LiveVehicleCalibrationView(fleetLink: fleetLink, vehicleID: vehicleID, fallback: fallback)
-            .padding(14)
+            .padding(GuardianSpacing.cardBodyInset)
     }
 }
 

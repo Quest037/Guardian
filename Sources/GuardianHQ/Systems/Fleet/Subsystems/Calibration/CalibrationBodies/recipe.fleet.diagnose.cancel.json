@@ -1,0 +1,15 @@
+{
+  "_comment": "Atomic best-effort cleanup for the arm probe. If the operator cancels mid-probe (after arm but before the recipe's own disarm step has had a chance to run), this recipe disarms the vehicle so cancel never leaves a vehicle armed on the pad. Single matcher uses `any → succeed`: whether the autopilot says 'disarmed', 'already disarmed', or anything else, the cleanup goal — vehicle not under armed power — is satisfied to the best of our ability. The runner / wizard surfaces the underlying outcome through the audit trace if anything was unusual.",
+  "entryStepID": "disarm",
+  "overallBudgetSeconds": 10,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "disarm",
+      "command": "command.fleet.vehicle.do.disarm",
+      "matchers": [
+        { "when": { "kind": "any" }, "then": { "kind": "succeed" } }
+      ]
+    }
+  ]
+}

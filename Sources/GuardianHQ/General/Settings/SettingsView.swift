@@ -22,7 +22,7 @@ struct SettingsView: View {
     @ViewBuilder
     private func settingsGroupCardTitle(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 14, weight: .semibold))
+            .font(GuardianTypography.font(.sectionHeadingSemibold))
             .foregroundStyle(theme.textPrimary)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -40,8 +40,8 @@ struct SettingsView: View {
                 .fixedSize()
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.horizontal, GuardianSpacing.sm)
+            .padding(.vertical, GuardianSpacing.xs)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(theme.backgroundRaised)
             .overlay(alignment: .bottom) {
@@ -72,7 +72,7 @@ struct SettingsView: View {
 
     private var generalPane: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.md) {
                 GuardianCard(
                     configuration: settingsGroupCardConfiguration,
                     header: { settingsGroupCardTitle("Operator") },
@@ -164,14 +164,14 @@ struct SettingsView: View {
                     }
                 )
             }
-            .padding(24)
+            .padding(GuardianSpacing.xl)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private var missionsPane: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.md) {
                 GuardianCard(
                     configuration: settingsGroupCardConfiguration,
                     header: { settingsGroupCardTitle("Mission Control") },
@@ -181,7 +181,7 @@ struct SettingsView: View {
                             description:
                                 "Maximum duration for one Alter step (Sooner / Later) while a run is active: scheduled mission start, per-task MAVLink start deferrals (including between-cycle restarts). Larger changes require multiple steps."
                         ) {
-                            VStack(alignment: .trailing, spacing: 8) {
+                            VStack(alignment: .trailing, spacing: GuardianSpacing.xs) {
                                 Slider(
                                     value: Binding(
                                         get: { Double(generalSettings.missionControlPostponeStepCapSeconds) },
@@ -195,21 +195,21 @@ struct SettingsView: View {
                                 Text(MissionDelayPolicy.humanReadableDuration(
                                     seconds: TimeInterval(generalSettings.missionControlPostponeStepCapSeconds)
                                 ))
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(GuardianTypography.font(.inlineNoticeTitle))
                                 .foregroundStyle(theme.textSecondary)
                             }
                         }
                     }
                 )
             }
-            .padding(24)
+            .padding(GuardianSpacing.xl)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private var simsPane: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.md) {
                 GuardianCard(
                     configuration: settingsGroupCardConfiguration,
                     header: { settingsGroupCardTitle("Simulation platform") },
@@ -239,10 +239,10 @@ struct SettingsView: View {
                                 title: "Spawn location",
                                 description: "Used for newly spawned SITL vehicles."
                             ) {
-                                HStack(alignment: .top, spacing: 10) {
-                                    VStack(alignment: .leading, spacing: 4) {
+                                HStack(alignment: .top, spacing: GuardianSpacing.denseGutter) {
+                                    VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                                         Text("Latitude")
-                                            .font(.system(size: 11, weight: .semibold))
+                                            .font(GuardianTypography.font(.formFieldLabel))
                                             .foregroundStyle(theme.textSecondary)
                                         TextField(
                                             "Latitude",
@@ -253,9 +253,9 @@ struct SettingsView: View {
                                         .controlSize(.small)
                                         .frame(width: 130)
                                     }
-                                    VStack(alignment: .leading, spacing: 4) {
+                                    VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                                         Text("Longitude")
-                                            .font(.system(size: 11, weight: .semibold))
+                                            .font(GuardianTypography.font(.formFieldLabel))
                                             .foregroundStyle(theme.textSecondary)
                                         TextField(
                                             "Longitude",
@@ -266,9 +266,9 @@ struct SettingsView: View {
                                         .controlSize(.small)
                                         .frame(width: 130)
                                     }
-                                    VStack(alignment: .leading, spacing: 4) {
+                                    VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                                         Text("Altitude")
-                                            .font(.system(size: 11, weight: .semibold))
+                                            .font(GuardianTypography.font(.formFieldLabel))
                                             .foregroundStyle(theme.textSecondary)
                                         TextField("Altitude", value: .constant(0), format: .number)
                                             .textFieldStyle(.roundedBorder)
@@ -276,9 +276,9 @@ struct SettingsView: View {
                                             .frame(width: 72)
                                             .disabled(true)
                                     }
-                                    VStack(alignment: .leading, spacing: 4) {
+                                    VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                                         Text("\u{00a0}")
-                                            .font(.system(size: 11, weight: .semibold))
+                                            .font(GuardianTypography.font(.formFieldLabel))
                                             .foregroundStyle(.clear)
                                         GuardianThemedButton(
                                             title: "Map",
@@ -325,10 +325,10 @@ struct SettingsView: View {
                                 title: "Telemetry seed",
                                 description: "Seed values before the first telemetry sample arrives."
                             ) {
-                                HStack(spacing: 10) {
-                                    VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: GuardianSpacing.denseGutter) {
+                                    VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                                         Text("Percent")
-                                            .font(.system(size: 11, weight: .semibold))
+                                            .font(GuardianTypography.font(.formFieldLabel))
                                             .foregroundStyle(theme.textSecondary)
                                         TextField(
                                             "Percent",
@@ -339,9 +339,9 @@ struct SettingsView: View {
                                         .controlSize(.small)
                                         .frame(width: 82)
                                     }
-                                    VStack(alignment: .leading, spacing: 4) {
+                                    VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                                         Text("Voltage (V)")
-                                            .font(.system(size: 11, weight: .semibold))
+                                            .font(GuardianTypography.font(.formFieldLabel))
                                             .foregroundStyle(theme.textSecondary)
                                         TextField(
                                             "Voltage",
@@ -352,9 +352,9 @@ struct SettingsView: View {
                                         .controlSize(.small)
                                         .frame(width: 96)
                                     }
-                                    VStack(alignment: .leading, spacing: 4) {
+                                    VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                                         Text("Current (A)")
-                                            .font(.system(size: 11, weight: .semibold))
+                                            .font(GuardianTypography.font(.formFieldLabel))
                                             .foregroundStyle(theme.textSecondary)
                                         TextField(
                                             "Current",
@@ -385,7 +385,7 @@ struct SettingsView: View {
                     }
                 )
             }
-            .padding(24)
+            .padding(GuardianSpacing.xl)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -394,20 +394,20 @@ struct SettingsView: View {
         Rectangle()
             .fill(theme.borderSubtle)
             .frame(height: 1)
-            .padding(.vertical, 12)
+            .padding(.vertical, GuardianSpacing.sm)
     }
 
     private var controlsPane: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.md) {
                 GuardianCard(
                     configuration: settingsGroupCardConfiguration,
                     header: {
-                        HStack(spacing: 10) {
+                        HStack(spacing: GuardianSpacing.denseGutter) {
                             Text("Live Drive keyboard")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
                                 .foregroundStyle(theme.textPrimary)
-                            Spacer(minLength: 8)
+                            Spacer(minLength: GuardianSpacing.xs)
                             GuardianThemedButton(
                                 title: "Reset defaults",
                                 accent: .neutral,
@@ -422,10 +422,10 @@ struct SettingsView: View {
                     body: {
                         VStack(alignment: .leading, spacing: 0) {
                             Text("Bindings use a single key or a named key (Space, Return, Delete, …).")
-                                .font(.system(size: 12))
+                                .font(GuardianTypography.font(.denseCaption12Regular))
                                 .foregroundStyle(theme.textSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
-                                .padding(.bottom, 12)
+                                .padding(.bottom, GuardianSpacing.sm)
 
                             ForEach(ManualControlAction.allCases) { action in
                                 settingsRow(
@@ -457,18 +457,18 @@ struct SettingsView: View {
                     body: {
                         VStack(alignment: .leading, spacing: 0) {
                             Text("Per vehicle class: step size for keyboard nudges in Live Drive.")
-                                .font(.system(size: 12))
+                                .font(GuardianTypography.font(.denseCaption12Regular))
                                 .foregroundStyle(theme.textSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
-                                .padding(.bottom, 10)
+                                .padding(.bottom, GuardianSpacing.denseGutter)
 
                             ForEach([UniversalVehicleClass.uav, .ugv, .usv, .uuv], id: \.rawValue) { vehicleClass in
                                 let profile = manualControlSettings.stepProfile(for: vehicleClass)
-                                VStack(alignment: .leading, spacing: 10) {
+                                VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                                     Text(vehicleClass.displayName)
-                                        .font(.system(size: 13, weight: .semibold))
+                                        .font(GuardianTypography.font(.subsectionTitleSemibold))
                                         .foregroundStyle(theme.textPrimary)
-                                    HStack(spacing: 10) {
+                                    HStack(spacing: GuardianSpacing.denseGutter) {
                                         controlNumberField(
                                             title: "Fwd/Back (m)",
                                             value: Binding(
@@ -500,7 +500,7 @@ struct SettingsView: View {
                                     }
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 }
-                                .padding(.vertical, 6)
+                                .padding(.vertical, GuardianSpacing.xsTight)
                                 if vehicleClass != .uuv {
                                     rowDivider
                                 }
@@ -509,7 +509,7 @@ struct SettingsView: View {
                     }
                 )
             }
-            .padding(24)
+            .padding(GuardianSpacing.xl)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -519,13 +519,13 @@ struct SettingsView: View {
         description: String,
         @ViewBuilder trailing: () -> Trailing
     ) -> some View {
-        HStack(alignment: .top, spacing: 20) {
-            VStack(alignment: .leading, spacing: 4) {
+        HStack(alignment: .top, spacing: GuardianSpacing.lg) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(GuardianTypography.font(.subsectionTitleSemibold))
                     .foregroundStyle(theme.textPrimary)
                 Text(description)
-                    .font(.system(size: 12))
+                    .font(GuardianTypography.font(.denseCaption12Regular))
                     .foregroundStyle(theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -537,9 +537,9 @@ struct SettingsView: View {
     }
 
     private func controlNumberField(title: String, value: Binding<Double>) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
             Text(title)
-                .font(.system(size: 11, weight: .semibold))
+                .font(GuardianTypography.font(.formFieldLabel))
                 .foregroundStyle(theme.textSecondary)
             TextField("", value: value, format: .number.precision(.fractionLength(3)))
                 .textFieldStyle(.roundedBorder)
@@ -552,7 +552,7 @@ struct SettingsView: View {
         Modal(
             title: "Pick SIM Spawn Location",
             headerActions: {
-                HStack(spacing: 8) {
+                HStack(spacing: GuardianSpacing.xs) {
                     GuardianThemedButton(
                         title: "Cancel",
                         accent: .danger,
@@ -569,7 +569,7 @@ struct SettingsView: View {
                 }
             },
             bodyContent: {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                     Text(
                         String(
                             format: "Selected lat/lng: %.6f, %.6f",
@@ -577,7 +577,7 @@ struct SettingsView: View {
                             draftSimLongitudeDeg
                         )
                     )
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(GuardianTypography.relativeFixed(size: 12, weight: .regular, design: .monospaced, relativeTo: .caption))
                     .foregroundStyle(theme.textPrimary)
 
                     GuardianMapView(

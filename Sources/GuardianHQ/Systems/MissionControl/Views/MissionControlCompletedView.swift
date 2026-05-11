@@ -5,10 +5,10 @@ import SwiftUI
 
 extension MissionRunDetailView {
     var missionCompletedReportCards: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.cardBodyInset) {
             HStack(alignment: .firstTextBaseline) {
                 Text("Mission report")
-                    .font(.system(size: 18, weight: .bold))
+                    .font(GuardianTypography.relativeFixed(size: 18, weight: .bold, relativeTo: .title3))
                     .foregroundStyle(theme.textPrimary)
                 Spacer()
                 MissionRunStatusBadge(status: .completed)
@@ -23,30 +23,30 @@ extension MissionRunDetailView {
     }
 
     var completedOutcomeCard: some View {
-        let accent = completedOutcomeAccent
-        return completedReportCardChrome(title: "Outcome", accent: accent) {
+        completedReportGuardianCard(title: "Outcome", border: completedOutcomeBorder) {
             Text(completedOutcomeTitle)
-                .font(.system(size: 16, weight: .semibold))
+                .font(GuardianTypography.font(.windowHeading16Semibold))
                 .foregroundStyle(theme.textPrimary)
             Text(completedOutcomeDetail)
-                .font(.system(size: 13))
+                .font(GuardianTypography.font(.denseSubsection13Regular))
                 .foregroundStyle(theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    var completedOutcomeAccent: Color {
+    /// Semantic ``GuardianCardBorder`` for how the run ended (same vocabulary as the rest of the app — no in-body tint bars).
+    private var completedOutcomeBorder: GuardianCardBorder {
         switch run.completionKind {
-        case .oneOffAutopilotFinished:
-            return Color.green.opacity(0.75)
-        case .operatorStoppedAfterCycle:
-            return Color.blue.opacity(0.8)
         case .operatorStoppedImmediate:
-            return Color.orange.opacity(0.85)
+            return .warning
+        case .operatorStoppedAfterCycle:
+            return .primary
         case .operatorCompletedImmediate, .operatorCompletedAfterCycle:
-            return Color.green.opacity(0.72)
+            return .subtle
+        case .oneOffAutopilotFinished:
+            return .subtle
         case .none:
-            return Color.gray.opacity(0.55)
+            return .subtle
         }
     }
 
@@ -85,7 +85,7 @@ extension MissionRunDetailView {
     }
 
     var completedScheduleCyclesCard: some View {
-        completedReportCardChrome(title: "Timing & cycles", accent: Color.white.opacity(0.2)) {
+        completedReportGuardianCard(title: "Timing & cycles", border: .subtle) {
             if let t = run.oneOffStartAt {
                 labeledReportRow("Planned start", t.formatted(date: .abbreviated, time: .shortened))
             } else {
@@ -100,7 +100,7 @@ extension MissionRunDetailView {
     }
 
     var completedTimelineCard: some View {
-        completedReportCardChrome(title: "Timeline", accent: Color.white.opacity(0.2)) {
+        completedReportGuardianCard(title: "Timeline", border: .subtle) {
             labeledReportRow("Created", run.createdAt.formatted(date: .abbreviated, time: .shortened))
             if let s = run.startedAt {
                 labeledReportRow("Started", s.formatted(date: .abbreviated, time: .shortened))
@@ -128,17 +128,17 @@ extension MissionRunDetailView {
     }
 
     var completedRosterCard: some View {
-        completedReportCardChrome(title: "Roster", accent: Color.white.opacity(0.2)) {
+        completedReportGuardianCard(title: "Roster", border: .subtle) {
             if run.assignments.isEmpty {
                 Text("No roster slots.")
-                    .font(.system(size: 13))
+                    .font(GuardianTypography.font(.denseSubsection13Regular))
                     .foregroundStyle(theme.textSecondary)
             } else {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
                     ForEach(run.assignments) { a in
                         let bound = a.attachedFleetVehicleToken != nil || !a.attachedDevice.isEmpty
                         Text("• \(a.slotName)\(bound ? "" : " — unassigned")")
-                            .font(.system(size: 13, design: .monospaced))
+                            .font(GuardianTypography.font(.telemetryMono13Regular))
                             .foregroundStyle(theme.textSecondary)
                     }
                 }
@@ -149,11 +149,11 @@ extension MissionRunDetailView {
     var completedMissionLogHealthCard: some View {
         let errs = completedMissionLogErrorCount
         let warns = completedMissionLogWarningCount
-        let accent: Color = errs > 0 ? Color.red.opacity(0.8) : (warns > 0 ? Color.orange.opacity(0.8) : Color.green.opacity(0.65))
-        return completedReportCardChrome(title: "Mission log health", accent: accent) {
+        let border: GuardianCardBorder = errs > 0 ? .danger : (warns > 0 ? .warning : .subtle)
+        return completedReportGuardianCard(title: "Mission log health", border: border) {
             if run.events.isEmpty {
                 Text("No mission log entries are stored for this run.")
-                    .font(.system(size: 13))
+                    .font(GuardianTypography.font(.denseSubsection13Regular))
                     .foregroundStyle(theme.textSecondary)
             } else {
                 let events = run.events.count
@@ -162,9 +162,9 @@ extension MissionRunDetailView {
                 labeledReportRow("Errors", "\(errs)")
                 if errs == 0, warns == 0 {
                     Text("No warnings or errors in the mission log.")
-                        .font(.system(size: 12))
+                        .font(GuardianTypography.font(.denseCaption12Regular))
                         .foregroundStyle(theme.textTertiary)
-                        .padding(.top, 4)
+                        .padding(.top, GuardianSpacing.xxs)
                 }
             }
         }
@@ -180,103 +180,114 @@ extension MissionRunDetailView {
 
     var completedMissionLogExportSection: some View {
         let text = liveLogPlainText(events: run.events, phase: run.sessionPhase, plan: run.compiledPlan)
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Text("Mission log")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(theme.textPrimary)
-                Spacer()
-                GuardianThemedButton(
-                    title: "Copy",
-                    accent: .primary,
-                    surface: .solid,
-                    size: .small,
-                    shape: .cornered,
-                    isEnabled: !text.isEmpty,
-                    action: { copyCompletedLog() }
-                )
-
-                GuardianThemedButton(
-                    title: "Save…",
-                    accent: .neutral,
-                    surface: .outline,
-                    size: .small,
-                    shape: .cornered,
-                    isEnabled: !text.isEmpty,
-                    action: { saveCompletedLog() }
-                )
-
-                GuardianThemedButton(
-                    title: "Print…",
-                    accent: .neutral,
-                    surface: .outline,
-                    size: .small,
-                    shape: .cornered,
-                    isEnabled: !text.isEmpty,
-                    action: { printCompletedLog() }
-                )
-            }
-
-            if text.isEmpty {
-                Text("No mission log entries for this run.")
-                    .font(.system(size: 13))
-                    .foregroundStyle(theme.textSecondary)
-            } else {
-                ScrollView {
-                    Text(text)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(theme.textTertiary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
+        return GuardianCard(
+            configuration: GuardianCardConfiguration(
+                border: .subtle,
+                cornerRadius: GuardianCardLayout.cornerRadius,
+                bodyPadding: GuardianCardLayout.defaultBodyPadding
+            ),
+            header: {
+                HStack(alignment: .center, spacing: GuardianSpacing.denseGutter) {
+                    Text("Mission log")
+                        .font(GuardianTypography.font(.sectionHeadingSemibold))
+                        .foregroundStyle(theme.textPrimary)
+                    Spacer(minLength: GuardianSpacing.xs)
+                    GuardianThemedButton(
+                        title: "Copy",
+                        accent: .primary,
+                        surface: .solid,
+                        size: .small,
+                        shape: .cornered,
+                        isEnabled: !text.isEmpty,
+                        action: { copyCompletedLog() }
+                    )
+                    GuardianThemedButton(
+                        title: "Save…",
+                        accent: .neutral,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        isEnabled: !text.isEmpty,
+                        action: { saveCompletedLog() }
+                    )
+                    GuardianThemedButton(
+                        title: "Print…",
+                        accent: .neutral,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        isEnabled: !text.isEmpty,
+                        action: { printCompletedLog() }
+                    )
                 }
-                .frame(minHeight: 220, idealHeight: 320, maxHeight: 480)
-                .padding(10)
-                .background(theme.backgroundElevated)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(theme.borderSubtle, lineWidth: 1)
-                )
+                .frame(maxWidth: .infinity, alignment: .leading)
+            },
+            body: {
+                Group {
+                    if text.isEmpty {
+                        Text("No mission log entries for this run.")
+                            .font(GuardianTypography.font(.denseSubsection13Regular))
+                            .foregroundStyle(theme.textSecondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    } else {
+                        ScrollView {
+                            Text(text)
+                                .font(GuardianTypography.font(.telemetryMono11Regular))
+                                .foregroundStyle(theme.textTertiary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                        .frame(minHeight: 220, idealHeight: 320, maxHeight: 480)
+                        .padding(GuardianSpacing.denseGutter)
+                        .background(theme.backgroundElevated)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(theme.borderSubtle, lineWidth: 1)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
-        }
-        .padding(14)
+        )
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(theme.backgroundRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
-    func completedReportCardChrome<Content: View>(
+    private func completedReportGuardianCard<Content: View>(
         title: String,
-        accent: Color,
-        @ViewBuilder content: () -> Content
+        border: GuardianCardBorder,
+        @ViewBuilder content: @escaping () -> Content
     ) -> some View {
-        HStack(alignment: .top, spacing: 0) {
-            Rectangle()
-                .fill(accent)
-                .frame(width: 4)
-            VStack(alignment: .leading, spacing: 10) {
+        GuardianCard(
+            configuration: GuardianCardConfiguration(
+                border: border,
+                cornerRadius: GuardianCardLayout.cornerRadius,
+                bodyPadding: GuardianCardLayout.defaultBodyPadding
+            ),
+            header: {
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(GuardianTypography.font(.sectionHeadingSemibold))
                     .foregroundStyle(theme.textPrimary)
-                content()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            },
+            body: {
+                VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
+                    content()
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.leading, 12)
-            .padding(.vertical, 12)
-            .padding(.trailing, 12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .background(theme.backgroundRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        )
     }
 
     func labeledReportRow(_ label: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(label)
-                .font(.system(size: 12))
+                .font(GuardianTypography.font(.denseCaption12Regular))
                 .foregroundStyle(theme.textSecondary)
-            Spacer(minLength: 12)
+            Spacer(minLength: GuardianSpacing.sm)
             Text(value)
-                .font(.system(size: 12, weight: .medium))
+                .font(GuardianTypography.font(.denseCaption12Medium))
                 .foregroundStyle(theme.textPrimary)
                 .multilineTextAlignment(.trailing)
         }

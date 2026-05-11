@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum FleetBadgeStyle {
-    static let font = Font.system(size: 9, weight: .heavy)
+    static let font = GuardianTypography.relativeFixed(size: 9, weight: .heavy, relativeTo: .caption2)
     static let horizontalPadding: CGFloat = 9
     static let verticalPadding: CGFloat = 5
     static let cornerRadius: CGFloat = 5

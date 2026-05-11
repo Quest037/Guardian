@@ -43,12 +43,12 @@ struct MissionRunStartPreflightSheet: View {
             bodyContent: {
                 VStack(alignment: .leading, spacing: 0) {
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 10) {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                             ForEach(rows) { row in
                                 preflightRowView(row)
                             }
                         }
-                        .padding(.vertical, 4)
+                        .padding(.vertical, GuardianSpacing.xxs)
                     }
                     .frame(minHeight: 160, maxHeight: 320)
 
@@ -57,20 +57,20 @@ struct MissionRunStartPreflightSheet: View {
                             ProgressView()
                                 .controlSize(.small)
                             Text("Checking roster…")
-                                .font(.system(size: 12))
+                                .font(GuardianTypography.font(.denseCaption12Regular))
                                 .foregroundStyle(theme.textTertiary)
                         } else if allSlotsPassed {
                             Label("All vehicles armed successfully.", systemImage: "checkmark.circle.fill")
-                                .font(.system(size: 12, weight: .medium))
+                                .font(GuardianTypography.font(.denseCaption12Medium))
                                 .foregroundStyle(GuardianSemanticColors.successStroke)
                         } else {
                             Label("One or more slots failed — fix and try again.", systemImage: "exclamationmark.triangle.fill")
-                                .font(.system(size: 12, weight: .medium))
+                                .font(GuardianTypography.font(.denseCaption12Medium))
                                 .foregroundStyle(GuardianSemanticColors.warningStroke)
                         }
                         Spacer(minLength: 0)
                     }
-                    .padding(.top, 12)
+                    .padding(.top, GuardianSpacing.sm)
                 }
             }
         )
@@ -83,17 +83,17 @@ struct MissionRunStartPreflightSheet: View {
 
     @ViewBuilder
     private func preflightRowView(_ row: MissionRunPreflightSlotRow) -> some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: GuardianSpacing.denseGutter) {
             Image(systemName: iconName(for: row.phase))
-                .font(.system(size: 14, weight: .semibold))
+                .font(GuardianTypography.font(.sectionHeadingSemibold))
                 .foregroundStyle(iconTint(for: row.phase))
                 .frame(width: 20, alignment: .center)
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
                 Text(row.slotName)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(GuardianTypography.font(.subsectionTitleSemibold))
                     .foregroundStyle(theme.textPrimary)
                 Text(row.detail)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(GuardianTypography.font(.telemetryMono11Regular))
                     .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
                 if row.phase == .failed, let advice = row.remediationAdvice {
@@ -102,7 +102,7 @@ struct MissionRunStartPreflightSheet: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, GuardianSpacing.xxs)
     }
 
     private func iconName(for phase: MissionRunPreflightSlotPhase) -> String {

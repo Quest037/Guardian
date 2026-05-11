@@ -1,0 +1,54 @@
+{
+  "_comment": "AHRS level / horizon reference. Operator places the vehicle on a stable, level surface; the autopilot captures the current attitude as the zero reference so the artificial horizon and self-level modes are accurate.\n\nBoth recoverable failure kinds route to `placeOnLevelSurface` because the operator-side fix is identical: get the vehicle flatter and steadier.\n- calibrationDeclined → autopilot detected tilt before sampling started.\n- calibrationDidNotConverge → samples drifted (vibration or marginal level).\n\nOverall budget is 60s — fast procedure (10-30s typical) plus operator setup time.\nAuto-retries (timeout / noSession / autopilotBusy) are handled by the catalogue's default retry policy on the dispatch itself, so the matchers below only see the *final* outcome.",
+  "entryStepID": "calibrate",
+  "overallBudgetSeconds": 60,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "calibrate",
+      "command": "command.fleet.vehicle.do.calibrate.level",
+      "matchers": [
+        {
+          "when": { "kind": "success" },
+          "then": { "kind": "succeed" }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDeclined" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "placeOnLevelSurface"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDidNotConverge" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "placeOnLevelSurface"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "cancelled" },
+          "then": {
+            "kind": "fail",
+            "detail": "Level calibration cancelled by operator."
+          }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "fail",
+            "detail": "Level calibration failed with an unhandled outcome — see the audit trace for the underlying response."
+          }
+        }
+      ]
+    }
+  ]
+}

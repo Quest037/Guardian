@@ -34,92 +34,99 @@ struct LiveDriveView: View {
     @State private var simControlsSidebarVisible = false
     @State private var liveSimBatteryDrainEnabled = true
     @State private var liveSimBatteryDrainRate: SimBatteryDrainRate = .normal
+    /// Bottom prompts (same template as Mission Control run) — call ``GuardianBottomPromptCenter/present(_:style:onDismiss:)`` from Live Drive flows.
+    @StateObject private var bottomPromptCenter = GuardianBottomPromptCenter()
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     private var liveDriveSidebarAnimation: Animation {
-        .easeInOut(duration: 0.2)
+        GuardianMotion.drawerSlide
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            subBar
+        ZStack(alignment: .bottom) {
+            VStack(spacing: 0) {
+                subBar
 
-            GeometryReader { geo in
-                let spacing: CGFloat = 14
-                let outerPadding: CGFloat = 20
-                let totalW = geo.size.width
-                let totalH = geo.size.height
-                let contentW = max(0, totalW - (outerPadding * 2))
-                let contentH = max(0, totalH - (outerPadding * 2))
-                // Left column is 70% of content area width (explicit requirement).
-                let leftW = contentW * 0.7
-                // Right column consumes remaining width after gutter.
-                let rightW = max(0, contentW - leftW - spacing)
-                // Left column vertical split is 70/30 (with gutter accounted for).
-                let mediaH = max(220, (contentH - spacing) * 0.7)
-                let telemetryH = max(120, (contentH - spacing) * 0.3)
+                GeometryReader { geo in
+                    let spacing: CGFloat = GuardianSpacing.cardBodyInset
+                    let outerPadding: CGFloat = GuardianSpacing.lg
+                    let totalW = geo.size.width
+                    let totalH = geo.size.height
+                    let contentW = max(0, totalW - (outerPadding * 2))
+                    let contentH = max(0, totalH - (outerPadding * 2))
+                    // Left column is 70% of content area width (explicit requirement).
+                    let leftW = contentW * 0.7
+                    // Right column consumes remaining width after gutter.
+                    let rightW = max(0, contentW - leftW - spacing)
+                    // Left column vertical split is 70/30 (with gutter accounted for).
+                    let mediaH = max(220, (contentH - spacing) * 0.7)
+                    let telemetryH = max(120, (contentH - spacing) * 0.3)
 
-                HStack(alignment: .top, spacing: spacing) {
-                    VStack(spacing: spacing) {
-                        mediaCard
-                            .frame(maxWidth: .infinity)
-                            .frame(height: mediaH)
-                        telemetryCard
-                            .frame(height: telemetryH)
-                    }
-                    .frame(width: leftW)
-
-                    logCard
-                        .frame(width: rightW, height: contentH)
-                }
-                .padding(outerPadding)
-                .frame(width: totalW, height: totalH, alignment: .topLeading)
-            }
-        }
-        .background(
-            KeyboardEventMonitor(
-                isEnabled: keyboardControlsEnabled,
-                onKeyDown: { event in handleKeyboardKeyDown(event) },
-                onKeyUp: { event in handleKeyboardKeyUp(event) }
-            )
-        )
-        // Safety net: if the user switches apps / windows while a key is held, the
-        // `keyUp` event never reaches us. Without this, the vehicle would keep streaming
-        // forward velocity in the background. Resigning key window flushes the held set,
-        // and the next stream tick pushes a zero setpoint (vehicle decelerates to hover).
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
-            handleWindowResignKey()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(theme.backgroundBase)
-        .onChange(of: appDrawer.presentationRevision) { _ in
-            if appDrawer.presented == nil {
-                vehiclePickerVisible = false
-                simControlsSidebarVisible = false
-            }
-        }
-        .onDisappear {
-            appDrawer.dismiss()
-        }
-        .sheet(item: $preflightPurpose) { purpose in
-            if let vehicle = selectedPickableVehicle,
-               let vehicleID = selectedVehicleID {
-                VehiclePreflightSheet(
-                    vehicleTitle: vehicle.title,
-                    vehicleID: vehicleID,
-                    fleetLink: fleetLink,
-                    sitl: sitl,
-                    controlStore: missionControlStore,
-                    leaveArmed: true,
-                    autoCloseOnPass: true,
-                    onPassed: {
-                        Task { @MainActor in
-                            activateLiveDriveSessionAfterPreflight(kind: purpose.sessionKind)
+                    HStack(alignment: .top, spacing: spacing) {
+                        VStack(spacing: spacing) {
+                            mediaCard
+                                .frame(maxWidth: .infinity)
+                                .frame(height: mediaH)
+                            telemetryCard
+                                .frame(height: telemetryH)
                         }
+                        .frame(width: leftW)
+
+                        logCard
+                            .frame(width: rightW, height: contentH)
                     }
-                )
+                    .padding(outerPadding)
+                    .frame(width: totalW, height: totalH, alignment: .topLeading)
+                }
             }
+            .background(
+                KeyboardEventMonitor(
+                    isEnabled: keyboardControlsEnabled,
+                    onKeyDown: { event in handleKeyboardKeyDown(event) },
+                    onKeyUp: { event in handleKeyboardKeyUp(event) }
+                )
+            )
+            // Safety net: if the user switches apps / windows while a key is held, the
+            // `keyUp` event never reaches us. Without this, the vehicle would keep streaming
+            // forward velocity in the background. Resigning key window flushes the held set,
+            // and the next stream tick pushes a zero setpoint (vehicle decelerates to hover).
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+                handleWindowResignKey()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(theme.backgroundBase)
+            .onChange(of: appDrawer.presentationRevision) { _ in
+                if appDrawer.presented == nil {
+                    vehiclePickerVisible = false
+                    simControlsSidebarVisible = false
+                }
+            }
+            .onDisappear {
+                appDrawer.dismiss()
+                bottomPromptCenter.dismiss()
+            }
+            .sheet(item: $preflightPurpose) { purpose in
+                if let vehicle = selectedPickableVehicle,
+                   let vehicleID = selectedVehicleID {
+                    VehiclePreflightSheet(
+                        vehicleTitle: vehicle.title,
+                        vehicleID: vehicleID,
+                        fleetLink: fleetLink,
+                        sitl: sitl,
+                        controlStore: missionControlStore,
+                        leaveArmed: true,
+                        autoCloseOnPass: true,
+                        onPassed: {
+                            Task { @MainActor in
+                                activateLiveDriveSessionAfterPreflight(kind: purpose.sessionKind)
+                            }
+                        }
+                    )
+                }
+            }
+
+            GuardianBottomPromptBanner(center: bottomPromptCenter)
         }
     }
 
@@ -169,9 +176,9 @@ struct LiveDriveView: View {
     /// Menu trigger styled like ``GuardianThemedButton`` outline chips (``Menu`` cannot nest a ``Button``).
     private func subBarMenuChip(_ title: String, foreground: Color, stroke: Color) -> some View {
         Text(title)
-            .font(.system(size: 12, weight: .semibold))
+            .font(GuardianTypography.font(.inlineNoticeTitle))
             .foregroundStyle(foreground)
-            .padding(.horizontal, 10)
+            .padding(.horizontal, GuardianSpacing.denseGutter)
             .frame(height: 28)
             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
@@ -181,7 +188,7 @@ struct LiveDriveView: View {
     }
 
     private var subBar: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: GuardianSpacing.denseGutter) {
             Picker("", selection: $mediaTab) {
                 Text("Map").tag(LiveDriveMediaTab.map)
                 Text("Camera").tag(LiveDriveMediaTab.camera)
@@ -191,11 +198,11 @@ struct LiveDriveView: View {
 
             if selectedVehicleID != nil {
                 inputSourcePill
-                Spacer(minLength: 2)
+                Spacer(minLength: GuardianSpacing.micro)
 
                 if let sessionStatusText {
                     Text(sessionStatusText)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(GuardianTypography.font(.inlineNoticeDetail))
                         .foregroundStyle(
                             sessionStatusIsError ? GuardianSemanticColors.warningStroke : theme.textSecondary
                         )
@@ -203,7 +210,7 @@ struct LiveDriveView: View {
                 }
                 if let lastKeyboardCommandText {
                     Text(lastKeyboardCommandText)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(GuardianTypography.font(.inlineNoticeDetail))
                         .foregroundStyle(
                             lastKeyboardCommandFailed ? GuardianSemanticColors.warningStroke : theme.textSecondary
                         )
@@ -237,6 +244,7 @@ struct LiveDriveView: View {
                         )
                     }
                     .menuStyle(.borderlessButton)
+                    .guardianPointerOnHover()
                 }
 
                 if store.hasActiveSession {
@@ -254,6 +262,7 @@ struct LiveDriveView: View {
                         )
                     }
                     .menuStyle(.borderlessButton)
+                    .guardianPointerOnHover()
                 } else {
                     GuardianThemedButton(
                         title: "Start Session",
@@ -290,7 +299,7 @@ struct LiveDriveView: View {
                     )
                 }
             } else {
-                Spacer(minLength: 2)
+                Spacer(minLength: GuardianSpacing.micro)
                 GuardianThemedButton(
                     accent: .neutral,
                     surface: .outline,
@@ -314,8 +323,8 @@ struct LiveDriveView: View {
             }
             
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, GuardianSpacing.md)
+        .padding(.vertical, GuardianSpacing.denseGutter)
         .background(theme.backgroundRaised)
         .overlay(alignment: .bottom) {
             Rectangle()
@@ -347,9 +356,9 @@ struct LiveDriveView: View {
                 bodyPadding: GuardianCardLayout.defaultBodyPadding
             ),
             body: {
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.cardBodyInset) {
                     Text("Battery drain")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
                         .foregroundStyle(theme.textPrimary)
                     Toggle("Enable drain", isOn: $liveSimBatteryDrainEnabled)
                         .toggleStyle(.switch)
@@ -409,7 +418,7 @@ struct LiveDriveView: View {
             animation: liveDriveSidebarAnimation
         ) {
             liveSimControlsSidebarBody
-                .padding(14)
+                .padding(GuardianSpacing.cardBodyInset)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
@@ -676,12 +685,12 @@ struct LiveDriveView: View {
                     case .camera:
                         ZStack {
                             theme.backgroundElevated
-                            VStack(spacing: 8) {
+                            VStack(spacing: GuardianSpacing.xs) {
                                 Image(systemName: "video")
-                                    .font(.system(size: 30, weight: .medium))
+                                    .font(GuardianTypography.font(.heroGlyph30Medium))
                                     .foregroundStyle(theme.textSecondary)
                                 Text("Camera view placeholder")
-                                    .font(.system(size: 13, weight: .semibold))
+                                    .font(GuardianTypography.font(.subsectionTitleSemibold))
                                     .foregroundStyle(theme.textSecondary)
                             }
                         }
@@ -691,21 +700,21 @@ struct LiveDriveView: View {
                 .overlay(alignment: .bottomLeading) {
                     if let label = lastKeyboardCommandText, store.hasActiveSession {
                         Text(label)
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .font(GuardianTypography.font(.telemetryMono10Semibold))
                             .foregroundStyle(
                                 lastKeyboardCommandFailed
                                     ? GuardianSemanticColors.warningForeground
                                     : theme.textPrimary
                             )
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
+                            .padding(.horizontal, GuardianSpacing.xs)
+                            .padding(.vertical, GuardianSpacing.xxs)
                             .background(theme.backgroundRaised.opacity(0.92))
                             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                                     .strokeBorder(theme.borderSubtle, lineWidth: 1)
                             )
-                            .padding(8)
+                            .padding(GuardianSpacing.xs)
                     }
                 }
             }
@@ -717,32 +726,32 @@ struct LiveDriveView: View {
             configuration: GuardianCardConfiguration(
                 border: .none,
                 cornerRadius: GuardianCardLayout.cornerRadius,
-                bodyPadding: 12
+                bodyPadding: GuardianSpacing.sm
             ),
             header: {
-                HStack(alignment: .top, spacing: 10) {
+                HStack(alignment: .top, spacing: GuardianSpacing.denseGutter) {
                     if let vehicle = selectedPickableVehicle {
-                        HStack(spacing: 10) {
+                        HStack(spacing: GuardianSpacing.denseGutter) {
                             telemetryVehicleBadge(for: vehicle)
                                 .frame(width: 34, height: 28)
                                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                            VStack(alignment: .leading, spacing: 1) {
+                            VStack(alignment: .leading, spacing: GuardianSpacing.hairlineStack) {
                                 Text(telemetryHeaderName(for: vehicle))
-                                    .font(.system(size: 13, weight: .semibold))
+                                    .font(GuardianTypography.font(.subsectionTitleSemibold))
                                     .foregroundStyle(theme.textPrimary)
                                 Text(telemetryHeaderSubtitle(for: vehicle))
-                                    .font(.system(size: 10, design: .monospaced))
+                                    .font(GuardianTypography.font(.telemetryMono10Regular))
                                     .foregroundStyle(theme.textSecondary)
                             }
                         }
                     } else {
                         Text("Vehicle health / telemetry")
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(GuardianTypography.font(.sectionHeadingSemibold))
                             .foregroundStyle(theme.textPrimary)
                     }
-                    Spacer(minLength: 8)
+                    Spacer(minLength: GuardianSpacing.xs)
                     if let hub = selectedHub {
-                        HStack(spacing: 8) {
+                        HStack(spacing: GuardianSpacing.xs) {
                             telemetryPill("Mode", hub.flightMode.isEmpty ? "—" : hub.flightMode)
                             telemetryPill(
                                 "Armed",
@@ -759,11 +768,11 @@ struct LiveDriveView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             },
             body: {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
                     if let hub = selectedHub {
-                        HStack(alignment: .top, spacing: 10) {
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack(spacing: 8) {
+                        HStack(alignment: .top, spacing: GuardianSpacing.denseGutter) {
+                            VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+                                HStack(spacing: GuardianSpacing.xs) {
                                     telemetryPrimaryBox(
                                         "Altitude",
                                         displayAltitudeText(for: hub)
@@ -774,7 +783,7 @@ struct LiveDriveView: View {
                                     )
                                 }
 
-                                HStack(spacing: 8) {
+                                HStack(spacing: GuardianSpacing.xs) {
                                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                                         .fill(theme.borderSubtle.opacity(0.5))
                                         .overlay(
@@ -786,16 +795,16 @@ struct LiveDriveView: View {
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
 
-                            VStack(alignment: .leading, spacing: 6) {
+                            VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
                                 Text("Messages")
-                                    .font(.system(size: 11, weight: .semibold))
+                                    .font(GuardianTypography.font(.formFieldLabel))
                                     .foregroundStyle(theme.textSecondary)
                                 Text("No active messages.")
-                                    .font(.system(size: 11, design: .monospaced))
+                                    .font(GuardianTypography.font(.telemetryMono11Regular))
                                     .foregroundStyle(theme.textTertiary)
                                     .lineLimit(3)
                             }
-                            .padding(8)
+                            .padding(GuardianSpacing.xs)
                             .frame(width: 220, alignment: .topLeading)
                             .background(theme.backgroundElevated)
                             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -806,7 +815,7 @@ struct LiveDriveView: View {
                         }
                     } else {
                         Text("Select a vehicle to view telemetry.")
-                            .font(.system(size: 12))
+                            .font(GuardianTypography.font(.denseCaption12Regular))
                             .foregroundStyle(theme.textSecondary)
                     }
                     Spacer(minLength: 0)
@@ -872,9 +881,9 @@ struct LiveDriveView: View {
                 bodyPadding: GuardianCardLayout.defaultBodyPadding
             ),
             header: {
-                HStack(spacing: 10) {
+                HStack(spacing: GuardianSpacing.denseGutter) {
                     Text(logHeaderTitle)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(GuardianTypography.font(.sectionHeadingSemibold))
                         .foregroundStyle(theme.textPrimary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     if selectedVehicleID != nil {
@@ -889,7 +898,7 @@ struct LiveDriveView: View {
             body: {
                 ScrollView {
                     Text(logText)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(GuardianTypography.font(.telemetryMono11Regular))
                         .foregroundStyle(theme.textTertiary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
@@ -955,40 +964,40 @@ struct LiveDriveView: View {
                     endPoint: .bottomTrailing
                 )
                 Image(systemName: "antenna.radiowaves.left.and.right")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(GuardianTypography.font(.disclosureRowTitle))
                     .foregroundStyle(theme.textPrimary.opacity(0.45))
             }
         }
     }
 
     private func telemetryPill(_ label: String, _ value: String, accent: Color = Color.white.opacity(0.04)) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.micro) {
             Text(label)
-                .font(.system(size: 10))
+                .font(GuardianTypography.font(.denseCaption10Regular))
                 .foregroundStyle(theme.textSecondary)
             Text(value)
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .font(GuardianTypography.font(.telemetryMono12Semibold))
                 .foregroundStyle(theme.textPrimary)
         }
-        .padding(.vertical, 6)
-        .padding(.horizontal, 8)
+        .padding(.vertical, GuardianSpacing.xsTight)
+        .padding(.horizontal, GuardianSpacing.xs)
         .background(accent.opacity(0.28))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     private func telemetryPrimaryBox(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.titleStackTight) {
             Text(label)
-                .font(.system(size: 10, weight: .semibold))
+                .font(GuardianTypography.font(.denseCaption10Semibold))
                 .foregroundStyle(theme.textSecondary)
             Text(value)
-                .font(.system(size: 22, weight: .bold, design: .rounded))
+                .font(GuardianTypography.font(.hudCountdownRounded22Bold))
                 .foregroundStyle(theme.textPrimary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 10)
+        .padding(.vertical, GuardianSpacing.xs)
+        .padding(.horizontal, GuardianSpacing.denseGutter)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(theme.borderSubtle.opacity(0.55))
         .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -1308,37 +1317,37 @@ private struct LiveDriveVehiclePickerSidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(alignment: .center, spacing: 12) {
+            HStack(alignment: .center, spacing: GuardianSpacing.sm) {
                 Text("Select vehicle")
-                    .font(.system(size: 16, weight: .bold))
+                    .font(GuardianTypography.font(.hudTitle16Bold))
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)
-                Spacer(minLength: 8)
+                Spacer(minLength: GuardianSpacing.xs)
                 Button {
                     onClose()
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 18, weight: .medium))
+                        .font(GuardianTypography.font(.heroGlyph18Medium))
                         .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(theme.textSecondary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(GuardianPointerPlainButtonStyle())
                 .keyboardShortcut(.cancelAction)
                 .help("Close")
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
+            .padding(.horizontal, GuardianSpacing.md)
+            .padding(.vertical, GuardianSpacing.cardBodyInset)
             .background(theme.backgroundElevated)
 
             if vehicles.isEmpty {
                 Spacer()
                 Text("No vehicles available.")
-                    .font(.system(size: 13))
+                    .font(GuardianTypography.font(.denseSubsection13Regular))
                     .foregroundStyle(theme.textSecondary)
                 Spacer()
             } else {
                 ScrollView {
-                    VStack(spacing: 10) {
+                    VStack(spacing: GuardianSpacing.denseGutter) {
                         ForEach(vehicles) { vehicle in
                             Button {
                                 onSelect(vehicle)
@@ -1350,31 +1359,31 @@ private struct LiveDriveVehiclePickerSidebar: View {
                                         bodyPadding: GuardianCardLayout.defaultBodyPadding
                                     ),
                                     body: {
-                                        VStack(alignment: .leading, spacing: 10) {
+                                        VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                                             ZStack(alignment: .topTrailing) {
-                                                HStack(spacing: 14) {
+                                                HStack(spacing: GuardianSpacing.cardBodyInset) {
                                                     vehicleThumbnail(vehicle)
                                                         .frame(width: 72, height: 56)
                                                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-                                                    VStack(alignment: .leading, spacing: 4) {
+                                                    VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                                                         Text(vehicle.title)
-                                                            .font(.system(size: 15, weight: .semibold))
+                                                            .font(GuardianTypography.font(.panelSecondaryHeadingSemibold))
                                                             .foregroundStyle(theme.textPrimary)
                                                             .multilineTextAlignment(.leading)
                                                         Text(vehicle.lifecycleStatus.mediumLabel)
-                                                            .font(.system(size: 11, weight: .semibold))
+                                                            .font(GuardianTypography.font(.formFieldLabel))
                                                             .foregroundStyle(vehicle.lifecycleStatus.color.uiColor.opacity(0.95))
                                                             .lineLimit(1)
                                                         Text(vehicle.vehicleShortID)
-                                                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                                            .font(GuardianTypography.font(.telemetryMono10Medium))
                                                             .foregroundStyle(theme.textSecondary)
                                                             .lineLimit(1)
                                                     }
                                                     Spacer(minLength: 0)
                                                 }
 
-                                                HStack(spacing: 8) {
+                                                HStack(spacing: GuardianSpacing.xs) {
                                                     FleetAutopilotStackBadge(stack: vehicle.autopilotStack)
                                                     FleetLiveSimBadge(isSimulation: vehicle.isSimulation)
                                                     if isSelected(vehicle) {
@@ -1392,10 +1401,10 @@ private struct LiveDriveVehiclePickerSidebar: View {
                                         .strokeBorder(vehicle.lifecycleStatus.color.uiColor.opacity(0.7), lineWidth: 1)
                                 }
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(GuardianPointerPlainButtonStyle())
                         }
                     }
-                    .padding(16)
+                    .padding(GuardianSpacing.md)
                 }
             }
         }
@@ -1424,7 +1433,7 @@ private struct LiveDriveVehiclePickerSidebar: View {
                     endPoint: .bottomTrailing
                 )
                 Image(systemName: "antenna.radiowaves.left.and.right")
-                    .font(.system(size: 28, weight: .medium))
+                    .font(GuardianTypography.font(.heroGlyph28Medium))
                     .foregroundStyle(theme.textPrimary.opacity(0.35))
             }
         }

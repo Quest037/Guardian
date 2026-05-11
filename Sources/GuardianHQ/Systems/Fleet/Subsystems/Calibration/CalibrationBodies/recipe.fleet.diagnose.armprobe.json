@@ -1,0 +1,107 @@
+{
+  "_comment": "Arm probe — the migration target for today's preflight overlay. Two-step recipe: attempt arm, then immediately disarm so the probe leaves the vehicle in the same state it found it. Failure matchers on the arm step classify the common autopilot refusal kinds the catalogue exposes today (alreadyArmed reads as a pass; armRejectedByAutopilot / calibrationDeclined / modeNotSupported / autopilotBusy fail with distinct details). The disarm step runs only when arm reported a healthy state; its `any → fail` catch is intentional because a vehicle that armed but won't disarm is the worst-case outcome and must be surfaced as a failure, not silently swallowed. The descriptor declares `recipe.fleet.diagnose.cancel` as cancelRecipe so operator-cancel mid-probe still results in a disarm attempt.",
+  "entryStepID": "arm",
+  "overallBudgetSeconds": 20,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "arm",
+      "command": "command.fleet.vehicle.do.arm",
+      "matchers": [
+        {
+          "when": { "kind": "success" },
+          "then": { "kind": "continueToNextStep" }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "alreadyArmed" },
+          "then": { "kind": "continueToNextStep" }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "armRejectedByAutopilot" },
+          "then": {
+            "kind": "fail",
+            "detail": "Autopilot refused arm. Inspect the audit trace for the underlying reason (GPS lock, battery, levelling, calibration state, etc.)."
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDeclined" },
+          "then": {
+            "kind": "fail",
+            "detail": "Autopilot blocked arm — sensor calibration is required before this vehicle can be armed."
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "modeNotSupported" },
+          "then": {
+            "kind": "fail",
+            "detail": "Autopilot is in a mode that disallows arming. Switch to an arming-capable mode and retry."
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "autopilotBusy" },
+          "then": {
+            "kind": "fail",
+            "detail": "Autopilot is busy with a higher-priority operation. Wait for it to clear and retry."
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "notConnected" },
+          "then": {
+            "kind": "fail",
+            "detail": "Vehicle is not connected — link is down or the session is not live."
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "noSession" },
+          "then": {
+            "kind": "fail",
+            "detail": "MAVSDK session unavailable — link to autopilot is not established."
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "authorityGated" },
+          "then": {
+            "kind": "fail",
+            "detail": "Arm refused by authority gate (live-mission or live-drive policy)."
+          }
+        },
+        {
+          "when": { "kind": "cancelled" },
+          "then": {
+            "kind": "fail",
+            "detail": "Arm probe cancelled by operator."
+          }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "fail",
+            "detail": "Arm probe failed with an unhandled outcome — see audit trace for details."
+          }
+        }
+      ]
+    },
+    {
+      "kind": "invokeCommand",
+      "id": "disarm",
+      "command": "command.fleet.vehicle.do.disarm",
+      "matchers": [
+        {
+          "when": { "kind": "success" },
+          "then": { "kind": "succeed" }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "alreadyDisarmed" },
+          "then": { "kind": "succeed" }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "fail",
+            "detail": "Vehicle armed but did not disarm cleanly — UNSAFE STATE. Disarm manually before approaching the airframe."
+          }
+        }
+      ]
+    }
+  ]
+}

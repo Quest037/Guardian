@@ -1,0 +1,61 @@
+{
+  "_comment": "Compass-motor interference characterisation. ArduPilot-only procedure: operator restrains the airframe, autopilot sweeps throttle while sampling magnetic deflection so the compass can be compensated against motor current draw. PX4 has no equivalent procedure — that path surfaces as `error(notImplemented)` with a clean 'not supported on this stack' message.\n\n- declined → escalate(removeMagneticInterference): a stable magnetic baseline is required before the sweep starts.\n- didNotConverge → escalate(holdStill): the airframe moved during the throttle sweep, contaminating the sample window.\n\nOverall budget is 300s — sweep can take 2-3 minutes plus operator setup; well under the 600s parser ceiling.",
+  "entryStepID": "calibrate",
+  "overallBudgetSeconds": 300,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "calibrate",
+      "command": "command.fleet.vehicle.do.calibrate.compass.motor",
+      "matchers": [
+        {
+          "when": { "kind": "success" },
+          "then": { "kind": "succeed" }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "notImplemented" },
+          "then": {
+            "kind": "fail",
+            "detail": "Compass-motor calibration is ArduPilot-only and not supported on this vehicle's autopilot stack."
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDeclined" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "removeMagneticInterference"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDidNotConverge" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "holdStill"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "cancelled" },
+          "then": {
+            "kind": "fail",
+            "detail": "Compass-motor calibration cancelled by operator."
+          }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "fail",
+            "detail": "Compass-motor calibration failed with an unhandled outcome — see the audit trace for the underlying response."
+          }
+        }
+      ]
+    }
+  ]
+}

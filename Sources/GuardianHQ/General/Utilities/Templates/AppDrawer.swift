@@ -23,7 +23,9 @@ struct PresentedAppDrawer: Identifiable {
 ///
 /// Inject via environment and attach ``View/withAppDrawer()`` on the window root (after ``RootView``).
 ///
-/// Ephemeral app toasts use a separate ``View/withToasts()`` host on the **main content** column inside ``RootView`` so they do not cover the nav rail. Apply ``withAppDrawer()`` on the outer window root so drawers stack above primary UI.
+/// Ephemeral app toasts use ``View/withToasts()`` on the **main content** column inside ``RootView`` so they do not
+/// cover the nav rail. Apply ``withAppDrawer()`` **before** ``View/withGuardianConfirmOverlayHost()`` so the drawer
+/// sits above ``RootView`` but below blocking confirms — see ``GuardianLayoutPatterns``.
 @MainActor
 final class AppDrawer: ObservableObject {
     @Published private(set) var presented: PresentedAppDrawer?
@@ -36,7 +38,7 @@ final class AppDrawer: ObservableObject {
         title: String?,
         preferredWidth: CGFloat = 380,
         scrimTapDismisses: Bool = true,
-        animation: Animation = .easeInOut(duration: 0.2),
+        animation: Animation = GuardianMotion.drawerSlide,
         @ViewBuilder content: @escaping () -> Content
     ) {
         let clampedWidth = min(560, max(260, preferredWidth))
@@ -55,7 +57,7 @@ final class AppDrawer: ObservableObject {
     }
 
     func dismiss(animation: Animation? = nil) {
-        let anim = animation ?? presented?.animation ?? .easeInOut(duration: 0.2)
+        let anim = animation ?? presented?.animation ?? GuardianMotion.drawerSlide
         withAnimation(anim) {
             presented = nil
             presentationRevision &+= 1
@@ -76,26 +78,26 @@ struct AppDrawerChrome<Content: View>: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(alignment: .center, spacing: 12) {
+            HStack(alignment: .center, spacing: GuardianSpacing.sm) {
                 Text(title)
-                    .font(.system(size: 16, weight: .bold))
+                    .font(GuardianTypography.font(.hudTitle16Bold))
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)
-                Spacer(minLength: 8)
+                Spacer(minLength: GuardianSpacing.xs)
                 Button {
                     onClose()
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 18, weight: .medium))
+                        .font(GuardianTypography.font(.heroGlyph18Medium))
                         .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(theme.textSecondary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(GuardianPointerPlainButtonStyle())
                 .keyboardShortcut(.cancelAction)
                 .help("Close")
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
+            .padding(.horizontal, GuardianSpacing.md)
+            .padding(.vertical, GuardianSpacing.cardBodyInset)
             .background(theme.backgroundElevated)
             .overlay(alignment: .bottom) {
                 Rectangle()
@@ -144,7 +146,7 @@ private struct AppDrawerHostModifier: ViewModifier {
             }
         }
         .animation(
-            appDrawer.presented?.animation ?? .easeInOut(duration: 0.2),
+            appDrawer.presented?.animation ?? GuardianMotion.drawerSlide,
             value: appDrawer.presentationRevision
         )
     }

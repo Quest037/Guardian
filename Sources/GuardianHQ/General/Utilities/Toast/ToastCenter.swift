@@ -1,34 +1,5 @@
 import SwiftUI
 
-enum ToastStyle {
-    case success
-    case info
-    case error
-
-    /// Legacy translucent chip tint (avoid for new UI; ephemeral toasts use ``ToastHost`` solid fills).
-    var background: Color {
-        switch self {
-        case .success:
-            return GuardianSemanticColors.successBackground
-        case .info:
-            return GuardianSemanticColors.infoBackground
-        case .error:
-            return GuardianSemanticColors.dangerBackground
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .success:
-            return "checkmark.circle.fill"
-        case .info:
-            return "info.circle.fill"
-        case .error:
-            return "xmark.circle.fill"
-        }
-    }
-}
-
 struct ToastMessage: Identifiable, Equatable {
     let id = UUID()
     let text: String
@@ -42,12 +13,12 @@ final class ToastCenter: ObservableObject {
 
     func show(_ text: String, style: ToastStyle = .info, duration: TimeInterval = 2.2) {
         dismissTask?.cancel()
-        withAnimation(.easeInOut(duration: 0.18)) {
+        withAnimation(GuardianMotion.feedbackCrossfade) {
             current = ToastMessage(text: text, style: style)
         }
         let task = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            withAnimation(.easeInOut(duration: 0.18)) {
+            withAnimation(GuardianMotion.feedbackCrossfade) {
                 self.current = nil
             }
         }
@@ -64,41 +35,35 @@ struct ToastHost: ViewModifier {
             content
 
             if let toast = toastCenter.current {
-                HStack(alignment: .center, spacing: 8) {
+                HStack(alignment: .center, spacing: GuardianSpacing.xs) {
                     Image(systemName: toast.style.icon)
                     Text(toast.text)
                         .lineLimit(4)
                         .multilineTextAlignment(.leading)
                     Spacer(minLength: 0)
                 }
-                .font(.system(size: 13, weight: .semibold))
+                .font(GuardianTypography.font(.toastEphemeral))
                 .foregroundStyle(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
+                .padding(.horizontal, GuardianSpacing.cardBodyInset)
+                .padding(.vertical, GuardianSpacing.denseGutter)
                 .background(toastEphemeralBackground(for: toast.style))
                 .overlay(
                     RoundedRectangle(cornerRadius: 10)
                         .stroke(Color.white.opacity(0.18), lineWidth: 1)
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .guardianDropShadow(GuardianElevation.feedbackChrome)
                 .frame(maxWidth: 380, alignment: .leading)
-                .padding(.leading, 14)
-                .padding(.top, 12)
+                .padding(.leading, GuardianSpacing.cardBodyInset)
+                .padding(.top, GuardianSpacing.sm)
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
     }
 
-    /// App-wide ephemeral toasts: more readable than ``ToastStyle/background`` tints, less heavy than MC-R banners.
+    /// App-wide ephemeral toasts: more readable than ``GuardianFeedbackSeverity/legacyTranslucentChipBackground``, less heavy than MC-R banners.
     private func toastEphemeralBackground(for style: ToastStyle) -> Color {
-        switch style {
-        case .success:
-            return Color(red: 0.11, green: 0.44, blue: 0.24).opacity(0.82)
-        case .info:
-            return Color(red: 0.14, green: 0.34, blue: 0.62).opacity(0.82)
-        case .error:
-            return Color(red: 0.52, green: 0.14, blue: 0.18).opacity(0.82)
-        }
+        style.toastEphemeralSolidBackground
     }
 }
 

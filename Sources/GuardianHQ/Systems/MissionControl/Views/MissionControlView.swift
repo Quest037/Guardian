@@ -67,20 +67,20 @@ struct MissionControlView: View {
     ) -> some View {
         VStack(spacing: 0) {
             Spacer(minLength: 0)
-            VStack(spacing: 14) {
+            VStack(spacing: GuardianSpacing.cardBodyInset) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 44, weight: .medium))
+                    .font(GuardianTypography.relativeFixed(size: 44, weight: .medium, relativeTo: .largeTitle))
                     .foregroundStyle(theme.textSecondary)
                 Text(title)
-                    .font(.system(size: 20, weight: .semibold))
+                    .font(GuardianTypography.relativeFixed(size: 20, weight: .semibold, relativeTo: .title3))
                     .foregroundStyle(theme.textPrimary)
                 subtitle()
-                    .font(.system(size: 14))
+                    .font(GuardianTypography.relativeFixed(size: 14, weight: .regular, relativeTo: .callout))
                     .foregroundColor(theme.textSecondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 480)
             }
-            .padding(32)
+            .padding(GuardianSpacing.xxl)
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -99,8 +99,8 @@ struct MissionControlView: View {
                     showingAddRunSheet = true
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.horizontal, GuardianSpacing.sm)
+            .padding(.vertical, GuardianSpacing.xs)
             .frame(maxWidth: .infinity)
             .background(theme.backgroundRaised)
 
@@ -115,8 +115,8 @@ struct MissionControlView: View {
             } else {
                 ScrollView {
                     LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 300), spacing: 12)],
-                        spacing: 12
+                        columns: [GridItem(.adaptive(minimum: 300), spacing: GuardianSpacing.sm)],
+                        spacing: GuardianSpacing.sm
                     ) {
                         ForEach(controlStore.runs) { run in
                             Button {
@@ -128,10 +128,10 @@ struct MissionControlView: View {
                                     isSelected: selectedRunID == run.id
                                 )
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(GuardianPointerPlainButtonStyle())
                         }
                     }
-                    .padding(16)
+                    .padding(GuardianSpacing.md)
                 }
                 .background(theme.backgroundBase)
             }
@@ -164,9 +164,9 @@ struct MissionRunStatusBadge: View {
 
     var body: some View {
         Text(displayTitle)
-            .font(.system(size: 10, weight: .heavy))
-            .padding(.horizontal, 9)
-            .padding(.vertical, 4)
+            .font(GuardianTypography.font(.denseMicro10Heavy))
+            .padding(.horizontal, GuardianSpacing.chromeChipHorizontal)
+            .padding(.vertical, GuardianSpacing.xxs)
             .foregroundStyle(foreground)
             .background(background)
             .clipShape(Capsule())
@@ -226,7 +226,7 @@ private struct MissionRunCard: View {
         GuardianCardConfiguration(
             border: isSelected ? .none : .subtle,
             cornerRadius: GuardianCardLayout.cornerRadius,
-            bodyPadding: 12
+            bodyPadding: GuardianSpacing.sm
         )
     }
 
@@ -237,46 +237,46 @@ private struct MissionRunCard: View {
                 runCardMissionThumbnail
             },
             body: {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                     HStack {
                         Text(run.missionName)
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(GuardianTypography.font(.panelSecondaryHeadingSemibold))
                             .foregroundStyle(theme.textPrimary)
                             .lineLimit(1)
                         Spacer()
                         MissionRunStatusBadge(status: run.status, sessionPhase: run.sessionPhase)
                     }
 
-                    HStack(spacing: 8) {
+                    HStack(spacing: GuardianSpacing.xs) {
                         Image(systemName: scheduleIconName)
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(GuardianTypography.font(.denseCaption10Semibold))
                             .foregroundStyle(theme.textTertiary)
                         Text(scheduleSummaryText)
-                            .font(.system(size: 11, weight: .medium))
+                            .font(GuardianTypography.font(.inlineNoticeDetail))
                             .foregroundStyle(theme.textSecondary)
                             .lineLimit(1)
                         Spacer(minLength: 0)
                         if run.gracefulStopKind != .none {
                             Text(gracefulStopKindGridLabel(run.gracefulStopKind))
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(GuardianTypography.font(.denseCaption10Semibold))
                                 .foregroundStyle(GuardianSemanticColors.warningForeground)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 3)
+                                .padding(.horizontal, GuardianSpacing.chromeTightInset)
+                                .padding(.vertical, GuardianSpacing.titleStackTight)
                                 .background(GuardianSemanticColors.warningBackground)
                                 .clipShape(Capsule())
                         }
                     }
 
-                    HStack(spacing: 8) {
+                    HStack(spacing: GuardianSpacing.xs) {
                         statPill(label: "Slots", value: "\(run.assignments.count)")
                         statPill(label: "Assigned", value: "\(assignedSlots)")
                         statPill(label: "Unassigned", value: "\(unassignedSlots)")
                     }
 
                     if let progressLabel {
-                        VStack(alignment: .leading, spacing: 5) {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.stackDense) {
                             Text(progressLabel)
-                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .font(GuardianTypography.font(.telemetryMono10Semibold))
                                 .foregroundStyle(theme.textTertiary)
                             GeometryReader { geo in
                                 ZStack(alignment: .leading) {
@@ -297,7 +297,7 @@ private struct MissionRunCard: View {
                         .frame(maxWidth: .infinity)
 
                     Text(timelineSummaryText)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .font(GuardianTypography.font(.telemetryMono11Medium))
                         .foregroundStyle(theme.textTertiary)
                         .lineLimit(1)
                 }
@@ -326,7 +326,7 @@ private struct MissionRunCard: View {
             ZStack {
                 Color(red: 0x12 / 255, green: 0x15 / 255, blue: 0x1c / 255)
                 Image(systemName: "shield.lefthalf.filled")
-                    .font(.system(size: 22, weight: .medium))
+                    .font(GuardianTypography.relativeFixed(size: 22, weight: .medium, relativeTo: .title2))
                     .foregroundStyle(theme.textSecondary.opacity(0.75))
             }
             .frame(maxWidth: .infinity)
@@ -417,16 +417,16 @@ private struct MissionRunCard: View {
 
     @ViewBuilder
     private func statPill(label: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.micro) {
             Text(label)
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .font(GuardianTypography.font(.telemetryMono9Semibold))
                 .foregroundStyle(theme.textTertiary)
             Text(value)
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                .font(GuardianTypography.font(.telemetryMono12Bold))
                 .foregroundStyle(theme.textPrimary)
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 6)
+        .padding(.horizontal, GuardianSpacing.chromeChipHorizontal)
+        .padding(.vertical, GuardianSpacing.xsTight)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(theme.backgroundElevated)
         .clipShape(RoundedRectangle(cornerRadius: 7))
@@ -461,7 +461,7 @@ private struct AddMissionRunSheet: View {
                 .keyboardShortcut(.cancelAction)
             },
             bodyContent: {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
                     if missionsSelectableForNewRun.isEmpty {
                         Group {
                             if missionStore.missions.isEmpty {
@@ -473,31 +473,31 @@ private struct AddMissionRunSheet: View {
                         .foregroundStyle(theme.textSecondary)
                     } else {
                         ScrollView {
-                            VStack(alignment: .leading, spacing: 8) {
+                            VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
                                 ForEach(missionsSelectableForNewRun) { mission in
                                     Button {
                                         onCreateRun(mission)
                                         dismiss()
                                     } label: {
-                                        HStack(alignment: .center, spacing: 10) {
+                                        HStack(alignment: .center, spacing: GuardianSpacing.denseGutter) {
                                             MissionCardThumbnailView(mission: mission, fixedLength: 48)
-                                            VStack(alignment: .leading, spacing: 2) {
+                                            VStack(alignment: .leading, spacing: GuardianSpacing.micro) {
                                                 Text(mission.name)
                                                     .foregroundStyle(theme.textPrimary)
                                                 Text(mission.description.isEmpty ? "No description" : mission.description)
-                                                    .font(.system(size: 11))
+                                                    .font(GuardianTypography.font(.denseFootnoteRegular))
                                                     .foregroundStyle(theme.textSecondary)
                                                     .lineLimit(1)
                                             }
                                             Spacer()
                                             Image(systemName: "plus.circle.fill")
                                         }
-                                        .padding(10)
+                                        .padding(GuardianSpacing.denseGutter)
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                         .background(theme.backgroundRaised)
                                         .clipShape(RoundedRectangle(cornerRadius: 8))
                                     }
-                                    .buttonStyle(.plain)
+                                    .buttonStyle(GuardianPointerPlainButtonStyle())
                                 }
                             }
                         }

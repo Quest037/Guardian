@@ -2,24 +2,36 @@ import SwiftUI
 
 // MARK: - Card chrome (default inset card: raised surface + subtle border)
 
-extension View {
-    /// Legacy inset card: padded body on ``GuardianDynamicColors/backgroundRaised`` with a hairline border.
-    /// Prefer ``GuardianCard`` for new panels (theme tokens + optional header/footer/media); migrate call sites when convenient.
-    func guardianInsetCard(cornerRadius: CGFloat = 10, padding: CGFloat = 14) -> some View {
-        self
+private struct GuardianInsetCardModifier: ViewModifier {
+    var cornerRadius: CGFloat
+    var padding: CGFloat
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    func body(content: Content) -> some View {
+        let theme = GuardianTheme.palette(for: colorScheme)
+        content
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(GuardianDynamicColors.backgroundRaised)
+            .background(theme.backgroundRaised)
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(GuardianDynamicColors.borderSubtle, lineWidth: 1)
+                    .strokeBorder(theme.borderSubtle, lineWidth: 1)
             )
+    }
+}
+
+extension View {
+    /// Inset card: padded body on ``GuardianThemePalette/backgroundRaised`` with ``borderSubtle`` hairline (same rail as modals / sidebars).
+    /// Prefer ``GuardianCard`` for new panels (header/footer/media); keep this for quick legacy panels.
+    func guardianInsetCard(cornerRadius: CGFloat = 10, padding: CGFloat = GuardianSpacing.cardBodyInset) -> some View {
+        modifier(GuardianInsetCardModifier(cornerRadius: cornerRadius, padding: padding))
     }
 
     /// Denser cards (e.g. tight grids): same chrome, smaller padding.
-    func guardianInsetCardCompact(cornerRadius: CGFloat = 10, padding: CGFloat = 10) -> some View {
-        guardianInsetCard(cornerRadius: cornerRadius, padding: padding)
+    func guardianInsetCardCompact(cornerRadius: CGFloat = 10, padding: CGFloat = GuardianSpacing.denseGutter) -> some View {
+        modifier(GuardianInsetCardModifier(cornerRadius: cornerRadius, padding: padding))
     }
 }
 
@@ -34,7 +46,7 @@ struct GuardianPanelSectionTitle: View {
 
     var body: some View {
         Text(title)
-            .font(.system(size: 15, weight: .semibold))
+            .font(GuardianTypography.font(.panelSectionTitle))
             .foregroundStyle(theme.textPrimary)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -64,16 +76,20 @@ enum GuardianChromeSurface: Hashable {
 }
 
 /// Control scale for themed buttons (independent of SwiftUI ``ControlSize``).
-enum GuardianChromeSize: Hashable {
+enum GuardianChromeSize: Hashable, CaseIterable {
     case small
     case medium
     case large
 
-    fileprivate var font: Font {
+    /// Label / SF Symbol font for ``GuardianThemedButton`` and strip cells at this scale (Theme §11.1 — same cap as the text label).
+    var chromeGlyphFont: Font {
         switch self {
-        case .small: .system(size: 12, weight: .semibold)
-        case .medium: .system(size: 13, weight: .semibold)
-        case .large: .system(size: 14, weight: .semibold)
+        case .small:
+            return GuardianTypography.relativeFixed(size: 12, weight: .semibold, relativeTo: .caption)
+        case .medium:
+            return GuardianTypography.relativeFixed(size: 13, weight: .semibold, relativeTo: .subheadline)
+        case .large:
+            return GuardianTypography.relativeFixed(size: 14, weight: .semibold, relativeTo: .callout)
         }
     }
 
@@ -94,7 +110,7 @@ enum GuardianChromeSize: Hashable {
     }
 
     /// Fixed control height for ``GuardianThemedButton`` / strip cells so text, icon-only, and icon+text rows align.
-    fileprivate var controlOuterHeight: CGFloat {
+    var controlOuterHeight: CGFloat {
         switch self {
         case .small: 28
         case .medium: 32
@@ -160,7 +176,7 @@ struct GuardianEditThenDeleteIconRow: View {
     let onDelete: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: GuardianSpacing.xs) {
             GuardianThemedButton(
                 accent: .primary,
                 surface: .outline,
@@ -202,9 +218,12 @@ enum GuardianBadgeSize: Hashable {
 
     fileprivate var font: Font {
         switch self {
-        case .small: .system(size: 9, weight: .heavy)
-        case .medium: .system(size: 10, weight: .semibold)
-        case .large: .system(size: 11, weight: .semibold)
+        case .small:
+            return GuardianTypography.relativeFixed(size: 9, weight: .heavy, relativeTo: .caption2)
+        case .medium:
+            return GuardianTypography.relativeFixed(size: 10, weight: .semibold, relativeTo: .caption2)
+        case .large:
+            return GuardianTypography.relativeFixed(size: 11, weight: .semibold, relativeTo: .caption2)
         }
     }
 
@@ -378,38 +397,48 @@ struct GuardianThemedButton<Label: View>: View {
             colorScheme: colorScheme
         )
         Button(action: action) {
-            Group {
-                switch shape {
-                case .square:
-                    themedLabelCore(style: style)
-                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .strokeBorder(style.stroke, lineWidth: surface == .outline ? 1.5 : 0)
-                        )
-                case .cornered:
-                    themedLabelCore(style: style)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(style.stroke, lineWidth: surface == .outline ? 1.5 : 0)
-                        )
-                case .pill:
-                    themedLabelCore(style: style)
-                        .clipShape(Capsule(style: .continuous))
-                        .overlay(Capsule(style: .continuous).strokeBorder(style.stroke, lineWidth: surface == .outline ? 1.5 : 0))
-                }
-            }
+            chromeOuterLabel(style: style, shape: shape)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(GuardianPointerPlainButtonStyle())
         .disabled(!isEnabled)
+    }
+
+    @ViewBuilder
+    private func chromeOuterLabel(style: GuardianThemeAccentStyle.ButtonResolved, shape: GuardianChromeShape) -> some View {
+        let outlineWidth: CGFloat = surface == .outline ? 1.5 : 0
+        switch shape {
+        case .square:
+            chromeRounded(style: style, cornerRadius: 4, outlineWidth: outlineWidth)
+        case .cornered:
+            chromeRounded(style: style, cornerRadius: 8, outlineWidth: outlineWidth)
+        case .pill:
+            chromePill(style: style, outlineWidth: outlineWidth)
+        }
+    }
+
+    private func chromeRounded(style: GuardianThemeAccentStyle.ButtonResolved, cornerRadius: CGFloat, outlineWidth: CGFloat) -> some View {
+        let r = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return themedLabelCore(style: style)
+            .clipShape(r)
+            .overlay(r.strokeBorder(style.stroke, lineWidth: outlineWidth).allowsHitTesting(false))
+            .contentShape(r)
+    }
+
+    private func chromePill(style: GuardianThemeAccentStyle.ButtonResolved, outlineWidth: CGFloat) -> some View {
+        let c = Capsule(style: .continuous)
+        return themedLabelCore(style: style)
+            .clipShape(c)
+            .overlay(c.strokeBorder(style.stroke, lineWidth: outlineWidth).allowsHitTesting(false))
+            .contentShape(c)
     }
 
     private func themedLabelCore(style: GuardianThemeAccentStyle.ButtonResolved) -> some View {
         let dim = isEnabled ? 1.0 : 0.45
         let hPad: CGFloat = contentSizing == .squareToolbarCell ? 0 : size.horizontalPadding
+        // Outline surfaces use a clear background — taps would fall through except on glyph bounds.
+        // Hit testing for the full control is defined on the clipped label (see ``body`` `contentShape`).
         return label()
-            .font(size.font)
+            .font(size.chromeGlyphFont)
             .foregroundStyle(style.foreground.opacity(dim))
             .lineLimit(1)
             .minimumScaleFactor(0.82)
@@ -468,19 +497,20 @@ struct GuardianThemedButtonStrip: View {
                     Rectangle()
                         .fill(GuardianTheme.palette(for: colorScheme).borderSubtle)
                         .frame(width: 1)
-                        .padding(.vertical, 4)
+                        .padding(.vertical, GuardianSpacing.xxs)
                 }
                 Button(action: item.action) {
                     Text(item.title)
-                        .font(size.font)
+                        .font(size.chromeGlyphFont)
                         .foregroundStyle(style.foreground)
                         .lineLimit(1)
                         .minimumScaleFactor(0.82)
                         .padding(.horizontal, size.horizontalPadding)
                         .frame(maxWidth: .infinity)
                         .frame(height: size.controlOuterHeight)
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(GuardianPointerPlainButtonStyle())
                 .background(surface == .solid ? style.fill : Color.clear)
             }
         }
@@ -488,6 +518,7 @@ struct GuardianThemedButtonStrip: View {
         .overlay(
             RoundedRectangle(cornerRadius: corner, style: .continuous)
                 .strokeBorder(style.stroke, lineWidth: 1.5)
+                .allowsHitTesting(false)
         )
     }
 
@@ -628,113 +659,16 @@ private enum GuardianThemeAccentStyle {
 /// Legacy alias — new code should use ``GuardianThemeAccent``.
 typealias GuardianBadgeTone = GuardianThemeAccent
 
-// MARK: - Inline notices (settings / banners)
-
-struct GuardianInlineNotice: View {
-    enum Kind: Hashable {
-        case informational
-        case success
-        case warning
-        case danger
-    }
-
-    let kind: Kind
-    let title: String
-    let detail: String
-
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: iconName)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(iconColor)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(theme.textPrimary)
-                Text(detail)
-                    .font(.system(size: 11))
-                    .foregroundStyle(theme.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(12)
-        .background(backgroundColor)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(borderColor, lineWidth: 1)
-        )
-    }
-
-    private var iconName: String {
-        switch kind {
-        case .informational: "info.circle.fill"
-        case .success: "checkmark.circle.fill"
-        case .warning: "exclamationmark.triangle.fill"
-        case .danger: "xmark.octagon.fill"
-        }
-    }
-
-    private var iconColor: Color {
-        switch kind {
-        case .informational: GuardianSemanticColors.infoForeground
-        case .success: GuardianSemanticColors.successForeground
-        case .warning: GuardianSemanticColors.warningStroke
-        case .danger: GuardianSemanticColors.dangerForeground
-        }
-    }
-
-    private var backgroundColor: Color {
-        switch kind {
-        case .informational: GuardianSemanticColors.infoBackground.opacity(colorScheme == .dark ? 0.55 : 0.85)
-        case .success: GuardianSemanticColors.successBackground.opacity(colorScheme == .dark ? 0.55 : 0.85)
-        case .warning: GuardianSemanticColors.warningBackground.opacity(colorScheme == .dark ? 0.55 : 0.85)
-        case .danger: GuardianSemanticColors.dangerBackground.opacity(colorScheme == .dark ? 0.55 : 0.85)
-        }
-    }
-
-    private var borderColor: Color {
-        iconColor.opacity(0.35)
-    }
-}
-
 // MARK: - Settings-style disclosure row (non-navigating)
 
-/// Title + optional value + chevron — use inside cards or forms (not ``NavigationLink``).
+/// Title + optional value + chevron — use inside cards or forms (not ``NavigationLink``). Same layout as ``GuardianSettingsRow`` without a leading icon.
 struct GuardianDisclosureSettingRow: View {
     let title: String
     var value: String?
     let action: () -> Void
 
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
-
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Text(title)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(theme.textPrimary)
-                Spacer(minLength: 8)
-                if let value, !value.isEmpty {
-                    Text(value)
-                        .font(.system(size: 12))
-                        .foregroundStyle(theme.textTertiary)
-                        .lineLimit(1)
-                }
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(theme.textTertiary)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
+        GuardianSettingsRow(title: title, systemImage: nil, value: value, action: action)
     }
 }
 
@@ -748,15 +682,15 @@ struct GuardianBreadcrumbTrail: View {
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: GuardianSpacing.xxs) {
             ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
                 if index > 0 {
                     Image(systemName: "chevron.compact.right")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(GuardianTypography.font(.breadcrumbSeparator))
                         .foregroundStyle(theme.textTertiary)
                 }
                 Text(segment)
-                    .font(.system(size: 11, weight: index == segments.count - 1 ? .semibold : .regular))
+                    .font(GuardianTypography.font(.breadcrumbSegment(isCurrent: index == segments.count - 1)))
                     .foregroundStyle(index == segments.count - 1 ? theme.textPrimary : theme.textTertiary)
             }
         }
@@ -765,8 +699,11 @@ struct GuardianBreadcrumbTrail: View {
 
 // MARK: - Labeled form field (stacked label + control)
 
+/// Stacked **label**, optional **subtitle**, **control** slot, optional **error** line (Theme §6.1). Validation routing: ``GuardianFormKit`` header doc.
 struct GuardianLabeledFormField<Content: View>: View {
     let label: String
+    var subtitle: String? = nil
+    var error: String? = nil
     @ViewBuilder let content: () -> Content
 
     @Environment(\.colorScheme) private var colorScheme
@@ -774,11 +711,23 @@ struct GuardianLabeledFormField<Content: View>: View {
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
             Text(label)
-                .font(.system(size: 11, weight: .semibold))
+                .font(GuardianTypography.font(.formFieldLabel))
                 .foregroundStyle(theme.textSecondary)
+            if let subtitle, !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(GuardianTypography.font(.denseFootnoteRegular))
+                    .foregroundStyle(theme.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             content()
+            if let error, !error.isEmpty {
+                Text(error)
+                    .font(GuardianTypography.font(.denseCaption10Regular))
+                    .foregroundStyle(GuardianSemanticColors.dangerForeground)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }
@@ -796,18 +745,19 @@ struct GuardianSearchBarField: View {
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: GuardianSpacing.xs) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 12, weight: .semibold))
+                .font(GuardianTypography.font(.searchFieldIcon))
                 .foregroundStyle(theme.textTertiary)
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
+                .font(GuardianTypography.font(.searchField))
                 .foregroundStyle(theme.textPrimary)
+                .frame(minHeight: GuardianFormLayout.compactFieldOuterHeight, alignment: .center)
                 .onSubmit { onSubmit?() }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        .padding(.horizontal, GuardianSpacing.denseGutter)
+        .padding(.vertical, GuardianSpacing.chromeTightInset)
         .background(theme.backgroundElevated)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
@@ -830,25 +780,25 @@ struct GuardianMetricTile: View {
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
             Text(title.uppercased())
-                .font(.system(size: 9, weight: .bold))
+                .font(GuardianTypography.font(.metricEyebrow))
                 .foregroundStyle(theme.textTertiary)
                 .tracking(0.4)
             Text(value)
-                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .font(GuardianTypography.font(.metricValue))
                 .foregroundStyle(theme.textPrimary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             if let caption, !caption.isEmpty {
                 Text(caption)
-                    .font(.system(size: 10))
+                    .font(GuardianTypography.font(.metricCaption))
                     .foregroundStyle(theme.textSecondary)
                     .lineLimit(2)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
+        .padding(GuardianSpacing.sm)
         .background(theme.backgroundElevated)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
@@ -862,8 +812,8 @@ struct GuardianMetricTile: View {
 
 /// Full-width strip on ``GuardianThemePalette/backgroundRaised`` with the same corner + border language as Fleet / MC sub-bars.
 struct GuardianElevatedStrip<Content: View>: View {
-    var horizontalPadding: CGFloat = 12
-    var verticalPadding: CGFloat = 8
+    var horizontalPadding: CGFloat = GuardianSpacing.sm
+    var verticalPadding: CGFloat = GuardianSpacing.xs
     var cornerRadius: CGFloat = 8
     @ViewBuilder let content: () -> Content
 

@@ -2,7 +2,7 @@ import SwiftUI
 
 /// App-wide semantic colors (aligned with toast / status meaning).
 enum GuardianSemanticColors {
-    /// Success — same family as `ToastStyle.success` background tint.
+    /// Success — same family as ``GuardianFeedbackSeverity/success`` / legacy toast chip tint.
     static let successBackground = Color.green.opacity(0.22)
     static let successForeground = Color.green
     /// Vivid success accent for strokes / icons / dots / emphasis text on neutral surfaces.
@@ -26,6 +26,14 @@ enum GuardianSemanticColors {
 
     static let neutralBadgeBackground = Color.white.opacity(0.1)
     static let neutralBadgeForeground = Color.gray.opacity(0.95)
+
+    // MARK: - Bottom prompt banners (opaque; Theme §10.3)
+
+    /// Solid fills for ``GuardianBottomPromptBanner`` (white text). Tuned from ``successStroke`` / ``infoForeground`` / ``warningStroke`` / ``dangerStroke`` families for contrast on sheet backgrounds — adjust here + Theme plugin together.
+    static let bottomPromptBannerSuccess = Color(red: 0.09, green: 0.46, blue: 0.24)
+    static let bottomPromptBannerInfo = Color(red: 0.12, green: 0.35, blue: 0.68)
+    static let bottomPromptBannerWarning = Color(red: 0.52, green: 0.38, blue: 0.08)
+    static let bottomPromptBannerError = Color(red: 0.58, green: 0.14, blue: 0.17)
 
     /// Paladin session phase badge: pre-execution states use warning; live execution success; completed info; failed danger.
     static func paladinPhaseBadgeStyle(for phase: MissionRunSessionPhase) -> (background: Color, foreground: Color) {

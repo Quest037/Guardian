@@ -1,0 +1,42 @@
+---
+description: Use GuardianConfirm / GuardianConfirmDanger for operator confirmations (not system alerts)
+alwaysApply: true
+---
+
+# Guardian confirm dialogs
+
+## Do this
+
+- For **operator confirmations** (delete, stop, skip a guard, spawn, leave flow, etc.), present **`GuardianConfirm`** or **`GuardianConfirmDanger`** from `Sources/GuardianHQ/General/Utilities/Templates/GuardianConfirm.swift`.
+- Present them with **`guardianConfirmOverlay(item:onDismiss:dialog:)`** or **`guardianConfirmOverlay(isPresented:dialog:)`** (dimmed scrim, no system sheet). Wire **`GuardianConfirmOverlayHost`** like **`ToastCenter`**: a single **`@StateObject`** on the app scene, **`environmentObject`** on the window root, then **`withGuardianConfirmOverlayHost()`** applied **after** **`withAppDrawer()`** so the scrim covers the **sidebar, top bar, and drawer**. The host applies **`GuardianConfirmPanelFrame`** (horizontal padding + width) around the dialog content.
+- Prefer the **`item:`** overload with a small **`Identifiable`** enum when a screen can show more than one confirm, so only one overlay is active and state stays explicit.
+- Use a real **`title:`** next to the icon whenever there is a headline; use **`message:`** for supporting copy. Omit **`title`** only when a single short **`message`** beside the icon is enough.
+
+## Do not do this
+
+- Do **not** add **`confirmationDialog`** or **`Alert` / `.alert`** for these flows in Guardian UI — use the overlay helpers + the templates above (not `.sheet`), so system sheet chrome does not wrap the confirm.
+
+## Which variant?
+
+- **`GuardianConfirm`** (standard): one raised surface, optional info icon tile. **Cancel** = red outline (`GuardianThemedButton` danger outline). **Confirm** = blue (`GuardianPrimaryProminentButton`). Use for forward actions that are not framed as irreversible data loss (e.g. start now, spawn simulators, close loop).
+- **`GuardianConfirmDanger`**: red-tinted panel + **red border**, default trash icon. **Cancel** = **neutral** outline (retreat to safety). **Confirm** = **red solid** (`GuardianDestructiveProminentButton`). Use for delete / stop / remove / other irreversible or high-loss outcomes.
+
+This danger footer is the **intentional exception** to the global “Confirm actions are blue” guideline in `button-semantic-colors.mdc`: here the **affirmative** control stays red so the whole dialog reads as destructive.
+
+## Feedback vs confirms (z-order)
+
+- **Confirms** sit on ``withGuardianConfirmOverlayHost()`` **after** ``withAppDrawer()`` on the window root (`GuardianHQApp`) — scrim covers sidebar, top bar, and drawer.
+- **Toasts** use ``withToasts()`` on the **main content** column inside `RootView` — they appear **below** a live window-level confirm (by design).
+- **Bottom prompts** (`GuardianBottomPromptBanner`) are **screen-local** (e.g. Mission Control run, Live Drive). Avoid stacking a **blocking** confirm on top of an unresolved bottom prompt; **dismiss or resolve the prompt first**.
+- Shared severity vocabulary: ``GuardianFeedbackSeverity`` in `GuardianFeedbackSeverity.swift` (Theme §4).
+
+## After adding a confirm
+
+- Keep **`onCancel` / `onConfirm`** responsible for dismissing the overlay (`nil` out the presented item or `false` the `isPresented` binding) and clearing any pending payload state so buttons cannot fire twice. Use **`onDismiss`** on the **`item:`** overload for cleanup when the overlay is torn down without going through those buttons (e.g. Escape on macOS 14+).
+
+## Keyboard defaults (Theme §9.1)
+
+- **Escape:** handled by ``GuardianConfirmOverlayHost`` (macOS 14+); syncs bindings then tears down — same as tapping Cancel.
+- **Standard ``GuardianConfirm``:** **Cancel** → ``KeyboardShortcut/cancelAction``; **Confirm** → ``KeyboardShortcut/defaultAction`` (Return / Enter triggers the blue button).
+- **``GuardianConfirmDanger``:** **Cancel** → ``cancelAction`` only — **no** ``defaultAction`` on the red confirm so **Return does not** silently commit a destructive action; operator must click **Confirm**.
+- Broader policy (drawers, modals, focus ring tokens, icon-only a11y checklist): ``GuardianChromeInteraction`` in `Sources/GuardianHQ/General/DesignSystem/GuardianChromeInteraction.swift`.

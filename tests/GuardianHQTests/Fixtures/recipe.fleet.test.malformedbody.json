@@ -1,0 +1,13 @@
+{
+  "entryStepID": "calibrate",
+  "overallBudgetSeconds": "this should be a number not a string",
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "calibrate"
+      // missing comma above + comment is illegal JSON; decode must fail
+      "command": "command.fleet.vehicle.do.calibrate.compass",
+      "matchers": []
+    }
+  ]
+}

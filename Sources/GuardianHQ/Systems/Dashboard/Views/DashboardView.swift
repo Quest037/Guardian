@@ -155,58 +155,58 @@ struct DashboardView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.md) {
+                HStack(alignment: .top, spacing: GuardianSpacing.md) {
                     dashboardStatCard(title: "Missions", value: "\(missionStore.missions.count)")
                     dashboardStatCard(title: "Live Missions", value: "\(activeMissionRuns)")
                     dashboardStatCard(title: "Paused", value: "\(pausedMissionRuns)")
                     dashboardStatCard(title: "Completed", value: "\(completedMissionRuns)")
                 }
 
-                HStack(alignment: .top, spacing: 16) {
+                HStack(alignment: .top, spacing: GuardianSpacing.md) {
                     dashboardMissionHealthCard
                     dashboardFleetReadinessCard
                 }
 
-                HStack(alignment: .top, spacing: 16) {
+                HStack(alignment: .top, spacing: GuardianSpacing.md) {
                     dashboardUtilizationCard
                     dashboardBatteryRiskCard
                 }
 
                 dashboardAlertsCard
             }
-            .padding(24)
+            .padding(GuardianSpacing.xl)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private var dashboardMissionHealthCard: some View {
         GuardianCard(
-            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 12, bodyPadding: 14),
+            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 12, bodyPadding: GuardianSpacing.cardBodyInset),
             body: {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                     Text("Mission Health")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
                         .foregroundStyle(theme.textSecondary)
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.xs) {
                         Text(missionHealthLabel)
-                            .font(.system(size: 30, weight: .heavy))
+                            .font(GuardianTypography.relativeFixed(size: 30, weight: .heavy, relativeTo: .title2))
                             .foregroundStyle(missionHealthColor)
                         Text("Runs: \(activeMissionRuns) active")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(GuardianTypography.font(.denseCaption12Medium))
                             .foregroundStyle(theme.textSecondary)
                     }
                     if pausedMissionRuns > 0 {
                         Text("Paused runs need operator confirmation.")
-                            .font(.system(size: 12))
+                            .font(GuardianTypography.font(.denseCaption12Regular))
                             .foregroundStyle(.yellow.opacity(0.9))
                     } else if activeMissionRuns == 0 {
                         Text("No live mission runs right now.")
-                            .font(.system(size: 12))
+                            .font(GuardianTypography.font(.denseCaption12Regular))
                             .foregroundStyle(theme.textSecondary)
                     } else {
                         Text("Missions are currently advancing.")
-                            .font(.system(size: 12))
+                            .font(GuardianTypography.font(.denseCaption12Regular))
                             .foregroundStyle(.green.opacity(0.85))
                     }
                 }
@@ -217,13 +217,13 @@ struct DashboardView: View {
 
     private var dashboardFleetReadinessCard: some View {
         GuardianCard(
-            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 12, bodyPadding: 14),
+            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 12, bodyPadding: GuardianSpacing.cardBodyInset),
             body: {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                     Text("Fleet Readiness")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
                         .foregroundStyle(theme.textSecondary)
-                    HStack(spacing: 14) {
+                    HStack(spacing: GuardianSpacing.cardBodyInset) {
                         readinessCounter(title: "Ready", value: readyVehicleCount, color: .green)
                         readinessCounter(title: "Unready", value: notReadyVehicleCount, color: .orange)
                         readinessCounter(title: "Total", value: vehiclesTotalCount, color: theme.textPrimary.opacity(0.9))
@@ -232,13 +232,13 @@ struct DashboardView: View {
                     }
                     if readinessBreakdown.isEmpty {
                         Text("No active readiness blockers.")
-                            .font(.system(size: 12))
+                            .font(GuardianTypography.font(.denseCaption12Regular))
                             .foregroundStyle(.green.opacity(0.85))
                     } else {
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                             ForEach(readinessBreakdown) { row in
                                 Text("• \(row.label): \(row.count)")
-                                    .font(.system(size: 11, design: .monospaced))
+                                    .font(GuardianTypography.font(.telemetryMono11Regular))
                                     .foregroundStyle(theme.textTertiary)
                             }
                         }
@@ -251,22 +251,22 @@ struct DashboardView: View {
 
     private var dashboardUtilizationCard: some View {
         GuardianCard(
-            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 12, bodyPadding: 14),
+            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 12, bodyPadding: GuardianSpacing.cardBodyInset),
             body: {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                     Text("Fleet Utilization")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
                         .foregroundStyle(theme.textSecondary)
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
                         ForEach(utilizationRows) { row in
-                            VStack(alignment: .leading, spacing: 3) {
+                            VStack(alignment: .leading, spacing: GuardianSpacing.titleStackTight) {
                                 HStack {
                                     Text(row.label)
-                                        .font(.system(size: 11))
+                                        .font(GuardianTypography.font(.denseFootnoteRegular))
                                         .foregroundStyle(theme.textSecondary)
                                     Spacer(minLength: 0)
                                     Text("\(row.count)")
-                                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                        .font(GuardianTypography.font(.telemetryMono11Semibold))
                                         .foregroundStyle(theme.textPrimary)
                                 }
                                 GeometryReader { geo in
@@ -291,29 +291,29 @@ struct DashboardView: View {
 
     private var dashboardBatteryRiskCard: some View {
         GuardianCard(
-            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 12, bodyPadding: 14),
+            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 12, bodyPadding: GuardianSpacing.cardBodyInset),
             body: {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                     Text("Battery Risk Watchlist")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
                         .foregroundStyle(theme.textSecondary)
                     if criticalBatteryRows.isEmpty {
                         Text("No vehicles below 35% battery.")
-                            .font(.system(size: 12))
+                            .font(GuardianTypography.font(.denseCaption12Regular))
                             .foregroundStyle(.green.opacity(0.85))
                     } else {
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
                             ForEach(Array(criticalBatteryRows.prefix(6)), id: \.vehicleID) { row in
-                                HStack(spacing: 8) {
+                                HStack(spacing: GuardianSpacing.xs) {
                                     Circle()
                                         .fill(row.isSimulation ? Color.blue.opacity(0.85) : Color.white.opacity(0.75))
                                         .frame(width: 7, height: 7)
                                     Text(row.shortID)
-                                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                        .font(GuardianTypography.font(.telemetryMono11Semibold))
                                         .foregroundStyle(theme.textPrimary)
                                     Spacer(minLength: 0)
                                     Text(batteryText(for: row.batteryPercent))
-                                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                        .font(GuardianTypography.font(.telemetryMono11Semibold))
                                         .foregroundStyle(.orange.opacity(0.95))
                                 }
                             }
@@ -327,34 +327,35 @@ struct DashboardView: View {
 
     private var dashboardAlertsCard: some View {
         GuardianCard(
-            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 12, bodyPadding: 14),
+            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 12, bodyPadding: GuardianSpacing.cardBodyInset),
             body: {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                     HStack {
                         Text("Active Alerts")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(GuardianTypography.font(.subsectionTitleSemibold))
                             .foregroundStyle(theme.textSecondary)
                         Spacer(minLength: 0)
                         Text("Recent \(alertRows.count)")
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(GuardianTypography.font(.telemetryMono11Regular))
                             .foregroundStyle(theme.textTertiary)
                     }
                     if alertRows.isEmpty {
                         Text("No high-signal alerts detected in current logs.")
-                            .font(.system(size: 12))
+                            .font(GuardianTypography.font(.denseCaption12Regular))
                             .foregroundStyle(theme.textSecondary)
                     } else {
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
                             ForEach(Array(alertRows.enumerated()), id: \.offset) { _, row in
-                                HStack(alignment: .top, spacing: 8) {
+                                HStack(alignment: .top, spacing: GuardianSpacing.xs) {
                                     Circle()
                                         .fill(row.severity.color)
                                         .frame(width: 7, height: 7)
-                                        .padding(.top, 4)
+                                        .padding(.top, GuardianSpacing.xxs)
                                     Text(row.text)
-                                        .font(.system(size: 11, design: .monospaced))
+                                        .font(GuardianTypography.font(.telemetryMono11Regular))
                                         .foregroundStyle(theme.textTertiary)
                                         .lineLimit(2)
+                                        .textSelection(.enabled)
                                 }
                             }
                         }
@@ -367,14 +368,14 @@ struct DashboardView: View {
 
     private func dashboardStatCard(title: String, value: String) -> some View {
         GuardianCard(
-            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 12, bodyPadding: 16),
+            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 12, bodyPadding: GuardianSpacing.md),
             body: {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
                     Text(title)
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
                         .foregroundStyle(theme.textSecondary)
                     Text(value)
-                        .font(.system(size: 32, weight: .heavy))
+                        .font(GuardianTypography.relativeFixed(size: 32, weight: .heavy, relativeTo: .title))
                         .foregroundStyle(theme.textPrimary)
                 }
                 .frame(maxWidth: .infinity, minHeight: 88, alignment: .leading)
@@ -383,12 +384,12 @@ struct DashboardView: View {
     }
 
     private func readinessCounter(title: String, value: Int, color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.micro) {
             Text(title)
-                .font(.system(size: 10))
+                .font(GuardianTypography.font(.denseCaption10Regular))
                 .foregroundStyle(theme.textSecondary)
             Text("\(value)")
-                .font(.system(size: 16, weight: .bold, design: .rounded))
+                .font(GuardianTypography.relativeFixed(size: 16, weight: .bold, design: .rounded, relativeTo: .headline))
                 .foregroundStyle(color)
         }
     }

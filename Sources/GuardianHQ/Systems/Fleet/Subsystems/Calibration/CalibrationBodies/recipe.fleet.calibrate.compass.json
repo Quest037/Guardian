@@ -1,0 +1,54 @@
+{
+  "_comment": "Interactive magnetometer calibration. Single step that invokes the Layer 0 calibrate-compass command and branches on the normalised outcome. Hard failures escalate with the operator action needed to recover (remove magnetic interference vs rotate drone); the catch-all `any` matcher surfaces unhandled outcomes through the audit trace so Stage E's wizard always has a story to tell.\nOverall budget is 300s — real compass cal typically takes 2-4 minutes of operator rotation; the cap is generous but well under the 600s parser ceiling.\nAuto-retries (timeout / noSession / autopilotBusy) are handled by the catalogue's default retry policy on the dispatch itself, so the matchers below only see the *final* outcome.",
+  "entryStepID": "calibrate",
+  "overallBudgetSeconds": 300,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "calibrate",
+      "command": "command.fleet.vehicle.do.calibrate.compass",
+      "matchers": [
+        {
+          "when": { "kind": "success" },
+          "then": { "kind": "succeed" }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDeclined" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "removeMagneticInterference"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDidNotConverge" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "rotateDrone"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "cancelled" },
+          "then": {
+            "kind": "fail",
+            "detail": "Compass calibration cancelled by operator."
+          }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "fail",
+            "detail": "Compass calibration failed with an unhandled outcome — see the audit trace for the underlying response."
+          }
+        }
+      ]
+    }
+  ]
+}

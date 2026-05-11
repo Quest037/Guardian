@@ -1,0 +1,54 @@
+{
+  "_comment": "Six-position accelerometer calibration. Operator orients the airframe through each face (level, on side, on other side, nose up, nose down, on back) while the autopilot collects samples and computes per-axis bias + scale.\nShape mirrors compass cal: single step, success-or-escalate, with operator-action escalations on the two well-known autopilot refusal modes.\n- calibrationDeclined → autopilot wouldn't even start (no stable level reference, vehicle moving, etc.) → ask operator to put it on a level surface.\n- calibrationDidNotConverge → procedure started but samples didn't converge (operator was too fast, missed a face, vehicle moved during sampling) → ask operator to repeat the orientation pass.\nOverall budget is 300s — the manual six-position dance typically takes 2-4 minutes; the cap is generous but well under the 600s parser ceiling.\nAuto-retries (timeout / noSession / autopilotBusy) are handled by the catalogue's default retry policy on the dispatch itself, so the matchers below only see the *final* outcome.",
+  "entryStepID": "calibrate",
+  "overallBudgetSeconds": 300,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "calibrate",
+      "command": "command.fleet.vehicle.do.calibrate.accelerometer",
+      "matchers": [
+        {
+          "when": { "kind": "success" },
+          "then": { "kind": "succeed" }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDeclined" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "placeOnLevelSurface"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDidNotConverge" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "rotateDrone"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "cancelled" },
+          "then": {
+            "kind": "fail",
+            "detail": "Accelerometer calibration cancelled by operator."
+          }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "fail",
+            "detail": "Accelerometer calibration failed with an unhandled outcome — see the audit trace for the underlying response."
+          }
+        }
+      ]
+    }
+  ]
+}

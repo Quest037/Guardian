@@ -9,7 +9,7 @@ struct TacticalSplashView: View {
         ZStack {
             Color(red: 0.05, green: 0.06, blue: 0.07).ignoresSafeArea()
 
-            VStack(spacing: 22) {
+            VStack(spacing: GuardianSpacing.panelComfortInset) {
                 ZStack {
                     Circle()
                         .stroke(Color.cyan.opacity(0.28), lineWidth: 2)
@@ -40,17 +40,17 @@ struct TacticalSplashView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     } else {
                         Image(systemName: "shield.lefthalf.filled")
-                            .font(.system(size: 42, weight: .semibold))
+                            .font(GuardianTypography.relativeFixed(size: 42, weight: .semibold, relativeTo: .largeTitle))
                             .foregroundStyle(Color.white.opacity(0.92))
                     }
                 }
 
                 Text("GUARDIAN HQ")
-                    .font(.system(size: 34, weight: .heavy, design: .rounded))
+                    .font(GuardianTypography.relativeFixed(size: 34, weight: .heavy, design: .rounded, relativeTo: .title))
                     .foregroundStyle(.white)
 
                 Text("SECURE MISSION OPERATIONS")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(GuardianTypography.font(.subsectionTitleSemibold))
                     .tracking(3.0)
                     .foregroundStyle(Color.cyan.opacity(0.9))
             }

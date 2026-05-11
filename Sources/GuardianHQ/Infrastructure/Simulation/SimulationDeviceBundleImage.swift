@@ -95,7 +95,7 @@ struct SimulationDeviceThumbnail: View {
                 ZStack {
                     Color(red: 0.16, green: 0.16, blue: 0.17)
                     Image(systemName: "photo")
-                        .font(.system(size: 22, weight: .medium))
+                        .font(GuardianTypography.relativeFixed(size: 22, weight: .medium, relativeTo: .title2))
                         .foregroundStyle(.gray.opacity(0.6))
                 }
             }

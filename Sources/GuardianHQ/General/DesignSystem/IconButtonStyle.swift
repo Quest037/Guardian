@@ -8,7 +8,7 @@ extension View {
 
 extension Image {
     func appIconGlyph() -> some View {
-        font(.system(size: 14, weight: .semibold))
+        font(GuardianTypography.font(.sectionHeadingSemibold))
             .frame(width: 16, height: 16, alignment: .center)
             .contentShape(Rectangle())
     }

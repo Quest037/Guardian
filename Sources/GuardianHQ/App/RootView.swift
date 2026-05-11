@@ -54,6 +54,7 @@ struct RootView: View {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .background(theme.backgroundBase)
+                    // Theme 12.1 — toasts are content-column scoped (see `GuardianLayoutPatterns`).
                     .withToasts()
             }
         }
@@ -82,6 +83,13 @@ struct RootView: View {
                     )
                 }
             }
+            FleetRecipeRunner.shared.liveMissionGate = { vehicleID in
+                missionControlStore.isVehicleStreamUsedInLiveMission(
+                    vehicleID: vehicleID,
+                    fleetLink: fleetLinkService,
+                    sitl: sitlService
+                )
+            }
         }
         .onChange(of: fleetLinkService.isSimulateEnabled) { sim in
             if !sim { sitlService.stopAll() }
@@ -90,7 +98,7 @@ struct RootView: View {
             fleetLinkService.applyLogRetentionProfile(profile)
         }
         .onChange(of: generalSettingsStore.mainSidebarLaunchMode) { mode in
-            withAnimation(.easeInOut(duration: 0.2)) {
+            withAnimation(GuardianMotion.drawerSlide) {
                 isSidebarCollapsed = (mode == .collapsed)
             }
         }
@@ -100,20 +108,20 @@ struct RootView: View {
     }
 
     private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
             HStack(alignment: .center, spacing: 0) {
                 if isSidebarCollapsed {
                     HStack {
                         Spacer(minLength: 0)
                         Button {
-                            withAnimation(.easeInOut(duration: 0.2)) {
+                            withAnimation(GuardianMotion.drawerSlide) {
                                 isSidebarCollapsed = false
                             }
                         } label: {
                             GuardianSidebarLogoView(maxHeight: 28)
                                 .frame(width: 44, height: 28)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(GuardianPointerPlainButtonStyle())
                         .contentShape(Rectangle())
                         .help("Expand sidebar")
                         .accessibilityLabel("Guardian")
@@ -123,7 +131,7 @@ struct RootView: View {
                     .frame(maxWidth: .infinity)
                 } else {
                     Button {
-                        withAnimation(.easeInOut(duration: 0.2)) {
+                        withAnimation(GuardianMotion.drawerSlide) {
                             isSidebarCollapsed = true
                         }
                     } label: {
@@ -131,7 +139,7 @@ struct RootView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(GuardianPointerPlainButtonStyle())
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .help("Collapse sidebar")
                     .accessibilityLabel("Guardian")
@@ -139,12 +147,12 @@ struct RootView: View {
                     .transition(.opacity.combined(with: .move(edge: .leading)))
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 16)
-            .padding(.bottom, 8)
+            .padding(.horizontal, GuardianSpacing.sm)
+            .padding(.top, GuardianSpacing.md)
+            .padding(.bottom, GuardianSpacing.xs)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
                     ForEach(AppSection.primarySidebarRail, id: \.self) { section in
                         sidebarSectionRow(section: section)
                     }
@@ -152,12 +160,12 @@ struct RootView: View {
                         sidebarPluginRow(item: item)
                     }
                 }
-                .padding(.horizontal, 10)
-                .padding(.bottom, 6)
+                .padding(.horizontal, GuardianSpacing.denseGutter)
+                .padding(.bottom, GuardianSpacing.xsTight)
             }
             .frame(maxHeight: .infinity)
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
                 ForEach(pluginRegistry.sidebarItems(for: .secondary)) { item in
                     sidebarPluginRow(item: item)
                 }
@@ -165,18 +173,18 @@ struct RootView: View {
                     sidebarSectionRow(section: section)
                 }
 
-                VStack(alignment: isSidebarCollapsed ? .center : .leading, spacing: 4) {
+                VStack(alignment: isSidebarCollapsed ? .center : .leading, spacing: GuardianSpacing.xxs) {
                     Text(isSidebarCollapsed ? AppMetadata.releaseVersion : appVersionLabel)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(GuardianTypography.font(.appVersionCaption))
                         .foregroundStyle(theme.textSecondary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                 }
                 .frame(maxWidth: .infinity, alignment: isSidebarCollapsed ? .center : .leading)
-                .padding(.top, 4)
+                .padding(.top, GuardianSpacing.xxs)
             }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 14)
+            .padding(.horizontal, GuardianSpacing.denseGutter)
+            .padding(.bottom, GuardianSpacing.cardBodyInset)
         }
     }
 
@@ -187,27 +195,27 @@ struct RootView: View {
             Group {
                 if isSidebarCollapsed {
                     Image(systemName: section.systemImage)
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(GuardianTypography.font(.appSidebarIconCollapsed))
                         .frame(maxWidth: .infinity, alignment: .center)
                 } else {
                     HStack {
                         Image(systemName: section.systemImage)
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(GuardianTypography.font(.appSidebarIconExpanded))
                             .frame(width: 18, height: 18)
                         Text(section.rawValue)
-                            .font(.system(size: 14, weight: section == selection ? .semibold : .regular))
+                            .font(GuardianTypography.font(.appSidebarRowTitle(isSelected: section == selection)))
                         Spacer(minLength: 0)
                     }
                 }
             }
-            .padding(.horizontal, isSidebarCollapsed ? 8 : 14)
-            .padding(.vertical, 10)
+            .padding(.horizontal, isSidebarCollapsed ? GuardianSpacing.xs : GuardianSpacing.cardBodyInset)
+            .padding(.vertical, GuardianSpacing.denseGutter)
             .frame(maxWidth: .infinity)
             .background(section == selection ? theme.backgroundActive : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(GuardianPointerPlainButtonStyle())
         .foregroundStyle(theme.textPrimary)
         .frame(maxWidth: .infinity)
         .help(section.rawValue)
@@ -223,27 +231,27 @@ struct RootView: View {
             Group {
                 if isSidebarCollapsed {
                     Image(systemName: item.systemImage)
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(GuardianTypography.font(.appSidebarIconCollapsed))
                         .frame(maxWidth: .infinity, alignment: .center)
                 } else {
                     HStack {
                         Image(systemName: item.systemImage)
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(GuardianTypography.font(.appSidebarIconExpanded))
                             .frame(width: 18, height: 18)
                         Text(item.title)
-                            .font(.system(size: 14, weight: sidebarPluginRowIsSelected(item) ? .semibold : .regular))
+                            .font(GuardianTypography.font(.appSidebarRowTitle(isSelected: sidebarPluginRowIsSelected(item))))
                         Spacer(minLength: 0)
                     }
                 }
             }
-            .padding(.horizontal, isSidebarCollapsed ? 8 : 14)
-            .padding(.vertical, 10)
+            .padding(.horizontal, isSidebarCollapsed ? GuardianSpacing.xs : GuardianSpacing.cardBodyInset)
+            .padding(.vertical, GuardianSpacing.denseGutter)
             .frame(maxWidth: .infinity)
             .background(sidebarPluginRowIsSelected(item) ? theme.backgroundActive : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(GuardianPointerPlainButtonStyle())
         .foregroundStyle(theme.textPrimary)
         .frame(maxWidth: .infinity)
         .help(item.title)
@@ -257,16 +265,16 @@ struct RootView: View {
     }
 
     private var topBar: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: GuardianSpacing.md) {
             Text(selection.rawValue)
-                .font(.system(size: 15, weight: .bold))
+                .font(GuardianTypography.font(.appWindowToolbarTitle))
                 .foregroundStyle(theme.textPrimary)
-                .padding(.leading, 16)
+                .padding(.leading, GuardianSpacing.md)
             Spacer()
 
-            HStack(spacing: 8) {
+            HStack(spacing: GuardianSpacing.xs) {
                 Text("Simulate")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(GuardianTypography.font(.inlineNoticeTitle))
                     .foregroundStyle(theme.textSecondary)
                 Toggle(
                     "",
@@ -285,14 +293,14 @@ struct RootView: View {
                 toggleAppearanceMode()
             } label: {
                 Image(systemName: appearanceIconName)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(GuardianTypography.font(.sectionHeadingSemibold))
                     .foregroundStyle(theme.textSecondary)
                     .frame(width: 26, height: 26)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(GuardianPointerPlainButtonStyle())
             .help(appearanceButtonHelp)
-            .padding(.trailing, 16)
+            .padding(.trailing, GuardianSpacing.md)
         }
     }
 

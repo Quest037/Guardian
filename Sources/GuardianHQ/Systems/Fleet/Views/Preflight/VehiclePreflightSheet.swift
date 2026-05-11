@@ -56,12 +56,12 @@ struct VehiclePreflightSheet: View {
                 .keyboardShortcut(.cancelAction)
             },
             bodyContent: {
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.cardBodyInset) {
                     if probeRunning {
-                        HStack(spacing: 10) {
+                        HStack(spacing: GuardianSpacing.denseGutter) {
                             ProgressView().controlSize(.small)
                             Text("Running preflight arm probe…")
-                                .font(.system(size: 12))
+                                .font(GuardianTypography.font(.denseCaption12Regular))
                                 .foregroundStyle(theme.textTertiary)
                         }
                     } else if let result {
@@ -69,7 +69,7 @@ struct VehiclePreflightSheet: View {
 
                         if result.passed, result.armedDuringProbe {
                             Text("The vehicle was disarmed automatically after the test.")
-                                .font(.system(size: 11))
+                                .font(GuardianTypography.font(.denseFootnoteRegular))
                                 .foregroundStyle(theme.textSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -86,13 +86,13 @@ struct VehiclePreflightSheet: View {
 
     @ViewBuilder
     private func outcomeBlock(_ result: SingleVehiclePreflightProbeResult) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 10) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+            HStack(alignment: .top, spacing: GuardianSpacing.denseGutter) {
                 Image(systemName: result.passed ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(GuardianTypography.font(.missionProminentGlyph18Semibold))
                     .foregroundStyle(result.passed ? GuardianSemanticColors.successStroke : GuardianSemanticColors.dangerStroke)
                     .frame(width: 22, alignment: .center)
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
                     GuardianBadge(
                         text: result.passed ? "Pass" : "Fail",
                         accent: result.passed ? .success : .danger,
@@ -101,7 +101,7 @@ struct VehiclePreflightSheet: View {
                         shape: .cornered
                     )
                     Text(result.detail)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(GuardianTypography.font(.telemetryMono11Regular))
                         .foregroundStyle(theme.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                     if !result.passed, let advice = result.remediationAdvice {

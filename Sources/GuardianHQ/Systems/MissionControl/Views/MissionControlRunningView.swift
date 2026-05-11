@@ -1,4 +1,5 @@
 // MissionControlRunningView.swift — MC-R: live / paused run helpers (overview map signature, roster health card).
+// Note: MC-R **Tasks** column chrome (``GuardianCard`` + overlay headers) lives on ``MissionRunDetailView`` in ``MissionControlSetupView.swift`` (`missionLiveTasksSideCard`).
 import AppKit
 import SwiftUI
 
@@ -39,7 +40,7 @@ struct MissionLiveVehicleHealthCard: View {
                 Button(action: onTap) {
                     cardBody
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(GuardianPointerPlainButtonStyle())
                 .help("Open vehicle details")
             } else {
                 cardBody
@@ -49,17 +50,17 @@ struct MissionLiveVehicleHealthCard: View {
 
     private var cardBody: some View {
         ZStack(alignment: .topTrailing) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .center, spacing: 8) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
+                HStack(alignment: .center, spacing: GuardianSpacing.xs) {
                     vehicleTypeThumbnail
                         .frame(width: 36, height: 36)
-                    VStack(alignment: .leading, spacing: 3) {
+                    VStack(alignment: .leading, spacing: GuardianSpacing.titleStackTight) {
                         Text(slotTitle)
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(GuardianTypography.font(.formFieldLabel))
                             .foregroundStyle(theme.textPrimary)
                             .lineLimit(1)
                         Text(rosterSubtitle)
-                            .font(.system(size: 10))
+                            .font(GuardianTypography.font(.denseCaption10Regular))
                             .foregroundStyle(theme.textSecondary)
                             .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
@@ -68,7 +69,7 @@ struct MissionLiveVehicleHealthCard: View {
                 }
                 if let vehicleID {
                     Text(displayVehicleID(vehicleID))
-                        .font(.system(size: 9, design: .monospaced))
+                        .font(GuardianTypography.font(.telemetryMono9Regular))
                         .foregroundStyle(theme.textTertiary)
                         .lineLimit(1)
                         .help("Bridge vehicle key: \(vehicleID)")
@@ -81,18 +82,18 @@ struct MissionLiveVehicleHealthCard: View {
                 } else {
                     Spacer(minLength: 0)
                     Text("No telemetry")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(GuardianTypography.font(.denseCaption10Semibold))
                         .foregroundStyle(theme.textSecondary)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(10)
-            .padding(.trailing, 26)
+            .padding(GuardianSpacing.denseGutter)
+            .padding(.trailing, GuardianSpacing.floatingTrailingReserve)
 
             Color.clear
                 .frame(width: 28, height: 28)
-                .padding(.top, 6)
-                .padding(.trailing, 6)
+                .padding(.top, GuardianSpacing.xsTight)
+                .padding(.trailing, GuardianSpacing.xsTight)
                 .accessibilityLabel("Vehicle actions, coming soon")
         }
         .frame(width: 216, height: slotHeight)
@@ -124,7 +125,7 @@ struct MissionLiveVehicleHealthCard: View {
                 )
             SimulationDeviceThumbnail(imageBasenames: liveThumbnailBasenames)
                 .clipShape(RoundedRectangle(cornerRadius: 5))
-                .padding(3)
+                .padding(GuardianSpacing.titleStackTight)
         }
         .overlay(
             RoundedRectangle(cornerRadius: 8)
@@ -133,25 +134,25 @@ struct MissionLiveVehicleHealthCard: View {
     }
 
     private var batteryGpsMovementRow: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .bottom, spacing: 6) {
+        HStack(alignment: .bottom, spacing: GuardianSpacing.denseGutter) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
+                HStack(alignment: .bottom, spacing: GuardianSpacing.xsTight) {
                     Image(systemName: batterySymbol)
-                        .font(.system(size: 30, weight: .bold))
+                        .font(GuardianTypography.font(.heroTimer30Bold))
                         .foregroundStyle(batteryIconTint(percent: vehicleModel.battery.percent0to100))
                         .help(batteryHoverText)
                     Text(batteryPercentText)
-                        .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                        .font(GuardianTypography.font(.telemetryMono14Semibold))
                         .foregroundStyle(theme.textPrimary.opacity(0.94))
                         .lineLimit(1)
                 }
                 Text(vehicleModel.battery.trendText)
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(GuardianTypography.font(.telemetryMono10Regular))
                     .foregroundStyle(theme.textSecondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Text(vehicleModel.battery.etaText)
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(GuardianTypography.font(.telemetryMono10Regular))
                     .foregroundStyle(theme.textSecondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -162,13 +163,13 @@ struct MissionLiveVehicleHealthCard: View {
                 .fill(theme.borderSubtle.opacity(0.9))
                 .frame(width: 1, height: 58)
 
-            VStack(alignment: .trailing, spacing: 4) {
+            VStack(alignment: .trailing, spacing: GuardianSpacing.xxs) {
                 Text(vehicleModel.gps.titleText)
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .font(GuardianTypography.font(.telemetryMono11Semibold))
                     .foregroundStyle(theme.textPrimary.opacity(0.92))
                     .lineLimit(1)
                 Text(vehicleModel.movement.titleText)
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(GuardianTypography.font(.telemetryMono10Regular))
                     .foregroundStyle(theme.textSecondary)
                     .lineLimit(1)
             }

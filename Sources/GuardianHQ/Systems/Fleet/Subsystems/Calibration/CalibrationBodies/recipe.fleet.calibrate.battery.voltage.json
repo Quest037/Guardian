@@ -1,0 +1,34 @@
+{
+  "_comment": "Write the battery voltage scale factor computed by the operator/wizard from measured-vs-reported voltage. The descriptor declares `scale`; this body forwards it to the Layer 0 command by reference. Stack converters map to BATT_VOLT_MULT (ArduPilot) / BAT_V_DIV (PX4) and validate read-back.",
+  "entryStepID": "write",
+  "overallBudgetSeconds": 30,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "write",
+      "command": "command.fleet.vehicle.do.calibrate.battery.voltage",
+      "parameters": {
+        "scale": { "kind": "reference", "value": "scale" }
+      },
+      "matchers": [
+        { "when": { "kind": "success" }, "then": { "kind": "succeed" } },
+        {
+          "when": { "kind": "error", "errorKind": "parameterReadBackMismatch" },
+          "then": { "kind": "fail", "detail": "Battery voltage scale write was accepted but read-back did not match." }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "parameterRejected" },
+          "then": { "kind": "fail", "detail": "Battery voltage scale parameter write was rejected by the autopilot." }
+        },
+        {
+          "when": { "kind": "cancelled" },
+          "then": { "kind": "fail", "detail": "Battery voltage calibration cancelled by operator." }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": { "kind": "fail", "detail": "Battery voltage calibration failed with an unhandled outcome — see the audit trace for the underlying response." }
+        }
+      ]
+    }
+  ]
+}

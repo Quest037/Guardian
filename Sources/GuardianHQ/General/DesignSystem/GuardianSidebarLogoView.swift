@@ -56,7 +56,7 @@ struct GuardianSidebarLogoView: View {
                     .frame(maxHeight: maxHeight)
             } else {
                 Image(systemName: "photo")
-                    .font(.system(size: max(12, maxHeight * 0.45), weight: .medium))
+                    .font(GuardianTypography.relativeFixed(size: max(12, maxHeight * 0.45), weight: .medium, relativeTo: .caption))
                     .foregroundStyle(.secondary)
                     .frame(height: maxHeight)
             }

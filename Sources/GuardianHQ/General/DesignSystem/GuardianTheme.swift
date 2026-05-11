@@ -1,6 +1,10 @@
 import SwiftUI
 import AppKit
 
+/// Per-appearance colors for GuardianHQ chrome.
+///
+/// **Surface ladder:** see ``GuardianSurfaceLevel`` (base → raised → elevated → active). Modal stacks use
+/// ``overlayScrim`` over these fills. **Shadows:** ``GuardianElevation``.
 struct GuardianThemePalette {
     let backgroundBase: Color
     let backgroundRaised: Color
@@ -44,6 +48,9 @@ enum GuardianTheme {
     }
 }
 
+/// **AppKit / NSColor bridge** — resolves from `NSAppearance` independently of SwiftUI ``ColorScheme`` (e.g. `NSViewRepresentable`, AppKit-hosted surfaces, or when you must mirror the system appearance API).
+///
+/// **SwiftUI surfaces** should use ``GuardianTheme/palette(for:)`` so light/dark tracks the same ``ColorScheme`` as ``GuardianCard`` / ``Modal`` / ``guardianInsetCard()``. Do **not** add new SwiftUI call sites here unless bridging requires it.
 enum GuardianDynamicColors {
     static let backgroundBase = Color(nsColor: NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua

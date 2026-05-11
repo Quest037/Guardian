@@ -1,0 +1,54 @@
+{
+  "_comment": "RC stick-centre trim capture. Faster sibling of the full RC calibration: operator centres every stick on the transmitter, the autopilot snapshots the resulting PWM values as the new trim baseline. No min / max sweep; only centre.\n\nBoth recoverable failure kinds resolve to `connectExternalSensor` — same context as `recipe.fleet.calibrate.rc`: 'verify the RC receiver is connected and the transmitter is on, sticks centred.'\n\nOverall budget is 60s — procedure is seconds; budget covers operator setup of transmitter.",
+  "entryStepID": "calibrate",
+  "overallBudgetSeconds": 60,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "calibrate",
+      "command": "command.fleet.vehicle.do.calibrate.rc.trim",
+      "matchers": [
+        {
+          "when": { "kind": "success" },
+          "then": { "kind": "succeed" }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDeclined" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "connectExternalSensor"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDidNotConverge" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "connectExternalSensor"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "cancelled" },
+          "then": {
+            "kind": "fail",
+            "detail": "RC trim calibration cancelled by operator."
+          }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "fail",
+            "detail": "RC trim calibration failed with an unhandled outcome — see the audit trace for the underlying response."
+          }
+        }
+      ]
+    }
+  ]
+}

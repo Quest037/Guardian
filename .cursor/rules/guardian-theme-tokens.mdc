@@ -1,0 +1,23 @@
+---
+description: New SwiftUI UI must use Guardian design tokens (palette, semantics, spacing, typography) when they exist
+alwaysApply: true
+---
+
+# Guardian theme tokens (new UI)
+
+When adding or editing **SwiftUI** product UI in GuardianHQ:
+
+- **Surfaces & text:** Prefer ``GuardianTheme/palette(for:)`` (from `@Environment(\.colorScheme)`) for `backgroundBase`, `backgroundRaised`, `backgroundElevated`, `textPrimary` / `textSecondary` / `textTertiary`, `borderSubtle`, and `overlayScrim` — not ad-hoc grays for chrome that already has a token.
+- **Semantic states:** Use ``GuardianSemanticColors`` (and ``GuardianFeedbackSeverity`` where that model applies) for success, warning, danger, and info — avoid raw `Color.red` / `Color.green` for operator-meaningful states.
+- **Spacing & type:** Prefer ``GuardianSpacing`` and ``GuardianTypography`` (including semantic ``GuardianTypography/Role``) before one-off padding stacks or fixed `Font.system(size:)` for dense operator UI.
+- **Motion & depth:** Prefer ``GuardianMotion`` and ``GuardianElevation`` for transitions and shadows when a token exists for that pattern.
+- **Forms, lists, shell:** Prefer ``GuardianFormKit``, ``GuardianListKit`` / settings-row patterns, and ``GuardianShellStates`` when the interaction matches an existing helper.
+- **Charts:** For Swift Charts (`import Charts`), use ``GuardianSwiftChartsTheme`` (``View/guardianChartTheme(colorScheme:)``) plus ``GuardianChartPalette`` / ``View/guardianChartSeriesForegroundScale(colorblindSafe:)`` instead of default system chart chrome alone.
+- **Window overlays:** Trailing drawers and Z-order follow ``GuardianLayoutPatterns`` and `.cursor/rules/app-drawer.mdc` / confirm-dialog rules — do not fork parallel global overlay hosts.
+
+## Theme plugin (catalog discipline)
+
+When you introduce a **new shared design token** or reusable chrome type:
+
+- Add a **visible block** to the Theme plugin catalog (``ThemeCatalogContent`` / Theme tab) with a short usage note and ``ThemeAPICaption`` listing the public types involved.
+- If the project later adds **screenshot CI** for the Theme panel, extend coverage to **light and dark** for that new block; until then, manually spot-check both appearances when touching color.

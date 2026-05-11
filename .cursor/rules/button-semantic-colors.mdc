@@ -13,3 +13,8 @@ alwaysApply: true
 - Ordering and color semantics are app-wide conventions, not per-screen preferences.
 - Apply these semantics consistently in all new UI work and while touching existing screens.
 - Prefer shared styling helpers when practical, but do not block shipping on full refactors.
+- **Exception:** ``GuardianConfirmDanger`` uses a **red** primary for the proceed action and a **neutral** cancel — see ``guardian-confirm-dialogs`` (destructive confirm template only).
+
+## Cursor (macOS)
+
+- Use ``GuardianPointerPlainButtonStyle`` instead of `.buttonStyle(.plain)` on ``Button``, and append ``View/guardianPointerOnHover()`` after `.bordered` / `.borderedProminent` / `.borderless` (and on ``Menu`` chip triggers) so the pointer is a **pointing hand** over clickable controls. See ``GuardianButtonCursor.swift``.

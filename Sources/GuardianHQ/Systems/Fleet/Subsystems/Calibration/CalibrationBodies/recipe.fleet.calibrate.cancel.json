@@ -1,0 +1,15 @@
+{
+  "_comment": "Atomic best-effort cleanup. Used as the cancelRecipe for every interactive calibration recipe so cancel mid-flight leaves the autopilot in a clean (no-calibration-in-progress) state. The single matcher uses `any` so we never re-raise the cancel: whether the autopilot says 'cancelled', 'no calibration was running', or anything else, the cleanup goal is satisfied.",
+  "entryStepID": "cancel",
+  "overallBudgetSeconds": 10,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "cancel",
+      "command": "command.fleet.vehicle.cancel.calibration",
+      "matchers": [
+        { "when": { "kind": "any" }, "then": { "kind": "succeed" } }
+      ]
+    }
+  ]
+}

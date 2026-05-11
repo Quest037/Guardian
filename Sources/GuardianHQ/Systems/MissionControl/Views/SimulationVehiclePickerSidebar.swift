@@ -11,12 +11,12 @@ struct SimulationVehiclePickerSidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(alignment: .center, spacing: 12) {
+            HStack(alignment: .center, spacing: GuardianSpacing.sm) {
                 Text("Select Vehicle")
-                    .font(.system(size: 16, weight: .bold))
+                    .font(GuardianTypography.font(.hudTitle16Bold))
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)
-                Spacer(minLength: 8)
+                Spacer(minLength: GuardianSpacing.xs)
                 Picker("Stack", selection: $platform) {
                     ForEach(SimulationPlatform.allCases) { p in
                         Text(p.displayName).tag(p)
@@ -29,25 +29,25 @@ struct SimulationVehiclePickerSidebar: View {
                     onClose()
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 18, weight: .medium))
+                        .font(GuardianTypography.font(.heroGlyph18Medium))
                         .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(theme.textSecondary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(GuardianPointerPlainButtonStyle())
                 .keyboardShortcut(.cancelAction)
                 .help("Close")
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
+            .padding(.horizontal, GuardianSpacing.md)
+            .padding(.vertical, GuardianSpacing.cardBodyInset)
             .background(theme.backgroundElevated)
 
             ScrollView {
-                VStack(spacing: 10) {
+                VStack(spacing: GuardianSpacing.denseGutter) {
                     ForEach(SimulationVehiclePreset.allCases) { preset in
                         vehicleCard(preset)
                     }
                 }
-                .padding(16)
+                .padding(GuardianSpacing.md)
             }
         }
     }
@@ -56,26 +56,26 @@ struct SimulationVehiclePickerSidebar: View {
         Button {
             onSelect(preset)
         } label: {
-            HStack(spacing: 14) {
+            HStack(spacing: GuardianSpacing.cardBodyInset) {
                 SimulationDeviceThumbnail(imageBasenames: preset.simulationDeviceImageBasenames)
                     .frame(width: 72, height: 56)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                     Text(preset.displayName)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(GuardianTypography.font(.panelSecondaryHeadingSemibold))
                         .foregroundStyle(theme.textPrimary)
                         .multilineTextAlignment(.leading)
                     Text(preset.vehicleDomain.rawValue)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(GuardianTypography.font(.inlineNoticeDetail))
                         .foregroundStyle(theme.textSecondary)
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(GuardianTypography.font(.inlineNoticeTitle))
                     .foregroundStyle(theme.textTertiary)
             }
-            .padding(12)
+            .padding(GuardianSpacing.sm)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(theme.backgroundRaised)
             .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -84,6 +84,6 @@ struct SimulationVehiclePickerSidebar: View {
                     .strokeBorder(theme.borderSubtle, lineWidth: 1)
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(GuardianPointerPlainButtonStyle())
     }
 }

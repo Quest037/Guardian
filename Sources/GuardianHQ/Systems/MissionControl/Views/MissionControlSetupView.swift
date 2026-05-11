@@ -4,34 +4,36 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Spacing and widths for mission setup / roster prep.
-/// Tune here when adding sim battery, pre-place coordinates, staging waypoints, or other per-slot controls.
+///
+/// Values alias ``GuardianSpacing`` / ``GuardianCardLayout`` so MC-S tracks the global grid; tune **here** when
+/// adding sim battery, pre-place coordinates, staging waypoints, or other per-slot controls.
 enum MissionRunPrepLayout {
-    static let setupScrollPaddingH: CGFloat = 10
-    static let setupScrollPaddingV: CGFloat = 10
-    static let setupBlockSpacing: CGFloat = 10
-    static let taskCardPadding: CGFloat = 22
-    static let taskCardInnerSpacing: CGFloat = 18
-    static let tasksOuterSpacing: CGFloat = 22
+    static let setupScrollPaddingH: CGFloat = GuardianSpacing.denseGutter
+    static let setupScrollPaddingV: CGFloat = GuardianSpacing.denseGutter
+    static let setupBlockSpacing: CGFloat = GuardianSpacing.denseGutter
+    static let taskCardPadding: CGFloat = GuardianSpacing.missionTaskCardOuterInset
+    static let taskCardInnerSpacing: CGFloat = GuardianSpacing.sectionStack
+    static let tasksOuterSpacing: CGFloat = GuardianSpacing.missionTaskCardOuterInset
     /// Former default ~200pt; +50% for wider prep columns.
-    static let rosterGridMinWidth: CGFloat = 300
-    static let rosterGridSpacing: CGFloat = 18
-    static let scheduleCardPadding: CGFloat = 20
-    static let scheduleCardSpacing: CGFloat = 16
-    static let rosterSlotPadding: CGFloat = 10
-    static let rosterSlotStackSpacing: CGFloat = 10
+    static let rosterGridMinWidth: CGFloat = GuardianSpacing.missionRosterGridMinWidth
+    static let rosterGridSpacing: CGFloat = GuardianSpacing.missionRosterGridGap
+    static let scheduleCardPadding: CGFloat = GuardianSpacing.missionScheduleCardInset
+    static let scheduleCardSpacing: CGFloat = GuardianSpacing.missionScheduleBlockGap
+    static let rosterSlotPadding: CGFloat = GuardianSpacing.denseGutter
+    static let rosterSlotStackSpacing: CGFloat = GuardianSpacing.denseGutter
     static let rosterSlotIconSize: CGFloat = 44
-    static let rosterSlotIconRowSpacing: CGFloat = 14
-    static let rosterTitleStackSpacing: CGFloat = 3
+    static let rosterSlotIconRowSpacing: CGFloat = GuardianSpacing.cardBodyInset
+    static let rosterTitleStackSpacing: CGFloat = GuardianSpacing.titleStackTight
     /// Wingman / reserve visual indent under a primary (matches Missions roster nesting).
-    static let rosterSlotWingmanIndent: CGFloat = 14
+    static let rosterSlotWingmanIndent: CGFloat = GuardianSpacing.cardBodyInset
     /// Slot cards use ``GuardianCard``; same radius as ``GuardianCardLayout/cornerRadius`` (theme catalog / docs).
     static let rosterSlotCornerRadius: CGFloat = GuardianCardLayout.cornerRadius
     static let rosterSlotMinHeight: CGFloat = 100
     /// Below this width, Rosters tab stacks map above the accordion.
-    static let rostersMapAccordionStackBreakpoint: CGFloat = 780
+    static let rostersMapAccordionStackBreakpoint: CGFloat = GuardianSpacing.missionRosterMapAccordionBreakpoint
 }
 
-/// Matches the golden-angle route line hue in `OSMMapView` so route lines and progress bars align visually.
+/// Matches the golden-angle route line hue in ``OSMMapView`` so route lines and progress bars align visually.
 enum MissionTaskMapColor {
     static func hueDegrees(forTaskIndex index: Int) -> Double {
         (Double(index) * 137.508).truncatingRemainder(dividingBy: 360)
@@ -144,22 +146,22 @@ struct MissionControlRosterSlotCard: View {
 
             VStack(alignment: .leading, spacing: MissionRunPrepLayout.rosterTitleStackSpacing) {
                 Text(title)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(GuardianTypography.font(.inlineNoticeTitle))
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(2)
                 Text(subtitle)
-                    .font(.system(size: 10))
+                    .font(GuardianTypography.font(.denseCaption10Regular))
                     .foregroundStyle(theme.textSecondary)
                     .lineLimit(2)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            HStack(spacing: 8) {
+            HStack(spacing: GuardianSpacing.xs) {
                 Button(action: onChooseVehicle) {
                     Text("Choose")
                 }
-                .font(.system(size: 11, weight: .semibold))
-                .buttonStyle(.bordered)
+                .font(GuardianTypography.font(.formFieldLabel))
+                .buttonStyle(.bordered).guardianPointerOnHover()
                 .tint(.blue)
                 .controlSize(.small)
 
@@ -167,8 +169,8 @@ struct MissionControlRosterSlotCard: View {
                     Button(action: onPickAndAssignSim) {
                         Text("Sim")
                     }
-                    .font(.system(size: 11, weight: .semibold))
-                    .buttonStyle(.bordered)
+                    .font(GuardianTypography.font(.formFieldLabel))
+                    .buttonStyle(.bordered).guardianPointerOnHover()
                     .tint(.blue)
                     .controlSize(.small)
                     .help("Pick a simulator and assign it to this roster slot (same as Vehicles → Add Sim).")
@@ -177,9 +179,9 @@ struct MissionControlRosterSlotCard: View {
                 if let onOpenSettings {
                     Button(action: onOpenSettings) {
                         Image(systemName: "gearshape")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(GuardianTypography.font(.inlineNoticeTitle))
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.bordered).guardianPointerOnHover()
                     .controlSize(.small)
                     .help("Slot settings")
                 }
@@ -195,18 +197,18 @@ struct MissionControlRosterSlotCard: View {
 
                 VStack(alignment: .leading, spacing: MissionRunPrepLayout.rosterTitleStackSpacing) {
                     Text(title)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(GuardianTypography.font(.inlineNoticeTitle))
                         .foregroundStyle(theme.textPrimary)
                         .lineLimit(2)
                     Text(subtitle)
-                        .font(.system(size: 10))
+                        .font(GuardianTypography.font(.denseCaption10Regular))
                         .foregroundStyle(theme.textSecondary)
                         .lineLimit(2)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
                 if let stack = autopilotStack {
-                    HStack(spacing: 6) {
+                    HStack(spacing: GuardianSpacing.xsTight) {
                         FleetAutopilotStackBadge(stack: stack)
                         if let isSim = assignedFleetIsSimulation {
                             FleetLiveSimBadge(isSimulation: isSim)
@@ -215,10 +217,10 @@ struct MissionControlRosterSlotCard: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .center, spacing: 10) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
+                HStack(alignment: .center, spacing: GuardianSpacing.denseGutter) {
                     Text(fleetDisplayShortID ?? "—")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .font(GuardianTypography.font(.telemetryMono10Semibold))
                         .foregroundStyle(theme.textPrimary.opacity(0.9))
                         .lineLimit(1)
                         .layoutPriority(1)
@@ -229,46 +231,46 @@ struct MissionControlRosterSlotCard: View {
 
                     if let lifecycleStatus {
                         Text(lifecycleStatus.compactTwoWordStatus)
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(GuardianTypography.font(.denseCaption10Semibold))
                             .foregroundStyle(lifecycleStatus.color.uiColor.opacity(0.95))
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
                     } else {
                         Text("—")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(GuardianTypography.font(.denseCaption10Semibold))
                             .foregroundStyle(theme.textSecondary)
                             .lineLimit(1)
                     }
 
-                    Spacer(minLength: 8)
+                    Spacer(minLength: GuardianSpacing.xs)
 
                     rosterSetupBatteryCompact
                 }
 
                 if let detail = assignedVehicleDetail, !detail.isEmpty {
                     Text(detail)
-                        .font(.system(size: 10))
+                        .font(GuardianTypography.font(.denseCaption10Regular))
                         .foregroundStyle(theme.textTertiary)
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
-            HStack(alignment: .center, spacing: 10) {
+            HStack(alignment: .center, spacing: GuardianSpacing.denseGutter) {
                 Button(action: onChooseVehicle) {
                     Image(systemName: "pencil")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(GuardianTypography.font(.inlineNoticeTitle))
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.bordered).guardianPointerOnHover()
                 .controlSize(.small)
                 .help("Change vehicle assignment")
 
                 if let onCalibration {
                     Button(action: onCalibration) {
                         Image(systemName: "waveform.path.ecg.rectangle")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(GuardianTypography.font(.inlineNoticeTitle))
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.bordered).guardianPointerOnHover()
                     .controlSize(.small)
                     .help("Open Vehicle Inspector (calibration, preflight, telemetry)")
                 }
@@ -276,9 +278,9 @@ struct MissionControlRosterSlotCard: View {
                 if let onOpenSettings {
                     Button(action: onOpenSettings) {
                         Image(systemName: "gearshape")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(GuardianTypography.font(.inlineNoticeTitle))
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.bordered).guardianPointerOnHover()
                     .controlSize(.small)
                     .help("Slot settings")
                 }
@@ -287,9 +289,9 @@ struct MissionControlRosterSlotCard: View {
 
                 Button(action: onRemoveVehicle) {
                     Image(systemName: "trash")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(GuardianTypography.font(.inlineNoticeTitle))
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.bordered).guardianPointerOnHover()
                 .tint(.red)
                 .controlSize(.small)
                 .help("Remove vehicle from this slot")
@@ -298,12 +300,12 @@ struct MissionControlRosterSlotCard: View {
     }
 
     private var rosterSetupBatteryCompact: some View {
-        HStack(alignment: .center, spacing: 4) {
+        HStack(alignment: .center, spacing: GuardianSpacing.xxs) {
             Image(systemName: rosterBatterySymbol)
-                .font(.system(size: 16, weight: .semibold))
+                .font(GuardianTypography.font(.windowHeading16Semibold))
                 .foregroundStyle(rosterBatteryIconTint)
             Text(rosterBatteryPercentText)
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .font(GuardianTypography.font(.telemetryMono12Semibold))
                 .foregroundStyle(theme.textPrimary.opacity(0.94))
                 .lineLimit(1)
         }
@@ -350,7 +352,7 @@ struct MissionControlRosterSlotCard: View {
     private var slotLeadingGlyph: some View {
         SimulationDeviceThumbnail(imageBasenames: slotLeadingThumbnailBasenames)
             .clipShape(RoundedRectangle(cornerRadius: 6))
-            .padding(3)
+            .padding(GuardianSpacing.titleStackTight)
     }
 
     private var iconTile: some View {
@@ -417,6 +419,16 @@ enum MissionRunBulkSimSpawnBusyKind: Equatable {
     case allMissionSlots
 }
 
+/// Presented as one in-window overlay from ``MissionRunDetailView`` (replaces stacked `confirmationDialog` modifiers).
+private enum MissionRunPresentedConfirm: String, Identifiable, Equatable {
+    case deleteRun
+    case skipScheduledMissionStart
+    case skipTaskStartDeferral
+    case bulkSpawnSims
+
+    var id: String { rawValue }
+}
+
 struct MissionRunDetailView: View {
     @ObservedObject var run: MissionRunEnvironment
     @ObservedObject var missionStore: MissionStore
@@ -427,7 +439,7 @@ struct MissionRunDetailView: View {
     @EnvironmentObject private var appDrawer: AppDrawer
     @EnvironmentObject private var toastCenter: ToastCenter
     @Environment(\.colorScheme) private var colorScheme
-    @StateObject private var runPromptCenter = MissionRunPromptCenter()
+    @StateObject private var bottomPromptCenter = GuardianBottomPromptCenter()
 
     /// Internal so MC-C extensions in other files can share the same palette as setup/live chrome.
     var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
@@ -436,7 +448,6 @@ struct MissionRunDetailView: View {
     let onStart: (MissionRunEnvironment) -> Void
     let onDelete: (UUID) -> Void
 
-    @State private var confirmDeleteRun = false
     @State private var setupSelectedAssignmentId: UUID?
     /// Shared model for both the Setup staging map and the Live overview map —
     /// owns the tile style, recenter nonce, and the per-tab content that gets
@@ -459,18 +470,18 @@ struct MissionRunDetailView: View {
     /// Deferred one-off schedule: value + unit for **Go** on the running countdown banner (same control model as MCS Timing Tasks).
     @State private var scheduledStartPostponeValue: Double = 5
     @State private var scheduledStartPostponeUnit: DelayUnit = .mins
-    @State private var confirmSkipScheduledMissionStart = false
     @State private var confirmSkipScheduledMissionMessage = ""
     /// Per-task deferral Alter controls: value + unit (same model as scheduled start banner; covers initial and between-cycle MAVLink start waits).
     @State private var taskStartDeferralPostponeValue: Double = 5
     @State private var taskStartDeferralPostponeUnit: DelayUnit = .mins
-    @State private var confirmSkipTaskStartDeferral = false
     @State private var confirmSkipTaskStartDeferralTaskID: UUID?
     @State private var confirmSkipTaskStartDeferralMessage = ""
     @State private var setupMainTab: MissionRunSetupTab = .timing
     @State private var rosterSetupExpandedTaskIDs: Set<UUID> = []
     @State private var rosterSetupLegacyMissionRosterExpanded: Bool = true
     @State private var bulkSpawnSimsConfirmKind: MissionRunBulkSpawnSimsConfirmKind?
+    /// Single sheet for run-level confirms (replaces stacked `confirmationDialog` modifiers).
+    @State private var presentedRunConfirm: MissionRunPresentedConfirm?
     @State private var rosterBulkSimSpawnBusy: MissionRunBulkSimSpawnBusyKind?
     @State private var rosterBulkSimSpawnWorkingAssignmentId: UUID?
     /// Stack segment for **Sim** on empty roster cards (`SimulationVehiclePickerSidebar`, same as Vehicles → Add Sim).
@@ -519,7 +530,6 @@ struct MissionRunDetailView: View {
         self.onUpdate = onUpdate
         self.onStart = onStart
         self.onDelete = onDelete
-        _confirmDeleteRun = State(initialValue: false)
         _setupSelectedAssignmentId = State(initialValue: nil)
         _mapModel = StateObject(
             wrappedValue: GuardianMapModel(
@@ -825,26 +835,106 @@ struct MissionRunDetailView: View {
         r.refreshDerivedTaskStates()
     }
 
-    @ViewBuilder
-    private var bulkSpawnSimsConfirmMessage: some View {
+    private func bulkSpawnSimsConfirmMessagePlain() -> String {
         switch bulkSpawnSimsConfirmKind {
         case .singleTask(let taskID):
             if let mission = resolvedMission,
                let t = mission.routeMacro.tasks.first(where: { $0.id == taskID }) {
-                Text(
-                    "Spawn one built-in simulator for each empty roster slot in “\(t.name)”? Each uses that slot’s vehicle class and your default simulation stack and spawn location from Settings."
-                )
-            } else {
-                Text(
-                    "Spawn one built-in simulator for each empty roster slot? Each uses that slot’s vehicle class and your default simulation stack and spawn location from Settings."
-                )
+                return "Spawn one built-in simulator for each empty roster slot in “\(t.name)”? Each uses that slot’s vehicle class and your default simulation stack and spawn location from Settings."
             }
+            return "Spawn one built-in simulator for each empty roster slot? Each uses that slot’s vehicle class and your default simulation stack and spawn location from Settings."
         case .allMissionSlots:
-            Text(
-                "Spawn one built-in simulator for every empty roster slot across all tasks and the mission roster (if any)? Each uses that slot’s vehicle class and your default simulation stack and spawn location from Settings."
-            )
+            return "Spawn one built-in simulator for every empty roster slot across all tasks and the mission roster (if any)? Each uses that slot’s vehicle class and your default simulation stack and spawn location from Settings."
         case nil:
-            Text("")
+            return ""
+        }
+    }
+
+    @ViewBuilder
+    private func missionRunPresentedConfirmOverlayContent(_ kind: MissionRunPresentedConfirm) -> some View {
+        Group {
+            switch kind {
+                case .deleteRun:
+                    GuardianConfirmDanger(
+                        title: "Delete “\(run.missionName)”?",
+                        message: "This removes the run from Mission Control. The mission template is not deleted.",
+                        cancelTitle: "Cancel",
+                        confirmTitle: "Delete run",
+                        onCancel: { presentedRunConfirm = nil },
+                        onConfirm: {
+                            let id = run.id
+                            presentedRunConfirm = nil
+                            onDelete(id)
+                            onBack()
+                        }
+                    )
+                case .skipScheduledMissionStart:
+                    GuardianConfirm(
+                        title: "Start mission now?",
+                        message: confirmSkipScheduledMissionMessage,
+                        cancelTitle: "Cancel",
+                        confirmTitle: "Start now",
+                        onCancel: { presentedRunConfirm = nil },
+                        onConfirm: {
+                            run.systems.scheduling.beginDeferredOneOffImmediately()
+                            onStart(run)
+                            syncRunFromStore()
+                            onUpdate(run)
+                            presentedRunConfirm = nil
+                        }
+                    )
+                case .skipTaskStartDeferral:
+                    GuardianConfirm(
+                        title: "Start this task now?",
+                        message: confirmSkipTaskStartDeferralMessage,
+                        cancelTitle: "Cancel",
+                        confirmTitle: "Start now",
+                        onCancel: {
+                            confirmSkipTaskStartDeferralTaskID = nil
+                            presentedRunConfirm = nil
+                        },
+                        onConfirm: {
+                            if let taskID = confirmSkipTaskStartDeferralTaskID {
+                                run.systems.scheduling.skipMissionTaskStartDeferral(taskID: taskID)
+                            }
+                            confirmSkipTaskStartDeferralTaskID = nil
+                            syncRunFromStore()
+                            onUpdate(run)
+                            presentedRunConfirm = nil
+                        }
+                    )
+                case .bulkSpawnSims:
+                    GuardianConfirm(
+                        title: "Spawn simulators?",
+                        message: bulkSpawnSimsConfirmMessagePlain(),
+                        systemImage: "wand.and.stars",
+                        cancelTitle: "Cancel",
+                        confirmTitle: "Spawn",
+                        onCancel: {
+                            bulkSpawnSimsConfirmKind = nil
+                            presentedRunConfirm = nil
+                        },
+                        onConfirm: {
+                            let spawnKind = bulkSpawnSimsConfirmKind
+                            bulkSpawnSimsConfirmKind = nil
+                            presentedRunConfirm = nil
+                            guard let mission = resolvedMission else { return }
+                            switch spawnKind {
+                            case .singleTask(let taskID):
+                                guard let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }) else { return }
+                                Task { @MainActor in
+                                    await performBulkSpawnSitlForEmptyRosterSlots(task: task, mission: mission)
+                                }
+                            case .allMissionSlots:
+                                Task { @MainActor in
+                                    await performBulkSpawnSitlForAllMissionSlots(mission: mission)
+                                }
+                            case nil:
+                                break
+                            }
+                        }
+                    )
+                }
         }
     }
 
@@ -870,10 +960,10 @@ struct MissionRunDetailView: View {
 
     private func missionLiveTaskStateBadge(_ state: MissionTaskState) -> some View {
         Text(state.displayTitle.uppercased())
-            .font(.system(size: 7.5, weight: .heavy))
+            .font(GuardianTypography.font(.mapWaypointMicroHeavy))
             .tracking(0.4)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
+            .padding(.horizontal, GuardianSpacing.xsTight)
+            .padding(.vertical, GuardianSpacing.titleStackTight)
             .foregroundStyle(missionLiveTaskStateForeground(state))
             .background(
                 Capsule()
@@ -886,17 +976,17 @@ struct MissionRunDetailView: View {
     }
 
     private func missionLiveTaskStateBanner(_ state: MissionTaskState) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: GuardianSpacing.xs) {
             Circle()
                 .fill(missionLiveTaskStateForeground(state))
                 .frame(width: 7, height: 7)
             Text(state.displayTitle)
-                .font(.system(size: 12, weight: .semibold))
+                .font(GuardianTypography.font(.inlineNoticeTitle))
                 .foregroundStyle(theme.textPrimary)
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, GuardianSpacing.denseGutter)
+        .padding(.vertical, GuardianSpacing.xs)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 8)
@@ -919,9 +1009,9 @@ struct MissionRunDetailView: View {
     private func missionLiveTaskEndProtocolAcknowledgementBlock(task: RoutePath, compact: Bool) -> some View {
         switch run.taskStateByTaskID[task.id] ?? .ready {
         case .recovery:
-            VStack(alignment: .leading, spacing: compact ? 4 : 6) {
+            VStack(alignment: .leading, spacing: compact ? GuardianSpacing.xxs : GuardianSpacing.xsTight) {
                 Text("When this task’s roster has finished recovery, confirm here.")
-                    .font(.system(size: compact ? 10 : 11))
+                    .font(GuardianTypography.denseAcknowledgementCaption(compact: compact))
                     .foregroundStyle(theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 GuardianThemedButton(
@@ -937,11 +1027,11 @@ struct MissionRunDetailView: View {
                 )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, compact ? 2 : 0)
+            .padding(.top, compact ? GuardianSpacing.micro : 0)
         case .aborting:
-            VStack(alignment: .leading, spacing: compact ? 4 : 6) {
+            VStack(alignment: .leading, spacing: compact ? GuardianSpacing.xxs : GuardianSpacing.xsTight) {
                 Text("When this task’s roster has finished the abort protocol, confirm here.")
-                    .font(.system(size: compact ? 10 : 11))
+                    .font(GuardianTypography.denseAcknowledgementCaption(compact: compact))
                     .foregroundStyle(theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 GuardianThemedButton(
@@ -957,7 +1047,7 @@ struct MissionRunDetailView: View {
                 )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, compact ? 2 : 0)
+            .padding(.top, compact ? GuardianSpacing.micro : 0)
         default:
             EmptyView()
         }
@@ -967,11 +1057,11 @@ struct MissionRunDetailView: View {
     private func missionLiveSidebarStyleCloseButton(_ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: "xmark.circle.fill")
-                .font(.system(size: 18, weight: .medium))
+                .font(GuardianTypography.font(.heroGlyph18Medium))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(theme.textSecondary)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(GuardianPointerPlainButtonStyle())
         .keyboardShortcut(.cancelAction)
         .help("Close")
     }
@@ -985,11 +1075,11 @@ struct MissionRunDetailView: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: "gearshape")
-                .font(.system(size: 16, weight: .medium))
+                .font(GuardianTypography.font(.windowHeading16Medium))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(theme.textSecondary)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(GuardianPointerPlainButtonStyle())
         .help(helpText)
     }
 
@@ -999,11 +1089,11 @@ struct MissionRunDetailView: View {
     private func missionLiveSidebarStyleVehicleInspectorButton(_ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: "antenna.radiowaves.left.and.right")
-                .font(.system(size: 16, weight: .medium))
+                .font(GuardianTypography.font(.windowHeading16Medium))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(theme.textSecondary)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(GuardianPointerPlainButtonStyle())
         .help("Open Vehicle Inspector")
     }
 
@@ -1052,9 +1142,11 @@ struct MissionRunDetailView: View {
         now: Date,
         hero: Bool
     ) -> some View {
-        let deferralFont = hero ? Font.system(size: 13, design: .monospaced) : Font.system(size: 10, design: .monospaced)
-        let counterFont = hero ? Font.system(size: 15, design: .monospaced) : Font.system(size: 10, design: .monospaced)
-        let labelFont = hero ? Font.system(size: 13) : Font.system(size: 10)
+        let deferralFont = hero ? GuardianTypography.font(.telemetryMono13Regular) : GuardianTypography.font(.telemetryMono10Regular)
+        let counterFont = hero
+            ? GuardianTypography.relativeFixed(size: 15, weight: .regular, design: .monospaced, relativeTo: .headline)
+            : GuardianTypography.font(.telemetryMono10Regular)
+        let labelFont = hero ? GuardianTypography.font(.denseSubsection13Regular) : GuardianTypography.font(.denseCaption10Regular)
         let dashOpacity = hero ? 0.55 : 0.45
 
         if derived.inTaskStartDeferral, let taskStartDef = derived.taskStartDef {
@@ -1094,7 +1186,7 @@ struct MissionRunDetailView: View {
         hero: Bool
     ) -> some View {
         let controlSize: ControlSize = hero ? .regular : .small
-        HStack(alignment: .center, spacing: hero ? 10 : 8) {
+        HStack(alignment: .center, spacing: hero ? GuardianSpacing.denseGutter : GuardianSpacing.xs) {
             Spacer(minLength: 0)
             MissionDelayPostponeValueUnitRow(
                 postponeLabelColor: theme.textPrimary,
@@ -1125,7 +1217,7 @@ struct MissionRunDetailView: View {
                 syncRunFromStore()
                 onUpdate(run)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.borderedProminent).guardianPointerOnHover()
             .tint(.blue)
             .controlSize(controlSize)
             Button("Later") {
@@ -1147,11 +1239,11 @@ struct MissionRunDetailView: View {
                 syncRunFromStore()
                 onUpdate(run)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.borderedProminent).guardianPointerOnHover()
             .tint(.blue)
             .controlSize(controlSize)
             compactVerticalControlSeparator()
-                .padding(.horizontal, hero ? 8 : 6)
+                .padding(.horizontal, hero ? GuardianSpacing.xs : GuardianSpacing.xsTight)
             Button("Start") {
                 let rough = humanizedRoughTimeUntilScheduledStart(
                     executeAt: taskStartDefForControls.startAt,
@@ -1160,9 +1252,9 @@ struct MissionRunDetailView: View {
                 confirmSkipTaskStartDeferralTaskID = task.id
                 confirmSkipTaskStartDeferralMessage =
                     "This task’s MAVLink mission is scheduled to start in \(rough). Start it immediately?"
-                confirmSkipTaskStartDeferral = true
+                presentedRunConfirm = .skipTaskStartDeferral
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.borderedProminent).guardianPointerOnHover()
             .tint(.blue)
             .controlSize(controlSize)
             if hero {
@@ -1193,7 +1285,7 @@ struct MissionRunDetailView: View {
             syncRunFromStore()
             onUpdate(run)
         }
-        .buttonStyle(.borderedProminent)
+        .buttonStyle(.borderedProminent).guardianPointerOnHover()
         .tint(.blue)
         .controlSize(controlSize)
     }
@@ -1267,19 +1359,19 @@ struct MissionRunDetailView: View {
     @ViewBuilder
     private func missionLiveTaskWindDownActionsSection(task: RoutePath, now: Date) -> some View {
         let a = missionLiveTaskWindDownAvailability(task: task, now: now)
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
             Text("Path wind-down")
-                .font(.system(size: 10, weight: .semibold))
+                .font(GuardianTypography.font(.denseCaption10Semibold))
                 .foregroundStyle(theme.textSecondary)
             Text("Abort and complete are opposite intents — only one graceful end-of-cycle schedule at a time for this path.")
-                .font(.system(size: 10))
+                .font(GuardianTypography.font(.denseCaption10Regular))
                 .foregroundStyle(theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 8) {
+            HStack(spacing: GuardianSpacing.xs) {
                 Button("Abort now") {
                     applyTaskAbortNow(task: task)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.borderedProminent).guardianPointerOnHover()
                 .tint(.red)
                 .controlSize(.small)
                 .disabled(!a.abortNow)
@@ -1291,7 +1383,7 @@ struct MissionRunDetailView: View {
                 Button("Abort after cycle") {
                     applyTaskAbortGraceful(task: task)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.borderedProminent).guardianPointerOnHover()
                 .tint(.red)
                 .controlSize(.small)
                 .disabled(!a.abortGraceful)
@@ -1301,11 +1393,11 @@ struct MissionRunDetailView: View {
                         : "Unavailable if complete-after-cycle is already scheduled, during MAVLink start deferral, or while a whole-run graceful stop is active."
                 )
             }
-            HStack(spacing: 8) {
+            HStack(spacing: GuardianSpacing.xs) {
                 Button("Complete now") {
                     applyTaskCompleteNow(task: task)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.borderedProminent).guardianPointerOnHover()
                 .tint(.blue)
                 .controlSize(.small)
                 .disabled(!a.completeNow)
@@ -1317,7 +1409,7 @@ struct MissionRunDetailView: View {
                 Button("Complete after cycle") {
                     applyTaskCompleteGraceful(task: task)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.borderedProminent).guardianPointerOnHover()
                 .tint(.blue)
                 .controlSize(.small)
                 .disabled(!a.completeGraceful)
@@ -1331,15 +1423,15 @@ struct MissionRunDetailView: View {
                 Button("Revoke scheduled path wind-down") {
                     applyTaskRevokeGracefulWindDown(task: task)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.borderedProminent).guardianPointerOnHover()
                 .tint(.red)
                 .controlSize(.small)
                 .help("Cancel the scheduled end-of-cycle wind-down for this path only (does not change a whole-run graceful stop).")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 8)
-        .padding(.horizontal, 10)
+        .padding(.vertical, GuardianSpacing.xs)
+        .padding(.horizontal, GuardianSpacing.denseGutter)
         .background(
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color.primary.opacity(0.04))
@@ -1401,7 +1493,7 @@ struct MissionRunDetailView: View {
 
     private func missionLiveTaskTriageProgressHero(task: RoutePath, taskIndex: Int, mission: Mission, now: Date) -> some View {
         let d = missionLiveTaskProgressDerived(task: task, taskIndex: taskIndex, mission: mission, now: now)
-        return VStack(spacing: 18) {
+        return VStack(spacing: GuardianSpacing.sectionStack) {
             missionLiveTaskProgressCounterGroup(task: task, derived: d, now: now, hero: true)
                 .frame(maxWidth: .infinity, alignment: .center)
             missionLiveAnimatedProgressBar(
@@ -1418,14 +1510,14 @@ struct MissionRunDetailView: View {
                     now: now,
                     hero: true
                 )
-                .padding(.top, 4)
+                .padding(.top, GuardianSpacing.xxs)
             } else if showMissionTaskTrigger(for: task) {
                 HStack {
                     Spacer(minLength: 0)
                     missionLiveTaskProgressTriggerControl(task: task, hero: true)
                     Spacer(minLength: 0)
                 }
-                .padding(.top, 4)
+                .padding(.top, GuardianSpacing.xxs)
             }
 
             Spacer(minLength: 0)
@@ -1593,8 +1685,8 @@ struct MissionRunDetailView: View {
 
     private func syncRecoveryPromptIfNeeded() {
         guard run.status == .recovery, !dismissedRecoveryStatusPrompt else { return }
-        guard runPromptCenter.activePrompt == nil else { return }
-        runPromptCenter.present(
+        guard bottomPromptCenter.activePrompt == nil else { return }
+        bottomPromptCenter.present(
             "Recovery in progress. When fleet recovery actions are finished, mark this run completed.",
             style: .info,
             onDismiss: { dismissedRecoveryStatusPrompt = true }
@@ -1605,8 +1697,8 @@ struct MissionRunDetailView: View {
         guard run.status == .running || run.status == .paused else { return }
         guard run.sessionPhase == .aborting || run.sessionPhase == .aborted else { return }
         guard !dismissedAbortStatusPrompt else { return }
-        guard runPromptCenter.activePrompt == nil else { return }
-        runPromptCenter.present(
+        guard bottomPromptCenter.activePrompt == nil else { return }
+        bottomPromptCenter.present(
             "Abort protocol in progress. When fleet actions for your abort policy are finished and task confirmations are done, mark this run completed.",
             style: .info,
             onDismiss: { dismissedAbortStatusPrompt = true }
@@ -1617,7 +1709,7 @@ struct MissionRunDetailView: View {
         guard run.gracefulStopKind != .none, run.status == .running || run.status == .paused else { return }
         guard run.status != .recovery else { return }
         guard run.sessionPhase != .aborting, run.sessionPhase != .aborted else { return }
-        guard runPromptCenter.activePrompt == nil else { return }
+        guard bottomPromptCenter.activePrompt == nil else { return }
         let message: String = {
             switch run.gracefulStopKind {
             case .abortAfterCycle:
@@ -1629,7 +1721,7 @@ struct MissionRunDetailView: View {
             }
         }()
         guard !message.isEmpty else { return }
-        runPromptCenter.presentChoice(
+        bottomPromptCenter.presentChoice(
             message,
             style: .warning,
             confirmTitle: "Keep running",
@@ -1644,34 +1736,34 @@ struct MissionRunDetailView: View {
     /// Camera vs map for MC-R live console (icons only — segmented control lives in the title bar).
     private var missionLiveMediaModeSubBarToggle: some View {
         let activeFill = theme.backgroundElevated.opacity(0.55)
-        return HStack(spacing: 2) {
+        return HStack(spacing: GuardianSpacing.micro) {
             Button {
                 liveConsoleMediaTab = .map
             } label: {
                 Image(systemName: "map.fill")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(GuardianTypography.font(.subsectionTitleSemibold))
                     .foregroundStyle(liveConsoleMediaTab == .map ? theme.textPrimary : theme.textTertiary)
                     .frame(width: 30, height: 26)
                     .background(liveConsoleMediaTab == .map ? activeFill : Color.clear)
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(GuardianPointerPlainButtonStyle())
             .accessibilityLabel("Map")
 
             Button {
                 liveConsoleMediaTab = .camera
             } label: {
                 Image(systemName: "video.fill")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(GuardianTypography.font(.subsectionTitleSemibold))
                     .foregroundStyle(liveConsoleMediaTab == .camera ? theme.textPrimary : theme.textTertiary)
                     .frame(width: 30, height: 26)
                     .background(liveConsoleMediaTab == .camera ? activeFill : Color.clear)
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(GuardianPointerPlainButtonStyle())
             .accessibilityLabel("Camera")
         }
-        .padding(3)
+        .padding(GuardianSpacing.titleStackTight)
         .background(theme.borderSubtle.opacity(0.4))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
@@ -1690,7 +1782,7 @@ struct MissionRunDetailView: View {
 
     @ViewBuilder
     private func runSetupActionButtons(referenceNow: Date) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: GuardianSpacing.denseGutter) {
             GuardianThemedButton(
                 title: "Start Run",
                 accent: .primary,
@@ -1702,7 +1794,7 @@ struct MissionRunDetailView: View {
             )
 
             GuardianDestructiveProminentButton(title: "Delete Run") {
-                confirmDeleteRun = true
+                presentedRunConfirm = .deleteRun
             }
         }
     }
@@ -1710,9 +1802,9 @@ struct MissionRunDetailView: View {
     /// ``Menu`` label chip aligned with ``GuardianThemedButton`` outline geometry.
     private func runDetailToolbarMenuChip(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 12, weight: .semibold))
+            .font(GuardianTypography.font(.inlineNoticeTitle))
             .foregroundStyle(theme.textPrimary)
-            .padding(.horizontal, 10)
+            .padding(.horizontal, GuardianSpacing.denseGutter)
             .frame(height: 28)
             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
@@ -1725,8 +1817,8 @@ struct MissionRunDetailView: View {
         ZStack(alignment: .bottom) {
             VStack(spacing: 0) {
                 VStack(spacing: 0) {
-                    HStack(alignment: .center, spacing: 16) {
-                        HStack(spacing: 12) {
+                    HStack(alignment: .center, spacing: GuardianSpacing.md) {
+                        HStack(spacing: GuardianSpacing.sm) {
                             GuardianThemedButton(
                                 accent: .neutral,
                                 surface: .outline,
@@ -1736,13 +1828,13 @@ struct MissionRunDetailView: View {
                                 action: onBack,
                                 label: {
                                     Image(systemName: "arrow.left")
-                                        .font(.system(size: 14, weight: .semibold))
+                                        .font(GuardianTypography.font(.sectionHeadingSemibold))
                                 }
                             )
                             .help("Back to runs")
 
                             Text(run.missionName)
-                                .font(.system(size: 15, weight: .bold))
+                                .font(GuardianTypography.font(.panelEmphasisTitleBold))
                                 .foregroundStyle(theme.textPrimary)
                                 .lineLimit(1)
 
@@ -1763,9 +1855,9 @@ struct MissionRunDetailView: View {
                             }
                         }
 
-                        Spacer(minLength: 8)
+                        Spacer(minLength: GuardianSpacing.xs)
 
-                        HStack(spacing: 10) {
+                        HStack(spacing: GuardianSpacing.denseGutter) {
                             if run.status == .setup {
                                 if run.oneOffStartAt != nil {
                                     TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -1801,6 +1893,7 @@ struct MissionRunDetailView: View {
                                     runDetailToolbarMenuChip("Stop run")
                                 }
                                 .menuStyle(.borderlessButton)
+                                .guardianPointerOnHover()
 
                                 GuardianNeutralBorderedButton(
                                     systemImage: "gearshape",
@@ -1814,8 +1907,8 @@ struct MissionRunDetailView: View {
                             }
                         }
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
+                    .padding(.horizontal, GuardianSpacing.sm)
+                    .padding(.vertical, GuardianSpacing.xs)
                     .frame(maxWidth: .infinity)
                     .background(theme.backgroundRaised)
 
@@ -1875,7 +1968,7 @@ struct MissionRunDetailView: View {
                                             )
                                             confirmSkipScheduledMissionMessage =
                                                 "This mission is scheduled to start in \(rough). Are you sure you want to start it now?"
-                                            confirmSkipScheduledMissionStart = true
+                                            presentedRunConfirm = .skipScheduledMissionStart
                                         }
                                     }
                                 )
@@ -1883,41 +1976,6 @@ struct MissionRunDetailView: View {
                         }
                     }
                 }
-                .confirmationDialog(
-                    "Start mission now?",
-                    isPresented: $confirmSkipScheduledMissionStart,
-                    titleVisibility: .visible
-                ) {
-                    Button("Start now") {
-                        run.systems.scheduling.beginDeferredOneOffImmediately()
-                        onStart(run)
-                        syncRunFromStore()
-                        onUpdate(run)
-                    }
-                    Button("Cancel", role: .cancel) {}
-                } message: {
-                    Text(confirmSkipScheduledMissionMessage)
-                }
-                .confirmationDialog(
-                    "Start this task now?",
-                    isPresented: $confirmSkipTaskStartDeferral,
-                    titleVisibility: .visible
-                ) {
-                    Button("Start now") {
-                        if let taskID = confirmSkipTaskStartDeferralTaskID {
-                            run.systems.scheduling.skipMissionTaskStartDeferral(taskID: taskID)
-                        }
-                        confirmSkipTaskStartDeferralTaskID = nil
-                        syncRunFromStore()
-                        onUpdate(run)
-                    }
-                    Button("Cancel", role: .cancel) {
-                        confirmSkipTaskStartDeferralTaskID = nil
-                    }
-                } message: {
-                    Text(confirmSkipTaskStartDeferralMessage)
-                }
-
                 if run.status == .setup {
                     Group {
                         if setupMainTab == .rosters {
@@ -1947,21 +2005,21 @@ struct MissionRunDetailView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 } else if run.status == .completed {
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 16) {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.md) {
                             missionCompletedReportCards
                             completedMissionLogExportSection
                         }
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 18)
+                        .padding(.horizontal, GuardianSpacing.xl)
+                        .padding(.vertical, GuardianSpacing.sectionStack)
                         .frame(maxWidth: .infinity)
                     }
                 } else {
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                         missionLiveConsole
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 10)
+                    .padding(.horizontal, GuardianSpacing.denseGutter)
+                    .padding(.vertical, GuardianSpacing.denseGutter)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .onChange(of: fleetLink.hubTelemetry?.lastUpdate) { _ in
                         refreshVehicleVoiceNarrativeFromTelemetry()
@@ -1975,52 +2033,10 @@ struct MissionRunDetailView: View {
                 }
             }
         .background(theme.backgroundBase)
-        .confirmationDialog(
-            "Delete “\(run.missionName)”?",
-            isPresented: $confirmDeleteRun,
-            titleVisibility: .visible
-        ) {
-            Button("Delete Run", role: .destructive) {
-                let id = run.id
-                onDelete(id)
-                onBack()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This removes the run from Mission Control. The mission template is not deleted.")
-        }
-        .confirmationDialog(
-            "Spawn simulators?",
-            isPresented: Binding(
-                get: { bulkSpawnSimsConfirmKind != nil },
-                set: { if !$0 { bulkSpawnSimsConfirmKind = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Spawn") {
-                let kind = bulkSpawnSimsConfirmKind
-                bulkSpawnSimsConfirmKind = nil
-                guard let mission = resolvedMission else { return }
-                switch kind {
-                case .singleTask(let taskID):
-                    guard let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }) else { return }
-                    Task { @MainActor in
-                        await performBulkSpawnSitlForEmptyRosterSlots(task: task, mission: mission)
-                    }
-                case .allMissionSlots:
-                    Task { @MainActor in
-                        await performBulkSpawnSitlForAllMissionSlots(mission: mission)
-                    }
-                case nil:
-                    break
-                }
-            }
-            Button("Cancel", role: .cancel) {
-                bulkSpawnSimsConfirmKind = nil
-            }
-        } message: {
-            bulkSpawnSimsConfirmMessage
-        }
+        .guardianConfirmOverlay(item: $presentedRunConfirm, onDismiss: {
+            bulkSpawnSimsConfirmKind = nil
+            confirmSkipTaskStartDeferralTaskID = nil
+        }, dialog: missionRunPresentedConfirmOverlayContent)
         .sheet(isPresented: $startPreflightPresented) {
             MissionRunStartPreflightSheet(
                 run: run,
@@ -2098,18 +2114,18 @@ struct MissionRunDetailView: View {
                 focusLiveAssignment(nil)
                 dismissedRecoveryStatusPrompt = false
                 dismissedAbortStatusPrompt = false
-                runPromptCenter.dismiss()
+                bottomPromptCenter.dismiss()
                 if newStatus == .setup {
                     pruneStaleRosterFleetAssignmentsIfNeeded()
                 }
                 appDrawer.dismiss()
             } else if newStatus == .recovery {
                 dismissedRecoveryStatusPrompt = false
-                runPromptCenter.dismiss()
+                bottomPromptCenter.dismiss()
                 syncRecoveryPromptIfNeeded()
                 appDrawer.dismiss()
             } else {
-                runPromptCenter.dismiss()
+                bottomPromptCenter.dismiss()
                 appDrawer.dismiss()
             }
         }
@@ -2117,7 +2133,7 @@ struct MissionRunDetailView: View {
             guard run.status == .running || run.status == .paused else { return }
             if newPhase == .aborting {
                 dismissedAbortStatusPrompt = false
-                runPromptCenter.dismiss()
+                bottomPromptCenter.dismiss()
                 syncAbortSessionPromptIfNeeded()
                 appDrawer.dismiss()
             } else if newPhase == .aborted {
@@ -2137,12 +2153,12 @@ struct MissionRunDetailView: View {
             if kind != .none {
                 syncGracefulStopPromptIfNeeded()
             } else {
-                runPromptCenter.dismiss()
+                bottomPromptCenter.dismiss()
             }
         }
         .onDisappear {
             appDrawer.dismiss()
-            runPromptCenter.dismiss()
+            bottomPromptCenter.dismiss()
             for vehicleID in assignedSimulationVehicleIDs {
                 fleetLink.setSimBatteryDrainEnabled(
                     vehicleID: vehicleID,
@@ -2155,7 +2171,7 @@ struct MissionRunDetailView: View {
             onUpdate(run)
         }
 
-            MissionRunPromptBanner(center: runPromptCenter)
+            GuardianBottomPromptBanner(center: bottomPromptCenter)
         }
     }
 
@@ -2281,27 +2297,16 @@ struct MissionRunDetailView: View {
         let remaining = max(0, deferred.executeAt.timeIntervalSince(now))
         let total = max(deferred.executeAt.timeIntervalSince(deferred.countdownStartedAt), 0.001)
         let progress = 1 - min(1, max(0, remaining / total))
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.cyan.opacity(0.92))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Scheduled mission start")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.95))
-                    Text(
-                        "Execution begins \(deferred.executeAt.guardianScheduleOnAtPhrase) — in \(formattedOneOffCountdown(seconds: remaining))."
-                    )
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(theme.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 8)
-                HStack(alignment: .center, spacing: 8) {
+        return GuardianInlineNotice(
+            kind: .informational,
+            title: "Scheduled mission start",
+            detail:
+                "Execution begins \(deferred.executeAt.guardianScheduleOnAtPhrase) — in \(formattedOneOffCountdown(seconds: remaining)).",
+            trailing: {
+                HStack(alignment: .center, spacing: GuardianSpacing.xs) {
                     MissionDelayPostponeValueUnitRow(
                         postponeLabel: "Alter",
-                        postponeLabelColor: .white.opacity(0.92),
+                        postponeLabelColor: theme.textPrimary,
                         value: postponeValue,
                         unit: postponeUnit,
                         minimumTotalSeconds: 1,
@@ -2313,34 +2318,32 @@ struct MissionRunDetailView: View {
                     Button("Sooner") {
                         onAlterSooner()
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.borderedProminent).guardianPointerOnHover()
                     .tint(.blue)
                     .controlSize(.small)
                     Button("Later") {
                         onAlterLater()
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.borderedProminent).guardianPointerOnHover()
                     .tint(.blue)
                     .controlSize(.small)
                     compactVerticalControlSeparator()
-                        .padding(.horizontal, 6)
+                        .padding(.horizontal, GuardianSpacing.xsTight)
                     Button("Start") {
                         onRequestStartNow()
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.borderedProminent).guardianPointerOnHover()
                     .tint(.blue)
                     .controlSize(.small)
                 }
                 .fixedSize(horizontal: true, vertical: true)
-                .padding(.top, 1)
+                .padding(.top, GuardianSpacing.hairlineStack)
+            },
+            bottom: {
+                ProgressView(value: progress)
+                    .tint(GuardianSemanticColors.infoForeground.opacity(0.88))
             }
-            ProgressView(value: progress)
-                .tint(Color.cyan.opacity(0.85))
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.cyan.opacity(0.14))
+        )
     }
 
     private func formattedOneOffCountdown(seconds: TimeInterval) -> String {
@@ -2356,12 +2359,51 @@ struct MissionRunDetailView: View {
 
     private var liveConsoleCardFill: Color { theme.backgroundElevated }
     private var liveConsoleCardStroke: Color { theme.borderSubtle }
+
+    /// MC-R overlay sheets (task triage, vehicle detail): same header strip + hairline rhythm as ``GuardianCard`` header slot.
+    @ViewBuilder
+    private func missionLiveOverlayHeader<Trailing: View>(
+        title: String,
+        subtitle: String?,
+        titleMuted: Bool,
+        @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center, spacing: GuardianSpacing.denseGutter) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.micro) {
+                    Text(title)
+                        .font(GuardianTypography.font(.sectionHeadingSemibold))
+                        .foregroundStyle(titleMuted ? theme.textSecondary : theme.textPrimary)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.85)
+                    if let subtitle, !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(GuardianTypography.font(.denseFootnoteRegular))
+                            .foregroundStyle(theme.textSecondary)
+                            .lineLimit(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                trailing()
+            }
+            .frame(minHeight: GuardianCardLayout.headerContentMinHeight, alignment: .center)
+            .padding(.horizontal, GuardianCardLayout.headerHorizontalPadding)
+            .padding(.vertical, GuardianCardLayout.headerVerticalPadding)
+            .background(theme.backgroundElevated)
+            Rectangle()
+                .fill(theme.borderSubtle)
+                .frame(height: 1)
+                .frame(maxWidth: .infinity)
+        }
+    }
+
     /// MC-R left column: map **260** → **10** → roster **210** → **10** → Logs (**flex**, fills remainder).
     private let liveConsoleMapHeight: CGFloat = 260
     private let liveConsoleRosterHeight: CGFloat = 210
     /// Vertical gap between map↔roster and roster↔log (same value both places).
-    private let liveConsoleStackSpacing: CGFloat = 10
-    private let liveConsoleStackGutter: CGFloat = 10
+    private let liveConsoleStackSpacing: CGFloat = GuardianSpacing.denseGutter
+    private let liveConsoleStackGutter: CGFloat = GuardianSpacing.denseGutter
 
     /// Running / paused: **70%** map + roster + live mission log; **30%** Tasks card (overview or task triage sheet).
     private var missionLiveConsole: some View {
@@ -2421,24 +2463,23 @@ struct MissionRunDetailView: View {
         .spring(response: 0.42, dampingFraction: 0.86)
     }
 
-    /// Right column: tasks list base layer with the triage sheet (focused task) **or** the
-    /// vehicle detail sheet (focused roster slot) sliding up over it. All three layers stay
-    /// mounted inside the same card so transitions are purely visual and view state isn't lost.
-    /// Task and vehicle overlays are mutually exclusive (see ``focusLiveTask(_:)`` / ``focusLiveAssignment(_:)``).
+    /// Right column: ``GuardianCard`` with **Tasks** header; triage / vehicle layers use ``fullCardOverlay`` so they cover the entire card (header included).
     private var missionLiveTasksSideCard: some View {
-        ZStack(alignment: .top) {
-            missionLiveTasksBaseLayer
-            missionLiveTaskTriageOverlay
-            missionLiveVehicleOverlay
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(theme.backgroundRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(liveConsoleCardStroke, lineWidth: 1)
+        GuardianCard(
+            configuration: mcSetupGroupCardConfiguration,
+            header: { mcSetupGroupCardTitle("Tasks") },
+            body: {
+                missionLiveTasksBaseLayer
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            },
+            fullCardOverlay: {
+                ZStack(alignment: .top) {
+                    missionLiveTaskTriageOverlay
+                    missionLiveVehicleOverlay
+                }
+            }
         )
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     // MARK: - Tasks card overlay focus helpers
@@ -2467,32 +2508,26 @@ struct MissionRunDetailView: View {
     @ViewBuilder
     private var missionLiveTasksBaseLayer: some View {
         if let mission = resolvedMission {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Tasks")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(theme.textPrimary)
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        if run.status == .running,
-                           !run.taskStartDeferralByTaskID.isEmpty
-                        {
-                            TimelineView(.periodic(from: .now, by: 0.25)) { context in
-                                missionLiveTaskProgressList(mission: mission, now: context.date)
-                            }
-                        } else {
-                            missionLiveTaskProgressList(mission: mission, now: Date())
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: GuardianSpacing.cardBodyInset) {
+                    if run.status == .running,
+                       !run.taskStartDeferralByTaskID.isEmpty
+                    {
+                        TimelineView(.periodic(from: .now, by: 0.25)) { context in
+                            missionLiveTaskProgressList(mission: mission, now: context.date)
                         }
+                    } else {
+                        missionLiveTaskProgressList(mission: mission, now: Date())
                     }
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             Text("No mission template")
-                .font(.system(size: 11))
+                .font(GuardianTypography.font(.denseFootnoteRegular))
                 .foregroundStyle(theme.textSecondary)
-                .padding(.top, 4)
+                .padding(.top, GuardianSpacing.xxs)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
@@ -2505,22 +2540,28 @@ struct MissionRunDetailView: View {
                    let task = mission.routeMacro.tasks.first(where: { $0.id == focusID }) {
                     missionLiveTaskTriageInnerSheet(task: task, mission: mission)
                 } else {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(alignment: .center, spacing: 12) {
-                            Text("This task is not in the current mission template.")
-                                .font(.system(size: 11))
-                                .foregroundStyle(theme.textSecondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 0) {
+                        missionLiveOverlayHeader(
+                            title: "Task",
+                            subtitle: nil,
+                            titleMuted: false
+                        ) {
                             missionLiveSidebarStyleCloseButton {
                                 focusLiveTask(nil)
                             }
                         }
+                        Text("This task is not in the current mission template.")
+                            .font(GuardianTypography.font(.denseCaption12Regular))
+                            .foregroundStyle(theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                            .padding(GuardianCardLayout.defaultBodyPadding)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .background(theme.backgroundRaised)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(theme.backgroundRaised)
             .transition(.move(edge: .bottom).combined(with: .opacity))
             .zIndex(1)
         }
@@ -2536,7 +2577,6 @@ struct MissionRunDetailView: View {
         {
             missionLiveVehicleDetailSheet(assignment: assignment)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .background(theme.backgroundRaised)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
                 .zIndex(2)
         }
@@ -2547,121 +2587,128 @@ struct MissionRunDetailView: View {
     /// (battery / GPS / link / mission progress) iteratively without churning the overlay shell.
     private func missionLiveVehicleDetailSheet(assignment: MissionRunAssignment) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .center, spacing: 8) {
-                Text(assignment.slotName)
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(theme.textPrimary)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.85)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if telemetryVehicleID(for: assignment) != nil {
-                    missionLiveSidebarStyleVehicleInspectorButton {
-                        presentRosterCalibrationSheet(for: assignment)
+            missionLiveOverlayHeader(
+                title: assignment.slotName,
+                subtitle: nil,
+                titleMuted: false
+            ) {
+                HStack(spacing: GuardianSpacing.xs) {
+                    if telemetryVehicleID(for: assignment) != nil {
+                        missionLiveSidebarStyleVehicleInspectorButton {
+                            presentRosterCalibrationSheet(for: assignment)
+                        }
                     }
-                }
-                missionLiveSidebarStyleCogButton(
-                    helpText: "Vehicle settings (abort & complete policy)"
-                ) {
-                    presentAssignmentSettingsSidebar(assignmentID: assignment.id)
-                }
-                missionLiveSidebarStyleCloseButton {
-                    focusLiveAssignment(nil)
+                    missionLiveSidebarStyleCogButton(
+                        helpText: "Vehicle settings (abort & complete policy)"
+                    ) {
+                        presentAssignmentSettingsSidebar(assignmentID: assignment.id)
+                    }
+                    missionLiveSidebarStyleCloseButton {
+                        focusLiveAssignment(nil)
+                    }
                 }
             }
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                     if let device = resolvedMission?.rosterDevices.first(where: { $0.id == assignment.rosterDeviceId }) {
                         Text(rosterRoleSubtitle(device))
-                            .font(.system(size: 11))
+                            .font(GuardianTypography.font(.denseFootnoteRegular))
                             .foregroundStyle(theme.textSecondary)
                     }
                     if let vid = telemetryVehicleID(for: assignment) {
                         Text(vid)
-                            .font(.system(size: 10, design: .monospaced))
+                            .font(GuardianTypography.font(.telemetryMono10Regular))
                             .foregroundStyle(theme.textTertiary)
                             .help("Bridge vehicle key: \(vid)")
                     } else {
                         Text("No bridge link")
-                            .font(.system(size: 11))
+                            .font(GuardianTypography.font(.denseFootnoteRegular))
                             .foregroundStyle(theme.textTertiary)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
-                .padding(.top, 12)
+                .padding(.top, GuardianSpacing.sm)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(.horizontal, GuardianCardLayout.defaultBodyPadding)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(theme.backgroundRaised)
     }
 
     /// In-card triage sheet for the selected task: hero progress, deferral / trigger controls, sidebar-style close.
     private func missionLiveTaskTriageInnerSheet(task: RoutePath, mission: Mission) -> some View {
         let taskIndex = mission.routeMacro.tasks.firstIndex(where: { $0.id == task.id }) ?? 0
         return VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .center, spacing: 8) {
-                Text(task.name)
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(task.enabled ? theme.textPrimary : theme.textSecondary)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.85)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                missionLiveSidebarStyleCogButton {
-                    presentTaskSettingsSidebar(task: task)
-                }
-                missionLiveSidebarStyleCloseButton {
-                    focusLiveTask(nil)
-                }
-            }
-
-            missionLiveTaskStateBanner(run.taskStateByTaskID[task.id] ?? .ready)
-                .padding(.top, 10)
-
-            missionLiveTaskEndProtocolAcknowledgementBlock(task: task, compact: false)
-                .padding(.bottom, 10)
-
-            if run.status == .running || run.status == .paused {
-                TimelineView(.periodic(from: .now, by: 0.25)) { context in
-                    if missionLiveTaskWindDownSectionVisible(task: task, now: context.date) {
-                        missionLiveTaskWindDownActionsSection(task: task, now: context.date)
-                            .padding(.bottom, 10)
+            missionLiveOverlayHeader(
+                title: task.name,
+                subtitle: nil,
+                titleMuted: !task.enabled
+            ) {
+                HStack(spacing: GuardianSpacing.xs) {
+                    missionLiveSidebarStyleCogButton {
+                        presentTaskSettingsSidebar(task: task)
+                    }
+                    missionLiveSidebarStyleCloseButton {
+                        focusLiveTask(nil)
                     }
                 }
             }
 
-            if task.enabled, task.regularity == .continuous || task.regularity == .continuousWithDelay {
-                Text(
-                    task.cycles > 0
-                        ? "Cycles: \(run.taskCyclesCompletedByTaskID[task.id] ?? 0)/\(task.cycles)"
-                        : "Cycles: \(run.taskCyclesCompletedByTaskID[task.id] ?? 0)/∞"
-                )
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(theme.textSecondary)
-                .padding(.bottom, 8)
-            }
+            VStack(alignment: .leading, spacing: 0) {
+                missionLiveTaskStateBanner(run.taskStateByTaskID[task.id] ?? .ready)
+                    .padding(.top, GuardianSpacing.denseGutter)
 
-            Group {
-                if run.status == .running {
+                missionLiveTaskEndProtocolAcknowledgementBlock(task: task, compact: false)
+                    .padding(.bottom, GuardianSpacing.denseGutter)
+
+                if run.status == .running || run.status == .paused {
                     TimelineView(.periodic(from: .now, by: 0.25)) { context in
+                        if missionLiveTaskWindDownSectionVisible(task: task, now: context.date) {
+                            missionLiveTaskWindDownActionsSection(task: task, now: context.date)
+                                .padding(.bottom, GuardianSpacing.denseGutter)
+                        }
+                    }
+                }
+
+                if task.enabled, task.regularity == .continuous || task.regularity == .continuousWithDelay {
+                    Text(
+                        task.cycles > 0
+                            ? "Cycles: \(run.taskCyclesCompletedByTaskID[task.id] ?? 0)/\(task.cycles)"
+                            : "Cycles: \(run.taskCyclesCompletedByTaskID[task.id] ?? 0)/∞"
+                    )
+                    .font(GuardianTypography.font(.inlineNoticeDetail))
+                    .foregroundStyle(theme.textSecondary)
+                    .padding(.bottom, GuardianSpacing.xs)
+                }
+
+                Group {
+                    if run.status == .running {
+                        TimelineView(.periodic(from: .now, by: 0.25)) { context in
+                            missionLiveTaskTriageProgressHero(
+                                task: task,
+                                taskIndex: taskIndex,
+                                mission: mission,
+                                now: context.date
+                            )
+                        }
+                    } else {
                         missionLiveTaskTriageProgressHero(
                             task: task,
                             taskIndex: taskIndex,
                             mission: mission,
-                            now: context.date
+                            now: Date()
                         )
                     }
-                } else {
-                    missionLiveTaskTriageProgressHero(
-                        task: task,
-                        taskIndex: taskIndex,
-                        mission: mission,
-                        now: Date()
-                    )
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding(.horizontal, GuardianCardLayout.defaultBodyPadding)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(theme.backgroundRaised)
     }
 
     @ViewBuilder
@@ -2674,15 +2721,15 @@ struct MissionRunDetailView: View {
 
     private func missionLiveTaskProgressRow(task: RoutePath, taskIndex: Int, mission: Mission, now: Date) -> some View {
         let d = missionLiveTaskProgressDerived(task: task, taskIndex: taskIndex, mission: mission, now: now)
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
             Button {
                 focusLiveTask(task.id)
             } label: {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+                    HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.xsTight) {
                         missionLiveTaskStateBadge(run.taskStateByTaskID[task.id] ?? .ready)
                         missionLiveTaskTitleRow(task: task)
-                        Spacer(minLength: 6)
+                        Spacer(minLength: GuardianSpacing.xsTight)
                         missionLiveTaskProgressCounterGroup(task: task, derived: d, now: now, hero: false)
                     }
                     missionLiveAnimatedProgressBar(
@@ -2692,7 +2739,7 @@ struct MissionRunDetailView: View {
                 }
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(GuardianPointerPlainButtonStyle())
             .help("Open task triage")
 
             if d.inTaskStartDeferral, let taskStartDefForControls = d.taskStartDef {
@@ -2711,7 +2758,7 @@ struct MissionRunDetailView: View {
                 missionLiveTaskEndProtocolAcknowledgementBlock(task: task, compact: true)
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, GuardianSpacing.xxs)
     }
 
     /// Live progress caption while a task awaits its initial MAVLink mission start (see ``MissionTaskStartDeferral``).
@@ -2731,14 +2778,14 @@ struct MissionRunDetailView: View {
 
     @ViewBuilder
     private func missionLiveTaskTitleRow(task: RoutePath) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 4) {
+        HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.xxs) {
             Text(task.name)
-                .font(.system(size: 11, weight: .semibold))
+                .font(GuardianTypography.font(.formFieldLabel))
                 .foregroundStyle(task.enabled ? theme.textPrimary : theme.textSecondary)
             if task.enabled, task.regularity == .continuous || task.regularity == .continuousWithDelay {
                 let done = run.taskCyclesCompletedByTaskID[task.id] ?? 0
                 Text(task.cycles > 0 ? "(\(done)/\(task.cycles))" : "(\(done)/∞)")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(GuardianTypography.font(.denseCaption10Medium))
                     .foregroundStyle(theme.textSecondary)
             }
         }
@@ -2882,7 +2929,7 @@ struct MissionRunDetailView: View {
 
     private var missionLiveVehicleStatusRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
+            HStack(spacing: GuardianSpacing.denseGutter) {
                 if filteredLiveRosterAssignments.isEmpty {
                     MissionLiveVehicleHealthCard(
                         slotTitle: "—",
@@ -2927,93 +2974,90 @@ struct MissionRunDetailView: View {
         }
     }
 
-    /// Live mission log card; `maxTotalHeight` is the **entire** card height (live console: all space below map + roster).
+    /// Live mission log: ``GuardianCard`` header (elevated strip) + body with ``ScrollView`` so header/body match Settings chrome.
     private func missionLiveLogPlaceholder(maxTotalHeight: CGFloat) -> some View {
-        /// Padding, title row, spacing, divider — scroll gets whatever is left (never inflate past `maxTotalHeight`).
-        let nonScrollChrome: CGFloat = 74
-        let scrollMin: CGFloat = 44
-        let scrollMax = max(0, maxTotalHeight - nonScrollChrome)
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 10) {
-                Text("Logs")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(theme.textPrimary)
+        GuardianCard(
+            configuration: mcSetupGroupCardConfiguration,
+            header: {
+                HStack(alignment: .center, spacing: GuardianSpacing.denseGutter) {
+                    Text("Logs")
+                        .font(GuardianTypography.font(.sectionHeadingSemibold))
+                        .foregroundStyle(theme.textPrimary)
 
-                if focusedLiveTaskID != nil {
-                    Text("· task filter")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(theme.textTertiary)
-                }
-
-                if let compiledPlan = run.compiledPlan {
-                    let phaseStyle = GuardianSemanticColors.paladinPhaseBadgeStyle(for: run.sessionPhase)
-                    HStack(spacing: 6) {
-                        Text(run.sessionPhase.rawValue.capitalized)
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(phaseStyle.foreground)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 2)
-                            .background(phaseStyle.background)
-                            .clipShape(Capsule())
-                        Text(condensedHeaderMetadata(plan: compiledPlan))
-                            .font(.system(size: 10, design: .monospaced))
+                    if focusedLiveTaskID != nil {
+                        Text("· task filter")
+                            .font(GuardianTypography.font(.denseCaption10Medium))
                             .foregroundStyle(theme.textTertiary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
                     }
-                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-                }
 
-                Spacer(minLength: 8)
-
-                GuardianThemedButton(
-                    title: "Copy log",
-                    accent: .primary,
-                    surface: .solid,
-                    size: .small,
-                    shape: .cornered,
-                    isEnabled: !liveLogEventsFiltered.isEmpty,
-                    action: { copyLiveLogToPasteboard() }
-                )
-            }
-
-            if !liveLogEventsFiltered.isEmpty {
-                Divider().opacity(0.18)
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(liveLogEventsFiltered.suffix(80)) { event in
-                            logEventRow(event: event)
+                    if let compiledPlan = run.compiledPlan {
+                        let phaseStyle = GuardianSemanticColors.paladinPhaseBadgeStyle(for: run.sessionPhase)
+                        HStack(spacing: GuardianSpacing.xsTight) {
+                            Text(run.sessionPhase.rawValue.capitalized)
+                                .font(GuardianTypography.font(.telemetryNano9Semibold))
+                                .foregroundStyle(phaseStyle.foreground)
+                                .padding(.horizontal, GuardianSpacing.chromeTightInset)
+                                .padding(.vertical, GuardianSpacing.micro)
+                                .background(phaseStyle.background)
+                                .clipShape(Capsule())
+                            Text(condensedHeaderMetadata(plan: compiledPlan))
+                                .font(GuardianTypography.font(.telemetryMono10Regular))
+                                .foregroundStyle(theme.textTertiary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
                         }
+                        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
+
+                    Spacer(minLength: GuardianSpacing.xs)
+
+                    GuardianThemedButton(
+                        title: "Copy log",
+                        accent: .primary,
+                        surface: .solid,
+                        size: .small,
+                        shape: .cornered,
+                        isEnabled: !liveLogEventsFiltered.isEmpty,
+                        action: { copyLiveLogToPasteboard() }
+                    )
                 }
-                .frame(
-                    minHeight: scrollMax > 0 ? min(scrollMin, scrollMax) : 0,
-                    maxHeight: scrollMax
-                )
-                .environment(\.openURL, OpenURLAction { url in
-                    handleMcrLogURL(url)
-                })
-            } else {
-                Text(
-                    focusedLiveTaskID == nil
-                        ? "No mission log entries for this run yet."
-                        : "No log entries for this task or its roster vehicles yet."
-                )
-                .font(.system(size: 11))
-                .foregroundStyle(theme.textSecondary)
-                Spacer(minLength: 0)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            },
+            body: {
+                Group {
+                    if !liveLogEventsFiltered.isEmpty {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
+                                ForEach(liveLogEventsFiltered.suffix(80)) { event in
+                                    logEventRow(event: event)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                            .textSelection(.enabled)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .environment(\.openURL, OpenURLAction { url in
+                            handleMcrLogURL(url)
+                        })
+                    } else {
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(
+                                focusedLiveTaskID == nil
+                                    ? "No mission log entries for this run yet."
+                                    : "No log entries for this task or its roster vehicles yet."
+                            )
+                            .font(GuardianTypography.font(.denseFootnoteRegular))
+                            .foregroundStyle(theme.textSecondary)
+                            .textSelection(.enabled)
+                            Spacer(minLength: 0)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(liveConsoleCardFill)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(liveConsoleCardStroke, lineWidth: 1)
         )
+        .frame(maxWidth: .infinity, maxHeight: maxTotalHeight, alignment: .topLeading)
         .clipped()
     }
 
@@ -3101,11 +3145,12 @@ struct MissionRunDetailView: View {
                 .fill(logSeverityBorderColor(event.level))
                 .frame(width: 3)
             line
-                .font(.system(size: 11, design: .monospaced))
+                .font(GuardianTypography.font(.telemetryMono11Regular))
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, 6)
-                .padding(.vertical, 2)
+                .padding(.leading, GuardianSpacing.xsTight)
+                .padding(.vertical, GuardianSpacing.micro)
         }
+        .textSelection(.enabled)
     }
 
     /// `[Speaker]` segment as a `Text` so it can be concatenated with the wrapper + attributed body.
@@ -3368,7 +3413,7 @@ struct MissionRunDetailView: View {
     @ViewBuilder
     private func mcSetupGroupCardTitle(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 14, weight: .semibold))
+            .font(GuardianTypography.font(.sectionHeadingSemibold))
             .foregroundStyle(theme.textPrimary)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -3379,14 +3424,14 @@ struct MissionRunDetailView: View {
         description: String,
         @ViewBuilder trailing: () -> Trailing
     ) -> some View {
-        HStack(alignment: .top, spacing: 20) {
-            VStack(alignment: .leading, spacing: 4) {
+        HStack(alignment: .top, spacing: GuardianSpacing.lg) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(GuardianTypography.font(.subsectionTitleSemibold))
                     .foregroundStyle(theme.textPrimary)
                 if !description.isEmpty {
                     Text(description)
-                        .font(.system(size: 12))
+                        .font(GuardianTypography.font(.denseCaption12Regular))
                         .foregroundStyle(theme.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -3402,7 +3447,7 @@ struct MissionRunDetailView: View {
         Rectangle()
             .fill(theme.borderSubtle)
             .frame(height: 1)
-            .padding(.vertical, 12)
+            .padding(.vertical, GuardianSpacing.sm)
     }
 
     private var setupScheduleCard: some View {
@@ -3430,11 +3475,11 @@ struct MissionRunDetailView: View {
     /// Two headered cards side-by-side when space allows; stacked in narrow widths. No ``GeometryReader`` inside ``ScrollView``.
     private var setupTimingTabContent: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: 16) {
+            HStack(alignment: .top, spacing: GuardianSpacing.md) {
                 setupScheduleCard
                 setupTasksDelaysCard
             }
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.md) {
                 setupScheduleCard
                 setupTasksDelaysCard
             }
@@ -3447,7 +3492,7 @@ struct MissionRunDetailView: View {
             let stackVertically = geo.size.width < MissionRunPrepLayout.rostersMapAccordionStackBreakpoint
             let totalH = geo.size.height
             let totalW = geo.size.width
-            let rowGap: CGFloat = 14
+            let rowGap: CGFloat = GuardianSpacing.cardBodyInset
             let mapW = stackVertically ? totalW : max(0, (totalW - rowGap) * 0.7)
             let accW = stackVertically ? totalW : max(0, (totalW - rowGap) * 0.3)
             Group {
@@ -3476,7 +3521,7 @@ struct MissionRunDetailView: View {
             configuration: mcSetupGroupCardConfiguration,
             body: {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
                         if run.assignments.isEmpty {
                             Text("No roster slots on this mission template.")
                                 .foregroundStyle(theme.textSecondary)
@@ -3501,19 +3546,20 @@ struct MissionRunDetailView: View {
         let emptyAll = emptyRosterSlotCountAcrossMission(mission: mission)
         let confirming = bulkSpawnSimsConfirmKind != nil
         let busy = rosterBulkSimSpawnBusy != nil
-        return HStack(alignment: .center, spacing: 10) {
+        return HStack(alignment: .center, spacing: GuardianSpacing.denseGutter) {
             Text("Tasks")
-                .font(.system(size: 15, weight: .semibold))
+                .font(GuardianTypography.font(.panelSecondaryHeadingSemibold))
                 .foregroundStyle(theme.textPrimary)
             Spacer(minLength: 0)
             if fleetLink.isSimulateEnabled {
                 Button {
                     bulkSpawnSimsConfirmKind = .allMissionSlots
+                    presentedRunConfirm = .bulkSpawnSims
                 } label: {
                     Image(systemName: "wand.and.stars")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.bordered).guardianPointerOnHover()
                 .controlSize(.small)
                 .disabled(emptyAll == 0 || confirming || busy)
                 .help(
@@ -3521,8 +3567,8 @@ struct MissionRunDetailView: View {
                 )
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, GuardianSpacing.denseGutter)
+        .padding(.vertical, GuardianSpacing.xs)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(theme.backgroundElevated)
         .clipShape(RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous))
@@ -3625,23 +3671,23 @@ struct MissionRunDetailView: View {
         isExpanded: Bool,
         enabled: Bool
     ) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: GuardianSpacing.xs) {
             Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                .font(.system(size: 11, weight: .semibold))
+                .font(GuardianTypography.font(.formFieldLabel))
                 .foregroundStyle(theme.textSecondary)
                 .frame(width: 14, alignment: .center)
             Text(title)
-                .font(.system(size: 13, weight: .semibold))
+                .font(GuardianTypography.font(.subsectionTitleSemibold))
                 .foregroundStyle(theme.textPrimary)
                 .lineLimit(1)
-            Spacer(minLength: 6)
+            Spacer(minLength: GuardianSpacing.xsTight)
             Text("\(filled)/\(total)")
-                .font(.system(size: 11, weight: .medium))
+                .font(GuardianTypography.font(.inlineNoticeDetail))
                 .foregroundStyle(theme.textSecondary)
                 .lineLimit(1)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, GuardianSpacing.denseGutter)
+        .padding(.vertical, GuardianSpacing.xs)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(theme.backgroundElevated)
         .clipShape(RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous))
@@ -3659,8 +3705,8 @@ struct MissionRunDetailView: View {
         let filled = indices.filter { run.assignments[$0].hasFleetOrLegacyAssignment }.count
         let emptyRosterSlotCount = indices.count - filled
         let rows = missionRunTaskRosterOrderedSlots(task: task, mission: mission)
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 8) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+            HStack(alignment: .center, spacing: GuardianSpacing.xs) {
                 Button {
                     if expanded {
                         rosterSetupExpandedTaskIDs.remove(task.id)
@@ -3676,27 +3722,28 @@ struct MissionRunDetailView: View {
                         enabled: task.enabled
                     )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(GuardianPointerPlainButtonStyle())
                 .frame(maxWidth: .infinity, alignment: .leading)
 
                 Button {
                     presentTaskSettingsSidebar(task: task)
                 } label: {
                     Image(systemName: "gearshape")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.bordered).guardianPointerOnHover()
                 .controlSize(.small)
                 .help("Task settings")
 
                 if fleetLink.isSimulateEnabled {
                     Button {
                         bulkSpawnSimsConfirmKind = .singleTask(task.id)
+                        presentedRunConfirm = .bulkSpawnSims
                     } label: {
                         Image(systemName: "wand.and.stars")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(GuardianTypography.font(.subsectionTitleSemibold))
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.bordered).guardianPointerOnHover()
                     .controlSize(.small)
                     .disabled(
                         emptyRosterSlotCount == 0
@@ -3717,7 +3764,7 @@ struct MissionRunDetailView: View {
     private func rostersOrderedSlotsList(rows: [(assignmentIndex: Int, indent: Int)], mission: Mission?) -> some View {
         if rows.isEmpty {
             Text("No roster slots linked to this task. Link devices to the task in Missions → Roster.")
-                .font(.system(size: 12))
+                .font(GuardianTypography.font(.denseCaption12Regular))
                 .foregroundStyle(theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
@@ -3737,7 +3784,7 @@ struct MissionRunDetailView: View {
             let expanded = rosterSetupLegacyMissionRosterExpanded
             let filled = indices.filter { run.assignments[$0].hasFleetOrLegacyAssignment }.count
             let rows = missionRunLegacyRosterOrderedSlots(mission: mission)
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
                 Button {
                     rosterSetupLegacyMissionRosterExpanded.toggle()
                 } label: {
@@ -3749,7 +3796,7 @@ struct MissionRunDetailView: View {
                         enabled: true
                     )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(GuardianPointerPlainButtonStyle())
 
                 if rosterSetupLegacyMissionRosterExpanded {
                     rostersOrderedSlotsList(rows: rows, mission: mission)
@@ -3796,14 +3843,14 @@ struct MissionRunDetailView: View {
                         }
                     }
                 } else {
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
                         Text("Mission defaults unavailable")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(GuardianTypography.font(.subsectionTitleSemibold))
                             .foregroundStyle(theme.textPrimary)
                         Text(
                             "This run’s mission is not in the library (or failed to load). Add or restore the mission to edit abort/complete defaults."
                         )
-                        .font(.system(size: 12))
+                        .font(GuardianTypography.font(.denseCaption12Regular))
                         .foregroundStyle(theme.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                     }
@@ -3823,11 +3870,11 @@ struct MissionRunDetailView: View {
                     Text(
                         "Paladin and Mission Control resolve these dispositions when an action is requested during a run. Unlisted actions default to autonomous."
                     )
-                    .font(.system(size: 12))
+                    .font(GuardianTypography.font(.denseCaption12Regular))
                     .foregroundStyle(theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.bottom, 8)
+                    .padding(.bottom, GuardianSpacing.xs)
 
                     ForEach(MissionRunEngagementAction.allCases.indices, id: \.self) { idx in
                         let action = MissionRunEngagementAction.allCases[idx]
@@ -3853,7 +3900,7 @@ struct MissionRunDetailView: View {
     }
 
     private var setupRulesTabContent: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.md) {
             setupRulesPoliciesCard
             setupRulesEngagementCard
         }
@@ -3987,13 +4034,13 @@ struct MissionRunDetailView: View {
     }
 
     private func missionControlTaskStartDelayFieldRow(task: MissionTask) -> some View {
-        HStack(alignment: .center, spacing: 10) {
+        HStack(alignment: .center, spacing: GuardianSpacing.denseGutter) {
             Text(task.name)
-                .font(.system(size: 12, weight: .semibold))
+                .font(GuardianTypography.font(.inlineNoticeTitle))
                 .foregroundStyle(task.enabled ? theme.textPrimary : theme.textSecondary.opacity(0.72))
                 .lineLimit(2)
                 .multilineTextAlignment(.leading)
-            Spacer(minLength: 8)
+            Spacer(minLength: GuardianSpacing.xs)
             MissionDelayValueUnitEditor(
                 label: "",
                 value: taskStartDelayValueBinding(for: task),
@@ -4012,7 +4059,7 @@ struct MissionRunDetailView: View {
     private var scheduleSetupTasksTabContent: some View {
         VStack(alignment: .leading, spacing: MissionRunPrepLayout.scheduleCardSpacing) {
             Text("Manage task start delays")
-                .font(.system(size: 12))
+                .font(GuardianTypography.font(.denseCaption12Regular))
                 .foregroundStyle(theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -4022,7 +4069,7 @@ struct MissionRunDetailView: View {
                 }
             } else {
                 Text("Mission template unavailable for this run.")
-                    .font(.system(size: 12))
+                    .font(GuardianTypography.font(.denseCaption12Regular))
                     .foregroundStyle(theme.textSecondary)
             }
         }
@@ -4048,7 +4095,7 @@ struct MissionRunDetailView: View {
 
             if run.oneOffStartAt != nil {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
                         DatePicker(
                             "Start date & time",
                             selection: Binding(
@@ -4059,7 +4106,7 @@ struct MissionRunDetailView: View {
                         )
                         if run.oneOffScheduledTimeTooFarInPast(referenceNow: context.date) {
                             Text("That time is in the past. Move it forward or enable “Start immediately”.")
-                                .font(.system(size: 12))
+                                .font(GuardianTypography.font(.denseCaption12Regular))
                                 .foregroundStyle(Color.orange.opacity(0.95))
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -4248,10 +4295,10 @@ struct MissionRunDetailView: View {
     private var missionMissingTemplateRosterFallback: some View {
         VStack(alignment: .leading, spacing: MissionRunPrepLayout.taskCardInnerSpacing) {
             Text("Roster")
-                .font(.system(size: 15, weight: .semibold))
+                .font(GuardianTypography.font(.panelSecondaryHeadingSemibold))
                 .foregroundStyle(theme.textPrimary)
             Text("Mission template not found — roster slots are frozen from when the run was created.")
-                .font(.system(size: 12))
+                .font(GuardianTypography.font(.denseCaption12Regular))
                 .foregroundStyle(theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             LazyVGrid(

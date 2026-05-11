@@ -309,6 +309,183 @@ enum FleetTelemetryFieldCatalog {
         return ids.compactMap { fid in all.first { $0.id == fid } }
     }
 
+    // MARK: - System recipe directory (Stage C)
+
+    /// Per-system bundle of Layer 1 recipe names. Drives the Vehicle Inspector's
+    /// per-system action menus (Stage E renders the menu; Stage C ships the
+    /// directory and validates its references).
+    ///
+    /// The directory references recipes **by name only**; recipes themselves
+    /// continue to live in their owning subsystem (`FleetCalibrationRecipeRegistrations`,
+    /// `FleetErrorRecipeRegistrations`, etc.) so subsystem ownership is preserved.
+    /// `validateRecipeReferences(knownRecipes:)` is run from the recipe-catalogue
+    /// bootstrap and faults on any cited recipe that didn't register.
+    struct SystemRecipes: Equatable, Sendable {
+        /// Recipes that *maintain* the system in a healthy state (the calibrate
+        /// `do.calibrate.*` family + their orchestrating Layer 1 wrappers).
+        let calibrate: [FleetRecipeName]
+
+        /// Recipes that *recover* the system from an unhealthy state (compositions
+        /// of calibration + diagnose recipes that the autopilot's error-classifier
+        /// can hand the operator as a one-button fix).
+        let errorFix: [FleetRecipeName]
+
+        static let empty = SystemRecipes(calibrate: [], errorFix: [])
+    }
+
+    /// Authored mapping from calibration system to its recipe menu. v1 ships
+    /// concrete entries for every system that has at least one recipe authored
+    /// in `FleetCalibrationRecipeRegistrations` or `FleetErrorRecipeRegistrations`.
+    /// Systems without recipes today (gps, localPosition, homePosition) get
+    /// `.empty` so callers can still look them up uniformly.
+    ///
+    /// New recipes wire in here at the same PR that authors the descriptor and
+    /// body; the bootstrap-time validator catches typos against the live
+    /// recipes catalogue so a misspelled name fails at app start, not at
+    /// menu-render time.
+    static let systemRecipes: [FleetCalibrationSystemID: SystemRecipes] = [
+        .compass: SystemRecipes(
+            calibrate: [
+                .literal("recipe.fleet.calibrate.compass"),
+                .literal("recipe.fleet.calibrate.compass.motor"),
+                .literal("recipe.fleet.calibrate.compass.declination"),
+            ],
+            errorFix: [
+                .literal("recipe.fleet.errors.fix.calibrationrequired"),
+            ]
+        ),
+        .accelerometer: SystemRecipes(
+            calibrate: [.literal("recipe.fleet.calibrate.accelerometer")],
+            errorFix: [.literal("recipe.fleet.errors.fix.calibrationrequired")]
+        ),
+        .gyrometer: SystemRecipes(
+            calibrate: [.literal("recipe.fleet.calibrate.gyro")],
+            errorFix: [.literal("recipe.fleet.errors.fix.calibrationrequired")]
+        ),
+        .gps: .empty,
+        .localPosition: .empty,
+        .homePosition: .empty,
+        .rc: SystemRecipes(
+            calibrate: [
+                .literal("recipe.fleet.calibrate.rc"),
+                .literal("recipe.fleet.calibrate.rc.trim"),
+            ],
+            errorFix: []
+        ),
+        .battery: SystemRecipes(
+            calibrate: [
+                .literal("recipe.fleet.calibrate.battery.voltage"),
+                .literal("recipe.fleet.calibrate.battery.current"),
+                .literal("recipe.fleet.calibrate.battery.capacity"),
+            ],
+            errorFix: []
+        ),
+        .barometer: SystemRecipes(
+            calibrate: [
+                .literal("recipe.fleet.calibrate.baro"),
+                .literal("recipe.fleet.calibrate.baro.temperature"),
+            ],
+            errorFix: []
+        ),
+        .ekf: SystemRecipes(
+            calibrate: [.literal("recipe.fleet.calibrate.level")],
+            errorFix: [.literal("recipe.fleet.errors.fix.calibrationrequired")]
+        ),
+    ]
+
+    /// Lookup for the Vehicle Inspector's per-system action menu. Returns
+    /// `.empty` for systems the directory doesn't cover so call sites don't
+    /// have to special-case the miss.
+    static func recipes(forSystem id: FleetCalibrationSystemID) -> SystemRecipes {
+        systemRecipes[id] ?? .empty
+    }
+
+    /// Citation in the directory that did not resolve in the recipes catalogue
+    /// at validation time. Surfaces from ``validateRecipeReferences(knownRecipes:)``.
+    struct MissingRecipeReference: Equatable, Sendable, CustomStringConvertible {
+
+        /// Role the directory ascribes to the missing reference.
+        enum Role: String, Equatable, Sendable {
+            case calibrate
+            case errorFix
+        }
+
+        let system: FleetCalibrationSystemID
+        let recipe: FleetRecipeName
+        let role: Role
+
+        var description: String {
+            "\(system.rawValue) cites missing \(role.rawValue) recipe \(recipe.rawValue)"
+        }
+    }
+
+    /// Validate that every recipe name cited by the directory is in the supplied
+    /// set of known names. Returns missing references sorted deterministically by
+    /// `(system, recipe)` so log output is stable across runs.
+    ///
+    /// Bootstrap calls this with `Set(FleetRecipesCatalogue.shared.descriptors.keys)`
+    /// after both subsystems register; a fault from this path means a directory
+    /// citation was added without the matching recipe registration landing.
+    static func validateRecipeReferences(knownRecipes: Set<FleetRecipeName>) -> [MissingRecipeReference] {
+        var misses: [MissingRecipeReference] = []
+        for (system, entry) in systemRecipes {
+            for name in entry.calibrate where !knownRecipes.contains(name) {
+                misses.append(MissingRecipeReference(system: system, recipe: name, role: .calibrate))
+            }
+            for name in entry.errorFix where !knownRecipes.contains(name) {
+                misses.append(MissingRecipeReference(system: system, recipe: name, role: .errorFix))
+            }
+        }
+        return misses.sorted { lhs, rhs in
+            if lhs.system.rawValue != rhs.system.rawValue {
+                return lhs.system.rawValue < rhs.system.rawValue
+            }
+            return lhs.recipe.rawValue < rhs.recipe.rawValue
+        }
+    }
+
+    /// Bootstrap convenience overload that resolves the known set from the
+    /// supplied catalogue. The bootstrap calls this with the live shared
+    /// catalogue after both subsystems register.
+    @MainActor
+    static func validateRecipeReferences(against catalogue: FleetRecipesCatalogue) -> [MissingRecipeReference] {
+        validateRecipeReferences(knownRecipes: Set(catalogue.descriptors.keys))
+    }
+
+    // MARK: - Inspector menu resolution
+
+    /// Resolved bundle of recipe descriptors for a single system, in the order the
+    /// directory declared them. Each side filters out any name that didn't resolve
+    /// against the supplied catalogue (the bootstrap-time validator has already
+    /// faulted on those, so dropping them here yields a soft-degrade UX rather
+    /// than a crash).
+    struct ResolvedSystemRecipes: Equatable, Sendable {
+        let calibrate: [FleetRecipeDescriptor]
+        let errorFix: [FleetRecipeDescriptor]
+
+        var isEmpty: Bool { calibrate.isEmpty && errorFix.isEmpty }
+
+        static let empty = ResolvedSystemRecipes(calibrate: [], errorFix: [])
+    }
+
+    /// Resolve the directory's citations for `system` into live
+    /// ``FleetRecipeDescriptor`` values via the supplied catalogue. Order matches
+    /// the directory's authored order; unresolved names are dropped silently
+    /// because the bootstrap validator is the authoritative typo gate.
+    ///
+    /// This is the entry point the Vehicle Inspector calls to populate its
+    /// per-system `Calibrate` / `Fix` menus.
+    @MainActor
+    static func resolveDescriptors(
+        forSystem id: FleetCalibrationSystemID,
+        against catalogue: FleetRecipesCatalogue
+    ) -> ResolvedSystemRecipes {
+        let entry = recipes(forSystem: id)
+        let calibrate = entry.calibrate.compactMap { catalogue.descriptor(for: $0) }
+        let errorFix = entry.errorFix.compactMap { catalogue.descriptor(for: $0) }
+        return ResolvedSystemRecipes(calibrate: calibrate, errorFix: errorFix)
+    }
+
     /// All catalogued field IDs (used by ``unknownFields(in:)`` to surface anything new under "Other").
     static let catalogedIds: Set<String> = Set(all.map(\.id))
 

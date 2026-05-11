@@ -1,0 +1,39 @@
+{
+  "_comment": "Rangefinder / lidar calibration. Both stack converters return `.notImplemented` in v1: AP `RNGFND_*` and PX4 `SENS_FLOW_*` / per-driver families don't overlap cleanly enough to ship a portable cal recipe.\n\nThis recipe registers for discoverability — Vehicle Inspector / wizard surfaces it in the per-system menu, and any attempt to run it returns a precise 'not supported in this app version' message. When per-stack support lands, only the converter changes; this recipe stays.",
+  "entryStepID": "calibrate",
+  "overallBudgetSeconds": 30,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "calibrate",
+      "command": "command.fleet.vehicle.do.calibrate.rangefinder",
+      "matchers": [
+        {
+          "when": { "kind": "success" },
+          "then": { "kind": "succeed" }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "notImplemented" },
+          "then": {
+            "kind": "fail",
+            "detail": "Rangefinder calibration is not implemented in this app version. AP and PX4 use disjoint per-driver parameter families that require a stack- and driver-specific authoring pass."
+          }
+        },
+        {
+          "when": { "kind": "cancelled" },
+          "then": {
+            "kind": "fail",
+            "detail": "Rangefinder calibration cancelled by operator."
+          }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "fail",
+            "detail": "Rangefinder calibration failed with an unhandled outcome — see the audit trace for the underlying response."
+          }
+        }
+      ]
+    }
+  ]
+}

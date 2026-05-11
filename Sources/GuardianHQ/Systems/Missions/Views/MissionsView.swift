@@ -24,8 +24,13 @@ struct MissionsView: View {
     @State private var sortMode: SortMode = .newest
     @State private var selectedMissionID: UUID?
     @State private var showArchivedMissions = false
-    @State private var pendingDeleteMission: Mission?
-    @State private var showingDeleteMissionConfirm = false
+    /// Drives delete confirm ``.sheet(item:)`` so the sheet never opens with an empty payload (avoids the “tiny blank box” first frame).
+    private struct MissionListDeleteConfirmContext: Identifiable {
+        var id: UUID { mission.id }
+        let mission: Mission
+    }
+
+    @State private var missionListDeleteConfirm: MissionListDeleteConfirmContext?
     @State private var cloneMissionContext: CloneMissionContext?
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
@@ -56,20 +61,19 @@ struct MissionsView: View {
                 }
             )
         }
-        .alert("Delete Mission?", isPresented: $showingDeleteMissionConfirm) {
-            Button("Cancel", role: .cancel) {
-                pendingDeleteMission = nil
-            }
-            Button("Delete", role: .destructive) {
-                if let mission = pendingDeleteMission {
+        .guardianConfirmOverlay(item: $missionListDeleteConfirm) { ctx in
+            GuardianConfirmDanger(
+                title: "Delete Mission?",
+                message: "Delete “\(ctx.mission.name)”? This removes the mission template and non-running Mission Control runs for this mission.",
+                cancelTitle: "Cancel",
+                confirmTitle: "Delete",
+                onCancel: { missionListDeleteConfirm = nil },
+                onConfirm: {
+                    let mission = ctx.mission
+                    missionListDeleteConfirm = nil
                     performDeleteMission(mission)
                 }
-                pendingDeleteMission = nil
-            }
-        } message: {
-            if let mission = pendingDeleteMission {
-                Text("Delete “\(mission.name)”? This removes the mission template and non-running Mission Control runs for this mission.")
-            }
+            )
         }
     }
 
@@ -90,7 +94,7 @@ struct MissionsView: View {
 
     private var missionList: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
+            HStack(spacing: GuardianSpacing.xs) {
                 GuardianThemedButton(
                     title: displayMode == .list ? "Grid View" : "List View",
                     accent: .neutral,
@@ -123,8 +127,8 @@ struct MissionsView: View {
                     showingAddMission = true
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.horizontal, GuardianSpacing.sm)
+            .padding(.vertical, GuardianSpacing.xs)
             .frame(maxWidth: .infinity)
             .background(theme.backgroundRaised)
 
@@ -132,7 +136,7 @@ struct MissionsView: View {
                 VStack {
                     Spacer()
                     Text("No missions yet")
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(GuardianTypography.font(.missionProminentGlyph18Semibold))
                         .foregroundStyle(theme.textPrimary)
                     Text("Use Add Mission to create your first mission template.")
                         .foregroundStyle(theme.textSecondary)
@@ -140,7 +144,7 @@ struct MissionsView: View {
                 }
             } else if displayMode == .list {
                 ScrollView {
-                    LazyVStack(spacing: 10) {
+                    LazyVStack(spacing: GuardianSpacing.denseGutter) {
                         ForEach(sortedMissions) { mission in
                             MissionRow(
                                 mission: mission,
@@ -164,19 +168,19 @@ struct MissionsView: View {
                             )
                         }
                     }
-                    .padding(16)
+                    .padding(GuardianSpacing.md)
                 }
                 .background(theme.backgroundBase)
             } else {
                 ScrollView {
                     LazyVGrid(
                         columns: [
-                            GridItem(.flexible(), spacing: 12),
-                            GridItem(.flexible(), spacing: 12),
-                            GridItem(.flexible(), spacing: 12),
-                            GridItem(.flexible(), spacing: 12),
+                            GridItem(.flexible(), spacing: GuardianSpacing.sm),
+                            GridItem(.flexible(), spacing: GuardianSpacing.sm),
+                            GridItem(.flexible(), spacing: GuardianSpacing.sm),
+                            GridItem(.flexible(), spacing: GuardianSpacing.sm),
                         ],
-                        spacing: 12
+                        spacing: GuardianSpacing.sm
                     ) {
                         ForEach(sortedMissions) { mission in
                             MissionCard(
@@ -201,7 +205,7 @@ struct MissionsView: View {
                             )
                         }
                     }
-                    .padding(16)
+                    .padding(GuardianSpacing.md)
                 }
                 .background(theme.backgroundBase)
             }
@@ -230,8 +234,7 @@ struct MissionsView: View {
             toastCenter.show("Cannot delete a mission with a live Mission Control run.", style: .error)
             return
         }
-        pendingDeleteMission = mission
-        showingDeleteMissionConfirm = true
+        missionListDeleteConfirm = MissionListDeleteConfirmContext(mission: mission)
     }
 
     private func performConfirmedDeleteMission(_ mission: Mission) {
@@ -286,6 +289,14 @@ private struct MissionWorkspaceView: View {
         let deviceId: UUID
     }
 
+    private enum MissionWorkspacePresentedConfirm: String, Identifiable, Equatable {
+        case deleteMission
+        case removeRosterDevice
+        case deleteTask
+        case closeLoop
+        var id: String { rawValue }
+    }
+
     /// One row in the Roster tab vehicle list (order may differ from ``MissionTask/rosterDeviceIds`` for grouped display).
     private struct TaskRosterDisplayRow: Identifiable {
         let deviceId: UUID
@@ -302,7 +313,7 @@ private struct MissionWorkspaceView: View {
     @StateObject private var mapModel: GuardianMapModel
     @State private var pendingDeleteTaskIndex: Int?
     @State private var pendingCloseLoopTaskIndex: Int?
-    @State private var showingDeleteMissionConfirm = false
+    @State private var missionWorkspacePresentedConfirm: MissionWorkspacePresentedConfirm?
     @State private var taskRosterDrafts: [UUID: TaskRosterDraft] = [:]
     @State private var bulkWaypointEditorSheetContext: BulkWaypointEditorSheetContext?
     @State private var bulkWaypointDraft = RouteWaypoint()
@@ -315,7 +326,6 @@ private struct MissionWorkspaceView: View {
     @State private var taskSettingsOverlayTaskIndex: Int?
     /// Roster-tab vehicle edit panel (same scrim + slide pattern as task settings).
     @State private var rosterDeviceEditContext: RosterDeviceEditOverlayContext?
-    @State private var showingRosterDeleteConfirm = false
     @State private var pendingRosterDelete: RosterDeviceEditOverlayContext?
     /// Coalesces disk writes while typing mission name / description on the Details tab.
     @State private var debouncedPersistMissionTask: Task<Void, Never>?
@@ -348,7 +358,7 @@ private struct MissionWorkspaceView: View {
     /// Matches wingman/reserve “Leader” label + menu footprint so the add row does not jump when Slot changes.
     private static let rosterAddRowSupportsColumnWidth: CGFloat = 264
     /// Leading inset per nesting level for wingmen / reserves under a primary.
-    private static let rosterSlotGroupIndentStep: CGFloat = 16
+    private static let rosterSlotGroupIndentStep: CGFloat = GuardianSpacing.md
 
     private var missionTaskSettingsSidebarAnimation: Animation {
         .spring(response: 0.36, dampingFraction: 0.88)
@@ -375,8 +385,8 @@ private struct MissionWorkspaceView: View {
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
-                HStack(spacing: 10) {
-                    HStack(spacing: 10) {
+                HStack(spacing: GuardianSpacing.denseGutter) {
+                    HStack(spacing: GuardianSpacing.denseGutter) {
                         GuardianThemedButton(
                             accent: .neutral,
                             surface: .outline,
@@ -386,13 +396,13 @@ private struct MissionWorkspaceView: View {
                             action: onBack,
                             label: {
                                 Image(systemName: "arrow.left")
-                                    .font(.system(size: 14, weight: .semibold))
+                                    .font(GuardianTypography.font(.sectionHeadingSemibold))
                             }
                         )
                         .help("Back to missions")
 
                         Text(missionWorkspaceToolbarTitle)
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(GuardianTypography.font(.sectionHeadingSemibold))
                             .foregroundStyle(theme.textPrimary)
                             .lineLimit(1)
                             .truncationMode(.tail)
@@ -409,7 +419,7 @@ private struct MissionWorkspaceView: View {
                     }
                     .fixedSize(horizontal: true, vertical: false)
 
-                    Spacer(minLength: 12)
+                    Spacer(minLength: GuardianSpacing.sm)
 
                     GuardianThemedButton(
                         accent: .danger,
@@ -417,16 +427,16 @@ private struct MissionWorkspaceView: View {
                         size: .small,
                         shape: .cornered,
                         contentSizing: .squareToolbarCell,
-                        action: { showingDeleteMissionConfirm = true },
+                        action: { missionWorkspacePresentedConfirm = .deleteMission },
                         label: {
                             Image(systemName: "trash")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
                         }
                     )
                     .help("Delete Mission")
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .padding(.horizontal, GuardianSpacing.sm)
+                .padding(.vertical, GuardianSpacing.xs)
                 .frame(maxWidth: .infinity)
                 .background(theme.backgroundRaised)
                 .overlay(alignment: .bottom) {
@@ -439,7 +449,7 @@ private struct MissionWorkspaceView: View {
                     tasksTab
                 } else {
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 16) {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.md) {
                             switch activeTab {
                             case .details:
                                 detailsTab
@@ -449,8 +459,8 @@ private struct MissionWorkspaceView: View {
                                 EmptyView()
                             }
                         }
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 16)
+                        .padding(.horizontal, GuardianSpacing.lg)
+                        .padding(.vertical, GuardianSpacing.md)
                         .frame(maxWidth: .infinity)
                     }
                     .background(theme.backgroundBase)
@@ -509,27 +519,11 @@ private struct MissionWorkspaceView: View {
                 rosterDeviceEditContext = nil
             }
         }
-        .alert("Delete Mission?", isPresented: $showingDeleteMissionConfirm) {
-            Button("Cancel", role: .cancel) {}
-            Button("Delete", role: .destructive) {
-                onDelete(draft)
-            }
-        } message: {
-            Text("This will permanently remove this mission.")
-        }
-        .alert("Remove vehicle?", isPresented: $showingRosterDeleteConfirm) {
-            Button("Cancel", role: .cancel) {
-                pendingRosterDelete = nil
-            }
-            Button("Remove", role: .destructive) {
-                if let pending = pendingRosterDelete {
-                    performRemoveRosterDeviceFromTask(taskIndex: pending.taskIndex, deviceId: pending.deviceId)
-                    pendingRosterDelete = nil
-                }
-            }
-        } message: {
-            Text(rosterDeleteConfirmMessage)
-        }
+        .guardianConfirmOverlay(item: $missionWorkspacePresentedConfirm, onDismiss: {
+            pendingRosterDelete = nil
+            pendingDeleteTaskIndex = nil
+            pendingCloseLoopTaskIndex = nil
+        }, dialog: missionWorkspaceConfirmOverlayContent)
         .sheet(item: $bulkWaypointEditorSheetContext) { ctx in
             bulkWaypointEditorSheet(taskIndex: ctx.taskIndex)
         }
@@ -567,16 +561,16 @@ private struct MissionWorkspaceView: View {
             ),
             header: {
                 Text("Edit Mission")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(GuardianTypography.font(.sectionHeadingSemibold))
                     .foregroundStyle(theme.textPrimary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             },
             body: {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.md) {
                     GuardianLabeledFormField(label: "Mission name") {
                         TextField("", text: $draft.name, prompt: Text("Mission name").foregroundColor(theme.textTertiary))
                             .textFieldStyle(.roundedBorder)
-                            .controlSize(.small)
+                            .guardianFormControlSizing()
                     }
                     GuardianLabeledFormField(label: "Mission description") {
                         AutoGrowingTextEditor(
@@ -596,6 +590,7 @@ private struct MissionWorkspaceView: View {
                         .labelsHidden()
                         .pickerStyle(.segmented)
                         .frame(maxWidth: 280, alignment: .leading)
+                        .guardianFormControlSizing()
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -604,7 +599,7 @@ private struct MissionWorkspaceView: View {
     }
 
     private var rosterTab: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.md) {
             GuardianCard(
                 configuration: GuardianCardConfiguration(
                     border: .subtle,
@@ -613,20 +608,20 @@ private struct MissionWorkspaceView: View {
                 ),
                 header: {
                     Text("Roster")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(GuardianTypography.font(.sectionHeadingSemibold))
                         .foregroundStyle(theme.textPrimary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 },
                 body: {
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
                         Text("Vehicles per task")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(GuardianTypography.font(.subsectionTitleSemibold))
                             .foregroundStyle(theme.textPrimary)
                         Text(
                             "Each mission task lists the vehicles you expect on that route. Use callsigns and slots for planning; "
                                 + "you will bind real aircraft in Mission Control."
                         )
-                        .font(.system(size: 12))
+                        .font(GuardianTypography.font(.denseCaption12Regular))
                         .foregroundStyle(theme.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                     }
@@ -643,7 +638,7 @@ private struct MissionWorkspaceView: View {
                     ),
                     body: {
                         Text("No tasks yet. Add tasks on the Tasks tab, then assign vehicles to each task here.")
-                            .font(.system(size: 12))
+                            .font(GuardianTypography.font(.denseCaption12Regular))
                             .foregroundStyle(theme.textSecondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -666,7 +661,7 @@ private struct MissionWorkspaceView: View {
                 bodyPadding: GuardianCardLayout.defaultBodyPadding
             ),
             header: {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.xs) {
                     TextField(
                         "Task name",
                         text: Binding(
@@ -675,10 +670,10 @@ private struct MissionWorkspaceView: View {
                         )
                     )
                     .textFieldStyle(.plain)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(GuardianTypography.font(.sectionHeadingSemibold))
                     .foregroundStyle(theme.textPrimary)
 
-                    Spacer(minLength: 8)
+                    Spacer(minLength: GuardianSpacing.xs)
 
                     GuardianThemedButton(
                         accent: .neutral,
@@ -689,34 +684,34 @@ private struct MissionWorkspaceView: View {
                         action: { presentTaskSettingsSidebar(taskIndex: taskIndex) },
                         label: {
                             Image(systemName: "gearshape.fill")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
                         }
                     )
                     .help("Task settings")
 
                     Text("\(path.waypoints.count) waypoints")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(GuardianTypography.font(.inlineNoticeDetail))
                         .foregroundStyle(theme.textSecondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             },
             body: {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                     Text("Vehicles on this task")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(GuardianTypography.font(.formFieldLabel))
                         .foregroundStyle(theme.textSecondary)
 
                     if path.rosterDeviceIds.isEmpty {
                         Text("None yet — use the row below.")
-                            .font(.system(size: 11))
+                            .font(GuardianTypography.font(.denseFootnoteRegular))
                             .foregroundStyle(theme.textTertiary)
                     } else {
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
                             ForEach(taskRosterDisplayRows(for: path)) { row in
                                 if let device = draft.rosterDevices.first(where: { $0.id == row.deviceId }) {
-                                    HStack(alignment: .center, spacing: 8) {
+                                    HStack(alignment: .center, spacing: GuardianSpacing.xs) {
                                         Text(device.name)
-                                            .font(.system(size: 13, weight: .semibold))
+                                            .font(GuardianTypography.font(.subsectionTitleSemibold))
                                             .foregroundStyle(theme.textPrimary)
                                             .lineLimit(1)
                                             .truncationMode(.tail)
@@ -736,7 +731,7 @@ private struct MissionWorkspaceView: View {
                                             action: { presentRosterDeviceEdit(taskIndex: taskIndex, deviceId: row.deviceId) },
                                             label: {
                                                 Image(systemName: "pencil")
-                                                    .font(.system(size: 14, weight: .semibold))
+                                                    .font(GuardianTypography.font(.sectionHeadingSemibold))
                                             }
                                         )
                                         .help("Edit vehicle")
@@ -750,13 +745,13 @@ private struct MissionWorkspaceView: View {
                                             action: { requestRemoveRosterDevice(taskIndex: taskIndex, deviceId: row.deviceId) },
                                             label: {
                                                 Image(systemName: "trash")
-                                                    .font(.system(size: 14, weight: .semibold))
+                                                    .font(GuardianTypography.font(.sectionHeadingSemibold))
                                             }
                                         )
                                         .help("Remove vehicle")
                                     }
                                     .padding(.leading, CGFloat(row.indentLevel) * Self.rosterSlotGroupIndentStep)
-                                    .padding(.vertical, 4)
+                                    .padding(.vertical, GuardianSpacing.xxs)
                                     .accessibilityElement(children: .combine)
                                 }
                             }
@@ -765,7 +760,7 @@ private struct MissionWorkspaceView: View {
 
                     Divider().overlay(theme.borderSubtle)
 
-                    HStack(alignment: .center, spacing: 8) {
+                    HStack(alignment: .center, spacing: GuardianSpacing.xs) {
                         TextField(
                             "Callsign",
                             text: Binding(
@@ -851,15 +846,15 @@ private struct MissionWorkspaceView: View {
                             }()
                             let primaries = primaryRosterDevices(on: path)
                             if slotNeedsLeader {
-                                HStack(spacing: 8) {
+                                HStack(spacing: GuardianSpacing.xs) {
                                     Text("Leader")
-                                        .font(.system(size: 11, weight: .semibold))
+                                        .font(GuardianTypography.font(.formFieldLabel))
                                         .foregroundStyle(theme.textSecondary)
                                         .fixedSize()
-                                        .padding(.leading, 4)
+                                        .padding(.leading, GuardianSpacing.xxs)
                                     if primaries.isEmpty {
                                         Text("—")
-                                            .font(.system(size: 12))
+                                            .font(GuardianTypography.font(.denseCaption12Regular))
                                             .foregroundStyle(theme.textTertiary)
                                             .lineLimit(1)
                                     } else {
@@ -908,7 +903,7 @@ private struct MissionWorkspaceView: View {
 
     @ViewBuilder
     private func rosterDeviceInlineBadges(device: RosterDevice) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: GuardianSpacing.xsTight) {
             rosterNeutralCapsuleBadge(device.vehicleClass.classCode)
             rosterSlotSemanticCapsuleBadge(device.slot)
             rosterNeutralCapsuleBadge(rosterBehaviorRoleLabel(device.role))
@@ -921,12 +916,12 @@ private struct MissionWorkspaceView: View {
     @ViewBuilder
     private func rosterNeutralCapsuleBadge(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 10, weight: .semibold))
+            .font(GuardianTypography.font(.denseCaption10Semibold))
             .foregroundStyle(GuardianSemanticColors.neutralBadgeForeground)
             .lineLimit(1)
             .truncationMode(.tail)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
+            .padding(.horizontal, GuardianSpacing.chromeTightInset)
+            .padding(.vertical, GuardianSpacing.titleStackTight)
             .background(GuardianSemanticColors.neutralBadgeBackground)
             .clipShape(Capsule())
     }
@@ -946,11 +941,11 @@ private struct MissionWorkspaceView: View {
     private func rosterSlotSemanticCapsuleBadge(_ slot: MissionRosterSlotRole) -> some View {
         let pair = rosterSlotSemanticColors(slot)
         Text(slot.rawValue.capitalized)
-            .font(.system(size: 10, weight: .semibold))
+            .font(GuardianTypography.font(.denseCaption10Semibold))
             .foregroundStyle(pair.foreground)
             .lineLimit(1)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
+            .padding(.horizontal, GuardianSpacing.chromeTightInset)
+            .padding(.vertical, GuardianSpacing.titleStackTight)
             .background(pair.background)
             .clipShape(Capsule())
     }
@@ -1059,6 +1054,104 @@ private struct MissionWorkspaceView: View {
         return ctx
     }
 
+    @ViewBuilder
+    private func missionWorkspaceConfirmOverlayContent(_ kind: MissionWorkspacePresentedConfirm) -> some View {
+        Group {
+            switch kind {
+                case .deleteMission:
+                    GuardianConfirmDanger(
+                        title: "Delete mission?",
+                        message: "This will permanently remove this mission.",
+                        cancelTitle: "Cancel",
+                        confirmTitle: "Delete",
+                        onCancel: { missionWorkspacePresentedConfirm = nil },
+                        onConfirm: {
+                            missionWorkspacePresentedConfirm = nil
+                            onDelete(draft)
+                        }
+                    )
+                case .removeRosterDevice:
+                    GuardianConfirmDanger(
+                        title: "Remove vehicle?",
+                        message: rosterDeleteConfirmMessage,
+                        cancelTitle: "Cancel",
+                        confirmTitle: "Remove",
+                        onCancel: {
+                            pendingRosterDelete = nil
+                            missionWorkspacePresentedConfirm = nil
+                        },
+                        onConfirm: {
+                            if let pending = pendingRosterDelete {
+                                performRemoveRosterDeviceFromTask(taskIndex: pending.taskIndex, deviceId: pending.deviceId)
+                            }
+                            pendingRosterDelete = nil
+                            missionWorkspacePresentedConfirm = nil
+                        }
+                    )
+                case .deleteTask:
+                    GuardianConfirmDanger(
+                        title: "Delete task?",
+                        message: "This will remove the task and all its waypoints.",
+                        cancelTitle: "Cancel",
+                        confirmTitle: "Delete",
+                        onCancel: {
+                            pendingDeleteTaskIndex = nil
+                            missionWorkspacePresentedConfirm = nil
+                        },
+                        onConfirm: {
+                            if let idx = pendingDeleteTaskIndex,
+                               draft.routeMacro.tasks.indices.contains(idx) {
+                                draft.routeMacro.tasks.remove(at: idx)
+                                if editingTaskIndex == idx {
+                                    editingTaskIndex = nil
+                                    selectedWaypointIndex = nil
+                                }
+                                if selectedTaskIndex >= draft.routeMacro.tasks.count {
+                                    selectedTaskIndex = max(0, draft.routeMacro.tasks.count - 1)
+                                }
+                            }
+                            pendingDeleteTaskIndex = nil
+                            missionWorkspacePresentedConfirm = nil
+                            persistMissionToStoreNow()
+                        }
+                    )
+                case .closeLoop:
+                    GuardianConfirm(
+                        title: "Close loop for this task?",
+                        message: "Add the start waypoint to the end and mark this task as looped?",
+                        cancelTitle: "No",
+                        confirmTitle: "Close Loop",
+                        onCancel: {
+                            editingTaskIndex = nil
+                            selectedWaypointIndex = nil
+                            pendingCloseLoopTaskIndex = nil
+                            missionWorkspacePresentedConfirm = nil
+                            persistMissionToStoreNow()
+                            onToast("Task edit mode disabled", .info)
+                        },
+                        onConfirm: {
+                            guard let idx = pendingCloseLoopTaskIndex,
+                                  draft.routeMacro.tasks.indices.contains(idx) else {
+                                pendingCloseLoopTaskIndex = nil
+                                missionWorkspacePresentedConfirm = nil
+                                persistMissionToStoreNow()
+                                return
+                            }
+                            Task { @MainActor in
+                                await closeLoop(for: idx)
+                                editingTaskIndex = nil
+                                selectedWaypointIndex = nil
+                                onToast("Loop closed", .success)
+                                pendingCloseLoopTaskIndex = nil
+                                missionWorkspacePresentedConfirm = nil
+                                persistMissionToStoreNow()
+                            }
+                        }
+                    )
+                }
+        }
+    }
+
     private var rosterDeleteConfirmMessage: String {
         guard let pending = pendingRosterDelete,
               draft.routeMacro.tasks.indices.contains(pending.taskIndex) else {
@@ -1088,7 +1181,7 @@ private struct MissionWorkspaceView: View {
 
     private func requestRemoveRosterDevice(taskIndex: Int, deviceId: UUID) {
         pendingRosterDelete = RosterDeviceEditOverlayContext(taskIndex: taskIndex, deviceId: deviceId)
-        showingRosterDeleteConfirm = true
+        missionWorkspacePresentedConfirm = .removeRosterDevice
     }
 
     private func performRemoveRosterDeviceFromTask(taskIndex: Int, deviceId: UUID) {
@@ -1137,7 +1230,7 @@ private struct MissionWorkspaceView: View {
                         dismissMissionTaskSettingsOverlay()
                     }
                 )
-                .padding(16)
+                .padding(GuardianSpacing.md)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
             .frame(width: panelWidth)
@@ -1178,7 +1271,7 @@ private struct MissionWorkspaceView: View {
                             dismissRosterDeviceEditOverlay()
                         }
                     )
-                    .padding(16)
+                    .padding(GuardianSpacing.md)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
             }
@@ -1295,7 +1388,7 @@ private struct MissionWorkspaceView: View {
             let mapWidth = geo.size.width * 0.7
             let listWidth = geo.size.width * 0.3
             HStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
                     GuardianMapView(
                         model: mapModel,
                         contextMenuPolicy: GuardianMapContextMenuPolicy(
@@ -1412,10 +1505,10 @@ private struct MissionWorkspaceView: View {
 
                 ZStack(alignment: .topTrailing) {
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 12) {
-                            HStack(alignment: .center, spacing: 10) {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+                            HStack(alignment: .center, spacing: GuardianSpacing.denseGutter) {
                                 Text("Tasks")
-                                    .font(.system(size: 14, weight: .semibold))
+                                    .font(GuardianTypography.font(.sectionHeadingSemibold))
                                     .foregroundStyle(theme.textPrimary)
                                 Spacer(minLength: 0)
                                 GuardianThemedButton(
@@ -1433,7 +1526,7 @@ private struct MissionWorkspaceView: View {
                                     },
                                     label: {
                                         Image(systemName: "plus")
-                                            .font(.system(size: 14, weight: .semibold))
+                                            .font(GuardianTypography.font(.sectionHeadingSemibold))
                                     }
                                 )
                                 .help("Add task")
@@ -1441,7 +1534,7 @@ private struct MissionWorkspaceView: View {
 
                             if draft.routeMacro.tasks.isEmpty {
                                 Text("No tasks yet")
-                                    .font(.system(size: 12))
+                                    .font(GuardianTypography.font(.denseCaption12Regular))
                                     .foregroundStyle(theme.textSecondary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             } else {
@@ -1450,11 +1543,11 @@ private struct MissionWorkspaceView: View {
                                         configuration: GuardianCardConfiguration(
                                             border: .subtle,
                                             cornerRadius: GuardianCardLayout.cornerRadius,
-                                            bodyPadding: 14
+                                            bodyPadding: GuardianSpacing.cardBodyInset
                                         ),
                                         body: {
-                                            HStack(alignment: .center, spacing: 12) {
-                                                VStack(alignment: .leading, spacing: 6) {
+                                            HStack(alignment: .center, spacing: GuardianSpacing.sm) {
+                                                VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
                                                     TextField(
                                                         "Task name",
                                                         text: Binding(
@@ -1465,10 +1558,10 @@ private struct MissionWorkspaceView: View {
                                                         )
                                                     )
                                                     .textFieldStyle(.plain)
-                                                    .font(.system(size: 15, weight: .semibold))
+                                                    .font(GuardianTypography.font(.panelSecondaryHeadingSemibold))
                                                     .foregroundStyle(theme.textPrimary)
 
-                                                    VStack(alignment: .leading, spacing: 2) {
+                                                    VStack(alignment: .leading, spacing: GuardianSpacing.micro) {
                                                         Text("\(path.waypoints.count) wp")
                                                             .foregroundStyle(theme.textSecondary)
                                                         Text(distanceLabel(for: path))
@@ -1476,11 +1569,11 @@ private struct MissionWorkspaceView: View {
                                                         Text(durationLabel(for: path))
                                                             .foregroundStyle(theme.textSecondary)
                                                     }
-                                                    .font(.system(size: 12, weight: .medium))
+                                                    .font(GuardianTypography.font(.denseCaption12Medium))
                                                 }
                                                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                                                HStack(spacing: 8) {
+                                                HStack(spacing: GuardianSpacing.xs) {
                                                     GuardianThemedButton(
                                                         accent: .neutral,
                                                         surface: .outline,
@@ -1490,7 +1583,7 @@ private struct MissionWorkspaceView: View {
                                                         action: { presentTaskSettingsSidebar(taskIndex: index) },
                                                         label: {
                                                             Image(systemName: "gearshape.fill")
-                                                                .font(.system(size: 14, weight: .semibold))
+                                                                .font(GuardianTypography.font(.sectionHeadingSemibold))
                                                         }
                                                     )
                                                     .help("Task settings")
@@ -1514,7 +1607,7 @@ private struct MissionWorkspaceView: View {
                                                             },
                                                             label: {
                                                                 Image(systemName: "pencil")
-                                                                    .font(.system(size: 14, weight: .semibold))
+                                                                    .font(GuardianTypography.font(.sectionHeadingSemibold))
                                                             }
                                                         )
                                                         .help("Exit task edit mode")
@@ -1533,7 +1626,7 @@ private struct MissionWorkspaceView: View {
                                                             },
                                                             label: {
                                                                 Image(systemName: "pencil")
-                                                                    .font(.system(size: 14, weight: .semibold))
+                                                                    .font(GuardianTypography.font(.sectionHeadingSemibold))
                                                             }
                                                         )
                                                         .help("Edit route on map")
@@ -1545,10 +1638,13 @@ private struct MissionWorkspaceView: View {
                                                         size: .small,
                                                         shape: .cornered,
                                                         contentSizing: .squareToolbarCell,
-                                                        action: { pendingDeleteTaskIndex = index },
+                                                        action: {
+                                                            pendingDeleteTaskIndex = index
+                                                            missionWorkspacePresentedConfirm = .deleteTask
+                                                        },
                                                         label: {
                                                             Image(systemName: "trash")
-                                                                .font(.system(size: 14, weight: .semibold))
+                                                                .font(GuardianTypography.font(.sectionHeadingSemibold))
                                                         }
                                                     )
                                                     .help("Delete task")
@@ -1567,62 +1663,9 @@ private struct MissionWorkspaceView: View {
                                 }
                             }
                         }
-                        .alert("Delete task?", isPresented: Binding(
-                            get: { pendingDeleteTaskIndex != nil },
-                            set: { if !$0 { pendingDeleteTaskIndex = nil } }
-                        )) {
-                            Button("Cancel", role: .cancel) {}
-                            Button("Delete", role: .destructive) {
-                                if let idx = pendingDeleteTaskIndex,
-                                   draft.routeMacro.tasks.indices.contains(idx) {
-                                    draft.routeMacro.tasks.remove(at: idx)
-                                    if editingTaskIndex == idx {
-                                        editingTaskIndex = nil
-                                        selectedWaypointIndex = nil
-                                    }
-                                    if selectedTaskIndex >= draft.routeMacro.tasks.count {
-                                        selectedTaskIndex = max(0, draft.routeMacro.tasks.count - 1)
-                                    }
-                                }
-                                pendingDeleteTaskIndex = nil
-                                persistMissionToStoreNow()
-                            }
-                        } message: {
-                            Text("This will remove the task and all its waypoints.")
-                        }
-                        .alert("Close loop for this task?", isPresented: Binding(
-                            get: { pendingCloseLoopTaskIndex != nil },
-                            set: { if !$0 { pendingCloseLoopTaskIndex = nil } }
-                        )) {
-                            Button("No", role: .destructive) {
-                                editingTaskIndex = nil
-                                selectedWaypointIndex = nil
-                                pendingCloseLoopTaskIndex = nil
-                                persistMissionToStoreNow()
-                                onToast("Task edit mode disabled", .info)
-                            }
-                            Button("Close Loop") {
-                                guard let idx = pendingCloseLoopTaskIndex,
-                                      draft.routeMacro.tasks.indices.contains(idx) else {
-                                    pendingCloseLoopTaskIndex = nil
-                                    persistMissionToStoreNow()
-                                    return
-                                }
-                                Task { @MainActor in
-                                    await closeLoop(for: idx)
-                                    editingTaskIndex = nil
-                                    selectedWaypointIndex = nil
-                                    onToast("Loop closed", .success)
-                                    pendingCloseLoopTaskIndex = nil
-                                    persistMissionToStoreNow()
-                                }
-                            }
-                        } message: {
-                            Text("Add the start waypoint to the end and mark this task as looped?")
-                        }
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
+                    .padding(.horizontal, GuardianSpacing.md)
+                    .padding(.vertical, GuardianSpacing.sm)
                     .frame(maxWidth: .infinity)
 
                     if let taskIndex = editingTaskIndex,
@@ -1921,19 +1964,19 @@ private struct MissionWorkspaceView: View {
         let interiorCount = waypoints.filter { $0.pathRole == .segmentInterior }.count
         return VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
-                HStack(alignment: .center, spacing: 8) {
+                HStack(alignment: .center, spacing: GuardianSpacing.xs) {
                     Text("Waypoints")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(GuardianTypography.font(.sectionHeadingSemibold))
                         .foregroundStyle(theme.textPrimary)
                     Text("\(anchorCount)")
-                        .font(.system(size: 12, weight: .bold))
+                        .font(GuardianTypography.font(.missionRowKicker12Bold))
                         .foregroundStyle(theme.textSecondary)
                     if interiorCount > 0 {
                         Text("· +\(interiorCount) road")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(GuardianTypography.font(.formFieldLabel))
                             .foregroundStyle(theme.textTertiary)
                     }
-                    Spacer(minLength: 6)
+                    Spacer(minLength: GuardianSpacing.xsTight)
                     Picker("", selection: $pendingOutgoingSegmentKind) {
                         Text("Direct").tag(RouteSegmentKind.direct)
                         Text("Road").tag(RouteSegmentKind.followRoads)
@@ -1950,7 +1993,7 @@ private struct MissionWorkspaceView: View {
                         action: { openBulkWaypointEditor(taskIndex: taskIndex) },
                         label: {
                             Image(systemName: "gearshape")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
                         }
                     )
                     .help("Bulk edit all waypoints")
@@ -1963,13 +2006,13 @@ private struct MissionWorkspaceView: View {
                         action: { finishEditingTaskFromSidebar(taskIndex: taskIndex) },
                         label: {
                             Image(systemName: "checkmark")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
                         }
                     )
                     .help("Finish task editing")
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
+                .padding(.horizontal, GuardianSpacing.sm)
+                .padding(.vertical, GuardianSpacing.denseGutter)
                 .frame(maxWidth: .infinity)
                 .background(theme.backgroundRaised)
 
@@ -1980,7 +2023,7 @@ private struct MissionWorkspaceView: View {
 
             ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                         ForEach(MissionTaskPathSegmentEditing.anchorFlatIndices(in: draft.routeMacro.tasks[taskIndex].waypoints), id: \.self) { idx in
                             waypointEditorRow(taskIndex: taskIndex, idx: idx)
                                 .id("wp-\(idx)")
@@ -1989,7 +2032,7 @@ private struct MissionWorkspaceView: View {
                                 }
                         }
                     }
-                    .padding(12)
+                    .padding(GuardianSpacing.sm)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -2024,25 +2067,25 @@ private struct MissionWorkspaceView: View {
         let headingKey = headingFieldKey(taskIndex: taskIndex, waypointIndex: idx)
         let anchorOrdinal = draft.routeMacro.tasks[taskIndex].waypoints[...idx].filter { $0.pathRole == .anchor }.count
         let rowTitle = waypoint.pathRole == .anchor ? "Anchor \(anchorOrdinal)" : "Road sample \(idx + 1)"
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
             HStack {
                 Text(rowTitle)
-                    .font(.system(size: 13, weight: .bold))
+                    .font(GuardianTypography.font(.missionCardEmphasis13Bold))
                     .foregroundStyle(theme.textPrimary)
                 Spacer()
                 if isSelected {
                     Text("Selected")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(GuardianTypography.font(.missionMicro10Bold))
                         .foregroundStyle(GuardianSemanticColors.infoForeground)
                 }
             }
             Text(waypointPathRoleLabel(waypoint))
-                .font(.system(size: 10, weight: .medium))
+                .font(GuardianTypography.font(.denseCaption10Medium))
                 .foregroundStyle(theme.textTertiary)
 
-            HStack(spacing: 8) {
+            HStack(spacing: GuardianSpacing.xs) {
                 Text("Altitude")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(GuardianTypography.font(.formFieldLabel))
                     .foregroundStyle(theme.textSecondary)
                     .frame(width: 78, alignment: .leading)
                 numericInput(
@@ -2086,9 +2129,9 @@ private struct MissionWorkspaceView: View {
                 .frame(width: 96)
             }
 
-            HStack(spacing: 8) {
+            HStack(spacing: GuardianSpacing.xs) {
                 Text("Heading")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(GuardianTypography.font(.formFieldLabel))
                     .foregroundStyle(theme.textSecondary)
                     .frame(width: 78, alignment: .leading)
                 Picker(
@@ -2136,9 +2179,9 @@ private struct MissionWorkspaceView: View {
                 .disabled(waypoint.headingPreset != nil)
             }
 
-            HStack(spacing: 8) {
+            HStack(spacing: GuardianSpacing.xs) {
                 Text("Delay")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(GuardianTypography.font(.formFieldLabel))
                     .foregroundStyle(theme.textSecondary)
                     .frame(width: 78, alignment: .leading)
                 numericInput(
@@ -2168,9 +2211,9 @@ private struct MissionWorkspaceView: View {
                 Spacer()
             }
 
-            HStack(spacing: 8) {
+            HStack(spacing: GuardianSpacing.xs) {
                 Text("Action")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(GuardianTypography.font(.formFieldLabel))
                     .foregroundStyle(theme.textSecondary)
                     .frame(width: 78, alignment: .leading)
                 Picker(
@@ -2193,9 +2236,9 @@ private struct MissionWorkspaceView: View {
                 .frame(maxWidth: .infinity)
             }
 
-            HStack(spacing: 8) {
+            HStack(spacing: GuardianSpacing.xs) {
                 Text("Camera")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(GuardianTypography.font(.formFieldLabel))
                     .foregroundStyle(theme.textSecondary)
                     .frame(width: 78, alignment: .leading)
                 Picker(
@@ -2244,15 +2287,15 @@ private struct MissionWorkspaceView: View {
 
             HStack {
                 Text("Transition (to next waypoint)")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(GuardianTypography.font(.denseCaption10Semibold))
                     .foregroundStyle(.gray.opacity(0.9))
                 Spacer()
             }
-            .padding(.top, 4)
+            .padding(.top, GuardianSpacing.xxs)
 
-            HStack(spacing: 8) {
+            HStack(spacing: GuardianSpacing.xs) {
                 Text("Transition")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(GuardianTypography.font(.formFieldLabel))
                     .foregroundStyle(theme.textSecondary)
                     .frame(width: 78, alignment: .leading)
                 Picker(
@@ -2295,9 +2338,9 @@ private struct MissionWorkspaceView: View {
                 .frame(width: 82)
             }
 
-            HStack(spacing: 8) {
+            HStack(spacing: GuardianSpacing.xs) {
                 Text("Cam During")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(GuardianTypography.font(.formFieldLabel))
                     .foregroundStyle(theme.textSecondary)
                     .frame(width: 78, alignment: .leading)
                 Picker(
@@ -2358,7 +2401,7 @@ private struct MissionWorkspaceView: View {
                     Image(systemName: "trash")
                         .appIconGlyph()
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.borderedProminent).guardianPointerOnHover()
                 .tint(.red)
                 .uniformIconButton()
             }
@@ -2371,7 +2414,7 @@ private struct MissionWorkspaceView: View {
             applyTransitionCameraMode(taskIndex: taskIndex, waypointIndex: idx)
         }
         .textFieldStyle(.roundedBorder)
-        .padding(10)
+        .padding(GuardianSpacing.denseGutter)
         .background(isSelected ? Color.blue.opacity(0.12) : Color.white.opacity(0.03))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(
@@ -2626,6 +2669,7 @@ private struct MissionWorkspaceView: View {
         let path = draft.routeMacro.tasks[taskIndex]
         if shouldOfferCloseLoop(path) {
             pendingCloseLoopTaskIndex = taskIndex
+            missionWorkspacePresentedConfirm = .closeLoop
             return
         }
         editingTaskIndex = nil
@@ -2711,7 +2755,7 @@ private struct MissionWorkspaceView: View {
         Modal(
             title: "Bulk Edit Waypoints",
             headerActions: {
-                HStack(spacing: 8) {
+                HStack(spacing: GuardianSpacing.xs) {
                     GuardianThemedButton(
                         title: "Cancel",
                         accent: .danger,
@@ -2727,7 +2771,7 @@ private struct MissionWorkspaceView: View {
             },
             bodyContent: {
                 ScrollView {
-                    Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 10) {
+                    Grid(alignment: .leading, horizontalSpacing: GuardianSpacing.denseGutter, verticalSpacing: GuardianSpacing.denseGutter) {
                     GridRow {
                         bulkRowLabel("Altitude")
                         numericInput(
@@ -2883,7 +2927,7 @@ private struct MissionWorkspaceView: View {
 
                     GridRow {
                         Text("Transition (to next waypoint)")
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(GuardianTypography.font(.sectionHeadingSemibold))
                             .foregroundStyle(.gray.opacity(0.9))
                             .gridCellColumns(4)
                     }
@@ -2968,7 +3012,7 @@ private struct MissionWorkspaceView: View {
 
     private func bulkRowLabel(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 11, weight: .semibold))
+            .font(GuardianTypography.font(.formFieldLabel))
                 .foregroundStyle(theme.textSecondary)
             .frame(width: 132, alignment: .leading)
     }
@@ -2990,7 +3034,7 @@ private struct MissionRosterDeviceSettingsSidebar: View {
     @Environment(\.colorScheme) private var colorScheme
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
-    private var fieldRowLabelFont: Font { .system(size: 13) }
+    private var fieldRowLabelFont: Font { GuardianTypography.font(.denseSubsection13Regular) }
 
     private var slotNeedsLeader: Bool {
         device.slot == .wingman || device.slot == .reserve
@@ -3001,11 +3045,11 @@ private struct MissionRosterDeviceSettingsSidebar: View {
         label: String,
         @ViewBuilder trailing: () -> Trailing
     ) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
+        HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.sm) {
             Text(label)
                 .font(fieldRowLabelFont)
                 .foregroundStyle(theme.textPrimary)
-            Spacer(minLength: 12)
+            Spacer(minLength: GuardianSpacing.sm)
             trailing()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -3013,7 +3057,7 @@ private struct MissionRosterDeviceSettingsSidebar: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.sectionStack) {
                 rosterSettingsSection("Callsign") {
                     TextField("Callsign", text: $device.name)
                         .textFieldStyle(.roundedBorder)
@@ -3092,11 +3136,11 @@ private struct MissionRosterDeviceSettingsSidebar: View {
         _ title: String,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
             Text(title)
-                .font(.system(size: 13, weight: .semibold))
+                .font(GuardianTypography.font(.subsectionTitleSemibold))
                 .foregroundStyle(theme.textPrimary)
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                 content()
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -3120,18 +3164,18 @@ private struct MissionTaskSettingsSidebar: View {
         task.regularity == .continuousWithDelay
     }
 
-    private var fieldRowLabelFont: Font { .system(size: 13) }
+    private var fieldRowLabelFont: Font { GuardianTypography.font(.denseSubsection13Regular) }
 
     @ViewBuilder
     private func missionTaskSettingsFieldRow<Trailing: View>(
         label: String,
         @ViewBuilder trailing: () -> Trailing
     ) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
+        HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.sm) {
             Text(label)
                 .font(fieldRowLabelFont)
                 .foregroundStyle(theme.textPrimary)
-            Spacer(minLength: 12)
+            Spacer(minLength: GuardianSpacing.sm)
             trailing()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -3196,7 +3240,7 @@ private struct MissionTaskSettingsSidebar: View {
         unitSuffix: String? = nil
     ) -> some View {
         missionTaskSettingsFieldRow(label: label) {
-            HStack(spacing: 6) {
+            HStack(spacing: GuardianSpacing.xsTight) {
                 Stepper(value: value, in: range) {
                     Text(String(value.wrappedValue))
                         .font(fieldRowLabelFont)
@@ -3252,7 +3296,7 @@ private struct MissionTaskSettingsSidebar: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.sectionStack) {
                 settingsSection("") {
                     missionTaskSettingsFieldRow(label: "Name") {
                         TextField("Task name", text: $task.name)
@@ -3280,11 +3324,11 @@ private struct MissionTaskSettingsSidebar: View {
         _ title: String,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
             Text(title)
-                .font(.system(size: 13, weight: .semibold))
+                .font(GuardianTypography.font(.subsectionTitleSemibold))
                 .foregroundStyle(theme.textPrimary)
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                 content()
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -3299,7 +3343,7 @@ private struct MissionCardMetricBadges: View {
     let vehicleCount: Int
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: GuardianSpacing.xsTight) {
             GuardianBadge(
                 text: "\(taskCount) tasks",
                 accent: .secondary,
@@ -3325,7 +3369,7 @@ private struct MissionCardActionButtons: View {
     let onDelete: () -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: GuardianSpacing.xsTight) {
             GuardianThemedButton(
                 accent: .neutral,
                 surface: .outline,
@@ -3335,7 +3379,7 @@ private struct MissionCardActionButtons: View {
                 action: onArchiveToggle,
                 label: {
                     Image(systemName: isArchived ? "archivebox.fill" : "archivebox")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
                 }
             )
             .help(isArchived ? "Unarchive mission" : "Archive mission")
@@ -3349,7 +3393,7 @@ private struct MissionCardActionButtons: View {
                 action: onClone,
                 label: {
                     Image(systemName: "doc.on.doc")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
                 }
             )
             .help("Clone mission")
@@ -3363,7 +3407,7 @@ private struct MissionCardActionButtons: View {
                 action: onDelete,
                 label: {
                     Image(systemName: "trash")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
                 }
             )
             .help("Delete mission")
@@ -3387,11 +3431,11 @@ private struct MissionTypeCapsuleBadge: View {
             fg = GuardianSemanticColors.infoForeground
         }
         return Text(type.rawValue.capitalized)
-            .font(.system(size: 11, weight: .semibold))
+            .font(GuardianTypography.font(.formFieldLabel))
             .foregroundStyle(fg)
             .lineLimit(1)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            .padding(.horizontal, GuardianSpacing.xs)
+            .padding(.vertical, GuardianSpacing.xxs)
             .background(bg)
             .clipShape(Capsule())
     }
@@ -3411,23 +3455,23 @@ private struct MissionRow: View {
 
     var body: some View {
         GuardianCard(
-            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 10, bodyPadding: 12),
+            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 10, bodyPadding: GuardianSpacing.sm),
             body: {
-                HStack(alignment: .center, spacing: 10) {
+                HStack(alignment: .center, spacing: GuardianSpacing.denseGutter) {
                     MissionCardThumbnailView(mission: mission, fixedLength: 52)
 
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                         Text(mission.name)
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(GuardianTypography.font(.panelSecondaryHeadingSemibold))
                             .foregroundStyle(theme.textPrimary)
                             .lineLimit(1)
 
                         Text(mission.description.isEmpty ? "No description" : mission.description)
-                            .font(.system(size: 11))
+                            .font(GuardianTypography.font(.denseFootnoteRegular))
                             .foregroundStyle(theme.textSecondary)
                             .lineLimit(1)
 
-                        HStack(spacing: 6) {
+                        HStack(spacing: GuardianSpacing.xsTight) {
                             if mission.isArchived {
                                 GuardianBadge(
                                     text: "Archived",
@@ -3442,7 +3486,7 @@ private struct MissionRow: View {
                         }
                     }
 
-                    Spacer(minLength: 6)
+                    Spacer(minLength: GuardianSpacing.xsTight)
 
                     MissionCardActionButtons(
                         isArchived: mission.isArchived,
@@ -3476,19 +3520,19 @@ private struct MissionCard: View {
 
     var body: some View {
         GuardianCard(
-            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 10, bodyPadding: 14),
+            configuration: GuardianCardConfiguration(border: .subtle, cornerRadius: 10, bodyPadding: GuardianSpacing.cardBodyInset),
             media: {
                 MissionCardThumbnailView(mission: mission, gridBannerBarHeight: 120, gridThumbnailSide: 100)
             },
             body: {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
                     Text(mission.name)
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(GuardianTypography.font(.windowHeading16Semibold))
                         .foregroundStyle(theme.textPrimary)
                         .lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
 
-                    HStack(alignment: .center, spacing: 6) {
+                    HStack(alignment: .center, spacing: GuardianSpacing.xsTight) {
                         if mission.isArchived {
                             GuardianBadge(
                                 text: "Archived",
@@ -3500,7 +3544,7 @@ private struct MissionCard: View {
                         }
                         MissionTypeCapsuleBadge(type: mission.type)
                         MissionCardMetricBadges(taskCount: taskCount, vehicleCount: vehicleCount)
-                        Spacer(minLength: 4)
+                        Spacer(minLength: GuardianSpacing.xxs)
                         MissionCardActionButtons(
                             isArchived: mission.isArchived,
                             onArchiveToggle: onArchiveToggle,
@@ -3510,7 +3554,7 @@ private struct MissionCard: View {
                     }
 
                     Text(mission.description.isEmpty ? "No description" : mission.description)
-                        .font(.system(size: 12))
+                        .font(GuardianTypography.font(.denseCaption12Regular))
                         .foregroundStyle(theme.textSecondary)
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -3547,7 +3591,7 @@ private struct AddMissionSheet: View {
         Modal(
             title: "New Mission",
             headerActions: {
-                HStack(spacing: 8) {
+                HStack(spacing: GuardianSpacing.xs) {
                     GuardianThemedButton(
                         title: "Cancel",
                         accent: .danger,
@@ -3576,7 +3620,7 @@ private struct AddMissionSheet: View {
                 }
             },
             bodyContent: {
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.cardBodyInset) {
                     TextField("Name", text: $name)
                         .textFieldStyle(.roundedBorder)
 
@@ -3626,7 +3670,7 @@ private struct CloneMissionSheet: View {
         Modal(
             title: "Clone Mission",
             headerActions: {
-                HStack(spacing: 8) {
+                HStack(spacing: GuardianSpacing.xs) {
                     GuardianThemedButton(
                         title: "Cancel",
                         accent: .danger,
@@ -3647,16 +3691,16 @@ private struct CloneMissionSheet: View {
                 }
             },
             bodyContent: {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                     Text("Source mission")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(GuardianTypography.font(.inlineNoticeTitle))
                         .foregroundStyle(theme.textSecondary)
                     Text(sourceMissionName)
-                        .font(.system(size: 14, weight: .medium))
+                        .font(GuardianTypography.relativeFixed(size: 14, weight: .medium, relativeTo: .subheadline))
                         .foregroundStyle(theme.textPrimary)
 
                     Text("New mission name")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(GuardianTypography.font(.inlineNoticeTitle))
                         .foregroundStyle(theme.textSecondary)
                     TextField("Mission name", text: $cloneName)
                         .textFieldStyle(.roundedBorder)
@@ -3689,11 +3733,11 @@ private struct AutoGrowingTextEditor: View {
             if text.isEmpty {
                 Text(placeholder)
                     .foregroundStyle(theme.textTertiary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 8)
+                    .padding(.horizontal, GuardianSpacing.xs)
+                    .padding(.vertical, GuardianSpacing.xs)
             }
             TextEditor(text: $text)
-                .font(.system(size: 14))
+                .font(GuardianTypography.relativeFixed(size: 14, weight: .regular, relativeTo: .callout))
                 .foregroundStyle(theme.textPrimary)
                 .scrollContentBackground(.hidden)
                 .frame(height: clampedHeight)
@@ -3707,10 +3751,10 @@ private struct AutoGrowingTextEditor: View {
                 )
                 .background(
                     Text(text.isEmpty ? " " : text + "\n")
-                        .font(.system(size: 14))
+                        .font(GuardianTypography.relativeFixed(size: 14, weight: .regular, relativeTo: .callout))
                         .foregroundStyle(.clear)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
+                        .padding(.horizontal, GuardianSpacing.sm)
+                        .padding(.vertical, GuardianSpacing.xs)
                         .background(
                             GeometryReader { proxy in
                                 Color.clear.preference(

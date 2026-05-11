@@ -13,44 +13,44 @@ struct MissionRosterVehiclePickerSidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(alignment: .center, spacing: 12) {
+            HStack(alignment: .center, spacing: GuardianSpacing.sm) {
                 Text("Assign vehicle")
-                    .font(.system(size: 16, weight: .bold))
+                    .font(GuardianTypography.font(.hudTitle16Bold))
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)
-                Spacer(minLength: 8)
+                Spacer(minLength: GuardianSpacing.xs)
                 Button {
                     onClose()
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 18, weight: .medium))
+                        .font(GuardianTypography.font(.heroGlyph18Medium))
                         .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(theme.textSecondary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(GuardianPointerPlainButtonStyle())
                 .keyboardShortcut(.cancelAction)
                 .help("Close")
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
+            .padding(.horizontal, GuardianSpacing.md)
+            .padding(.vertical, GuardianSpacing.cardBodyInset)
             .background(theme.backgroundElevated)
 
             if vehicles.isEmpty {
                 Spacer()
                 Text("No vehicles in the fleet. Add a live link or spawn a sim from Vehicles.")
-                    .font(.system(size: 13))
+                    .font(GuardianTypography.font(.denseSubsection13Regular))
                     .foregroundStyle(theme.textSecondary)
                     .multilineTextAlignment(.center)
-                    .padding(24)
+                    .padding(GuardianSpacing.xl)
                 Spacer()
             } else {
                 ScrollView {
-                    VStack(spacing: 10) {
+                    VStack(spacing: GuardianSpacing.denseGutter) {
                         ForEach(vehicles) { vehicle in
                             vehicleRow(vehicle)
                         }
                     }
-                    .padding(16)
+                    .padding(GuardianSpacing.md)
                 }
             }
         }
@@ -64,32 +64,32 @@ struct MissionRosterVehiclePickerSidebar: View {
                 onSelect(vehicle)
             }
         } label: {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                 ZStack(alignment: .topTrailing) {
-                    HStack(spacing: 14) {
+                    HStack(spacing: GuardianSpacing.cardBodyInset) {
                         vehicleThumbnail(vehicle)
                             .frame(width: 72, height: 56)
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                             .opacity(enabled ? 1 : 0.45)
 
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                             Text(vehicle.title)
-                                .font(.system(size: 15, weight: .semibold))
+                                .font(GuardianTypography.font(.panelSecondaryHeadingSemibold))
                                 .foregroundStyle(enabled ? theme.textPrimary : theme.textSecondary)
                                 .multilineTextAlignment(.leading)
                             Text(vehicle.lifecycleStatus.mediumLabel)
-                                .font(.system(size: 11, weight: .semibold))
+                                .font(GuardianTypography.font(.formFieldLabel))
                                 .foregroundStyle(vehicle.lifecycleStatus.color.uiColor.opacity(enabled ? 0.95 : 0.55))
                                 .lineLimit(1)
                             Text(vehicle.vehicleShortID)
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .font(GuardianTypography.font(.telemetryMono10Medium))
                                 .foregroundStyle(theme.textSecondary)
                                 .lineLimit(1)
                         }
                         Spacer(minLength: 0)
                     }
 
-                    HStack(spacing: 8) {
+                    HStack(spacing: GuardianSpacing.xs) {
                         FleetAutopilotStackBadge(stack: vehicle.autopilotStack)
                         FleetLiveSimBadge(isSimulation: vehicle.isSimulation)
                     }
@@ -97,12 +97,12 @@ struct MissionRosterVehiclePickerSidebar: View {
 
                 if !enabled, let reason, !reason.isEmpty {
                     Text(reason)
-                        .font(.system(size: 10, weight: .medium))
+                        .font(GuardianTypography.font(.denseCaption10Medium))
                         .foregroundStyle(GuardianSemanticColors.warningStroke)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .padding(12)
+            .padding(GuardianSpacing.sm)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(theme.backgroundRaised)
             .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -111,7 +111,7 @@ struct MissionRosterVehiclePickerSidebar: View {
                     .strokeBorder(vehicle.lifecycleStatus.color.uiColor.opacity(enabled ? 0.7 : 0.25), lineWidth: 1)
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(GuardianPointerPlainButtonStyle())
         .disabled(!enabled)
     }
 
@@ -127,7 +127,7 @@ struct MissionRosterVehiclePickerSidebar: View {
                     endPoint: .bottomTrailing
                 )
                 Image(systemName: "antenna.radiowaves.left.and.right")
-                    .font(.system(size: 28, weight: .medium))
+                    .font(GuardianTypography.font(.heroGlyph28Medium))
                     .foregroundStyle(theme.textPrimary.opacity(0.35))
             }
         }

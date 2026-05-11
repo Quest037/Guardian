@@ -1,0 +1,54 @@
+{
+  "_comment": "Barometer ground-pressure reset. Vehicle must be on the ground and still; the autopilot zeroes the baro reference at the current altitude so subsequent climb / descent reports are relative to launch.\n\nFast procedure (typically < 5s). The two recoverable failure kinds both route to `holdStill` because motion / vibration is the only operator-side cause the recipe can prompt for — pressure noise from wind or strong HVAC is environmental and surfaces through the `any` matcher with the underlying detail.\n\nOverall budget is 30s — generous for the procedure plus a single retry of operator setup.\nAuto-retries (timeout / noSession / autopilotBusy) are handled by the catalogue's default retry policy on the dispatch itself, so the matchers below only see the *final* outcome.",
+  "entryStepID": "calibrate",
+  "overallBudgetSeconds": 30,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "calibrate",
+      "command": "command.fleet.vehicle.do.calibrate.baro",
+      "matchers": [
+        {
+          "when": { "kind": "success" },
+          "then": { "kind": "succeed" }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDeclined" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "holdStill"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDidNotConverge" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "holdStill"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "cancelled" },
+          "then": {
+            "kind": "fail",
+            "detail": "Barometer calibration cancelled by operator."
+          }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "fail",
+            "detail": "Barometer calibration failed with an unhandled outcome — see the audit trace for the underlying response."
+          }
+        }
+      ]
+    }
+  ]
+}

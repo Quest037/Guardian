@@ -24,7 +24,7 @@ struct FleetVehicleGridCard: View {
         GuardianCardConfiguration(
             border: .none,
             cornerRadius: GuardianCardLayout.cornerRadius,
-            bodyPadding: 12
+            bodyPadding: GuardianSpacing.sm
         )
     }
 
@@ -47,7 +47,7 @@ struct FleetVehicleGridCard: View {
                             FleetLiveSimBadge(isSimulation: true)
                         }
                     }
-                    .padding(8)
+                    .padding(GuardianSpacing.xs)
                 }
             },
             body: {
@@ -84,7 +84,7 @@ struct FleetVehicleGridCard: View {
                     endPoint: .bottomTrailing
                 )
                 Image(systemName: "antenna.radiowaves.left.and.right")
-                    .font(.system(size: 36, weight: .medium))
+                    .font(GuardianTypography.relativeFixed(size: 36, weight: .medium, relativeTo: .title2))
                     .foregroundStyle(theme.textPrimary.opacity(0.35))
             }
         }
@@ -92,16 +92,16 @@ struct FleetVehicleGridCard: View {
 
     @ViewBuilder
     private var liveStatusRow: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
             statusBadge
             if let lifecycleStatus {
                 Text(lifecycleStatus.sentence)
-                    .font(.system(size: 10))
+                    .font(GuardianTypography.font(.denseCaption10Regular))
                     .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let onCalibration {
-                HStack(spacing: 8) {
+                HStack(spacing: GuardianSpacing.xs) {
                     GuardianThemedButton(
                         accent: .neutral,
                         surface: .outline,
@@ -111,27 +111,27 @@ struct FleetVehicleGridCard: View {
                         action: onCalibration,
                         label: {
                             Image(systemName: "waveform.path.ecg.rectangle")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
                         }
                     )
                     .help("Open Vehicle Inspector (calibration, preflight, telemetry)")
                 }
             }
         }
-        .padding(.top, 2)
+        .padding(.top, GuardianSpacing.micro)
     }
 
     @ViewBuilder
     private var simStatusRow: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
             statusBadge
             if let lifecycleStatus {
                 Text(lifecycleStatus.sentence)
-                    .font(.system(size: 10))
+                    .font(GuardianTypography.font(.denseCaption10Regular))
                     .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            HStack(spacing: 8) {
+            HStack(spacing: GuardianSpacing.xs) {
                 if let onCalibration {
                     GuardianThemedButton(
                         accent: .neutral,
@@ -142,7 +142,7 @@ struct FleetVehicleGridCard: View {
                         action: onCalibration,
                         label: {
                             Image(systemName: "waveform.path.ecg.rectangle")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
                         }
                     )
                     .help("Open Vehicle Inspector (calibration, preflight, telemetry)")
@@ -157,7 +157,7 @@ struct FleetVehicleGridCard: View {
                         action: clone,
                         label: {
                             Image(systemName: "doc.on.doc")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
                         }
                     )
                     .help("Spawn another simulator with this vehicle preset")
@@ -173,7 +173,7 @@ struct FleetVehicleGridCard: View {
                         action: stop,
                         label: {
                             Image(systemName: "trash")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
                         }
                     )
                     .help(stopSimDisabledReason ?? "Stop the simulator process.")
@@ -188,38 +188,38 @@ struct FleetVehicleGridCard: View {
                         action: dismiss,
                         label: {
                             Image(systemName: "trash")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
                         }
                     )
                     .help(stopSimDisabledReason ?? "Remove this sim row from the grid.")
                 }
             }
         }
-        .padding(.top, 2)
+        .padding(.top, GuardianSpacing.micro)
     }
 
     @ViewBuilder
     private var statusBadge: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.xs) {
             if let lifecycleStatus {
                 Text(lifecycleStatus.compactTwoWordStatus)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(GuardianTypography.font(.formFieldLabel))
                     .foregroundStyle(lifecycleStatus.color.uiColor.opacity(0.95))
             } else if simTelemetryIsLive {
                 Text("Telemetry live")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(GuardianTypography.font(.formFieldLabel))
                     .foregroundStyle(Color.green.opacity(0.95))
             } else {
                 Text("Link connecting")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(GuardianTypography.font(.formFieldLabel))
                     .foregroundStyle(Color.yellow.opacity(0.95))
             }
 
-            Spacer(minLength: 6)
+            Spacer(minLength: GuardianSpacing.xsTight)
 
             if let displayShortID = vehicleModel?.displayShortID, !displayShortID.isEmpty {
                 Text(displayShortID)
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .font(GuardianTypography.font(.telemetryMono10Semibold))
                     .foregroundStyle(theme.textSecondary.opacity(0.95))
                     .lineLimit(1)
             }

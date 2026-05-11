@@ -1,0 +1,35 @@
+---
+description: When the operator says (save for next version), append a concise structured entry to NEXTVERSION.md
+alwaysApply: true
+---
+
+# Next version capture
+
+When the operator’s message **includes the phrase** `(save for next version)` — case-insensitive; also treat **`save for next version`** without parentheses as the same intent — they are asking to **persist the idea currently under discussion** into the repo for a later release, not to implement it now.
+
+## What to do
+
+1. **Open or create** `NEXTVERSION.md` at the **repository root** (alongside `README.md` and `TODO.md`).
+2. **Append** one new capture block at the **end** of the file (after the horizontal rule / comment marker). Do **not** remove or rewrite existing captures unless the operator explicitly asks to edit or dedupe them.
+3. Write **only** what was being discussed in that turn (and immediate thread context): no unrelated polish, no drive-by README edits.
+
+## Entry shape (required)
+
+Use this structure every time — keep it **short** (roughly one screenful max per capture; prefer tighter).
+
+```markdown
+## YYYY-MM-DD — <short title>
+
+- **Idea:** One or two sentences: what to do or explore later.
+- **Context:** Optional. Paths, subsystems, or conversation anchor (only if it helps the next reader).
+- **Notes:** Optional. Open questions, constraints, or “do not forget” items.
+```
+
+- **`YYYY-MM-DD`:** Use the **user_info “Today’s date”** field from the session when available; otherwise use the actual calendar date you infer is correct for the conversation.
+- **Title:** Derive from the topic under discussion (not the literal phrase “save for next version”).
+- If the operator packs **several** distinct ideas into one save request, use **one `##` block** with multiple bullets under **Idea** (or numbered sub-bullets), still concise.
+
+## What not to do
+
+- Do not move captures into `TODO.md` or `README.md` unless the operator asks.
+- Do not implement the deferred work as part of this capture unless they also asked you to build it.

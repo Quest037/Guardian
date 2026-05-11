@@ -246,8 +246,8 @@ struct GuardianMapView: View {
                     // (touch-sized: 2x30 + 1pt divider + 2x2pt border = 65pt,
                     // plus the 10pt outer margin = 75pt zoom-bar bottom) so
                     // the new buttons "carry on" from the same column.
-                    .padding(.leading, 10)
-                    .padding(.top, 85)
+                    .padding(.leading, GuardianSpacing.denseGutter)
+                    .padding(.top, GuardianSpacing.mapAttributionClearance)
                     .allowsHitTesting(true)
             }
         }
@@ -281,12 +281,12 @@ private struct GuardianMapToolbarOverlay: View {
                 }
                 Button(action: btn.action) {
                     Image(systemName: btn.systemImage)
-                        .font(.system(size: Self.iconSize, weight: .semibold))
+                        .font(GuardianTypography.relativeFixed(size: Self.iconSize, weight: .semibold, relativeTo: .subheadline))
                         .foregroundStyle(Color.black.opacity(0.85))
                         .frame(width: Self.buttonSize, height: Self.buttonSize)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(GuardianPointerPlainButtonStyle())
                 .help(btn.help)
             }
         }
@@ -296,7 +296,7 @@ private struct GuardianMapToolbarOverlay: View {
             RoundedRectangle(cornerRadius: Self.cornerRadius)
                 .strokeBorder(Self.outerBorderColor, lineWidth: 2)
         )
-        .shadow(color: Color.black.opacity(0.22), radius: 1, x: 0, y: 1)
+        .guardianDropShadow(GuardianElevation.mapToolbarBezel)
     }
 
     private var visibleButtons: [GuardianMapToolbarButton] {

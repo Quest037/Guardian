@@ -1,0 +1,54 @@
+{
+  "_comment": "Interactive RC channel calibration. Operator powers on the transmitter, binds the receiver, then exercises every stick / switch through its full physical range so the autopilot can learn the min / max / centre PWM endpoints per channel.\n\nBoth recoverable failure kinds resolve to `connectExternalSensor` — interpretation in this recipe's context: 'verify the RC receiver is connected, the transmitter is on and bound, and the operator is exercising the full stick range.' Stage D's prompt router renders the kind together with the recipe name, so the operator gets a context-appropriate message without needing a recipe-specific kind.\n\nOverall budget is 180s — manual exercising of every stick / switch takes 1-2 minutes plus operator setup.",
+  "entryStepID": "calibrate",
+  "overallBudgetSeconds": 180,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "calibrate",
+      "command": "command.fleet.vehicle.do.calibrate.rc",
+      "matchers": [
+        {
+          "when": { "kind": "success" },
+          "then": { "kind": "succeed" }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDeclined" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "connectExternalSensor"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDidNotConverge" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "connectExternalSensor"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "cancelled" },
+          "then": {
+            "kind": "fail",
+            "detail": "RC calibration cancelled by operator."
+          }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "fail",
+            "detail": "RC calibration failed with an unhandled outcome — see the audit trace for the underlying response."
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -4,10 +4,10 @@ import SwiftUI
 
 /// Padding and rhythm for ``Modal``. Use these from the Theme plugin docs and new sheets; do not invent parallel header/body metrics.
 enum GuardianModalLayout {
-    static let headerHorizontalPadding: CGFloat = 20
-    static let headerTopPadding: CGFloat = 16
-    static let headerBottomPadding: CGFloat = 12
-    static let bodyPadding: CGFloat = 16
+    static let headerHorizontalPadding: CGFloat = GuardianSpacing.lg
+    static let headerTopPadding: CGFloat = GuardianSpacing.md
+    static let headerBottomPadding: CGFloat = GuardianSpacing.sm
+    static let bodyPadding: CGFloat = GuardianSpacing.md
 }
 
 // MARK: - Header chrome
@@ -37,19 +37,19 @@ struct GuardianModalHeaderBar<HeaderActions: View>: View {
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
+        HStack(alignment: .center, spacing: GuardianSpacing.sm) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                 Text(title)
                     .font(.title3.bold())
                     .foregroundStyle(theme.textPrimary)
                 if let subtitle, !subtitle.isEmpty {
                     Text(subtitle)
-                        .font(.system(size: 12))
+                        .font(GuardianTypography.font(.denseCaption12Regular))
                         .foregroundStyle(theme.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            Spacer(minLength: 8)
+            Spacer(minLength: GuardianSpacing.xs)
             headerActions()
         }
         .padding(.horizontal, GuardianModalLayout.headerHorizontalPadding)

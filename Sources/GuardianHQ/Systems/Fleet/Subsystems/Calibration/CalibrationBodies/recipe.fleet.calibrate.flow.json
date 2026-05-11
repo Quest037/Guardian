@@ -1,0 +1,39 @@
+{
+  "_comment": "Optical-flow sensor calibration. Both stack converters return `.notImplemented` in v1: AP `FLOW_*` and PX4 `SENS_FLOW_*` / `EKF2_OF_*` overlap only on mounting-position params; per-axis scalers, yaw orientation, sensor type, and fusion delay are stack-specific.\n\nRegistered for discoverability — Vehicle Inspector lists it; runtime returns a precise 'not implemented in this app version' message.",
+  "entryStepID": "calibrate",
+  "overallBudgetSeconds": 30,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "calibrate",
+      "command": "command.fleet.vehicle.do.calibrate.flow",
+      "matchers": [
+        {
+          "when": { "kind": "success" },
+          "then": { "kind": "succeed" }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "notImplemented" },
+          "then": {
+            "kind": "fail",
+            "detail": "Optical-flow calibration is not implemented in this app version. AP `FLOW_*` and PX4 `SENS_FLOW_*` / `EKF2_OF_*` require a per-stack authoring pass."
+          }
+        },
+        {
+          "when": { "kind": "cancelled" },
+          "then": {
+            "kind": "fail",
+            "detail": "Optical-flow calibration cancelled by operator."
+          }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "fail",
+            "detail": "Optical-flow calibration failed with an unhandled outcome — see the audit trace for the underlying response."
+          }
+        }
+      ]
+    }
+  ]
+}

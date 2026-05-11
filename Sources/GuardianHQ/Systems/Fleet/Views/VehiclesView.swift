@@ -17,20 +17,34 @@ struct VehiclesView: View {
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
+    private var pendingSimStopConfirmMessage: String {
+        guard let pending = pendingSimStop else {
+            return "This shuts down the simulator and ends telemetry for that vehicle."
+        }
+        return "Stop “\(pending.vehicleLabel)”? This shuts down the simulator and ends telemetry for that vehicle."
+    }
+
     var body: some View {
         devicesContent
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.backgroundBase)
-        .confirmationDialog(
-            "Stop simulator?",
+        .guardianConfirmOverlay(
             isPresented: Binding(
                 get: { pendingSimStop != nil },
                 set: { if !$0 { pendingSimStop = nil } }
-            ),
-            titleVisibility: .visible
+            )
         ) {
-            Button("Stop", role: .destructive) {
-                if let pending = pendingSimStop {
+            GuardianConfirmDanger(
+                title: "Stop simulator?",
+                message: pendingSimStopConfirmMessage,
+                cancelTitle: "Cancel",
+                confirmTitle: "Stop",
+                onCancel: { pendingSimStop = nil },
+                onConfirm: {
+                    guard let pending = pendingSimStop else {
+                        pendingSimStop = nil
+                        return
+                    }
                     if missionControlStore.isVehicleStreamUsedInLiveMission(
                         vehicleID: pending.vehicleID,
                         fleetLink: fleetLink,
@@ -46,16 +60,9 @@ struct VehiclesView: View {
                     }
                     teardownLiveDriveIfNeeded(vehicleID: pending.vehicleID)
                     sitl.stop(id: pending.id)
+                    pendingSimStop = nil
                 }
-                pendingSimStop = nil
-            }
-            Button("Cancel", role: .cancel) {
-                pendingSimStop = nil
-            }
-        } message: {
-            if let label = pendingSimStop?.vehicleLabel {
-                Text("Stop “\(label)”? This shuts down the simulator and ends telemetry for that vehicle.")
-            }
+            )
         }
         .onChange(of: sitl.lastError) { newValue in
             if let newValue {
@@ -85,46 +92,24 @@ struct VehiclesView: View {
             : nil
     }
 
-    /// Same layout as `serverOfflineMessage` (icon 44pt medium gray, title 20pt semibold white, subtitle 14pt gray, max 480pt, padding 32, centered in the pane).
     private var noVehiclesEmptyState: some View {
-        centeredEmptyStateBlock(
+        GuardianEmptyState(
             systemImage: "car.side",
             title: "No Vehicles",
-            subtitle: {
-                Text("No vehicles currently linked")
-            }
+            detail: "No vehicles currently linked.",
+            primaryTitle: fleetLink.isSimulateEnabled ? "Add Sim" : nil,
+            primaryAction: fleetLink.isSimulateEnabled
+                ? {
+                    sidebarSpawnPlatform = generalSettings.defaultSimulationPlatform
+                    presentAddSimulationSidebar()
+                }
+                : nil
         )
-    }
-
-    private func centeredEmptyStateBlock(
-        systemImage: String,
-        title: String,
-        @ViewBuilder subtitle: () -> Text
-    ) -> some View {
-        VStack(spacing: 0) {
-            Spacer(minLength: 0)
-            VStack(spacing: 14) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 44, weight: .medium))
-                    .foregroundStyle(theme.textSecondary)
-                Text(title)
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(theme.textPrimary)
-                subtitle()
-                    .font(.system(size: 14))
-                    .foregroundColor(theme.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 480)
-            }
-            .padding(32)
-            Spacer(minLength: 0)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     /// Strip under the window title bar: live link status and Add Sim (trailing).
     private var vehiclesSubBar: some View {
-        HStack(alignment: .center, spacing: 12) {
+        HStack(alignment: .center, spacing: GuardianSpacing.sm) {
             Spacer(minLength: 0)
             telemetryHeaderIndicator
             if fleetLink.isSimulateEnabled {
@@ -143,8 +128,8 @@ struct VehiclesView: View {
     private var devicesContent: some View {
         VStack(spacing: 0) {
             vehiclesSubBar
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .padding(.horizontal, GuardianSpacing.sm)
+                .padding(.vertical, GuardianSpacing.xs)
                 .frame(maxWidth: .infinity)
                 .background(theme.backgroundRaised)
 
@@ -153,7 +138,7 @@ struct VehiclesView: View {
             } else {
                 ScrollView {
                     vehicleFleetSection
-                        .padding(24)
+                        .padding(GuardianSpacing.xl)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
@@ -187,8 +172,8 @@ struct VehiclesView: View {
 
     private var vehicleFleetSection: some View {
         LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 228, maximum: 360), spacing: 14, alignment: .top)],
-            spacing: 14
+            columns: [GridItem(.adaptive(minimum: 228, maximum: 360), spacing: GuardianSpacing.cardBodyInset, alignment: .top)],
+            spacing: GuardianSpacing.cardBodyInset
         ) {
             ForEach(fleetGridEntries, id: \.id) { entry in
                 switch entry {
@@ -327,12 +312,12 @@ struct VehiclesView: View {
 
     /// Dot + two-word MAVLink bridge status for the sub-bar.
     private var telemetryHeaderIndicator: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: GuardianSpacing.xs) {
             Circle()
                 .fill(bridgeStatusColor)
                 .frame(width: 9, height: 9)
             Text(bridgeHeaderTitleTwoWords)
-                .font(.system(size: 14, weight: .semibold))
+                .font(GuardianTypography.font(.sectionHeadingSemibold))
                 .foregroundStyle(theme.textPrimary)
                 .lineLimit(1)
         }
@@ -411,5 +396,6 @@ struct VehiclesView: View {
         liveDriveStore: LiveDriveStore()
     )
     .environmentObject(ToastCenter())
+    .environmentObject(GuardianConfirmOverlayHost())
     .frame(width: 720, height: 480)
 }

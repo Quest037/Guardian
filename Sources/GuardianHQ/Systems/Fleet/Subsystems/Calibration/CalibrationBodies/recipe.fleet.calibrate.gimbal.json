@@ -1,0 +1,61 @@
+{
+  "_comment": "Gimbal accelerometer calibration. PX4-only procedure via MAVSDK's Calibration plugin: the gimbal must be detected on the bus and able to report its accelerometer for the autopilot to characterise its mounting. ArduPilot has no equivalent MAVSDK call (param-driven approach lives on the separate `do.calibrate.gimbal.neutral` command).\n\n- declined → escalate(connectExternalSensor): gimbal not on the bus, or MAVLink component address not responding.\n- didNotConverge → escalate(holdStill): gimbal moved during sampling.\n\nOverall budget is 60s — procedure itself is fast; the bulk of the time is operator setup.",
+  "entryStepID": "calibrate",
+  "overallBudgetSeconds": 60,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "calibrate",
+      "command": "command.fleet.vehicle.do.calibrate.gimbal",
+      "matchers": [
+        {
+          "when": { "kind": "success" },
+          "then": { "kind": "succeed" }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "notImplemented" },
+          "then": {
+            "kind": "fail",
+            "detail": "Gimbal accelerometer calibration is PX4-only (uses the MAVSDK Calibration plugin). On ArduPilot, use the param-driven `recipe.fleet.calibrate.gimbal.neutral` workflow instead."
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDeclined" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "connectExternalSensor"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDidNotConverge" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "holdStill"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "cancelled" },
+          "then": {
+            "kind": "fail",
+            "detail": "Gimbal calibration cancelled by operator."
+          }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "fail",
+            "detail": "Gimbal calibration failed with an unhandled outcome — see the audit trace for the underlying response."
+          }
+        }
+      ]
+    }
+  ]
+}

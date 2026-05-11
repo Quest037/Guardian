@@ -1,0 +1,54 @@
+{
+  "_comment": "Gyroscope null-rate calibration. Operator sets the vehicle on a stable surface and does not touch it while the autopilot zeroes the angular-rate bias. Procedure is fast (10-30s) and has only one failure mode that the operator can fix: motion / vibration during sampling.\n\nBoth calibrationDeclined (autopilot refused to start because it detected motion) and calibrationDidNotConverge (procedure started but samples showed nonzero rates) route to the same operator action — `holdStill`. They stay as separate matchers because the underlying error kinds are distinct in the audit trace, which makes diagnosing flaky mounts vs operator timing easier.\n\nOverall budget is 60s — the procedure itself takes seconds; the cap covers operator setup time plus one retry headroom.\nAuto-retries (timeout / noSession / autopilotBusy) are handled by the catalogue's default retry policy on the dispatch itself, so the matchers below only see the *final* outcome.",
+  "entryStepID": "calibrate",
+  "overallBudgetSeconds": 60,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "calibrate",
+      "command": "command.fleet.vehicle.do.calibrate.gyro",
+      "matchers": [
+        {
+          "when": { "kind": "success" },
+          "then": { "kind": "succeed" }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDeclined" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "holdStill"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDidNotConverge" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "holdStill"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "cancelled" },
+          "then": {
+            "kind": "fail",
+            "detail": "Gyro calibration cancelled by operator."
+          }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "fail",
+            "detail": "Gyro calibration failed with an unhandled outcome — see the audit trace for the underlying response."
+          }
+        }
+      ]
+    }
+  ]
+}

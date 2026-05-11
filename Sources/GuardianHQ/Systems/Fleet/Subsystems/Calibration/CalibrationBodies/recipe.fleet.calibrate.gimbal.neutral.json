@@ -1,0 +1,36 @@
+{
+  "_comment": "Write gimbal neutral roll/pitch/yaw offsets in degrees. The descriptor declares rollDeg/pitchDeg/yawDeg; this body forwards them to the Layer 0 command by reference. Stack converters expand the command into the appropriate PARAM_SET writes and validate read-back.",
+  "entryStepID": "write",
+  "overallBudgetSeconds": 30,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "write",
+      "command": "command.fleet.vehicle.do.calibrate.gimbal.neutral",
+      "parameters": {
+        "rollDeg": { "kind": "reference", "value": "rollDeg" },
+        "pitchDeg": { "kind": "reference", "value": "pitchDeg" },
+        "yawDeg": { "kind": "reference", "value": "yawDeg" }
+      },
+      "matchers": [
+        { "when": { "kind": "success" }, "then": { "kind": "succeed" } },
+        {
+          "when": { "kind": "error", "errorKind": "parameterReadBackMismatch" },
+          "then": { "kind": "fail", "detail": "Gimbal neutral write was accepted but one or more read-back values did not match." }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "parameterRejected" },
+          "then": { "kind": "fail", "detail": "Gimbal neutral parameter write was rejected by the autopilot." }
+        },
+        {
+          "when": { "kind": "cancelled" },
+          "then": { "kind": "fail", "detail": "Gimbal neutral calibration cancelled by operator." }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": { "kind": "fail", "detail": "Gimbal neutral calibration failed with an unhandled outcome — see the audit trace for the underlying response." }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "_comment": "Electronic Speed Controller (ESC) throttle endpoint calibration. **DANGEROUS** — motors will arm and spin at the procedure's throttle endpoints; props must be removed and the airframe physically restrained.\n\nProcedure: operator unplugs battery → invokes the cal command (autopilot puts ESCs into endpoint-learn mode) → operator plugs battery in → ESCs learn the high/low PWM endpoints from the autopilot's signal → operator unplugs again to commit.\n\nBoth recoverable failure kinds resolve to `restartVehicle` because the entire sequence is gated on the battery-disconnected starting state. If the autopilot rejects or the ESCs don't converge, the operator action is the same: power-cycle and retry from the top.\n\nOverall budget is 180s — covers operator battery-juggling time. v1 ships with a `humanDescription` that flags the danger; pre-invocation operator confirmation is the Vehicle Inspector / wizard's responsibility, not the recipe runner's.",
+  "entryStepID": "calibrate",
+  "overallBudgetSeconds": 180,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "calibrate",
+      "command": "command.fleet.vehicle.do.calibrate.esc",
+      "matchers": [
+        {
+          "when": { "kind": "success" },
+          "then": { "kind": "succeed" }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDeclined" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "restartVehicle"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDidNotConverge" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "restartVehicle"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "cancelled" },
+          "then": {
+            "kind": "fail",
+            "detail": "ESC calibration cancelled by operator."
+          }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "fail",
+            "detail": "ESC calibration failed with an unhandled outcome — see the audit trace for the underlying response."
+          }
+        }
+      ]
+    }
+  ]
+}

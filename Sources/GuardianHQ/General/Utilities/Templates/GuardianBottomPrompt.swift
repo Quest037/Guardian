@@ -1,37 +1,12 @@
 import SwiftUI
 
-/// Visual style for **Mission Run** (MC-R) bottom prompts only — not app-wide toasts.
-enum MissionRunPromptStyle: Equatable {
-    case success
-    case info
-    case warning
-    case error
+// MARK: - Style
 
-    var icon: String {
-        switch self {
-        case .success: return "checkmark.circle.fill"
-        case .info: return "info.circle.fill"
-        case .warning: return "flag.checkered"
-        case .error: return "xmark.circle.fill"
-        }
-    }
+/// Solid bottom-banner semantics for ``GuardianBottomPromptCenter`` (Mission Control run, Live Drive, etc.) — distinct from ``ToastCenter`` toasts. Uses ``GuardianBottomPromptStyle`` (``GuardianFeedbackSeverity``).
 
-    /// Solid banner fills (readable on any sheet background); stronger than ephemeral app toasts.
-    var bannerBackground: Color {
-        switch self {
-        case .success:
-            return Color(red: 0.09, green: 0.46, blue: 0.24)
-        case .info:
-            return Color(red: 0.12, green: 0.35, blue: 0.68)
-        case .warning:
-            return Color(red: 0.52, green: 0.38, blue: 0.08)
-        case .error:
-            return Color(red: 0.58, green: 0.14, blue: 0.17)
-        }
-    }
-}
+// MARK: - Payload
 
-struct MissionRunDismissiblePrompt: Identifiable, Equatable {
+struct GuardianBottomPrompt: Identifiable, Equatable {
     enum Buttons: Equatable {
         case singleDismiss
         case pair(confirm: String, dismiss: String)
@@ -39,10 +14,10 @@ struct MissionRunDismissiblePrompt: Identifiable, Equatable {
 
     let id: UUID
     let text: String
-    let style: MissionRunPromptStyle
+    let style: GuardianBottomPromptStyle
     let buttons: Buttons
 
-    init(text: String, style: MissionRunPromptStyle, buttons: Buttons = .singleDismiss) {
+    init(text: String, style: GuardianBottomPromptStyle, buttons: Buttons = .singleDismiss) {
         self.id = UUID()
         self.text = text
         self.style = style
@@ -50,25 +25,29 @@ struct MissionRunDismissiblePrompt: Identifiable, Equatable {
     }
 }
 
-/// Bottom prompts for an open Mission Run (MC-R) sheet only. Independent from ``ToastCenter``.
+// MARK: - Center
+
+/// Host for a single bottom **prompt** (dismiss or confirm/dismiss). Independent from ``ToastCenter``.
 @MainActor
-final class MissionRunPromptCenter: ObservableObject {
-    @Published private(set) var activePrompt: MissionRunDismissiblePrompt?
+final class GuardianBottomPromptCenter: ObservableObject {
+    @Published private(set) var activePrompt: GuardianBottomPrompt?
     private var onDismissCallback: (() -> Void)?
     private var onConfirmCallback: (() -> Void)?
 
-    func present(_ text: String, style: MissionRunPromptStyle = .info, onDismiss: (() -> Void)? = nil) {
+    init() {}
+
+    func present(_ text: String, style: GuardianBottomPromptStyle = .info, onDismiss: (() -> Void)? = nil) {
         onDismissCallback = onDismiss
         onConfirmCallback = nil
-        withAnimation(.easeInOut(duration: 0.18)) {
-            activePrompt = MissionRunDismissiblePrompt(text: text, style: style, buttons: .singleDismiss)
+        withAnimation(GuardianMotion.feedbackCrossfade) {
+            activePrompt = GuardianBottomPrompt(text: text, style: style, buttons: .singleDismiss)
         }
     }
 
     /// Two actions (e.g. **Keep running** vs **Dismiss**). `onDismiss` runs only for the dismiss control.
     func presentChoice(
         _ text: String,
-        style: MissionRunPromptStyle = .warning,
+        style: GuardianBottomPromptStyle = .warning,
         confirmTitle: String,
         dismissTitle: String,
         onConfirm: @escaping () -> Void,
@@ -76,8 +55,8 @@ final class MissionRunPromptCenter: ObservableObject {
     ) {
         onDismissCallback = onDismiss
         onConfirmCallback = onConfirm
-        withAnimation(.easeInOut(duration: 0.18)) {
-            activePrompt = MissionRunDismissiblePrompt(
+        withAnimation(GuardianMotion.feedbackCrossfade) {
+            activePrompt = GuardianBottomPrompt(
                 text: text,
                 style: style,
                 buttons: .pair(confirm: confirmTitle, dismiss: dismissTitle)
@@ -89,7 +68,7 @@ final class MissionRunPromptCenter: ObservableObject {
         let dismissCb = onDismissCallback
         onDismissCallback = nil
         onConfirmCallback = nil
-        withAnimation(.easeInOut(duration: 0.18)) {
+        withAnimation(GuardianMotion.feedbackCrossfade) {
             activePrompt = nil
         }
         dismissCb?()
@@ -99,26 +78,32 @@ final class MissionRunPromptCenter: ObservableObject {
         let confirmCb = onConfirmCallback
         onDismissCallback = nil
         onConfirmCallback = nil
-        withAnimation(.easeInOut(duration: 0.18)) {
+        withAnimation(GuardianMotion.feedbackCrossfade) {
             activePrompt = nil
         }
         confirmCb?()
     }
 }
 
-/// Full width of the MC-R host, pinned to the bottom edge (inside the run detail view only).
-struct MissionRunPromptBanner: View {
-    @ObservedObject var center: MissionRunPromptCenter
+// MARK: - Banner
+
+/// Full width of the host, pinned to the **bottom** edge (place inside a ``ZStack(alignment: .bottom)``).
+struct GuardianBottomPromptBanner: View {
+    @ObservedObject private var center: GuardianBottomPromptCenter
+
+    init(center: GuardianBottomPromptCenter) {
+        self.center = center
+    }
 
     var body: some View {
         Group {
             if let prompt = center.activePrompt {
-                HStack(alignment: .center, spacing: 10) {
+                HStack(alignment: .center, spacing: GuardianSpacing.denseGutter) {
                     Image(systemName: prompt.style.icon)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(GuardianTypography.font(.bottomPromptIcon))
                         .foregroundStyle(.white)
                     Text(prompt.text)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(GuardianTypography.font(.bottomPromptMessage))
                         .foregroundStyle(.white)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
@@ -129,29 +114,29 @@ struct MissionRunPromptBanner: View {
                         Button("Dismiss") {
                             center.dismiss()
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.bordered).guardianPointerOnHover()
                         .controlSize(.small)
                         .tint(.white)
                     case let .pair(confirm, dismiss):
-                        HStack(spacing: 8) {
+                        HStack(spacing: GuardianSpacing.xs) {
                             Button(dismiss) {
                                 center.dismiss()
                             }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(.bordered).guardianPointerOnHover()
                             .controlSize(.small)
                             .tint(.white)
                             Button(confirm) {
                                 center.confirmPrimary()
                             }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.borderedProminent).guardianPointerOnHover()
                             .tint(.blue)
                             .controlSize(.small)
                         }
                     }
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(prompt.style.bannerBackground)
+                .padding(.horizontal, GuardianSpacing.cardBodyInset)
+                .padding(.vertical, GuardianSpacing.denseGutter)
+                .background(prompt.style.bottomPromptBannerBackground)
                 .overlay(
                     Rectangle()
                         .frame(height: 1)
@@ -159,8 +144,9 @@ struct MissionRunPromptBanner: View {
                     alignment: .top
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .padding(.horizontal, 12)
-                .padding(.bottom, 12)
+                .guardianDropShadow(GuardianElevation.feedbackChrome)
+                .padding(.horizontal, GuardianSpacing.sm)
+                .padding(.bottom, GuardianSpacing.sm)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }

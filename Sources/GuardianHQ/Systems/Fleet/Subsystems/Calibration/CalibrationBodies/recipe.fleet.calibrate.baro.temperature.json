@@ -1,0 +1,61 @@
+{
+  "_comment": "Barometer temperature compensation. ArduPilot-only cold-start procedure: vehicle sits powered but unmoving while the autopilot samples baro readings across the warm-up temperature range, then fits the compensation curve. PX4 has no equivalent procedure — that path surfaces as `error(notImplemented)` with a clean 'not supported on this stack' message.\n\nLong procedure — typically 10-15 minutes of warm-up sampling. Both recoverable failure kinds resolve to `holdStill` since environmental noise (vibration, draft) is the only operator-recoverable cause.\n\nOverall budget is 600s (the parser ceiling) so the recipe at least has the headroom the procedure needs — operators should still wall-clock the actual session and budget accordingly.",
+  "entryStepID": "calibrate",
+  "overallBudgetSeconds": 600,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "calibrate",
+      "command": "command.fleet.vehicle.do.calibrate.baro.temperature",
+      "matchers": [
+        {
+          "when": { "kind": "success" },
+          "then": { "kind": "succeed" }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "notImplemented" },
+          "then": {
+            "kind": "fail",
+            "detail": "Barometer temperature calibration is ArduPilot-only and not supported on this vehicle's autopilot stack."
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDeclined" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "holdStill"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDidNotConverge" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "operatorActionRequired",
+              "operatorKind": "holdStill"
+            },
+            "allowedVerbs": ["retry", "abort"]
+          }
+        },
+        {
+          "when": { "kind": "cancelled" },
+          "then": {
+            "kind": "fail",
+            "detail": "Barometer temperature calibration cancelled by operator."
+          }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "fail",
+            "detail": "Barometer temperature calibration failed with an unhandled outcome — see the audit trace for the underlying response."
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -78,7 +78,7 @@ struct MissionCardThumbnailView: View {
                     RoundedRectangle(cornerRadius: corner, style: .continuous)
                         .fill(placeholderFill)
                     Image(systemName: "shield.lefthalf.filled")
-                        .font(.system(size: placeholderGlyphPointSize, weight: .medium))
+                        .font(GuardianTypography.relativeFixed(size: placeholderGlyphPointSize, weight: .medium, relativeTo: .title2))
                         .foregroundStyle(theme.textSecondary.opacity(0.85))
                 }
             }

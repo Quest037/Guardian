@@ -31,10 +31,10 @@ struct MissionDelayValueUnitEditor: View {
     }
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: GuardianSpacing.xs) {
             if !label.isEmpty {
                 Text(label)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(GuardianTypography.font(.formFieldLabel))
                     .foregroundStyle(secondaryLabelColor)
                     .frame(width: labelColumnWidth, alignment: .leading)
             }
@@ -90,9 +90,9 @@ struct MissionDelayPostponeValueUnitRow: View {
     var controlSize: ControlSize = .small
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: GuardianSpacing.xs) {
             Text(postponeLabel)
-                .font(.system(size: 11, weight: .semibold))
+                .font(GuardianTypography.font(.formFieldLabel))
                 .foregroundStyle(postponeLabelColor)
             MissionDelayValueUnitEditor(
                 label: "",

@@ -1,0 +1,37 @@
+{
+  "_comment": "Write servo PWM endpoints for a single channel. The descriptor declares channel/minPwm/maxPwm/trimPwm; this body forwards them to the Layer 0 command by reference. Stack converters expand the command into the appropriate PARAM_SET writes and validate read-back.",
+  "entryStepID": "write",
+  "overallBudgetSeconds": 30,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "write",
+      "command": "command.fleet.vehicle.do.calibrate.servo",
+      "parameters": {
+        "channel": { "kind": "reference", "value": "channel" },
+        "minPwm": { "kind": "reference", "value": "minPwm" },
+        "maxPwm": { "kind": "reference", "value": "maxPwm" },
+        "trimPwm": { "kind": "reference", "value": "trimPwm" }
+      },
+      "matchers": [
+        { "when": { "kind": "success" }, "then": { "kind": "succeed" } },
+        {
+          "when": { "kind": "error", "errorKind": "parameterReadBackMismatch" },
+          "then": { "kind": "fail", "detail": "Servo endpoint write was accepted but one or more read-back values did not match." }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "parameterRejected" },
+          "then": { "kind": "fail", "detail": "Servo endpoint parameter write was rejected by the autopilot." }
+        },
+        {
+          "when": { "kind": "cancelled" },
+          "then": { "kind": "fail", "detail": "Servo endpoint calibration cancelled by operator." }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": { "kind": "fail", "detail": "Servo endpoint calibration failed with an unhandled outcome — see the audit trace for the underlying response." }
+        }
+      ]
+    }
+  ]
+}

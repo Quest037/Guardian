@@ -24,14 +24,14 @@ struct MissionRunControlsSidebarView: View {
         VStack(alignment: .leading, spacing: 0) {
             sectionTitle("Mission policies")
             policySection
-                .padding(.bottom, 16)
+                .padding(.bottom, GuardianSpacing.md)
 
             sectionTitle("Rules of engagement")
             engagementSection
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 16)
-        .padding(.bottom, 24)
+        .padding(.horizontal, GuardianSpacing.md)
+        .padding(.top, GuardianSpacing.md)
+        .padding(.bottom, GuardianSpacing.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
@@ -53,7 +53,7 @@ struct MissionRunControlsSidebarView: View {
                 cases: MissionRunCompletePolicy.setupPickerCases
             ) { $0.setupMenuLabel }
         }
-        .padding(14)
+        .padding(GuardianSpacing.cardBodyInset)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(theme.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -66,11 +66,11 @@ struct MissionRunControlsSidebarView: View {
                 if idx > 0 {
                     Divider().overlay(theme.borderSubtle)
                 }
-                HStack(alignment: .center, spacing: 12) {
+                HStack(alignment: .center, spacing: GuardianSpacing.sm) {
                     Text(action.setupLabel)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(GuardianTypography.font(.disclosureRowTitle))
                         .foregroundStyle(theme.textPrimary)
-                    Spacer(minLength: 12)
+                    Spacer(minLength: GuardianSpacing.sm)
                     Picker("", selection: engagementDispositionBinding(for: action)) {
                         ForEach(MissionRunEngagementDisposition.allCases, id: \.self) { disposition in
                             Text(disposition.setupMenuLabel).tag(disposition)
@@ -80,10 +80,10 @@ struct MissionRunControlsSidebarView: View {
                     .pickerStyle(.menu)
                     .frame(minWidth: 180, alignment: .trailing)
                 }
-                .padding(.vertical, 8)
+                .padding(.vertical, GuardianSpacing.xs)
             }
         }
-        .padding(14)
+        .padding(GuardianSpacing.cardBodyInset)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(theme.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -94,9 +94,9 @@ struct MissionRunControlsSidebarView: View {
     @ViewBuilder
     private func sectionTitle(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 13, weight: .semibold))
+            .font(GuardianTypography.font(.subsectionTitleSemibold))
             .foregroundStyle(theme.textSecondary)
-            .padding(.bottom, 8)
+            .padding(.bottom, GuardianSpacing.xs)
     }
 
     @ViewBuilder
@@ -106,11 +106,11 @@ struct MissionRunControlsSidebarView: View {
         cases: [Value],
         label: @escaping (Value) -> String
     ) -> some View {
-        HStack(alignment: .center, spacing: 12) {
+        HStack(alignment: .center, spacing: GuardianSpacing.sm) {
             Text(title)
-                .font(.system(size: 13, weight: .medium))
+                .font(GuardianTypography.font(.disclosureRowTitle))
                 .foregroundStyle(theme.textPrimary)
-            Spacer(minLength: 12)
+            Spacer(minLength: GuardianSpacing.sm)
             Picker("", selection: binding) {
                 ForEach(cases, id: \.self) { value in
                     Text(label(value)).tag(value)
@@ -120,7 +120,7 @@ struct MissionRunControlsSidebarView: View {
             .pickerStyle(.menu)
             .frame(minWidth: 180, alignment: .trailing)
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, GuardianSpacing.xs)
     }
 
     // MARK: - Bindings (route every set through MRE policy APIs as the local operator)

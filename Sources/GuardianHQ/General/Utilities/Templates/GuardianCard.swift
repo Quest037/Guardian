@@ -5,13 +5,13 @@ import SwiftUI
 /// Padding, radius, and rhythm for ``GuardianCard``. Prefer these over ad-hoc card metrics.
 enum GuardianCardLayout {
     static let cornerRadius: CGFloat = 10
-    static let headerHorizontalPadding: CGFloat = 14
+    static let headerHorizontalPadding: CGFloat = GuardianSpacing.cardBodyInset
     /// Vertical padding around header **content**; sized with ``headerContentMinHeight`` so a row of
     /// ``GuardianThemedButton`` / ``GuardianChromeSize/small`` (28pt outer height) does not crowd the strip hairlines.
-    static let headerVerticalPadding: CGFloat = 12
-    static let footerHorizontalPadding: CGFloat = 14
-    static let footerVerticalPadding: CGFloat = 12
-    static let defaultBodyPadding: CGFloat = 14
+    static let headerVerticalPadding: CGFloat = GuardianSpacing.sm
+    static let footerHorizontalPadding: CGFloat = GuardianSpacing.cardBodyInset
+    static let footerVerticalPadding: CGFloat = GuardianSpacing.sm
+    static let defaultBodyPadding: CGFloat = GuardianSpacing.cardBodyInset
 
     /// Minimum height of header **content** (inside horizontal padding, before vertical padding) so toolbar-style
     /// rows align with ``GuardianThemedButton`` small geometry (28pt control height).
@@ -106,15 +106,19 @@ private struct GuardianCardHairline: View {
 /// overall shell (top corners when media is first, all four on media-only cards). The seam to header/body/footer is a
 /// straight horizontal edge—no per-slot corner mask, which avoids double-clipping and radius mismatches with children.
 ///
+/// **Full-card overlay:** Supply ``fullCardOverlay`` to draw **above** every slot (including the header strip), still inside
+/// the same corner radius and border — e.g. slide-up sheets over Mission Control’s Tasks card. Use ``EmptyView`` when unused.
+///
 /// **Naming:** This is the standard **panel card** chrome (raised surface). It is unrelated to the main nav **sidebar**
 /// and unrelated to the trailing ``AppDrawer`` shell.
-struct GuardianCard<Media: View, Header: View, BodyContent: View, Footer: View>: View {
+struct GuardianCard<Media: View, Header: View, BodyContent: View, Footer: View, FullCardOverlay: View>: View {
     private let configuration: GuardianCardConfiguration
     private let sections: GuardianCardSections
     @ViewBuilder private let media: () -> Media
     @ViewBuilder private let header: () -> Header
     @ViewBuilder private let bodyContent: () -> BodyContent
     @ViewBuilder private let footer: () -> Footer
+    @ViewBuilder private let fullCardOverlay: () -> FullCardOverlay
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -126,7 +130,8 @@ struct GuardianCard<Media: View, Header: View, BodyContent: View, Footer: View>:
         @ViewBuilder media: @escaping () -> Media,
         @ViewBuilder header: @escaping () -> Header,
         @ViewBuilder body: @escaping () -> BodyContent,
-        @ViewBuilder footer: @escaping () -> Footer
+        @ViewBuilder footer: @escaping () -> Footer,
+        @ViewBuilder fullCardOverlay: @escaping () -> FullCardOverlay
     ) {
         self.configuration = configuration
         self.sections = sections
@@ -134,6 +139,7 @@ struct GuardianCard<Media: View, Header: View, BodyContent: View, Footer: View>:
         self.header = header
         self.bodyContent = body
         self.footer = footer
+        self.fullCardOverlay = fullCardOverlay
         assert(
             sections.contains(.body) || sections == .mediaOnly,
             "GuardianCard requires .body in sections, or use sections == .mediaOnly for a media-only card."
@@ -142,7 +148,7 @@ struct GuardianCard<Media: View, Header: View, BodyContent: View, Footer: View>:
 
     var body: some View {
         let slots = orderedSlots()
-        return VStack(spacing: 0) {
+        let inner = VStack(spacing: 0) {
             ForEach(Array(slots.enumerated()), id: \.offset) { index, slot in
                 if index > 0 {
                     GuardianCardHairline()
@@ -151,6 +157,12 @@ struct GuardianCard<Media: View, Header: View, BodyContent: View, Footer: View>:
             }
         }
         .background(theme.backgroundRaised)
+
+        return ZStack(alignment: .top) {
+            inner
+            fullCardOverlay()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
         .clipShape(RoundedRectangle(cornerRadius: configuration.cornerRadius, style: .continuous))
         .overlay {
             if let stroke = configuration.border.strokeColor(for: colorScheme) {
@@ -209,7 +221,7 @@ struct GuardianCard<Media: View, Header: View, BodyContent: View, Footer: View>:
 
 // MARK: - Convenience inits (body-only, common stacks)
 
-extension GuardianCard where Media == EmptyView, Header == EmptyView, Footer == EmptyView {
+extension GuardianCard where Media == EmptyView, Header == EmptyView, Footer == EmptyView, FullCardOverlay == EmptyView {
     /// Simple raised card: body only, default border and padding.
     init(
         configuration: GuardianCardConfiguration = .standard,
@@ -221,12 +233,13 @@ extension GuardianCard where Media == EmptyView, Header == EmptyView, Footer == 
             media: { EmptyView() },
             header: { EmptyView() },
             body: body,
-            footer: { EmptyView() }
+            footer: { EmptyView() },
+            fullCardOverlay: { EmptyView() }
         )
     }
 }
 
-extension GuardianCard where Media == EmptyView, Footer == EmptyView {
+extension GuardianCard where Media == EmptyView, Footer == EmptyView, FullCardOverlay == EmptyView {
     /// Card with a header strip + body.
     init(
         configuration: GuardianCardConfiguration = .standard,
@@ -239,12 +252,33 @@ extension GuardianCard where Media == EmptyView, Footer == EmptyView {
             media: { EmptyView() },
             header: header,
             body: body,
-            footer: { EmptyView() }
+            footer: { EmptyView() },
+            fullCardOverlay: { EmptyView() }
         )
     }
 }
 
-extension GuardianCard where Media == EmptyView, Header == EmptyView {
+extension GuardianCard where Media == EmptyView, Footer == EmptyView {
+    /// Card with header strip + body + **full-card overlay** (drawn above header and body, same clip and stroke).
+    init(
+        configuration: GuardianCardConfiguration = .standard,
+        @ViewBuilder header: @escaping () -> Header,
+        @ViewBuilder body: @escaping () -> BodyContent,
+        @ViewBuilder fullCardOverlay: @escaping () -> FullCardOverlay
+    ) {
+        self.init(
+            configuration: configuration,
+            sections: [.header, .body],
+            media: { EmptyView() },
+            header: header,
+            body: body,
+            footer: { EmptyView() },
+            fullCardOverlay: fullCardOverlay
+        )
+    }
+}
+
+extension GuardianCard where Media == EmptyView, Header == EmptyView, FullCardOverlay == EmptyView {
     /// Card with body + footer strip.
     init(
         configuration: GuardianCardConfiguration = .standard,
@@ -257,12 +291,13 @@ extension GuardianCard where Media == EmptyView, Header == EmptyView {
             media: { EmptyView() },
             header: { EmptyView() },
             body: body,
-            footer: footer
+            footer: footer,
+            fullCardOverlay: { EmptyView() }
         )
     }
 }
 
-extension GuardianCard where Header == EmptyView, Footer == EmptyView {
+extension GuardianCard where Header == EmptyView, Footer == EmptyView, FullCardOverlay == EmptyView {
     /// Media (flush, full width) + body — set `configuration.bodyPadding` to `0` for map-style edge-to-edge bodies.
     init(
         configuration: GuardianCardConfiguration = .standard,
@@ -275,12 +310,13 @@ extension GuardianCard where Header == EmptyView, Footer == EmptyView {
             media: media,
             header: { EmptyView() },
             body: body,
-            footer: { EmptyView() }
+            footer: { EmptyView() },
+            fullCardOverlay: { EmptyView() }
         )
     }
 }
 
-extension GuardianCard where Header == EmptyView, BodyContent == EmptyView, Footer == EmptyView {
+extension GuardianCard where Header == EmptyView, BodyContent == EmptyView, Footer == EmptyView, FullCardOverlay == EmptyView {
     /// Full-bleed media fills the card; all four corners use the card radius (no following slots).
     init(
         configuration: GuardianCardConfiguration = .standard,
@@ -292,7 +328,8 @@ extension GuardianCard where Header == EmptyView, BodyContent == EmptyView, Foot
             media: media,
             header: { EmptyView() },
             body: { EmptyView() },
-            footer: { EmptyView() }
+            footer: { EmptyView() },
+            fullCardOverlay: { EmptyView() }
         )
     }
 }

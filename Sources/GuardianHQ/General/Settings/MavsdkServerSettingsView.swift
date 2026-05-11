@@ -14,15 +14,15 @@ struct MavsdkServerSettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.lg) {
+                VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
                     Text("MAVSDK Server")
-                        .font(.system(size: 22, weight: .bold))
+                        .font(GuardianTypography.font(.pluginsPageHero))
                         .foregroundStyle(theme.textPrimary)
                     Text(
                         "The link server runs only when Server is on in the top bar. Adjust ports and extra addresses below if your network or simulator needs it, or leave the defaults."
                     )
-                    .font(.system(size: 13))
+                    .font(GuardianTypography.font(.denseSubsection13Regular))
                     .foregroundStyle(theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 }
@@ -33,7 +33,7 @@ struct MavsdkServerSettingsView: View {
 
                 logPanel
             }
-            .padding(24)
+            .padding(GuardianSpacing.xl)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(theme.backgroundBase)
@@ -50,16 +50,16 @@ struct MavsdkServerSettingsView: View {
     }
 
     private var statusRow: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: GuardianSpacing.sm) {
             Circle()
                 .fill(fleetLink.isRunning ? Color.green : Color.orange.opacity(0.85))
                 .frame(width: 10, height: 10)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.micro) {
                 Text(fleetLink.isRunning ? "mavsdk_server running" : "mavsdk_server stopped")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(GuardianTypography.font(.sectionHeadingSemibold))
                     .foregroundStyle(theme.textPrimary)
                 Text("Use the Server switch in the top bar to start or stop.")
-                    .font(.system(size: 11))
+                    .font(GuardianTypography.font(.denseFootnoteRegular))
                     .foregroundStyle(theme.textSecondary)
             }
             Spacer()
@@ -67,19 +67,19 @@ struct MavsdkServerSettingsView: View {
                 syncExtraURLsFromText()
                 fleetLink.applyConfiguration(draft)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.bordered).guardianPointerOnHover()
             .tint(.gray.opacity(0.4))
             .disabled(fleetLink.isRunning)
         }
-        .padding(14)
+        .padding(GuardianSpacing.cardBodyInset)
         .background(theme.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private var settingsPanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.cardBodyInset) {
             Text("Connection")
-                .font(.system(size: 15, weight: .bold))
+                .font(GuardianTypography.font(.panelEmphasisTitleBold))
                 .foregroundStyle(theme.textPrimary)
 
             labeledField(title: "gRPC port") {
@@ -100,64 +100,65 @@ struct MavsdkServerSettingsView: View {
 
             labeledField(title: "Extra MAVLink URLs (one per line)") {
                 TextEditor(text: $extraURLsText)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(GuardianTypography.relativeFixed(size: 12, weight: .regular, design: .monospaced, relativeTo: .caption))
                     .frame(minHeight: 88, maxHeight: 160)
                     .scrollContentBackground(.hidden)
-                    .padding(8)
+                    .padding(GuardianSpacing.xs)
                     .background(Color(nsColor: .textBackgroundColor).opacity(0.12))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
             }
 
             if let err = fleetLink.lastError {
                 Text(err)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(GuardianTypography.font(.denseCaption12Medium))
                     .foregroundStyle(.red.opacity(0.9))
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(16)
+        .padding(GuardianSpacing.md)
         .background(theme.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private var logPanel: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
             HStack {
                 Text("Server log")
-                    .font(.system(size: 15, weight: .bold))
+                    .font(GuardianTypography.font(.panelEmphasisTitleBold))
                     .foregroundStyle(theme.textPrimary)
                 Spacer()
                 Button("Copy") { copyServerLogToPasteboard() }
-                    .buttonStyle(.borderless)
+                    .buttonStyle(.borderless).guardianPointerOnHover()
                     .foregroundStyle(theme.textSecondary)
                     .disabled(fleetLink.logLines.isEmpty)
                     .help("Copy all log lines to the clipboard")
                 Button("Clear") { fleetLink.clearLog() }
-                    .buttonStyle(.borderless)
+                    .buttonStyle(.borderless).guardianPointerOnHover()
                     .foregroundStyle(theme.textSecondary)
             }
 
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 4) {
+                LazyVStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                     ForEach(Array(fleetLink.logLines.enumerated()), id: \.offset) { _, line in
                         Text(line)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(GuardianTypography.font(.telemetryMono11Regular))
                             .foregroundStyle(theme.textSecondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
+                .textSelection(.enabled)
             }
             .frame(minHeight: 160, maxHeight: 280)
         }
-        .padding(16)
+        .padding(GuardianSpacing.md)
         .background(theme.backgroundRaised)
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private func labeledField<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
             Text(title)
-                .font(.system(size: 12, weight: .semibold))
+                .font(GuardianTypography.font(.inlineNoticeTitle))
                 .foregroundStyle(theme.textSecondary)
             content()
         }

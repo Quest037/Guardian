@@ -29,6 +29,8 @@ let package = Package(
                 .copy("Resources/SimulationDevices"),
                 .copy("Resources/MissionBadge"),
                 .copy("Resources/FleetCalibrationAnchors.json"),
+                .copy("Systems/Fleet/Subsystems/Calibration/CalibrationBodies"),
+                .copy("Systems/Fleet/Subsystems/Errors/ErrorBodies"),
                 .copy("Resources/SitlDefaultParams/ArduPilotGuardianBattery.parm"),
                 .copy("Resources/sidebar_logo.png"),
                 .copy("Resources/Brand/GuardianMark.svg"),
@@ -48,7 +50,10 @@ let package = Package(
         .testTarget(
             name: "GuardianHQTests",
             dependencies: ["GuardianHQ"],
-            path: "Tests/GuardianHQTests"
+            path: "Tests/GuardianHQTests",
+            resources: [
+                .copy("Fixtures"),
+            ]
         ),
     ]
 )

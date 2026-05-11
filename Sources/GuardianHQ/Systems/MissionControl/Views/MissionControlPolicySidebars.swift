@@ -28,20 +28,20 @@ struct MissionRunTaskPolicyOverridesSidebarView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.sectionStack) {
                 Text(taskName)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(GuardianTypography.font(.subsectionTitleSemibold))
                     .foregroundStyle(theme.textSecondary)
                 Text("Policy overrides apply to this task’s roster slots unless a slot sets its own.")
-                    .font(.system(size: 11))
+                    .font(GuardianTypography.font(.denseFootnoteRegular))
                     .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 MissionRunPolicyOptionalAbortRow(label: "Abort policy", selection: abortBinding)
                 MissionRunPolicyOptionalCompleteRow(label: "Complete policy", selection: completeBinding)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
+            .padding(.horizontal, GuardianSpacing.md)
+            .padding(.vertical, GuardianSpacing.cardBodyInset)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -104,20 +104,20 @@ struct MissionRunAssignmentPolicyOverridesSidebarView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.sectionStack) {
                 Text(slotTitle)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(GuardianTypography.font(.subsectionTitleSemibold))
                     .foregroundStyle(theme.textSecondary)
                 Text("Slot policies override the task (and mission defaults).")
-                    .font(.system(size: 11))
+                    .font(GuardianTypography.font(.denseFootnoteRegular))
                     .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 MissionRunPolicyOptionalAbortRow(label: "Abort policy", selection: abortBinding)
                 MissionRunPolicyOptionalCompleteRow(label: "Complete policy", selection: completeBinding)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
+            .padding(.horizontal, GuardianSpacing.md)
+            .padding(.vertical, GuardianSpacing.cardBodyInset)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -159,9 +159,9 @@ private struct MissionRunPolicyOptionalAbortRow: View {
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 14) {
+        HStack(alignment: .center, spacing: GuardianSpacing.cardBodyInset) {
             Text(label)
-                .font(.system(size: 13, weight: .medium))
+                .font(GuardianTypography.font(.disclosureRowTitle))
                 .foregroundStyle(theme.textPrimary)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Picker("", selection: $selection) {
@@ -186,9 +186,9 @@ private struct MissionRunPolicyOptionalCompleteRow: View {
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 14) {
+        HStack(alignment: .center, spacing: GuardianSpacing.cardBodyInset) {
             Text(label)
-                .font(.system(size: 13, weight: .medium))
+                .font(GuardianTypography.font(.disclosureRowTitle))
                 .foregroundStyle(theme.textPrimary)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Picker("", selection: $selection) {

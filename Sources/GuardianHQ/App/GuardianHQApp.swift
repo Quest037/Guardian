@@ -80,6 +80,7 @@ struct GuardianHQApp: App {
     @State private var selection: AppSection = .dashboard
     @State private var showingSplash = true
     @StateObject private var toastCenter = ToastCenter()
+    @StateObject private var guardianConfirmOverlayHost = GuardianConfirmOverlayHost()
     @StateObject private var appDrawer = AppDrawer()
     @StateObject private var fleetLinkService = FleetLinkService()
     @StateObject private var sitlService = SitlService()
@@ -99,6 +100,7 @@ struct GuardianHQApp: App {
                 if showingSplash {
                     TacticalSplashView()
                 } else {
+                    // Theme 12.1 — window stack: RootView → AppDrawer → blocking confirm host (see `GuardianLayoutPatterns`).
                     RootView(
                         selection: $selection,
                         fleetLinkService: fleetLinkService,
@@ -106,6 +108,7 @@ struct GuardianHQApp: App {
                         generalSettingsStore: generalSettingsStore
                     )
                         .withAppDrawer()
+                        .withGuardianConfirmOverlayHost()
                         .environmentObject(toastCenter)
                         .environmentObject(appDrawer)
                         .environmentObject(osmRoutingService)
@@ -115,6 +118,8 @@ struct GuardianHQApp: App {
                         }
                 }
             }
+            // Must be an ancestor of ``View/withGuardianConfirmOverlayHost()`` so ``GuardianConfirmOverlayRootModifier`` can resolve ``@EnvironmentObject`` (it wraps the drawer, not the other way around).
+            .environmentObject(guardianConfirmOverlayHost)
             .onChange(of: showingSplash) { stillShowingSplash in
                 guard !stillShowingSplash else { return }
                 Task { @MainActor in
@@ -128,11 +133,12 @@ struct GuardianHQApp: App {
                 GuardianPluginRegistry.shared.bindPreferences(pluginPreferences)
                 GuardianPluginBootstrap.ensureRegistered()
                 FleetCommandsCatalogueBootstrap.ensureRegistered()
+                FleetRecipesCatalogueBootstrap.ensureRegistered()
             }
             .task {
                 guard showingSplash else { return }
                 try? await Task.sleep(nanoseconds: 1_800_000_000)
-                withAnimation(.easeInOut(duration: 0.25)) {
+                withAnimation(GuardianMotion.shellCrossfade) {
                     showingSplash = false
                 }
             }

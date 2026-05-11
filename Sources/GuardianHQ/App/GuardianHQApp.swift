@@ -19,7 +19,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .dashboard:
             return "square.grid.2x2"
         case .devices:
-            return "dot.radiowaves.left.and.right"
+            return "car.side"
         case .liveDrive:
             return "steeringwheel"
         case .missions:
@@ -100,7 +100,7 @@ struct GuardianHQApp: App {
                 if showingSplash {
                     TacticalSplashView()
                 } else {
-                    // Theme 12.1 — window stack: RootView → AppDrawer → blocking confirm host (see `GuardianLayoutPatterns`).
+                    // Theme 12.1 — window stack: RootView → AppDrawer → blocking confirm host → toasts (see `GuardianLayoutPatterns`).
                     RootView(
                         selection: $selection,
                         fleetLinkService: fleetLinkService,
@@ -109,6 +109,7 @@ struct GuardianHQApp: App {
                     )
                         .withAppDrawer()
                         .withGuardianConfirmOverlayHost()
+                        .withToasts()
                         .environmentObject(toastCenter)
                         .environmentObject(appDrawer)
                         .environmentObject(osmRoutingService)

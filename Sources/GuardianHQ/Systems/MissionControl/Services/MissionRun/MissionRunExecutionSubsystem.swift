@@ -879,18 +879,12 @@ final class MissionRunExecutionSubsystem {
     private func buildStagingPass(mission: Mission?) -> MissionRunPassResult {
         guard let environment else { return MissionRunPassResult(events: [], commands: []) }
         var events: [MissionRunEvent] = []
-        var commands: [MissionRunIssuedCommand] = []
         events.append(
             MissionRunEvent(
                 level: .info,
                 templateKey: MissionRunLogTemplateKey.stagingPassStarted
             )
         )
-        let skipRelocate = mission.map { mission in
-            mission.routeMacro.tasks.filter(\.enabled).contains { task in
-                !environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: task.id).isEmpty
-            }
-        } ?? false
         for assignment in environment.assignments {
             let slot = assignment.slotName
             let pc = MissionControlTaskTagName.taskContext(for: assignment, mission: mission)
@@ -912,54 +906,16 @@ final class MissionRunExecutionSubsystem {
             }
             switch token {
             case .sitl:
-                if let coord = assignment.simStartOverrideCoord {
-                    if !skipRelocate {
-                        commands.append(
-                            MissionRunIssuedCommand(
-                                assignmentID: assignment.id,
-                                slotName: slot,
-                                vehicleTokenKey: tokenKey,
-                                command: .gotoCoordinate(coord, relativeAltitudeM: 20, yawDeg: 0),
-                                issuer: .missionControl,
-                                issuerKey: MissionRunCommandIssuerKey.staging,
-                                category: .missionControl
-                            )
-                        )
-                    } else {
-                        events.append(
-                            MissionRunEvent(
-                                level: .info,
-                                taskID: taskID,
-                                taskLabel: taskLabel,
-                                speaker: .missionControl,
-                                templateKey: MissionRunLogTemplateKey.stagingSimFoldedMission
-                            )
-                        )
-                    }
-                    events.append(
-                        MissionRunEvent(
-                            level: .info,
-                            taskID: taskID,
-                            taskLabel: taskLabel,
-                            speaker: .missionControl,
-                            templateKey: MissionRunLogTemplateKey.stagingSimTarget,
-                            templateParams: [
-                                "lat": String(format: "%.6f", coord.lat),
-                                "lon": String(format: "%.6f", coord.lon),
-                            ]
-                        )
+                events.append(
+                    MissionRunEvent(
+                        level: .info,
+                        taskID: taskID,
+                        taskLabel: taskLabel,
+                        speaker: .missionControl,
+                        templateKey: MissionRunLogTemplateKey.stagingSimPoseFromSetup,
+                        templateParams: ["slot": slot]
                     )
-                } else {
-                    events.append(
-                        MissionRunEvent(
-                            level: .warning,
-                            taskID: taskID,
-                            taskLabel: taskLabel,
-                            speaker: .missionControl,
-                            templateKey: MissionRunLogTemplateKey.stagingSimNoOverride
-                        )
-                    )
-                }
+                )
             case .live:
                 events.append(
                     MissionRunEvent(
@@ -979,7 +935,7 @@ final class MissionRunExecutionSubsystem {
                 templateParams: ["slotCount": String(environment.assignments.count)]
             )
         )
-        return MissionRunPassResult(events: events, commands: commands)
+        return MissionRunPassResult(events: events, commands: [])
     }
 
     private struct TaskMissionLaunchPass {
@@ -1085,16 +1041,7 @@ final class MissionRunExecutionSubsystem {
     ) -> TimeInterval {
         guard task.executionMethod == .staggered else { return 0 }
         guard let firstWaypoint = task.waypoints.first else { return 20 }
-        let startCoord = squads.compactMap { $0.squad.primaryAssignment.simStartOverrideCoord }.first
         let distanceM: Double = {
-            if let startCoord {
-                return MissionTelemetryGeo.horizontalDistanceM(
-                    lat1: startCoord.lat,
-                    lon1: startCoord.lon,
-                    lat2: firstWaypoint.coord.lat,
-                    lon2: firstWaypoint.coord.lon
-                )
-            }
             if task.waypoints.count > 1 {
                 let second = task.waypoints[1]
                 return MissionTelemetryGeo.horizontalDistanceM(
@@ -1172,9 +1119,7 @@ extension MissionRunLogTemplateKey {
     static let stagingPassStarted = "missioncontrol.mre.staging.pass_started"
     static let stagingPassComplete = "missioncontrol.mre.staging.pass_complete"
     static let stagingNoToken = "missioncontrol.mre.staging.no_token"
-    static let stagingSimFoldedMission = "missioncontrol.mre.staging.sim_folded_mission"
-    static let stagingSimTarget = "missioncontrol.mre.staging.sim_target"
-    static let stagingSimNoOverride = "missioncontrol.mre.staging.sim_no_override"
+    static let stagingSimPoseFromSetup = "missioncontrol.mre.staging.sim_pose_from_setup"
     static let stagingLiveReadonly = "missioncontrol.mre.staging.live_readonly"
     static let missionNotStartedNeedsPath = "missioncontrol.mre.mission.not_started_needs_path"
     static let missionNotStartedNoPrimaries = "missioncontrol.mre.mission.not_started_no_primaries"

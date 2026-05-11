@@ -4,6 +4,10 @@ Paladin is GuardianHQ's cross-system autonomy plugin. It lives under `Sources/Gu
 
 This document explains the current Paladin structure, boundaries, and how to extend it safely.
 
+## Fleet catalogue & Paladin
+
+Paladin does **not** register plugin-owned `command.*` / `recipe.*` fleet descriptors: Mission Control, LiveDrive, Vehicle Inspector, and related flows use **core** fleet recipes and commands (`pluginID == nil` on those descriptors). The Paladin `GuardianPluginManifest` therefore keeps `publishedCommandNamespaces`, `publishedRecipeNamespaces`, `invokedCommandNamespaces`, and `invokedRecipeNamespaces` **empty** (see `GuardianPluginBootstrap.builtInPaladinManifest()`). For integrations that *do* add plugin-owned fleet rows, see `../PLUGIN_FLEET_CONTRIBUTIONS.md`.
+
 ## Goals
 
 - Keep mission orchestration logic separate from fleet-health intelligence.

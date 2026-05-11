@@ -25,59 +25,70 @@ struct VehiclesView: View {
     }
 
     var body: some View {
-        devicesContent
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(theme.backgroundBase)
-        .guardianConfirmOverlay(
-            isPresented: Binding(
-                get: { pendingSimStop != nil },
-                set: { if !$0 { pendingSimStop = nil } }
-            )
-        ) {
-            GuardianConfirmDanger(
-                title: "Stop simulator?",
-                message: pendingSimStopConfirmMessage,
-                cancelTitle: "Cancel",
-                confirmTitle: "Stop",
-                onCancel: { pendingSimStop = nil },
-                onConfirm: {
-                    guard let pending = pendingSimStop else {
-                        pendingSimStop = nil
-                        return
-                    }
-                    if missionControlStore.isVehicleStreamUsedInLiveMission(
-                        vehicleID: pending.vehicleID,
-                        fleetLink: fleetLink,
-                        sitl: sitl
-                    ) {
-                        toastCenter.show(
-                            "Cannot stop simulator while vehicle is assigned to a live Mission Control run.",
-                            style: .error,
-                            duration: 4
-                        )
-                        pendingSimStop = nil
-                        return
-                    }
-                    teardownLiveDriveIfNeeded(vehicleID: pending.vehicleID)
-                    sitl.stop(id: pending.id)
-                    pendingSimStop = nil
+        ZStack {
+            devicesContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(theme.backgroundBase)
+                .guardianConfirmOverlay(
+                    isPresented: Binding(
+                        get: { pendingSimStop != nil },
+                        set: { if !$0 { pendingSimStop = nil } }
+                    )
+                ) {
+                    GuardianConfirmDanger(
+                        title: "Stop simulator?",
+                        message: pendingSimStopConfirmMessage,
+                        cancelTitle: "Cancel",
+                        confirmTitle: "Stop",
+                        onCancel: { pendingSimStop = nil },
+                        onConfirm: {
+                            guard let pending = pendingSimStop else {
+                                pendingSimStop = nil
+                                return
+                            }
+                            if missionControlStore.isVehicleStreamUsedInLiveMission(
+                                vehicleID: pending.vehicleID,
+                                fleetLink: fleetLink,
+                                sitl: sitl
+                            ) {
+                                toastCenter.show(
+                                    "Cannot stop simulator while vehicle is assigned to a live Mission Control run.",
+                                    style: .error,
+                                    duration: 4
+                                )
+                                pendingSimStop = nil
+                                return
+                            }
+                            teardownLiveDriveIfNeeded(vehicleID: pending.vehicleID)
+                            sitl.stop(id: pending.id)
+                            pendingSimStop = nil
+                        }
+                    )
                 }
-            )
-        }
-        .onChange(of: sitl.lastError) { newValue in
-            if let newValue {
-                toastCenter.show(newValue, style: .error, duration: 4.5)
+                .onChange(of: sitl.lastError) { newValue in
+                    if let newValue {
+                        toastCenter.show(newValue, style: .error, duration: 4.5)
+                    }
+                }
+
+            if let ctx = calibrationSheetContext {
+                VehicleInspectorHostOverlay(onDismiss: { calibrationSheetContext = nil }) {
+                    VehicleCalibrationModal(
+                        fleetLink: fleetLink,
+                        controlStore: missionControlStore,
+                        sitl: sitl,
+                        vehicleID: ctx.vehicleID,
+                        fallback: ctx.fallback,
+                        onClose: { calibrationSheetContext = nil }
+                    )
+                    .environmentObject(toastCenter)
+                }
+                .transition(.opacity)
+                // In-window Vehicle Inspector above tab content (window shell adds drawer → confirm → toast above this).
+                .zIndex(1)
             }
         }
-        .sheet(item: $calibrationSheetContext) { ctx in
-            VehicleCalibrationModal(
-                fleetLink: fleetLink,
-                controlStore: missionControlStore,
-                sitl: sitl,
-                vehicleID: ctx.vehicleID,
-                fallback: ctx.fallback
-            )
-        }
+        .animation(GuardianMotion.confirmPresent, value: calibrationSheetContext?.id)
     }
 
     private struct VehicleCalibrationSheetContext: Identifiable {
@@ -94,7 +105,7 @@ struct VehiclesView: View {
 
     private var noVehiclesEmptyState: some View {
         GuardianEmptyState(
-            systemImage: "car.side",
+            systemImage: AppSection.devices.systemImage,
             title: "No Vehicles",
             detail: "No vehicles currently linked.",
             primaryTitle: fleetLink.isSimulateEnabled ? "Add Sim" : nil,

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Runs the opt-in SITL smoke suite for the Layer 0 fleet command catalogue.
+# Runs the opt-in SITL smoke suite for the Layer 0 fleet command catalogue and the
+# Layer 1 calibration / diagnose / composite recipes + command matrix (GuardianHQSitlSmokeTests).
 #
 # This is intentionally separate from normal `swift test`: it boots real ArduPilot and
 # PX4 SITL processes, starts mavsdk_server sessions, and drives Guardian's command
@@ -20,7 +21,7 @@ cd "$ROOT"
 
 export GUARDIAN_RUN_SITL_SMOKE=1
 
-echo "[sitl-smoke] Running GuardianHQ SITL command-catalogue smoke tests."
+echo "[sitl-smoke] Running GuardianHQ SITL smoke tests (Layer 0 catalogue + Layer 1 recipe matrix + cancel cleanup)."
 echo "[sitl-smoke] This will boot ArduPilot and PX4 SITL in one shared test session."
 echo "[sitl-smoke] Filter: GuardianHQSitlSmokeTests"
 

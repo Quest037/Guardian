@@ -589,6 +589,14 @@ struct SettingsView: View {
                         onVehicleMarkerMoved: { _, lat, lon in
                             draftSimLatitudeDeg = lat
                             draftSimLongitudeDeg = lon
+                        },
+                        onVehicleTap: { ev in
+                            draftSimLatitudeDeg = ev.lat
+                            draftSimLongitudeDeg = ev.lon
+                        },
+                        onVehicleDoubleTap: { ev in
+                            draftSimLatitudeDeg = ev.lat
+                            draftSimLongitudeDeg = ev.lon
                         }
                     )
                     .task(id: simSpawnDraftSignature) {

@@ -92,6 +92,7 @@ enum FleetCalibrationRecipeRegistrations {
         // is not yet registered.
         registerArmProbeCancelRecipe()
         registerArmProbeRecipe()
+        registerArmProbeHoldRecipe()
 
         let registered = FleetRecipesCatalogue.shared.descriptors.count - beforeCount
         os_log(
@@ -697,6 +698,33 @@ enum FleetCalibrationRecipeRegistrations {
                 "sequence today's PreflightProbeArm runs.",
             riskTier: .groundOnly,
             expectedDuration: 8,
+            appliesToSystems: ["arm", "preflight"],
+            body: body,
+            cancelRecipe: .literal("recipe.fleet.diagnose.cancel")
+        ))
+    }
+
+    /// Arm probe without the trailing disarm — same refusal classification as
+    /// ``registerArmProbeRecipe()``'s first step. Used when Mission Control
+    /// start-run preflight or LiveDrive must verify arming while leaving the
+    /// vehicle armed on success. Shares the diagnose cancel recipe so mid-probe
+    /// cancel still attempts cleanup disarm.
+    private static func registerArmProbeHoldRecipe() {
+        let name = FleetRecipeName.literal("recipe.fleet.diagnose.armprobe.hold")
+
+        guard let body = loadBody(for: name) else { return }
+
+        FleetRecipesCatalogue.shared.register(FleetRecipeDescriptor(
+            name: name,
+            humanLabel: "Arm probe (hold armed)",
+            humanDescription:
+                "Attempts to arm the vehicle and stops on success without a follow-up " +
+                "disarm — the same classified refusal matchers as the standard arm probe's " +
+                "first step. Used when a caller must leave the vehicle armed after a " +
+                "passing check (Mission Control roster preflight, LiveDrive). Operator " +
+                "cancel still runs the diagnose cancel cleanup recipe.",
+            riskTier: .groundOnly,
+            expectedDuration: 5,
             appliesToSystems: ["arm", "preflight"],
             body: body,
             cancelRecipe: .literal("recipe.fleet.diagnose.cancel")

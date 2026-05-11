@@ -151,4 +151,12 @@ struct FleetRecipeDescriptor: Equatable, Sendable {
             return false
         })
     }
+
+    /// When `true`, the Vehicle Inspector should not offer a **Run** affordance while the vehicle
+    /// is in a live mission unless the operator will pass `allowDuringLiveMission` on the runner
+    /// (future confirmation flow). Matches ``FleetRecipeRunner`` gate semantics for
+    /// ``FleetRecipeRiskTier``.
+    func vehicleInspectorLaunchBlockedDuringLiveMission(isVehicleInLiveMission: Bool) -> Bool {
+        isVehicleInLiveMission && riskTier != .safeInLiveMission
+    }
 }

@@ -43,7 +43,7 @@ final class FleetRecipeRunnerTests: XCTestCase {
 
         @MainActor
         func makeInvoker() -> FleetRecipeCommandInvoker {
-            return { [weak self] command, parameters, vehicleID, source, _ in
+            return { [weak self] command, parameters, vehicleID, source, _, _ in
                 guard let self else {
                     return .error(.dispatchFailed, detail: "Stub released.", elapsed: 0)
                 }
@@ -167,6 +167,218 @@ final class FleetRecipeRunnerTests: XCTestCase {
         XCTAssertEqual(outcome.trace.entries.first?.attempt, 1)
         XCTAssertEqual(stub.calls.count, 1)
         XCTAssertEqual(stub.calls.first?.command, cmd)
+    }
+
+    func test_wizard_progress_map_cleared_when_run_completes() async {
+        let vid = "WIZ-PROG-MAP-CLEAR"
+        let cmd = registerCommand("command.fleet.vehicle.do.arm")
+        let body = FleetRecipeBody(
+            entryStepID: .literal("one"),
+            steps: [
+                commandStep("one", invokes: cmd, matchers: [
+                    .init(when: .success(), then: .succeed)
+                ])
+            ]
+        )
+        let recipe = registerRecipe("recipe.fleet.test.wizprog.clear", body: body)
+        let stub = StubInvoker()
+
+        let outcome = await runWithStub(recipe: recipe, vehicleID: vid, stub: stub)
+
+        XCTAssertTrue(outcome.isSuccess)
+        XCTAssertNil(FleetRecipeRunner.shared.wizardProgressByVehicleID[vid])
+    }
+
+    func test_wizard_escalation_inline_publishes_snapshot_submit_advances() async {
+        let vid = "WIZ-ESC-INLINE"
+        let cal = registerCommand("command.fleet.vehicle.do.calibrate.compass")
+        let confirm = registerCommand("command.fleet.vehicle.do.arm")
+        let body = FleetRecipeBody(
+            entryStepID: .literal("calibrate"),
+            steps: [
+                commandStep("calibrate", invokes: cal, matchers: [
+                    .init(when: .any, then: .escalate(
+                        reason: .operatorActionRequired(kind: .rotateDrone),
+                        allowedVerbs: [.acknowledge, .abort]
+                    ))
+                ]),
+                commandStep("confirm", invokes: confirm, matchers: [
+                    .init(when: .any, then: .succeed)
+                ])
+            ]
+        )
+        let recipe = registerRecipe("recipe.fleet.test.wizesc.inline", body: body)
+        let stub = StubInvoker()
+        let handler = FleetRecipeRunner.shared.vehicleInspectorWizardEscalationHandler(for: vid)
+
+        let runTask = Task {
+            await self.runWithStub(recipe: recipe, vehicleID: vid, stub: stub, escalationHandler: handler)
+        }
+
+        for _ in 0 ..< 500 {
+            if FleetRecipeRunner.shared.wizardEscalationByVehicleID[vid] != nil { break }
+            await Task.yield()
+        }
+
+        guard let snap = FleetRecipeRunner.shared.wizardEscalationByVehicleID[vid] else {
+            XCTFail("Expected wizard escalation snapshot to publish")
+            return
+        }
+        XCTAssertTrue(snap.headline.contains("Rotate"), "Headline: \(snap.headline)")
+        XCTAssertEqual(Set(snap.allowedVerbs), Set([.acknowledge, .abort]))
+
+        XCTAssertTrue(FleetRecipeRunner.shared.submitWizardEscalationVerb(vehicleID: vid, verb: .acknowledge))
+
+        let outcome = await runTask.value
+        XCTAssertTrue(outcome.isSuccess)
+        XCTAssertNil(FleetRecipeRunner.shared.wizardEscalationByVehicleID[vid])
+        XCTAssertEqual(stub.calls.map(\.command), [cal, confirm])
+    }
+
+    func test_wizard_escalation_cancel_unblocks_with_abort_when_allowed() async {
+        let vid = "WIZ-ESC-CANCEL"
+        let cmd = registerCommand("command.fleet.vehicle.do.calibrate.compass")
+        let body = FleetRecipeBody(
+            entryStepID: .literal("calibrate"),
+            steps: [
+                commandStep("calibrate", invokes: cmd, matchers: [
+                    .init(when: .any, then: .escalate(
+                        reason: .operatorActionRequired(kind: .rotateDrone),
+                        allowedVerbs: [.acknowledge, .abort]
+                    ))
+                ])
+            ]
+        )
+        let recipe = registerRecipe("recipe.fleet.test.wizesc.cancel", body: body)
+        let stub = StubInvoker()
+        let handler = FleetRecipeRunner.shared.vehicleInspectorWizardEscalationHandler(for: vid)
+
+        let runTask = Task {
+            await self.runWithStub(recipe: recipe, vehicleID: vid, stub: stub, escalationHandler: handler)
+        }
+
+        for _ in 0 ..< 500 {
+            if FleetRecipeRunner.shared.wizardEscalationByVehicleID[vid] != nil { break }
+            await Task.yield()
+        }
+        XCTAssertNotNil(FleetRecipeRunner.shared.wizardEscalationByVehicleID[vid])
+
+        XCTAssertTrue(FleetRecipeRunner.shared.cancel(vehicleID: vid))
+
+        let outcome = await runTask.value
+        XCTAssertFalse(outcome.isSuccess)
+        XCTAssertNil(FleetRecipeRunner.shared.wizardEscalationByVehicleID[vid])
+        if case .failed(_, _, let detail, _) = outcome {
+            XCTAssertTrue(detail?.contains("Operator aborted") == true, "Got: \(detail ?? "")")
+        } else {
+            XCTFail("Expected failed outcome; got \(outcome)")
+        }
+    }
+
+    func test_cancel_runID_unknown_returns_false() {
+        XCTAssertFalse(FleetRecipeRunner.shared.cancel(runID: FleetRecipeRunID(rawValue: UUID())))
+    }
+
+    func test_cancel_runID_matches_escalation_snapshot() async {
+        let vid = "CANCEL-RUNID-ESC"
+        let cmd = registerCommand("command.fleet.vehicle.do.calibrate.compass")
+        let body = FleetRecipeBody(
+            entryStepID: .literal("calibrate"),
+            steps: [
+                commandStep("calibrate", invokes: cmd, matchers: [
+                    .init(when: .any, then: .escalate(
+                        reason: .operatorActionRequired(kind: .rotateDrone),
+                        allowedVerbs: [.acknowledge, .abort]
+                    ))
+                ])
+            ]
+        )
+        let recipe = registerRecipe("recipe.fleet.test.wizesc.cancel.runid", body: body)
+        let stub = StubInvoker()
+        let handler = FleetRecipeRunner.shared.vehicleInspectorWizardEscalationHandler(for: vid)
+
+        let runTask = Task {
+            await self.runWithStub(recipe: recipe, vehicleID: vid, stub: stub, escalationHandler: handler)
+        }
+
+        var cancelled = false
+        for _ in 0 ..< 500 {
+            if let esc = FleetRecipeRunner.shared.wizardEscalationByVehicleID[vid] {
+                XCTAssertTrue(FleetRecipeRunner.shared.cancel(runID: esc.runID))
+                cancelled = true
+                break
+            }
+            await Task.yield()
+        }
+        XCTAssertTrue(cancelled, "Expected escalation so cancel(runID:) can target the snapshot")
+
+        let outcome = await runTask.value
+        XCTAssertFalse(outcome.isSuccess)
+        XCTAssertNil(FleetRecipeRunner.shared.wizardEscalationByVehicleID[vid])
+    }
+
+    func test_wizard_progress_runID_stable_during_nested_invokeRecipe() async {
+        let vid = "WIZ-RUNID-NESTED"
+        let arm = registerCommand("command.fleet.vehicle.do.arm")
+        let takeoff = registerCommand("command.fleet.vehicle.do.takeoff")
+        let childBody = FleetRecipeBody(
+            entryStepID: .literal("innerA"),
+            steps: [
+                commandStep("innerA", invokes: arm, matchers: [
+                    .init(when: .success(), then: .continueToNextStep)
+                ]),
+                commandStep("innerB", invokes: takeoff, matchers: [
+                    .init(when: .success(), then: .succeed)
+                ]),
+            ]
+        )
+        let child = registerRecipe("recipe.fleet.test.child.runidsnap", body: childBody)
+
+        let parentBody = FleetRecipeBody(
+            entryStepID: .literal("invokeChild"),
+            steps: [
+                .invokeRecipe(
+                    id: .literal("invokeChild"),
+                    recipe: child,
+                    parameters: .empty,
+                    matchers: [
+                        .init(when: .success(), then: .succeed),
+                        .init(when: .any, then: .fail(detail: "child should have succeeded"))
+                    ]
+                )
+            ]
+        )
+        let parent = registerRecipe("recipe.fleet.test.parent.runidsnap", body: parentBody)
+        let stub = StubInvoker()
+
+        let runTask = Task {
+            await self.runWithStub(recipe: parent, vehicleID: vid, stub: stub)
+        }
+
+        var surfaceRunID: FleetRecipeRunID?
+        var sawNestedActivity = false
+        for _ in 0 ..< 800 {
+            if let snap = FleetRecipeRunner.shared.wizardProgressByVehicleID[vid] {
+                if surfaceRunID == nil {
+                    surfaceRunID = snap.runID
+                } else {
+                    XCTAssertEqual(
+                        snap.runID,
+                        surfaceRunID,
+                        "Wizard progress must keep the top-level run id during nested invokeRecipe"
+                    )
+                }
+                if snap.activityLine.contains("Nested procedure") {
+                    sawNestedActivity = true
+                }
+            }
+            await Task.yield()
+        }
+
+        let outcome = await runTask.value
+        XCTAssertTrue(outcome.isSuccess, outcome.loggable)
+        XCTAssertNotNil(surfaceRunID)
+        XCTAssertTrue(sawNestedActivity, "Expected nested invokeRecipe to publish a nested activity line")
     }
 
     func test_happyPath_multipleStepsChainViaContinue() async {
@@ -370,6 +582,32 @@ final class FleetRecipeRunnerTests: XCTestCase {
         } else {
             XCTFail("Expected failed outcome; got \(outcome)")
         }
+    }
+
+    func test_fail_auditTrace_stepMatchesFailingCommandPath() async {
+        let arm = registerCommand("command.fleet.vehicle.do.arm")
+        let body = FleetRecipeBody(
+            entryStepID: .literal("arm"),
+            steps: [
+                commandStep("arm", invokes: arm, matchers: [
+                    .init(when: .any, then: .fail(detail: "explicit failure"))
+                ])
+            ]
+        )
+        let recipe = registerRecipe("recipe.fleet.test.failauditpath", body: body)
+        let stub = StubInvoker()
+
+        let outcome = await runWithStub(recipe: recipe, stub: stub)
+
+        guard case .failed(let path, let lastResponse, _, let trace) = outcome else {
+            XCTFail("Expected failed outcome; got \(outcome)")
+            return
+        }
+        XCTAssertEqual(path.map(\.rawValue), ["arm"])
+        XCTAssertEqual(trace.entries.count, 1)
+        XCTAssertEqual(trace.entries.first?.stepID.rawValue, path.first?.rawValue)
+        XCTAssertNotNil(lastResponse)
+        XCTAssertNotNil(trace.entries.first?.controlOutcome)
     }
 
     func test_noMatcherFires_isImplicitFail() async {
@@ -608,7 +846,7 @@ final class FleetRecipeRunnerTests: XCTestCase {
         // Inject a slow stub so wall-clock time accumulates. Without a per-dispatch
         // delay, the runner would tight-loop on `.retry` faster than the budget
         // can elapse on a fast CI machine.
-        FleetRecipeRunner.shared.commandInvokerOverride = { _, _, _, _, _ in
+        FleetRecipeRunner.shared.commandInvokerOverride = { _, _, _, _, _, _ in
             try? await Task.sleep(nanoseconds: 50_000_000) // 50 ms
             return .success()
         }
@@ -647,7 +885,7 @@ final class FleetRecipeRunnerTests: XCTestCase {
         let stub = StubInvoker()
         let vehicleID = "TEST-VEHICLE"
 
-        FleetRecipeRunner.shared.commandInvokerOverride = { command, parameters, vid, source, _ in
+        FleetRecipeRunner.shared.commandInvokerOverride = { command, parameters, vid, source, _, _ in
             stub.calls.append(.init(command: command, parameters: parameters, vehicleID: vid, source: source))
             FleetRecipeRunner.shared.cancel(vehicleID: vid)
             return .success()
@@ -703,7 +941,7 @@ final class FleetRecipeRunnerTests: XCTestCase {
         let stub = StubInvoker()
         let vehicleID = "TEST-VEHICLE"
 
-        FleetRecipeRunner.shared.commandInvokerOverride = { command, parameters, vid, source, _ in
+        FleetRecipeRunner.shared.commandInvokerOverride = { command, parameters, vid, source, _, _ in
             stub.calls.append(.init(command: command, parameters: parameters, vehicleID: vid, source: source))
             if command == cmd {
                 FleetRecipeRunner.shared.cancel(vehicleID: vid)
@@ -743,7 +981,7 @@ final class FleetRecipeRunnerTests: XCTestCase {
 
         let started = expectation(description: "first run reached invoker")
         let release = expectation(description: "first run allowed to complete")
-        FleetRecipeRunner.shared.commandInvokerOverride = { _, _, _, _, _ in
+        FleetRecipeRunner.shared.commandInvokerOverride = { _, _, _, _, _, _ in
             started.fulfill()
             await self.fulfillment(of: [release], timeout: 5)
             return .success()
@@ -1091,6 +1329,67 @@ final class FleetRecipeRunnerTests: XCTestCase {
 
         XCTAssertTrue(outcome.isSuccess, "Gate must not re-check at child boundary; got: \(outcome.loggable)")
         XCTAssertEqual(stub.calls.map { $0.command }, [childCmd])
+    }
+
+    // MARK: - Vehicle Inspector chrome helpers
+
+    func test_activeTopLevelRecipeName_nilWhenIdle() {
+        XCTAssertNil(FleetRecipeRunner.shared.activeTopLevelRecipeName(forVehicleID: "no-active-run"))
+    }
+
+    func test_activeTopLevelRecipeName_reportsOuterRecipeDuringNestedChildDispatch() async {
+        let vehicleID = "TEST-VEHICLE"
+        let childCmd = registerCommand("command.fleet.vehicle.do.arm")
+        let childBody = FleetRecipeBody(
+            entryStepID: .literal("inner"),
+            steps: [
+                commandStep("inner", invokes: childCmd, matchers: [
+                    .init(when: .any, then: .succeed)
+                ])
+            ]
+        )
+        let child = registerRecipe("recipe.fleet.test.activenamechild", body: childBody)
+
+        let parentBody = FleetRecipeBody(
+            entryStepID: .literal("invokeChild"),
+            steps: [
+                .invokeRecipe(
+                    id: .literal("invokeChild"),
+                    recipe: child,
+                    parameters: .empty,
+                    matchers: [
+                        .init(when: .success(), then: .succeed),
+                        .init(when: .any, then: .fail(detail: "child should have succeeded"))
+                    ]
+                )
+            ]
+        )
+        let parent = registerRecipe("recipe.fleet.test.activenameparent", body: parentBody)
+        let stub = StubInvoker()
+        let baseInvoker = stub.makeInvoker()
+        var observedDuringChild: [FleetRecipeName?] = []
+        FleetRecipeRunner.shared.commandInvokerOverride = { command, parameters, vehicleID, source, timeout, invokingPluginID in
+            if command == childCmd {
+                observedDuringChild.append(
+                    FleetRecipeRunner.shared.activeTopLevelRecipeName(forVehicleID: vehicleID)
+                )
+            }
+            return await baseInvoker(command, parameters, vehicleID, source, timeout, invokingPluginID)
+        }
+        defer { FleetRecipeRunner.shared.commandInvokerOverride = nil }
+
+        let outcome = await FleetRecipeRunner.shared.run(
+            recipe: parent,
+            parameters: .empty,
+            vehicleID: vehicleID,
+            source: "runnerTests",
+            fleetLink: dummyFleetLink(),
+            escalationHandler: nil
+        )
+
+        XCTAssertTrue(outcome.isSuccess, "Got: \(outcome.loggable)")
+        XCTAssertEqual(observedDuringChild, [parent])
+        XCTAssertEqual(stub.calls.map(\.command), [childCmd])
     }
 }
 

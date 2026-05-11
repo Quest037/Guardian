@@ -400,6 +400,23 @@ enum FleetTelemetryFieldCatalog {
         systemRecipes[id] ?? .empty
     }
 
+    /// Maps a top-level recipe name to the **single** calibration system whose ``systemRecipes``
+    /// entry lists that name under `calibrate` or `errorFix`.
+    ///
+    /// Returns `nil` when the name is absent from the directory or appears on **more than one**
+    /// system (e.g. shared `recipe.fleet.errors.fix.calibrationrequired`), so Vehicle Inspector
+    /// cannot guess which canvas marker to emphasise.
+    static func calibrationSystemID(forTelemetryDirectoryRecipe name: FleetRecipeName) -> FleetCalibrationSystemID? {
+        var matches: [FleetCalibrationSystemID] = []
+        for (system, entry) in systemRecipes {
+            if entry.calibrate.contains(name) || entry.errorFix.contains(name) {
+                matches.append(system)
+            }
+        }
+        guard matches.count == 1 else { return nil }
+        return matches[0]
+    }
+
     /// Citation in the directory that did not resolve in the recipes catalogue
     /// at validation time. Surfaces from ``validateRecipeReferences(knownRecipes:)``.
     struct MissingRecipeReference: Equatable, Sendable, CustomStringConvertible {

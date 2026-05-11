@@ -74,7 +74,7 @@ struct LogsView: View {
                             DisclosureGroup(
                                 isExpanded: $levelsAccordionExpanded,
                                 content: {
-                                    Text("Coming soon")
+                                    Text("No options in this group.")
                                         .font(GuardianTypography.font(.denseFootnoteRegular))
                                         .foregroundStyle(theme.textSecondary)
                                         .padding(.top, GuardianSpacing.xsTight)
@@ -89,7 +89,7 @@ struct LogsView: View {
                             DisclosureGroup(
                                 isExpanded: $sessionsAccordionExpanded,
                                 content: {
-                                    Text("Coming soon")
+                                    Text("No options in this group.")
                                         .font(GuardianTypography.font(.denseFootnoteRegular))
                                         .foregroundStyle(theme.textSecondary)
                                         .padding(.top, GuardianSpacing.xsTight)

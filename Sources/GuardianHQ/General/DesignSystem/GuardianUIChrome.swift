@@ -699,11 +699,19 @@ struct GuardianBreadcrumbTrail: View {
 
 // MARK: - Labeled form field (stacked label + control)
 
+/// Layout for ``GuardianLabeledFormField`` — default is label above the control; **inline** matches dense drawer rows (label leading, control trailing).
+enum GuardianLabeledFormFieldLayout: Equatable {
+    case stacked
+    /// Label in a fixed leading column; control + optional error stack in the trailing column.
+    case inlineLeadingLabel(labelWidth: CGFloat = 132)
+}
+
 /// Stacked **label**, optional **subtitle**, **control** slot, optional **error** line (Theme §6.1). Validation routing: ``GuardianFormKit`` header doc.
 struct GuardianLabeledFormField<Content: View>: View {
     let label: String
     var subtitle: String? = nil
     var error: String? = nil
+    var layout: GuardianLabeledFormFieldLayout = .stacked
     @ViewBuilder let content: () -> Content
 
     @Environment(\.colorScheme) private var colorScheme
@@ -711,6 +719,15 @@ struct GuardianLabeledFormField<Content: View>: View {
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
+        switch layout {
+        case .stacked:
+            stackedBody
+        case .inlineLeadingLabel(let labelWidth):
+            inlineBody(labelWidth: labelWidth)
+        }
+    }
+
+    private var stackedBody: some View {
         VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
             Text(label)
                 .font(GuardianTypography.font(.formFieldLabel))
@@ -728,6 +745,35 @@ struct GuardianLabeledFormField<Content: View>: View {
                     .foregroundStyle(GuardianSemanticColors.dangerForeground)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    private func inlineBody(labelWidth: CGFloat) -> some View {
+        HStack(alignment: .top, spacing: GuardianSpacing.sm) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
+                Text(label)
+                    .font(GuardianTypography.font(.formFieldLabel))
+                    .foregroundStyle(theme.textSecondary)
+                    .multilineTextAlignment(.leading)
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(GuardianTypography.font(.denseFootnoteRegular))
+                        .foregroundStyle(theme.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(width: labelWidth, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
+                content()
+                if let error, !error.isEmpty {
+                    Text(error)
+                        .font(GuardianTypography.font(.denseCaption10Regular))
+                        .foregroundStyle(GuardianSemanticColors.dangerForeground)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

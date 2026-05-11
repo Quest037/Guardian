@@ -19,6 +19,10 @@ let package = Package(
                 .product(name: "Mavsdk", package: "MAVSDK-Swift"),
             ],
             path: "Sources/GuardianHQ",
+            exclude: [
+                "Plugins/PLUGIN_FLEET_CONTRIBUTIONS.md",
+                "Plugins/Paladin/Paladin_README.md",
+            ],
             resources: [
                 .copy("Resources/AppIcon.icns"),
                 .copy("Resources/mavsdk_server"),

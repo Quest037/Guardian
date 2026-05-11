@@ -332,8 +332,6 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
     var attachedDevice: String
     /// `FleetMissionVehicleToken.storageKey` when bound to the Vehicles list; `nil` if unassigned or legacy text-only.
     var attachedFleetVehicleToken: String?
-    /// Optional setup-stage override for where a bound SIM should start before mission execution.
-    var simStartOverrideCoord: RouteCoordinate?
     var policies: MissionRunAssignmentPolicies
 
     init(
@@ -343,7 +341,6 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         slotName: String,
         attachedDevice: String = "",
         attachedFleetVehicleToken: String? = nil,
-        simStartOverrideCoord: RouteCoordinate? = nil,
         policies: MissionRunAssignmentPolicies = MissionRunAssignmentPolicies()
     ) {
         self.id = id
@@ -352,12 +349,11 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         self.slotName = slotName
         self.attachedDevice = attachedDevice
         self.attachedFleetVehicleToken = attachedFleetVehicleToken
-        self.simStartOverrideCoord = simStartOverrideCoord
         self.policies = policies
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, taskId, legacyAssignmentTaskUUID = "pathId", rosterDeviceId, slotName, attachedDevice, attachedFleetVehicleToken, simStartOverrideCoord
+        case id, taskId, legacyAssignmentTaskUUID = "pathId", rosterDeviceId, slotName, attachedDevice, attachedFleetVehicleToken
         case policies
         case abortPolicy
     }
@@ -371,7 +367,6 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         slotName = try c.decode(String.self, forKey: .slotName)
         attachedDevice = try c.decodeIfPresent(String.self, forKey: .attachedDevice) ?? ""
         attachedFleetVehicleToken = try c.decodeIfPresent(String.self, forKey: .attachedFleetVehicleToken)
-        simStartOverrideCoord = try c.decodeIfPresent(RouteCoordinate.self, forKey: .simStartOverrideCoord)
         if let decodedPolicies = try c.decodeIfPresent(MissionRunAssignmentPolicies.self, forKey: .policies) {
             policies = decodedPolicies
         } else if let legacyAbort = try c.decodeIfPresent(MissionRunAbortPolicy.self, forKey: .abortPolicy) {
@@ -389,7 +384,6 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         try c.encode(slotName, forKey: .slotName)
         try c.encode(attachedDevice, forKey: .attachedDevice)
         try c.encodeIfPresent(attachedFleetVehicleToken, forKey: .attachedFleetVehicleToken)
-        try c.encodeIfPresent(simStartOverrideCoord, forKey: .simStartOverrideCoord)
         if policies.abort != nil || policies.complete != nil {
             try c.encode(policies, forKey: .policies)
         }
@@ -796,7 +790,6 @@ enum MissionControlPlanMutation: Equatable {
     case removeTaskStartDelay(taskID: UUID)
     case replaceAssignmentVehicleToken(assignmentID: UUID, vehicleTokenKey: String?)
     case updateAssignmentTask(assignmentID: UUID, taskID: UUID?)
-    case updateAssignmentSimStartOverride(assignmentID: UUID, coordinate: RouteCoordinate?)
 }
 
 struct MissionControlPlanChangeSet: Equatable {

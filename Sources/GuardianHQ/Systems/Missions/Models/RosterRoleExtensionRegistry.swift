@@ -11,7 +11,7 @@ struct RosterRoleWeightDeltas: Equatable, Sendable {
     var roe_slack: Double?
     var support_bias: Double?
 
-    /// Cap on the combined delta from all plugins for a single knob (`RosterRolesToDo.md` §8).
+    /// Cap on the combined delta from all plugins for a single knob (see README — Mission roster behavior roles).
     static let maxAbsTotalDeltaPerKnob: Double = 0.25
 
     var hasAnyDelta: Bool {
@@ -93,6 +93,7 @@ enum RosterRoleExtensionRegistry {
 
     static func _testOnlyReset() {
         overlaysByRole = [:]
+        RosterRolePluginCatalog._testOnlyReset()
     }
 
     private static func mergeWeights(base: RosterRoleWeights, overlays: [RosterRolePluginOverlay]) -> RosterRoleWeights {

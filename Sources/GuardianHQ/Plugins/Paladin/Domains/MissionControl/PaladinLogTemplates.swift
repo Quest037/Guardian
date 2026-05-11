@@ -5,8 +5,6 @@ import Foundation
 extension MissionRunLogTemplateKey {
     /// Paladin assistant engaging execution (distinct from MC ``executionStarted``).
     static let paladinExecutionStarted = "paladin.mre.execution.started"
-    /// Stub: acknowledges resolved roster behavior envelope until policy tilt consumes tags/weights.
-    static let paladinRosterRolePolicyTiltStub = "paladin.mre.roster.policy_tilt_stub"
 }
 
 // MARK: - Paladin template catalog (plugin extension to ``StructuredLogTemplateCatalog``)
@@ -29,12 +27,6 @@ enum PaladinLogTemplateCatalog {
             forKey: MissionRunLogTemplateKey.paladinExecutionStarted,
             defaultPattern: "Paladin execution started.",
             mcr: "Paladin · execution started"
-        )
-        StructuredLogTemplateCatalog.registerTemplate(
-            pluginID: .paladin,
-            forKey: MissionRunLogTemplateKey.paladinRosterRolePolicyTiltStub,
-            defaultPattern: "Paladin roster policy tilt (stub) — ingested {{count}} behavior role(s): {{roles}}.",
-            mcr: "Paladin · roster stub · {{count}} · {{roles}}"
         )
     }
 }

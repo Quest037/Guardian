@@ -10,7 +10,7 @@ enum RosterRoleDefinitionSource: String, Codable, Equatable, Sendable {
 
 // MARK: - Weights (MRE blending knobs, 0…1)
 
-/// Default weight knobs for Paladin / MRE policy blending (`RosterRolesToDo.md` §6).
+/// Default weight knobs for Paladin / MRE policy blending (see README — Mission roster behavior roles).
 struct RosterRoleWeights: Codable, Equatable, Sendable {
     var aggression: Double
     var tenacity: Double
@@ -37,7 +37,7 @@ struct RosterRoleWeights: Codable, Equatable, Sendable {
 
 // MARK: - MRE payload (JSON contract §7)
 
-/// Versioned payload for Mission Control / MRE (`RosterRolesToDo.md` §7). Encode with `JSONEncoder`.
+/// Versioned payload for Mission Control / MRE (see README — Mission roster behavior roles). Encode with `JSONEncoder`.
 struct RosterRoleMREPayload: Codable, Equatable, Sendable {
     /// Bump when tag or weight semantics change.
     var role_schema: Int
@@ -72,7 +72,7 @@ struct RosterRoleDefinition: Equatable, Sendable, Codable {
 
 // MARK: - Catalog
 
-/// Built-in roster behavior roles for mission templates (`RosterRolesToDo.md`).
+/// Built-in roster behavior roles for mission templates (see README — Mission roster behavior roles).
 enum RosterRoleCatalog {
 
     /// Catalog revision; increment when tag/weight meaning changes.
@@ -199,17 +199,91 @@ enum RosterRoleCatalog {
         return definitionsByRole[role]
     }
 
+    /// Neutral weights when a device references an id with no catalog row (still emit ``RosterRoleMREPayload`` for traceability).
+    private static let orphanWeights = RosterRoleWeights(
+        aggression: 0.5, tenacity: 0.5, cohesion: 0.5, roe_slack: 0.5, support_bias: 0.5
+    )
+
+    @MainActor
+    static func displayName(forBehaviorRoleID id: String) -> String {
+        if id == RosterRole.none.rawValue { return "None" }
+        if let row = RosterRolePluginCatalog.definition(for: id) { return row.displayName }
+        if let r = RosterRole(rawValue: id), let def = definition(for: r) { return def.displayName }
+        return id
+    }
+
+    @MainActor
+    static func blurb(forBehaviorRoleID id: String) -> String? {
+        if let row = RosterRolePluginCatalog.definition(for: id) { return row.blurb }
+        if let r = RosterRole(rawValue: id) { return r.rosterCatalogBlurb }
+        return nil
+    }
+
+    /// Built-in enum order, then plugin-only ids (not matching any ``RosterRole`` case), sorted.
+    @MainActor
+    static func missionUIPickerBehaviorRoleIDs() -> [String] {
+        var ids = RosterRole.allCases.map(\.rawValue)
+        let builtinSet = Set(ids)
+        let extras = RosterRolePluginCatalog.allRegisteredIDs.filter { builtinSet.contains($0) == false }
+        ids.append(contentsOf: extras.sorted())
+        return ids
+    }
+
+    /// Reference drawer / docs: `none` first, then remaining ids sorted.
+    @MainActor
+    static func behaviorRoleReferenceOrderedIDs() -> [String] {
+        var set = Set(RosterRole.allCases.map(\.rawValue))
+        set.formUnion(RosterRolePluginCatalog.allRegisteredIDs)
+        let rest = set.filter { $0 != RosterRole.none.rawValue }.sorted()
+        return [RosterRole.none.rawValue] + rest
+    }
+
+    @MainActor
+    static func contributingPlugins(forBehaviorRoleID id: String) -> [GuardianPluginID] {
+        if let row = RosterRolePluginCatalog.definition(for: id) { return [row.pluginID] }
+        if let r = RosterRole(rawValue: id), r != .none {
+            return RosterRoleExtensionRegistry.resolvedDefinition(for: r)?.contributingPluginIDs ?? []
+        }
+        return []
+    }
+
+    /// Machine payload for MRE; `nil` only for ``RosterRole/none`` slug.
+    ///
+    /// **Precedence:** ``RosterRolePluginCatalog`` row for ``id`` (last write wins) overrides built-in + overlay merge
+    /// for the same slug; otherwise built-in catalog + ``RosterRoleExtensionRegistry`` overlays; otherwise an orphan row.
+    @MainActor
+    static func mrePayload(forBehaviorRoleID id: String) -> RosterRoleMREPayload? {
+        guard id != RosterRole.none.rawValue else { return nil }
+        if let pluginRow = RosterRolePluginCatalog.definition(for: id) {
+            return RosterRoleMREPayload(
+                role_schema: pluginRow.schemaVersion,
+                role_id: id,
+                tags: pluginRow.sortedTags,
+                weights: pluginRow.weights
+            )
+        }
+        if let r = RosterRole(rawValue: id), r != .none,
+           let resolved = RosterRoleExtensionRegistry.resolvedDefinition(for: r) {
+            return RosterRoleMREPayload(
+                role_schema: resolved.schemaVersion,
+                role_id: id,
+                tags: resolved.sortedTags,
+                weights: resolved.weights
+            )
+        }
+        return RosterRoleMREPayload(
+            role_schema: schemaVersion,
+            role_id: id,
+            tags: [],
+            weights: orphanWeights
+        )
+    }
+
     /// Machine payload for MRE / Paladin; `nil` when role is ``RosterRole/none``.
-    /// Tags and weights include merged plugin overlays from ``RosterRoleExtensionRegistry``.
+    /// Tags and weights follow ``mrePayload(forBehaviorRoleID:)`` precedence (plugin catalog wins on slug collision).
     @MainActor
     static func mrePayload(for role: RosterRole) -> RosterRoleMREPayload? {
-        guard let resolved = RosterRoleExtensionRegistry.resolvedDefinition(for: role) else { return nil }
-        return RosterRoleMREPayload(
-            role_schema: resolved.schemaVersion,
-            role_id: role.rawValue,
-            tags: resolved.sortedTags,
-            weights: resolved.weights
-        )
+        mrePayload(forBehaviorRoleID: role.rawValue)
     }
 }
 

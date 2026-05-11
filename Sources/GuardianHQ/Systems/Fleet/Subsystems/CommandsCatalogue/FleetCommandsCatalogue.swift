@@ -5,7 +5,7 @@ import os
 // MARK: - Outcome continuation gate
 
 /// Single-fire gate around a `CheckedContinuation<FleetCommandAsyncOutcome, Never>`.
-/// Mirrors the pattern used by `MissionControlStore.awaitArmCommandOutcome` so the
+/// Mirrors the timeout-safe continuation pattern used by Layer 0 dispatch so the
 /// catalogue can race a dispatch callback against a timeout without ever resuming the
 /// continuation twice (which would trap).
 private final class FleetCommandOutcomeContinuationGate: @unchecked Sendable {
@@ -63,6 +63,12 @@ final class FleetCommandsCatalogue: ObservableObject {
 
     /// Idempotent registration. Last write wins per name.
     ///
+    /// **Plugin publish claims (Stage F):** when ``FleetCommandDescriptor/pluginID`` is
+    /// non-`nil`, the name must fall under one of that plugin’s
+    /// ``GuardianPluginManifest/publishedCommandNamespaces`` entries in
+    /// ``GuardianPluginRegistry`` (exact prefix or `prefix.` + suffix). Missing manifest
+    /// or an out-of-claim name is rejected.
+    ///
     /// **Composition rule (v1):** if `descriptor.containsCommands` is non-empty, every
     /// referenced child must already be registered AND the child must itself have an
     /// empty `containsCommands` list. The registry rejects deeper nesting at this
@@ -77,6 +83,28 @@ final class FleetCommandsCatalogue: ObservableObject {
                 descriptor.name.rawValue
             )
             return false
+        }
+        if let pluginID = descriptor.pluginID {
+            guard let manifest = GuardianPluginRegistry.shared.manifest(for: pluginID) else {
+                os_log(
+                    .fault,
+                    log: log,
+                    "Refusing to register %{public}@: no GuardianPluginManifest for plugin %{public}@.",
+                    descriptor.name.rawValue,
+                    pluginID.rawValue
+                )
+                return false
+            }
+            guard manifest.allowsPublishing(commandRaw: descriptor.name.rawValue) else {
+                os_log(
+                    .fault,
+                    log: log,
+                    "Refusing to register %{public}@: name is outside plugin %{public}@ publishedCommandNamespaces claims.",
+                    descriptor.name.rawValue,
+                    pluginID.rawValue
+                )
+                return false
+            }
         }
         for childName in descriptor.containsCommands {
             guard let child = descriptors[childName] else {
@@ -149,26 +177,33 @@ final class FleetCommandsCatalogue: ObservableObject {
     /// Execute a registered command end-to-end:
     ///
     /// 1. Resolve descriptor — fail with `.unknownCommand` if missing.
-    /// 2. Validate parameters against the descriptor's schema — fail with
+    /// 2. When `invokingPluginID` is set, enforce that manifest’s ``GuardianPluginManifest/invokedCommandNamespaces``
+    ///    covers this command name — fail with `.dispatchFailed` if not.
+    /// 3. Validate parameters against the descriptor's schema — fail with
     ///    `.dispatchFailed` (with full failure detail) on any mismatch.
-    /// 3. Resolve vehicle model + autopilot stack — fail with `.noVehicle` /
+    /// 4. Resolve vehicle model + autopilot stack — fail with `.noVehicle` /
     ///    `.notConnected` accordingly.
-    /// 4. Resolve stack converter — fail with `.notImplemented` if absent.
-    /// 5. Translate the command to a dispatch product. `.immediate` returns directly;
+    /// 5. Resolve stack converter — fail with `.notImplemented` if absent.
+    /// 6. Translate the command to a dispatch product. `.immediate` returns directly;
     ///    `.notImplemented` becomes `.error(.notImplemented)`; `.vehicleCommands` is
     ///    dispatched sequentially via `FleetLinkService`. First failure short-circuits.
-    /// 6. Normalise the final outcome via the converter and return a typed response.
+    /// 7. Normalise the final outcome via the converter and return a typed response.
     ///
     /// **Composite descriptors:** if `descriptor.containsCommands` is non-empty, the
     /// catalogue invokes each child `invoke(...)` recursively (depth always = 1 because
     /// of the registration-time depth guard). First child failure short-circuits.
+    ///
+    /// **Plugin invoke claims (Stage F):** when `invokingPluginID` is non-`nil`, the
+    /// resolved command name must fall under that plugin’s ``GuardianPluginManifest/invokedCommandNamespaces``
+    /// in ``GuardianPluginRegistry`` (same prefix rule as publish claims). Core callers omit this.
     func invoke(
         _ name: FleetCommandName,
         parameters: FleetCommandParameters = .empty,
         vehicleID: String,
         source: String,
         fleetLink: FleetLinkService,
-        timeout: TimeInterval = FleetCommandsCatalogue.defaultDispatchTimeoutSeconds
+        timeout: TimeInterval = FleetCommandsCatalogue.defaultDispatchTimeoutSeconds,
+        invokingPluginID: GuardianPluginID? = nil
     ) async -> FleetCommandResponse {
 
         let started = Date()
@@ -180,6 +215,23 @@ final class FleetCommandsCatalogue: ObservableObject {
                 detail: "No descriptor registered for \(name.rawValue).",
                 elapsed: Date().timeIntervalSince(started)
             )
+        }
+
+        if let pluginID = invokingPluginID {
+            guard let manifest = GuardianPluginRegistry.shared.manifest(for: pluginID) else {
+                return .error(
+                    .dispatchFailed,
+                    detail: "No GuardianPluginManifest for plugin \(pluginID.rawValue).",
+                    elapsed: Date().timeIntervalSince(started)
+                )
+            }
+            guard manifest.allowsInvoking(commandRaw: name.rawValue) else {
+                return .error(
+                    .dispatchFailed,
+                    detail: "Command \(name.rawValue) is outside plugin \(pluginID.rawValue) invokedCommandNamespaces claims.",
+                    elapsed: Date().timeIntervalSince(started)
+                )
+            }
         }
 
         // 2. Validate parameters.
@@ -202,7 +254,8 @@ final class FleetCommandsCatalogue: ObservableObject {
                 source: source,
                 fleetLink: fleetLink,
                 timeout: timeout,
-                started: started
+                started: started,
+                invokingPluginID: invokingPluginID
             )
         }
 
@@ -276,7 +329,8 @@ final class FleetCommandsCatalogue: ObservableObject {
         source: String,
         fleetLink: FleetLinkService,
         timeout: TimeInterval,
-        started: Date
+        started: Date,
+        invokingPluginID: GuardianPluginID?
     ) async -> FleetCommandResponse {
 
         for childName in descriptor.containsCommands {
@@ -289,7 +343,8 @@ final class FleetCommandsCatalogue: ObservableObject {
                 vehicleID: vehicleID,
                 source: source,
                 fleetLink: fleetLink,
-                timeout: timeout
+                timeout: timeout,
+                invokingPluginID: invokingPluginID
             )
             if !childResponse.isSuccess {
                 return FleetCommandResponse(

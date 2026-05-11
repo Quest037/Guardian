@@ -22,6 +22,7 @@ Examples:
 - `recipe.fleet.calibrate.compass.json`
 - `recipe.fleet.calibrate.accelerometer.json`
 - `recipe.fleet.diagnose.armprobe.json`
+- `recipe.fleet.diagnose.armprobe.hold.json`
 
 The loader resolves the file by `recipeName.rawValue`, so the filename and
 the recipe's registered name must match exactly.
@@ -134,13 +135,14 @@ forward descriptor-declared, caller-supplied values into the Layer 0 command:
 - `servo.json` — parameters: `channel`, `minPwm`, `maxPwm`, `trimPwm`.
 - `gimbal.neutral.json` — parameters: `rollDeg`, `pitchDeg`, `yawDeg`.
 
-**Pattern E — diagnose (2)**
+**Pattern E — diagnose (3)**
 
 The diagnose namespace lives in this bodies directory (single subsystem, single
 `.copy(...)` resource) but the recipes are registered alongside the
 calibrations by `FleetCalibrationRecipeRegistrations.registerAll()` after the
 param-driven block. The cleanup recipe disarms instead of cancelling a
-calibration procedure; the probe is two-step (arm → disarm).
+calibration procedure; the default probe is two-step (arm → disarm), with a
+single-step hold variant for callers that must not disarm after a passing arm.
 
 - `recipe.fleet.diagnose.cancel.json` — atomic best-effort disarm. Single
   matcher `any → succeed` so cancel mid-probe always leaves the vehicle
@@ -154,6 +156,10 @@ calibration procedure; the probe is two-step (arm → disarm).
   (`disarm`) is the safety floor — `success` / `alreadyDisarmed` succeed,
   `any` else fails loudly because a vehicle that armed but won't disarm is
   the worst-case probe outcome.
+- `recipe.fleet.diagnose.armprobe.hold.json` — single `arm` step with the same
+  refusal matchers as `armprobe` step 1, but `success` / `alreadyArmed` both
+  `succeed` (no disarm). Used when `MissionControlStore` must leave the
+  vehicle armed (Mission Control start-run roster probe, `leaveArmed` UI).
 
 The subdirectory name is exposed as
 `FleetCalibrationRecipeRegistrations.bodiesSubdirectoryName` so production

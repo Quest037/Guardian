@@ -121,23 +121,6 @@ final class PaladinMissionAssistant {
         Self.registerProfile()
     }
 
-    /// v1 stub: logs that Paladin received ``MissionRunEnvironment/rosterRoleResolutionsByDeviceID`` (no policy tilt yet).
-    private static func appendRosterRolePolicyTiltStubLogIfNeeded(run: MissionRunEnvironment) {
-        guard GuardianPluginRegistry.shared.isPluginEnabled(.paladin) else { return }
-        let active = run.rosterRoleResolutionsByDeviceID.values.filter { $0.role != .none }
-        guard !active.isEmpty else { return }
-        let roles = active.map(\.role.rawValue).sorted().joined(separator: ",")
-        run.systems.logging.appendLogEvent(
-            level: .info,
-            speaker: .assistant(key: PaladinMissionAssistant.assistantKey),
-            templateKey: MissionRunLogTemplateKey.paladinRosterRolePolicyTiltStub,
-            templateParams: [
-                "count": "\(active.count)",
-                "roles": roles,
-            ]
-        )
-    }
-
     /// Raises a swap-in-reserve operator prompt when the store token has ``MissionRunObserverPermissions/act``.
     @discardableResult
     func raiseSwapInReservePrompt(primaryAssignmentID: UUID, reserveAssignmentID: UUID) -> Bool {
@@ -172,7 +155,6 @@ final class PaladinMissionAssistant {
         )
         run.captureExecutionContext(ctx)
         _ = run.systems.executor.startExecution(context: ctx)
-        Self.appendRosterRolePolicyTiltStubLogIfNeeded(run: run)
         UserNotificationService.shared.notifyPaladinExecutionStarted(
             runID: runID,
             missionName: run.missionName

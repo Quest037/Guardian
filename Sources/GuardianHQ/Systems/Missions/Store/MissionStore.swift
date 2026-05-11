@@ -60,7 +60,8 @@ final class MissionStore: ObservableObject {
             duration: source.duration,
             deviceIDs: source.deviceIDs,
             rosterDevices: source.rosterDevices,
-            routeMacro: source.routeMacro
+            routeMacro: source.routeMacro,
+            missionPoints: source.missionPoints.map { $0.duplicatedForClonedMission() }
         )
         missions.insert(cloned, at: 0)
         save()

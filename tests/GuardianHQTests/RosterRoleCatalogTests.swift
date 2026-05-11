@@ -45,13 +45,13 @@ final class RosterRoleCatalogTests: XCTestCase {
         XCTAssertEqual(decoded.weights.support_bias, 0.95, accuracy: 0.0001)
     }
 
-    func test_rosterDevice_decode_unknownRole_becomesNone() throws {
+    func test_rosterDevice_decode_unknownRole_preservesSlug() throws {
         let json = """
         {"id":"00000000-0000-0000-0000-000000000001","name":"A","role":"future.plugin.role","slot":"primary","vehicleClass":"unknown"}
         """
         let data = try XCTUnwrap(json.data(using: .utf8))
         let device = try JSONDecoder().decode(RosterDevice.self, from: data)
-        XCTAssertEqual(device.role, .none)
+        XCTAssertEqual(device.behaviorRoleID, "future.plugin.role")
     }
 
     func test_rosterDevice_decode_knownRole() throws {
@@ -60,6 +60,6 @@ final class RosterRoleCatalogTests: XCTestCase {
         """
         let data = try XCTUnwrap(json.data(using: .utf8))
         let device = try JSONDecoder().decode(RosterDevice.self, from: data)
-        XCTAssertEqual(device.role, .warden)
+        XCTAssertEqual(device.behaviorRoleID, "warden")
     }
 }

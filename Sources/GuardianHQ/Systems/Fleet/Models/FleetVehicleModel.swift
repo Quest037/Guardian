@@ -365,26 +365,42 @@ struct FleetVehicleCommandRecord: Identifiable, Equatable {
     }
 }
 
-/// One stamped preflight probe outcome on a vehicle. Used by both the manual calibration modal and
-/// any plugin-driven preflight (e.g. Paladin autonomous arm-check) so all readiness signals share
-/// one history channel that downstream views and analytics can hook.
-struct PreflightProbeHistoryEntry: Equatable, Identifiable {
+/// What produced this history row — drives operator copy (banner, chips) without parsing ``source`` strings.
+enum RecipeRunHistoryKind: String, Equatable, Sendable, Codable {
+    /// Arm-probe / disarm probe from the calibration modal, Mission Control paths, or equivalent.
+    case preflightArmProbe
+    /// Catalogue **Run** from Vehicle Inspector (`source` still uses `vehicleInspector.recipe.<system>`).
+    case vehicleInspectorCatalogueRecipe
+    /// In-process automation (e.g. Paladin) or other writers not yet split into a dedicated kind.
+    case pluginOther
+}
+
+/// One stamped **recipe-run or probe** outcome on a vehicle (newest-first ring buffer on ``FleetVehicleModel/Functions``).
+///
+/// v1 stores a typed ``RecipeRunHistoryKind`` plus outcome fields in ``SingleVehiclePreflightProbeResult`` (shared
+/// "passed / detail / remediation / armedDuringProbe" envelope). A richer ``outcome`` type is deferred until
+/// non-probe-shaped runs need distinct fields without lossy mapping.
+struct RecipeRunHistoryEntry: Equatable, Identifiable {
     let id: UUID
     let recordedAt: Date
-    /// Free-form origin tag (e.g. `"calibrationModal.manual"`, `"paladin.autocal"`, `"liveDrive.preStart"`).
+    /// Free-form origin tag (e.g. `"calibrationModal.manual"`, `"vehicleInspector.recipe.core.barometer"`).
     let source: String
-    let result: SingleVehiclePreflightProbeResult
+    let kind: RecipeRunHistoryKind
+    /// v1 physical outcome; see ``RecipeRunHistoryKind`` for semantic interpretation.
+    let outcome: SingleVehiclePreflightProbeResult
 
     init(
         id: UUID = UUID(),
         recordedAt: Date = Date(),
         source: String,
-        result: SingleVehiclePreflightProbeResult
+        kind: RecipeRunHistoryKind,
+        outcome: SingleVehiclePreflightProbeResult
     ) {
         self.id = id
         self.recordedAt = recordedAt
         self.source = source
-        self.result = result
+        self.kind = kind
+        self.outcome = outcome
     }
 }
 
@@ -414,16 +430,16 @@ struct FleetVehicleModel: Equatable {
         var lastCommandError: String?
         /// Commands with `category.arbitrationPriority` below this value are rejected (e.g. manual takeover sets 2 so MC / Paladin at tier 0 are blocked).
         var commandGateMinimumPriority: Int = 0
-        /// Recent single-vehicle preflight probe outcomes (newest first, capped to ``preflightHistoryCap``).
+        /// Recent recipe-run / probe outcomes (newest first, capped to ``recipeRunHistoryCap``).
         ///
-        /// Plugins (e.g. Paladin's autonomous preflight / auto-calibrate) and the manual calibration modal
-        /// both write here via ``FleetLinkService.recordPreflightResult``. The most recent failed entry is
+        /// Writers: ``FleetLinkService/recordRecipeRun(vehicleID:source:kind:outcome:)`` (arm probes use
+        /// ``RecipeRunHistoryKind/preflightArmProbe``). The most recent failed entry is
         /// also overlaid onto ``Collections/calibration`` so a refused arm escalates the matching marker on
         /// the canvas without losing live telemetry-driven updates.
-        var preflightHistory: [PreflightProbeHistoryEntry] = []
+        var recipeRunHistory: [RecipeRunHistoryEntry] = []
     }
 
-    static let preflightHistoryCap: Int = 3
+    static let recipeRunHistoryCap: Int = 3
 
     var data: DataState
     var collections: Collections
@@ -485,7 +501,7 @@ struct FleetVehicleModel: Equatable {
             hub: data.telemetry,
             lifecycleStatus: collections.lifecycleStatus,
             vehicleType: data.vehicleType,
-            latestPreflight: functions.preflightHistory.first
+            latestRecipeRun: functions.recipeRunHistory.first
         )
     }
 
@@ -503,33 +519,33 @@ struct FleetVehicleModel: Equatable {
             hub: hub,
             lifecycleStatus: collections.lifecycleStatus,
             vehicleType: data.vehicleType,
-            latestPreflight: functions.preflightHistory.first
+            latestRecipeRun: functions.recipeRunHistory.first
         )
     }
 
-    /// Records a preflight probe outcome (manual or plugin-driven), keeping the newest first and
-    /// capping the buffer at ``preflightHistoryCap``. Recomputes ``Collections/calibration`` so the
+    /// Records a recipe-run / probe outcome (manual or plugin-driven), keeping the newest first and
+    /// capping the buffer at ``recipeRunHistoryCap``. Recomputes ``Collections/calibration`` so the
     /// canvas reflects the new overlay (failed pattern → matching system marker escalates to `.error`).
-    mutating func recordPreflight(_ entry: PreflightProbeHistoryEntry) {
-        functions.preflightHistory.insert(entry, at: 0)
-        if functions.preflightHistory.count > Self.preflightHistoryCap {
-            functions.preflightHistory.removeLast(functions.preflightHistory.count - Self.preflightHistoryCap)
+    mutating func recordRecipeRun(_ entry: RecipeRunHistoryEntry) {
+        functions.recipeRunHistory.insert(entry, at: 0)
+        if functions.recipeRunHistory.count > Self.recipeRunHistoryCap {
+            functions.recipeRunHistory.removeLast(functions.recipeRunHistory.count - Self.recipeRunHistoryCap)
         }
         collections.calibration = FleetCalibrationCollection.make(
             hub: data.telemetry,
             lifecycleStatus: collections.lifecycleStatus,
             vehicleType: data.vehicleType,
-            latestPreflight: functions.preflightHistory.first
+            latestRecipeRun: functions.recipeRunHistory.first
         )
     }
 
-    mutating func clearPreflightHistory() {
-        functions.preflightHistory.removeAll(keepingCapacity: false)
+    mutating func clearRecipeRuns() {
+        functions.recipeRunHistory.removeAll(keepingCapacity: false)
         collections.calibration = FleetCalibrationCollection.make(
             hub: data.telemetry,
             lifecycleStatus: collections.lifecycleStatus,
             vehicleType: data.vehicleType,
-            latestPreflight: nil
+            latestRecipeRun: nil
         )
     }
 

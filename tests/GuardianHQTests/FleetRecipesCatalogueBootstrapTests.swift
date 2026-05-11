@@ -59,8 +59,8 @@ final class FleetRecipesCatalogueBootstrapTests: XCTestCase {
         )
         XCTAssertEqual(
             diagnose.count,
-            2,
-            "Diagnose namespace ships 2 recipes: cancel + armprobe. Update this count when new diagnose recipes land."
+            3,
+            "Diagnose namespace ships 3 recipes: cancel + armprobe + armprobe.hold. Update this count when new diagnose recipes land."
         )
         XCTAssertEqual(
             errors.count,

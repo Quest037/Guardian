@@ -8,18 +8,17 @@ import SwiftUI
 ///
 /// | Channel | Scope | Blocks interaction? | Typical persistence | Notes |
 /// | --- | --- | --- | --- | --- |
-/// | **Toast** (`ToastCenter` / `View/withToasts()`) | Window · **top-leading** over the main **content** column | No | Auto-dismiss (default ≈2.2s) | Single slot; does not cover the sidebar rail. |
+/// | **Toast** (`ToastCenter` / `View/withToasts()`) | Window · **top-leading** over the main **content** column (hosted above the app drawer) | No | Auto-dismiss (default ≈2.2s) | Single slot; does not cover the sidebar rail. |
 /// | **Bottom prompt** (`GuardianBottomPromptCenter` / `GuardianBottomPromptBanner`) | **Screen-local** (host owns the center, e.g. Mission Control run, Live Drive) | Optional two-button flows gate the next step | Until dismissed or confirmed | Solid bottom banner; heavier than a toast. |
 /// | **Inline notice** (`GuardianInlineNotice`) | **Screen-local** (embedded in a layout) | No | Until your state removes it | Raised surface + border; use for contextual callouts. |
-/// | **Confirm** (`guardianConfirmOverlay` + `GuardianConfirmOverlayHost`) | **Whole window** | **Yes** (dimmed scrim) | Until action or Escape | Highest shell band in practice — see z-order below. |
+/// | **Confirm** (`guardianConfirmOverlay` + `GuardianConfirmOverlayHost`) | **Whole window** | **Yes** (dimmed scrim) | Until action or Escape | Below window-level toasts — see z-order below. |
 ///
 /// ## Z-order and attention (shell)
 ///
-/// **Back → front:** ``RootView`` (sidebar + `content`, with ``View/withToasts()`` on the content column only) →
-/// ``View/withAppDrawer()`` (full-window scrim + trailing panel) → ``View/withGuardianConfirmOverlayHost()`` (global
-/// blocking scrim + panel). An open drawer covers toasts; a presented confirm covers the drawer and all chrome. See
-/// ``GuardianLayoutPatterns`` for the canonical stack and modifier order. Bottom prompts live inside feature stacks; if
-/// a blocking confirm could appear, dismiss the prompt first so the two never compete for the same decision.
+/// **Back → front (window shell):** ``RootView`` (sidebar + `content`; publishes ``GuardianToastShellAnchorPreferenceKey``) →
+/// ``View/withAppDrawer()`` (full-window scrim + trailing panel) → ``View/withGuardianConfirmOverlayHost()`` (blocking
+/// scrim + panel) → ``View/withToasts()`` (outermost; ``ToastHost`` uses a higher ``zIndex`` than the confirm layer).
+/// See ``GuardianLayoutPatterns`` for modifier order.
 ///
 /// ## Naming bridge
 ///

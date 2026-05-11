@@ -174,6 +174,26 @@ enum StructuredLogTemplateCatalog: Sendable {
             mcr: "Roster roles · {{summary}}"
         )
         put(
+            MissionRunLogTemplateKey.missionPointRuntimeSeeded,
+            "Mission points runtime envelope seeded ({{count}} row(s); {{reason}}).",
+            mcr: "Points runtime · {{count}} · {{reason}}"
+        )
+        put(
+            MissionRunLogTemplateKey.missionPointRuntimeCreated,
+            "Mission point created at runtime — {{kind}} `{{pointId}}` @ {{lat}},{{lon}} (source {{source}}).",
+            mcr: "Point + · {{kind}} · {{pointId}} · {{source}}"
+        )
+        put(
+            MissionRunLogTemplateKey.missionPointRuntimeUpdated,
+            "Mission point updated at runtime — `{{pointId}}` (source {{source}}).",
+            mcr: "Point ~ · {{pointId}} · {{source}}"
+        )
+        put(
+            MissionRunLogTemplateKey.missionPointRuntimeClosedChanged,
+            "Mission point closed state — `{{pointId}}` closed={{closed}} (source {{source}}).",
+            mcr: "Point closed · {{pointId}} · {{closed}} · {{source}}"
+        )
+        put(
             MissionRunLogTemplateKey.executionMissionMissing,
             "Mission template missing from store; cannot upload MAVLink mission.",
             mcr: "No mission template in store · cannot upload MAVLink"
@@ -221,19 +241,9 @@ enum StructuredLogTemplateCatalog: Sendable {
             mcr: "No fleet token · skip staging"
         )
         put(
-            MissionRunLogTemplateKey.stagingSimFoldedMission,
-            "SIM staging location folded into MAVLink mission (no separate goto).",
-            mcr: "SIM staging folded into mission"
-        )
-        put(
-            MissionRunLogTemplateKey.stagingSimTarget,
-            "SIM staging target set to {{lat}}, {{lon}}.",
-            mcr: "SIM staging · {{lat}}, {{lon}}"
-        )
-        put(
-            MissionRunLogTemplateKey.stagingSimNoOverride,
-            "SIM has no staging override; default spawn position will be used.",
-            mcr: "SIM staging · default spawn"
+            MissionRunLogTemplateKey.stagingSimPoseFromSetup,
+            "SITL slot {{slot}}: spawn pose is set on the Mission Control setup map (SIM_OPOS / SIH_LOC), not from this staging pass.",
+            mcr: "SIM @{{slot}} · pose from setup map"
         )
         put(
             MissionRunLogTemplateKey.stagingLiveReadonly,

@@ -1,0 +1,85 @@
+{
+  "_comment": "Arm-only probe — same matcher vocabulary as the arm step in recipe.fleet.diagnose.armprobe, but completes with succeed instead of continuing to disarm. Used when Mission Control start-run preflight or LiveDrive must verify arming without auto-disarm. Descriptor still sets cancelRecipe to recipe.fleet.diagnose.cancel so operator cancel mid-probe attempts cleanup disarm.",
+  "entryStepID": "arm",
+  "overallBudgetSeconds": 15,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "arm",
+      "command": "command.fleet.vehicle.do.arm",
+      "matchers": [
+        {
+          "when": { "kind": "success" },
+          "then": { "kind": "succeed" }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "alreadyArmed" },
+          "then": { "kind": "succeed" }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "armRejectedByAutopilot" },
+          "then": {
+            "kind": "fail",
+            "detail": "Autopilot refused arm. Inspect the audit trace for the underlying reason (GPS lock, battery, levelling, calibration state, etc.)."
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "calibrationDeclined" },
+          "then": {
+            "kind": "fail",
+            "detail": "Autopilot blocked arm — sensor calibration is required before this vehicle can be armed."
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "modeNotSupported" },
+          "then": {
+            "kind": "fail",
+            "detail": "Autopilot is in a mode that disallows arming. Switch to an arming-capable mode and retry."
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "autopilotBusy" },
+          "then": {
+            "kind": "fail",
+            "detail": "Autopilot is busy with a higher-priority operation. Wait for it to clear and retry."
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "notConnected" },
+          "then": {
+            "kind": "fail",
+            "detail": "Vehicle is not connected — link is down or the session is not live."
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "noSession" },
+          "then": {
+            "kind": "fail",
+            "detail": "MAVSDK session unavailable — link to autopilot is not established."
+          }
+        },
+        {
+          "when": { "kind": "error", "errorKind": "authorityGated" },
+          "then": {
+            "kind": "fail",
+            "detail": "Arm refused by authority gate (live-mission or live-drive policy)."
+          }
+        },
+        {
+          "when": { "kind": "cancelled" },
+          "then": {
+            "kind": "fail",
+            "detail": "Arm probe cancelled by operator."
+          }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "fail",
+            "detail": "Arm probe failed with an unhandled outcome — see audit trace for details."
+          }
+        }
+      ]
+    }
+  ]
+}

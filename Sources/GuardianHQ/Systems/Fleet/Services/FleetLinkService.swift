@@ -710,38 +710,36 @@ final class FleetLinkService: ObservableObject {
         return FleetVehicleModel.defaultMapColorHex(forVehicleID: vehicleID)
     }
 
-    /// Records a single-vehicle preflight probe outcome on the FVM.
+    /// Records a recipe-run / probe outcome on the FVM (unified ``FleetVehicleModel/Functions/recipeRunHistory`` ring).
     ///
-    /// Designed to be called by **either** the manual calibration modal (e.g. `source = "calibrationModal.manual"`)
-    /// or in-process plugins running their own preflight / auto-calibrate cycles (e.g. Paladin
-    /// `source = "paladin.autocal.armCheck"`). The newest entry is overlaid onto
-    /// ``FleetVehicleModel.collections.calibration`` so a refused arm escalates the matching marker on
-    /// the canvas. History is capped to ``FleetVehicleModel.preflightHistoryCap`` entries.
-    func recordPreflightResult(
+    /// Appends one row to the per-vehicle recipe-run ring; set ``RecipeRunHistoryKind`` explicitly (arm probes
+    /// use ``RecipeRunHistoryKind/preflightArmProbe``). The newest entry may repaint ``FleetVehicleModel.collections/calibration``
+    /// when it fails with remediation that maps to a calibration system. History is capped to ``FleetVehicleModel/recipeRunHistoryCap``.
+    func recordRecipeRun(
         vehicleID: String,
-        result: SingleVehiclePreflightProbeResult,
-        source: String
+        source: String,
+        kind: RecipeRunHistoryKind,
+        outcome: SingleVehiclePreflightProbeResult
     ) {
         ensureVehicleModel(vehicleID: vehicleID, systemID: nil, initialStatus: .init(stage: .connecting))
         guard var model = vehicleModelsByVehicleID[vehicleID] else { return }
-        let entry = PreflightProbeHistoryEntry(source: source, result: result)
-        model.recordPreflight(entry)
+        let entry = RecipeRunHistoryEntry(source: source, kind: kind, outcome: outcome)
+        model.recordRecipeRun(entry)
         vehicleModelsByVehicleID[vehicleID] = model
         appendVehicleLog(
-            "Preflight outcome recorded [source=\(source)] \(result.passed ? "passed" : "failed"): \(result.detail)",
+            "Recipe run recorded [\(kind.rawValue)] [source=\(source)] \(outcome.passed ? "passed" : "failed"): \(outcome.detail)",
             vehicleID: vehicleID
         )
     }
 
-    /// Clears the FVM preflight history (operator dismiss in the calibration modal banner, or plugin
-    /// reset before a new auto-calibrate sequence). Recomputes the calibration collection so any
-    /// preflight overlay is removed from the canvas.
-    func clearPreflightHistory(vehicleID: String) {
+    /// Clears the per-vehicle recipe-run ring (operator dismiss in the calibration modal banner, or automation
+    /// reset before a new sequence). Recomputes the calibration collection so any recipe-run marker overlay drops.
+    func clearRecipeRuns(vehicleID: String) {
         guard var model = vehicleModelsByVehicleID[vehicleID] else { return }
-        guard !model.functions.preflightHistory.isEmpty else { return }
-        model.clearPreflightHistory()
+        guard !model.functions.recipeRunHistory.isEmpty else { return }
+        model.clearRecipeRuns()
         vehicleModelsByVehicleID[vehicleID] = model
-        appendVehicleLog("Preflight history cleared.", vehicleID: vehicleID)
+        appendVehicleLog("Recipe runs cleared.", vehicleID: vehicleID)
     }
 
     /// Raise the gate so lower-priority sources stop issuing (e.g. `.manualTakeover` blocks automation until reset to `.missionControl` / `.paladin`).
@@ -2111,7 +2109,13 @@ final class FleetLinkService: ObservableObject {
         }
         let subject = self.calibrationProgressSubject
         return Completable.create { completable in
-            let inner = observable.subscribe(
+            // MAVSDK emits calibration `ProgressData` on a SwiftNIO event-loop thread. This service
+            // is `@MainActor`; touching `calibrationProgressSubject` (or completing the Completable)
+            // from NIO trips MainActor / GCD queue assertions and can wedge the app. Serialize the
+            // whole stream onto the main scheduler before handling.
+            let inner = observable
+                .observe(on: MainScheduler.instance)
+                .subscribe(
                 onNext: { progress in
                     let phase: FleetCalibrationProgressEvent.Phase
                     let fraction: Double?
@@ -2176,7 +2180,7 @@ final class FleetLinkService: ObservableObject {
                     )
                     completable(.completed)
                 }
-            )
+                )
             return Disposables.create { inner.dispose() }
         }
     }

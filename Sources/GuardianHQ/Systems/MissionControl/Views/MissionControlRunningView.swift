@@ -10,6 +10,8 @@ struct LiveOverviewMapSignature: Equatable {
     let markers: [MapVehicleMarker]
     /// When set, map vehicle markers are restricted to this task’s roster (same as MC-R roster filter).
     let focusedTaskID: UUID?
+    /// Runtime mission points on the overview map (diamond markers); filtered when a task triage sheet is focused.
+    let missionPointMarkers: [GuardianMissionPointMapMarker]
 }
 
 struct MissionLiveVehicleHealthCard: View {
@@ -94,7 +96,7 @@ struct MissionLiveVehicleHealthCard: View {
                 .frame(width: 28, height: 28)
                 .padding(.top, GuardianSpacing.xsTight)
                 .padding(.trailing, GuardianSpacing.xsTight)
-                .accessibilityLabel("Vehicle actions, coming soon")
+                .accessibilityHidden(true)
         }
         .frame(width: 216, height: slotHeight)
         .background(cardFill)

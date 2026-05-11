@@ -127,6 +127,8 @@ struct LiveDriveView: View {
             }
 
             GuardianBottomPromptBanner(center: bottomPromptCenter)
+                // Above any future in-window overlays in this ZStack (content → modal → prompt shell order).
+                .zIndex(2)
         }
     }
 
@@ -670,7 +672,7 @@ struct LiveDriveView: View {
                                     sessionStatusIsError = false
                                 case .centerMarker:
                                     break
-                                case .deleteWaypoint:
+                                case .deleteWaypoint, .deleteMissionPoint:
                                     break
                                 }
                             }

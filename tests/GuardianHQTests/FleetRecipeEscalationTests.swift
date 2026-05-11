@@ -52,6 +52,18 @@ final class FleetRecipeEscalationTests: XCTestCase {
         XCTAssertEqual(asString, "\"acknowledge\"")
     }
 
+    func test_wizardInlineCopy_rotateDrone_usesOperatorFacingHeadline() {
+        let copy = FleetRecipeEscalationReason.operatorActionRequired(kind: .rotateDrone).wizardInlineCopy()
+        XCTAssertTrue(copy.headline.contains("Rotate"), copy.headline)
+        XCTAssertFalse(copy.detail.isEmpty)
+        XCTAssertEqual(copy.severity, .warning)
+    }
+
+    func test_wizardButtonTitle_matchesVerbLabels() {
+        XCTAssertEqual(FleetRecipeResumptionVerb.acknowledge.wizardButtonTitle, "Acknowledge")
+        XCTAssertEqual(FleetRecipeResumptionVerb.abort.wizardButtonTitle, "Abort")
+    }
+
     // MARK: Reason codable
 
     func test_escalationReason_codableRoundTripsForEveryCase() throws {

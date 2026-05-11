@@ -8,7 +8,7 @@ alwaysApply: true
 ## Do this
 
 - For **operator confirmations** (delete, stop, skip a guard, spawn, leave flow, etc.), present **`GuardianConfirm`** or **`GuardianConfirmDanger`** from `Sources/GuardianHQ/General/Utilities/Templates/GuardianConfirm.swift`.
-- Present them with **`guardianConfirmOverlay(item:onDismiss:dialog:)`** or **`guardianConfirmOverlay(isPresented:dialog:)`** (dimmed scrim, no system sheet). Wire **`GuardianConfirmOverlayHost`** like **`ToastCenter`**: a single **`@StateObject`** on the app scene, **`environmentObject`** on the window root, then **`withGuardianConfirmOverlayHost()`** applied **after** **`withAppDrawer()`** so the scrim covers the **sidebar, top bar, and drawer**. The host applies **`GuardianConfirmPanelFrame`** (horizontal padding + width) around the dialog content.
+- Present them with **`guardianConfirmOverlay(item:onDismiss:dialog:)`** or **`guardianConfirmOverlay(isPresented:dialog:)`** (dimmed scrim, no system sheet). Wire **`GuardianConfirmOverlayHost`** like **`ToastCenter`**: a single **`@StateObject`** on the app scene, **`environmentObject`** on the window root, then **`withGuardianConfirmOverlayHost()`** applied **after** **`withAppDrawer()`** (and before **`withToasts()`**) so the scrim covers the **sidebar, top bar, and drawer**. The host applies **`GuardianConfirmPanelFrame`** (horizontal padding + width) around the dialog content.
 - Prefer the **`item:`** overload with a small **`Identifiable`** enum when a screen can show more than one confirm, so only one overlay is active and state stays explicit.
 - Use a real **`title:`** next to the icon whenever there is a headline; use **`message:`** for supporting copy. Omit **`title`** only when a single short **`message`** beside the icon is enough.
 
@@ -26,7 +26,7 @@ This danger footer is the **intentional exception** to the global “Confirm act
 ## Feedback vs confirms (z-order)
 
 - **Confirms** sit on ``withGuardianConfirmOverlayHost()`` **after** ``withAppDrawer()`` on the window root (`GuardianHQApp`) — scrim covers sidebar, top bar, and drawer.
-- **Toasts** use ``withToasts()`` on the **main content** column inside `RootView` — they appear **below** a live window-level confirm (by design).
+- **Toasts** use ``withToasts()`` on the window root **after** ``withGuardianConfirmOverlayHost()`` — they appear **above** the drawer and window-level confirms (same-window modal chrome uses in-window overlays, not ``.sheet``, so toasts stay visible).
 - **Bottom prompts** (`GuardianBottomPromptBanner`) are **screen-local** (e.g. Mission Control run, Live Drive). Avoid stacking a **blocking** confirm on top of an unresolved bottom prompt; **dismiss or resolve the prompt first**.
 - Shared severity vocabulary: ``GuardianFeedbackSeverity`` in `GuardianFeedbackSeverity.swift` (Theme §4).
 

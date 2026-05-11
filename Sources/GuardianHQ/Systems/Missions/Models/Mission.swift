@@ -36,8 +36,8 @@ enum MissionRosterSlotRole: String, Codable, CaseIterable, Identifiable {
 struct RosterDevice: Identifiable, Codable, Equatable {
     let id: UUID
     var name: String
-    /// Behavioral / persona role for MRE and Paladin (scout, etc.); ``none`` until expanded.
-    var role: RosterRole
+    /// Stable behavior role slug: ``RosterRole/rawValue`` for built-ins (including `none`), or a plugin-owned id.
+    var behaviorRoleID: String
     var slot: MissionRosterSlotRole
     var vehicleClass: FleetVehicleType
     /// When ``slot`` is ``wingman`` or ``reserve``, optional primary on this task to follow; if nil, MRE may infer.
@@ -46,17 +46,36 @@ struct RosterDevice: Identifiable, Codable, Equatable {
     init(
         id: UUID = UUID(),
         name: String,
-        role: RosterRole = .none,
+        behaviorRoleID: String,
         slot: MissionRosterSlotRole = .primary,
         vehicleClass: FleetVehicleType = .unknown,
         leaderRosterDeviceId: UUID? = nil
     ) {
         self.id = id
         self.name = name
-        self.role = role
+        self.behaviorRoleID = behaviorRoleID.isEmpty ? RosterRole.none.rawValue : behaviorRoleID
         self.slot = slot
         self.vehicleClass = vehicleClass
         self.leaderRosterDeviceId = leaderRosterDeviceId
+    }
+
+    /// Convenience: built-in enum maps to its ``RosterRole/rawValue``.
+    init(
+        id: UUID = UUID(),
+        name: String,
+        role: RosterRole = .none,
+        slot: MissionRosterSlotRole = .primary,
+        vehicleClass: FleetVehicleType = .unknown,
+        leaderRosterDeviceId: UUID? = nil
+    ) {
+        self.init(
+            id: id,
+            name: name,
+            behaviorRoleID: role.rawValue,
+            slot: slot,
+            vehicleClass: vehicleClass,
+            leaderRosterDeviceId: leaderRosterDeviceId
+        )
     }
 
     enum CodingKeys: String, CodingKey {
@@ -67,28 +86,28 @@ struct RosterDevice: Identifiable, Codable, Equatable {
         case positionHint
     }
 
-    /// Unknown or future `rawValue` strings map to ``RosterRole/none`` so missions stay loadable.
-    private static func decodeLossyRosterRole(
+    /// Preserves any non-empty `role` / legacy string so plugin ids round-trip on the template.
+    private static func decodeBehaviorRoleID(
         from c: KeyedDecodingContainer<CodingKeys>,
         primaryKey: CodingKeys,
         legacyKey: CodingKeys
-    ) -> RosterRole {
-        if let raw = try? c.decodeIfPresent(String.self, forKey: primaryKey), let r = RosterRole(rawValue: raw) {
-            return r
+    ) -> String {
+        if let raw = try? c.decodeIfPresent(String.self, forKey: primaryKey), !raw.isEmpty {
+            return raw
         }
-        if let raw = try? c.decodeIfPresent(String.self, forKey: legacyKey), let r = RosterRole(rawValue: raw) {
-            return r
+        if let raw = try? c.decodeIfPresent(String.self, forKey: legacyKey), !raw.isEmpty {
+            return raw
         }
-        if let r = try? c.decodeIfPresent(RosterRole.self, forKey: primaryKey) { return r }
-        if let r = try? c.decodeIfPresent(RosterRole.self, forKey: legacyKey) { return r }
-        return .none
+        if let r = try? c.decodeIfPresent(RosterRole.self, forKey: primaryKey) { return r.rawValue }
+        if let r = try? c.decodeIfPresent(RosterRole.self, forKey: legacyKey) { return r.rawValue }
+        return RosterRole.none.rawValue
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
-        role = Self.decodeLossyRosterRole(from: c, primaryKey: .role, legacyKey: .legacyCharacter)
+        behaviorRoleID = Self.decodeBehaviorRoleID(from: c, primaryKey: .role, legacyKey: .legacyCharacter)
         if let sr = try c.decodeIfPresent(MissionRosterSlotRole.self, forKey: .slot) {
             slot = sr
         } else if let sr = try c.decodeIfPresent(MissionRosterSlotRole.self, forKey: .legacySlotRole) {
@@ -106,7 +125,7 @@ struct RosterDevice: Identifiable, Codable, Equatable {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(id, forKey: .id)
         try c.encode(name, forKey: .name)
-        try c.encode(role, forKey: .role)
+        try c.encode(behaviorRoleID, forKey: .role)
         try c.encode(slot, forKey: .slot)
         try c.encode(vehicleClass, forKey: .vehicleClass)
         try c.encodeIfPresent(leaderRosterDeviceId, forKey: .leaderRosterDeviceId)
@@ -880,6 +899,141 @@ extension RouteMacro {
     }
 }
 
+// MARK: - Mission points (typed map pins; not path waypoints)
+
+/// Kind of ``MissionPoint`` (rally, extraction, …). Extensible for future metadata families.
+enum MissionPointKind: String, Codable, CaseIterable, Identifiable, Sendable {
+    case rally
+    case extraction
+
+    var id: String { rawValue }
+
+    /// Compact map prefix (e.g. RP, EP) paired with a short suffix in UI.
+    var mapChipPrefix: String {
+        switch self {
+        case .rally: "RP"
+        case .extraction: "EP"
+        }
+    }
+}
+
+/// A mission-scoped map point (rally / extraction / …), orthogonal to task route waypoints.
+/// See ``Mission/missionPoints`` and `MissionPointsTodo.md`.
+struct MissionPoint: Identifiable, Codable, Equatable, Sendable {
+    /// Row identity in the mission document (distinct from ``pointId`` slug for MRE).
+    let id: UUID
+    /// Stable slug for MRE, recipes, and logs (unique within the parent ``Mission``).
+    var pointId: String
+    var label: String
+    var kind: MissionPointKind
+    var coordinate: RouteCoordinate
+    /// `nil` = mission-wide; otherwise scoped to that ``MissionTask``.
+    var taskID: UUID?
+    /// Catchment radius in metres; allowed **1…1000**, default **10**.
+    var catchmentRadiusM: Double
+    /// When `true`, planners / MRE should ignore this point until reopened.
+    var isClosed: Bool
+
+    /// Default catchment when creating or decoding a partial payload.
+    static let defaultCatchmentRadiusM: Double = 10
+
+    static func clampedCatchmentRadiusM(_ value: Double) -> Double {
+        min(1000, max(1, value))
+    }
+
+    init(
+        id: UUID = UUID(),
+        pointId: String,
+        label: String,
+        kind: MissionPointKind,
+        coordinate: RouteCoordinate,
+        taskID: UUID? = nil,
+        catchmentRadiusM: Double = MissionPoint.defaultCatchmentRadiusM,
+        isClosed: Bool = false
+    ) {
+        self.id = id
+        self.pointId = pointId
+        self.label = label
+        self.kind = kind
+        self.coordinate = coordinate
+        self.taskID = taskID
+        self.catchmentRadiusM = Self.clampedCatchmentRadiusM(catchmentRadiusM)
+        self.isClosed = isClosed
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        let decodedPointId = try c.decodeIfPresent(String.self, forKey: .pointId) ?? ""
+        pointId = decodedPointId.isEmpty ? "point.\(id.uuidString.lowercased())" : decodedPointId
+        label = try c.decodeIfPresent(String.self, forKey: .label) ?? ""
+        kind = try c.decodeIfPresent(MissionPointKind.self, forKey: .kind) ?? .rally
+        coordinate = try c.decodeIfPresent(RouteCoordinate.self, forKey: .coordinate) ?? RouteCoordinate()
+        taskID = try c.decodeIfPresent(UUID.self, forKey: .taskID)
+        let rawCatchment = try c.decodeIfPresent(Double.self, forKey: .catchmentRadiusM)
+            ?? MissionPoint.defaultCatchmentRadiusM
+        catchmentRadiusM = Self.clampedCatchmentRadiusM(rawCatchment)
+        isClosed = try c.decodeIfPresent(Bool.self, forKey: .isClosed) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(pointId, forKey: .pointId)
+        try c.encode(label, forKey: .label)
+        try c.encode(kind, forKey: .kind)
+        try c.encode(coordinate, forKey: .coordinate)
+        try c.encodeIfPresent(taskID, forKey: .taskID)
+        try c.encode(catchmentRadiusM, forKey: .catchmentRadiusM)
+        try c.encode(isClosed, forKey: .isClosed)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, pointId, label, kind, coordinate, taskID, catchmentRadiusM, isClosed
+    }
+
+    /// Numeric suffix from slug `rally.3` / `extraction.2` (for display after ``Mission/renumberMissionPointSlugsByListOrder()``).
+    var slugOrdinalSuffix: Int? {
+        let parts = pointId.split(separator: ".")
+        guard let last = parts.last else { return nil }
+        return Int(String(last))
+    }
+
+    /// List / selected-map chip, e.g. `RP:1`, `EP:2`.
+    var mapChipLabel: String {
+        let n = slugOrdinalSuffix.map(String.init) ?? "?"
+        return "\(kind.mapChipPrefix):\(n)"
+    }
+
+    /// Single digit (or number) on map when unselected — colour encodes kind.
+    var mapGlyphDigit: String {
+        slugOrdinalSuffix.map(String.init) ?? "?"
+    }
+
+    /// Copy for a cloned mission: new row ``id``; keeps ``pointId`` (namespaced by owning mission id on disk).
+    func duplicatedForClonedMission() -> MissionPoint {
+        MissionPoint(
+            id: UUID(),
+            pointId: pointId,
+            label: label,
+            kind: kind,
+            coordinate: coordinate,
+            taskID: taskID,
+            catchmentRadiusM: catchmentRadiusM,
+            isClosed: isClosed
+        )
+    }
+}
+
+extension MissionPoint {
+    /// Mission Control run **live overview** map — see `MissionPointsTodo.md` §4.2 / §9.
+    /// When `focusedTaskID` is `nil`, returns all points. Otherwise returns mission-wide (`taskID == nil`) plus rows scoped to that task.
+    static func filteredForMissionControlLiveMap(_ points: [MissionPoint], focusedTaskID: UUID?) -> [MissionPoint] {
+        guard let tid = focusedTaskID else { return points }
+        return points.filter { $0.taskID == nil || $0.taskID == tid }
+    }
+}
+
 struct Mission: Identifiable, Codable {
     let id: UUID
     var name: String
@@ -891,6 +1045,8 @@ struct Mission: Identifiable, Codable {
     var deviceIDs: [String]
     var rosterDevices: [RosterDevice]
     var routeMacro: RouteMacro
+    /// Typed map pins (rally, extraction, …) — orthogonal to task path waypoints; see ``MissionPoint``.
+    var missionPoints: [MissionPoint]
     let createdAt: Date
     /// Bumped when a new list/grid JPEG is written so SwiftUI reloads ``MissionCardThumbnailView``.
     var cardThumbnailVersion: Int
@@ -906,6 +1062,7 @@ struct Mission: Identifiable, Codable {
         deviceIDs: [String] = [],
         rosterDevices: [RosterDevice] = [],
         routeMacro: RouteMacro = RouteMacro(),
+        missionPoints: [MissionPoint] = [],
         createdAt: Date = Date(),
         cardThumbnailVersion: Int = 0
     ) {
@@ -919,13 +1076,14 @@ struct Mission: Identifiable, Codable {
         self.deviceIDs = deviceIDs
         self.rosterDevices = rosterDevices
         self.routeMacro = routeMacro
+        self.missionPoints = missionPoints
         self.createdAt = createdAt
         self.cardThumbnailVersion = cardThumbnailVersion
     }
 
     enum CodingKeys: String, CodingKey {
         case id, name, description, type, isArchived, count, duration, schedule, deviceIDs, routeMacro, createdAt
-        case cardThumbnailVersion
+        case cardThumbnailVersion, missionPoints
         case rosterDevices = "spaces"
         case mapRegion, routePlan // legacy
     }
@@ -957,6 +1115,7 @@ struct Mission: Identifiable, Codable {
         }
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         cardThumbnailVersion = try container.decodeIfPresent(Int.self, forKey: .cardThumbnailVersion) ?? 0
+        missionPoints = try container.decodeIfPresent([MissionPoint].self, forKey: .missionPoints) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -971,7 +1130,32 @@ struct Mission: Identifiable, Codable {
         try container.encode(deviceIDs, forKey: .deviceIDs)
         try container.encode(rosterDevices, forKey: .rosterDevices)
         try container.encode(routeMacro, forKey: .routeMacro)
+        try container.encode(missionPoints, forKey: .missionPoints)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(cardThumbnailVersion, forKey: .cardThumbnailVersion)
+    }
+}
+
+extension Mission {
+    /// Removes points scoped to a task that is being deleted (`taskID` match). Mission-wide rows (`taskID == nil`) are kept.
+    mutating func removeMissionPoints(forRemovedTaskID taskID: UUID) {
+        missionPoints.removeAll { $0.taskID == taskID }
+    }
+
+    /// Rewrites ``MissionPoint/pointId`` as `rally.1`, `rally.2`, … and `extraction.1`, … in **current array order**; clears labels (display is chip-only).
+    mutating func renumberMissionPointSlugsByListOrder() {
+        var rallyN = 0
+        var extractionN = 0
+        for i in missionPoints.indices {
+            switch missionPoints[i].kind {
+            case .rally:
+                rallyN += 1
+                missionPoints[i].pointId = "rally.\(rallyN)"
+            case .extraction:
+                extractionN += 1
+                missionPoints[i].pointId = "extraction.\(extractionN)"
+            }
+            missionPoints[i].label = ""
+        }
     }
 }

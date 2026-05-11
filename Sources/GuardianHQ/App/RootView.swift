@@ -54,10 +54,12 @@ struct RootView: View {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .background(theme.backgroundBase)
-                    // Theme 12.1 — toasts are content-column scoped (see `GuardianLayoutPatterns`).
-                    .withToasts()
             }
         }
+        .preference(
+            key: GuardianToastShellAnchorPreferenceKey.self,
+            value: GuardianToastShellAnchor(sidebarWidth: sidebarWidth, topBarHeight: 52)
+        )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.backgroundBase)
         .onAppear {

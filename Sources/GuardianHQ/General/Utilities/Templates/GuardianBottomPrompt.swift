@@ -151,5 +151,8 @@ struct GuardianBottomPromptBanner: View {
             }
         }
         .frame(maxWidth: .infinity)
+        // When idle this host is layout-only; without this, the framed `Group` can still
+        // occupy the full ZStack proposal and **steal all clicks** from the map / WKWebView below (MC-R, Live Drive).
+        .allowsHitTesting(center.activePrompt != nil)
     }
 }

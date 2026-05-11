@@ -1304,6 +1304,16 @@ struct ThemeCatalogContent: View {
                     .guardianFormControlSizing()
                 }
 
+                GuardianLabeledFormField(
+                    label: "Inline label column",
+                    subtitle: "Dense drawers: label leading, control trailing (``GuardianLabeledFormFieldLayout/inlineLeadingLabel(labelWidth:)``).",
+                    layout: .inlineLeadingLabel(labelWidth: 140)
+                ) {
+                    TextField("value", text: $sampleText)
+                        .textFieldStyle(.roundedBorder)
+                        .guardianFormControlSizing()
+                }
+
                 GuardianLabeledSegmentedPicker(
                     label: "Segmented filter",
                     subtitle: "``GuardianLabeledSegmentedPicker`` — replaces ad-hoc label + segmented ``Picker`` stacks.",
@@ -1327,7 +1337,7 @@ struct ThemeCatalogContent: View {
             .guardianInsetCard()
 
             ThemeAPICaption(
-                "GuardianFormKit · GuardianLabeledFormField · GuardianLabeledSegmentedPicker · View.guardianFormControlSizing() · GuardianSearchBarField"
+                "GuardianFormKit · GuardianLabeledFormField · GuardianLabeledFormFieldLayout · GuardianLabeledSegmentedPicker · View.guardianFormControlSizing() · GuardianSearchBarField"
             )
         }
     }
@@ -1408,7 +1418,7 @@ struct ThemeCatalogContent: View {
             VStack(alignment: .leading, spacing: GuardianSpacing.cardBodyInset) {
                 ThemeCatalogSubheading("GuardianEmptyState (Vehicles tab reference)")
                 GuardianEmptyState(
-                    systemImage: "car.side",
+                    systemImage: AppSection.devices.systemImage,
                     title: "No Vehicles",
                     detail: "No vehicles currently linked.",
                     primaryTitle: "Add Sim",

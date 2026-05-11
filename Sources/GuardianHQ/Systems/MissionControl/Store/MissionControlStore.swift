@@ -1,24 +1,5 @@
 import Foundation
 
-/// Ensures `awaitArmCommandOutcome` resumes its continuation **at most once** (defensive against MAVSDK / Rx edge cases).
-private final class ArmOutcomeContinuationGate: @unchecked Sendable {
-    private var hasResumed = false
-    private let lock = NSLock()
-
-    func resume(
-        _ continuation: CheckedContinuation<FleetCommandAsyncOutcome, Never>,
-        returning outcome: FleetCommandAsyncOutcome
-    ) {
-        lock.lock()
-        let shouldFire = !hasResumed
-        if shouldFire { hasResumed = true }
-        lock.unlock()
-        if shouldFire {
-            continuation.resume(returning: outcome)
-        }
-    }
-}
-
 @MainActor
 final class MissionControlStore: ObservableObject {
     @Published private(set) var runs: [MissionRunEnvironment] = []
@@ -314,41 +295,6 @@ final class MissionControlStore: ObservableObject {
         return nil
     }
 
-    /// If MAVLink / MAVSDK never completes the arm Completable, the UI must not hang forever (e.g. PX4 still booting).
-    private static let armCommandWaitTimeoutNanoseconds: UInt64 = 90 * 1_000_000_000
-    private static let armCommandTimeoutFailureDetail =
-        "Timed out waiting for arm (vehicle may still be booting, link interrupted, or autopilot did not respond)."
-
-    private func awaitArmCommandOutcome(
-        fleetLink: FleetLinkService,
-        vehicleID: String,
-        source: String
-    ) async -> FleetCommandAsyncOutcome {
-        await withCheckedContinuation { continuation in
-            let gate = ArmOutcomeContinuationGate()
-            let timeout = Task {
-                do {
-                    try await Task.sleep(nanoseconds: Self.armCommandWaitTimeoutNanoseconds)
-                } catch {
-                    return
-                }
-                await MainActor.run {
-                    gate.resume(continuation, returning: .failed(Self.armCommandTimeoutFailureDetail))
-                }
-            }
-            _ = fleetLink.executeVehicleCommand(
-                vehicleID: vehicleID,
-                command: .arm,
-                source: source,
-                category: .missionControl,
-                onCommandOutcome: { outcome in
-                    timeout.cancel()
-                    gate.resume(continuation, returning: outcome)
-                }
-            )
-        }
-    }
-
     /// True when this bridge vehicle id is bound to any **running or paused** Mission Control run roster slot.
     func isVehicleStreamUsedInLiveMission(vehicleID: String, fleetLink: FleetLinkService, sitl: SitlService) -> Bool {
         for r in runs where r.status == .running || r.status == .paused || r.status == .recovery {
@@ -369,16 +315,6 @@ final class MissionControlStore: ObservableObject {
         return false
     }
 
-    private func preflightArmFailureDetail(hub: FleetHubVehicleTelemetry?, reason: String) -> String {
-        if hub?.healthArmable == false {
-            return "Arm failed: \(reason) (telemetry: not armable — resolve pre-arm / health on the vehicle.)"
-        }
-        if hub?.healthArmable == nil {
-            return "Arm failed: \(reason) (armable health not yet reported — check link and autopilot messages.)"
-        }
-        return "Arm failed: \(reason)"
-    }
-
     /// Single-vehicle preflight check (same semantics as one slot in `runSingleVehiclePreflightProbeForStartRun`).
     ///
     /// - Parameter allowDuringLiveMission: Default `false`. When `false`, the call is **blocked** if
@@ -387,12 +323,15 @@ final class MissionControlStore: ObservableObject {
     ///   surfaces (reserve drone swap-in, recovery / re-link flows) or from plugin-authored auto-preflight
     ///   that owns its own safety reasoning. The default keeps every UI caller (Vehicle Inspector,
     ///   LiveDrive pre-session probe, etc.) safe by construction.
+    /// - Parameter preflightAuditSource: Passed through to ``FleetRecipeRunner/run`` as `source`
+    ///   for catalogue dispatch audit (e.g. `vehicles.preflightProbe` vs `missionControl.preflightProbe`).
     func runSingleVehiclePreflightProbe(
         vehicleID: String,
         fleetLink: FleetLinkService,
         sitl: SitlService,
         leaveArmed: Bool = false,
-        allowDuringLiveMission: Bool = false
+        allowDuringLiveMission: Bool = false,
+        preflightAuditSource: String = "vehicles.preflightProbe"
     ) async -> SingleVehiclePreflightProbeResult {
         if let blocked = preflightProbeReadinessBlocker(
             vehicleID: vehicleID,
@@ -414,47 +353,22 @@ final class MissionControlStore: ObservableObject {
         }
 
         await Task.yield()
-        let outcome = await awaitArmCommandOutcome(
-            fleetLink: fleetLink,
+        let recipeName: FleetRecipeName = leaveArmed
+            ? FleetRecipeName.literal("recipe.fleet.diagnose.armprobe.hold")
+            : FleetRecipeName.literal("recipe.fleet.diagnose.armprobe")
+        let recipeOutcome = await FleetRecipeRunner.shared.run(
+            recipe: recipeName,
             vehicleID: vehicleID,
-            source: "vehicles.preflightProbe"
+            source: preflightAuditSource,
+            fleetLink: fleetLink,
+            allowDuringLiveMission: allowDuringLiveMission
         )
         let isSim = isVehicleSimulationStream(vehicleID: vehicleID, fleetLink: fleetLink, sitl: sitl)
-
-        switch outcome {
-        case .succeeded:
-            let result = SingleVehiclePreflightProbeResult(
-                passed: true,
-                armedDuringProbe: true,
-                detail: "Arm succeeded.",
-                remediationAdvice: nil
-            )
-            if !leaveArmed {
-                _ = fleetLink.executeVehicleCommand(
-                    vehicleID: vehicleID,
-                    command: .disarm,
-                    source: "missionControl.preflightAutoDisarm",
-                    category: .missionControl,
-                    onCommandOutcome: nil
-                )
-            }
-            return result
-        case .failed(let reason):
-            let advice = PreflightFailureAdvisor.advice(
-                for: PreflightFailureRemediationContext(
-                    autopilotStack: hub?.autopilotStack ?? .unknown,
-                    rawFailureDetail: reason,
-                    hubSnapshot: hub,
-                    isSimulation: isSim
-                )
-            )
-            return SingleVehiclePreflightProbeResult(
-                passed: false,
-                armedDuringProbe: false,
-                detail: preflightArmFailureDetail(hub: hub, reason: reason),
-                remediationAdvice: advice
-            )
-        }
+        return MissionControlPreflightRecipeOutcomeMapper.singleVehiclePreflightProbeResult(
+            recipeOutcome: recipeOutcome,
+            hub: hub,
+            isSimulation: isSim
+        )
     }
 
     /// Attempts to **arm** every roster slot that has a fleet token + resolvable vehicle ID. Rows are reported via `rowUpdated` as each step completes.
@@ -497,57 +411,25 @@ final class MissionControlStore: ObservableObject {
                 continue
             }
 
-            if let blocked = preflightProbeReadinessBlocker(
+            let probe = await runSingleVehiclePreflightProbe(
                 vehicleID: vehicleID,
                 fleetLink: fleetLink,
                 sitl: sitl,
-                allowDuringLiveMission: false
-            ) {
-                row.phase = .failed
-                row.detail = blocked.detail
-                rowUpdated(row)
-                allPassed = false
-                continue
-            }
-
-            let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID)
-            if hub?.isArmed == true {
-                row.phase = .passed
-                row.detail = "Already armed — no arm command sent."
-                rowUpdated(row)
-                continue
-            }
-
-            let outcome = await awaitArmCommandOutcome(
-                fleetLink: fleetLink,
-                vehicleID: vehicleID,
-                source: "missionControl.preflightProbe"
+                leaveArmed: true,
+                allowDuringLiveMission: false,
+                preflightAuditSource: "missionControl.preflightProbe"
             )
-            switch outcome {
-            case .succeeded:
-                armedDuringProbe.append(vehicleID)
+            if probe.passed {
+                if probe.armedDuringProbe {
+                    armedDuringProbe.append(vehicleID)
+                }
                 row.phase = .passed
-                row.detail = "Arm succeeded."
+                row.detail = probe.detail
                 rowUpdated(row)
-            case .failed(let reason):
+            } else {
                 row.phase = .failed
-                let isSim: Bool = {
-                    guard let key = assignment.attachedFleetVehicleToken,
-                          let token = FleetMissionVehicleToken(storageKey: key)
-                    else { return false }
-                    if case .sitl = token { return true }
-                    return false
-                }()
-                let advice = PreflightFailureAdvisor.advice(
-                    for: PreflightFailureRemediationContext(
-                        autopilotStack: hub?.autopilotStack ?? .unknown,
-                        rawFailureDetail: reason,
-                        hubSnapshot: hub,
-                        isSimulation: isSim
-                    )
-                )
-                row.remediationAdvice = advice
-                row.detail = preflightArmFailureDetail(hub: hub, reason: reason)
+                row.detail = probe.detail
+                row.remediationAdvice = probe.remediationAdvice
                 rowUpdated(row)
                 allPassed = false
             }

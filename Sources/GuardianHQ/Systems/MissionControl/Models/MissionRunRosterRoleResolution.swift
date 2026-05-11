@@ -9,25 +9,65 @@ extension MissionRunLogTemplateKey {
 
 // MARK: - Resolved row (MC / MRE envelope slice)
 
-/// One roster device’s behavior role, resolved for Mission Control / MRE (built-in catalog + plugin overlays).
+/// One roster device’s behavior role, resolved for Mission Control / MRE (built-in catalog + plugin overlays / plugin full rows).
 /// MC code should prefer this over re-walking ``Mission/rosterDevices`` and re-merging overlays ad hoc.
 struct ResolvedRosterRole: Equatable, Sendable, Codable {
     /// ``RosterDevice/id``
     var rosterDeviceID: UUID
     /// ``RosterDevice/name`` at resolution time (for logs / export).
     var slotLabel: String
-    var role: RosterRole
-    /// MRE JSON contract payload; `nil` when ``role`` is ``RosterRole/none``.
+    /// Same as ``RosterDevice/behaviorRoleID`` (stable slug).
+    var behaviorRoleID: String
+    /// MRE JSON contract payload; `nil` when ``behaviorRoleID`` is the ``RosterRole/none`` slug.
     var mrePayload: RosterRoleMREPayload?
-    /// Plugins that contributed overlays for this role (sorted at resolution time).
+    /// Plugins that contributed overlays or the last catalog row for this slug (sorted at resolution time).
     var contributingPluginIDs: [GuardianPluginID]
 
     enum CodingKeys: String, CodingKey {
         case rosterDeviceID
         case slotLabel
-        case role
+        case behaviorRoleID
         case mrePayload
         case contributingPluginIDs
+        case legacyRole = "role"
+    }
+
+    init(
+        rosterDeviceID: UUID,
+        slotLabel: String,
+        behaviorRoleID: String,
+        mrePayload: RosterRoleMREPayload?,
+        contributingPluginIDs: [GuardianPluginID]
+    ) {
+        self.rosterDeviceID = rosterDeviceID
+        self.slotLabel = slotLabel
+        self.behaviorRoleID = behaviorRoleID
+        self.mrePayload = mrePayload
+        self.contributingPluginIDs = contributingPluginIDs
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        rosterDeviceID = try c.decode(UUID.self, forKey: .rosterDeviceID)
+        slotLabel = try c.decode(String.self, forKey: .slotLabel)
+        if let id = try c.decodeIfPresent(String.self, forKey: .behaviorRoleID) {
+            behaviorRoleID = id
+        } else if let r = try c.decodeIfPresent(RosterRole.self, forKey: .legacyRole) {
+            behaviorRoleID = r.rawValue
+        } else {
+            behaviorRoleID = RosterRole.none.rawValue
+        }
+        mrePayload = try c.decodeIfPresent(RosterRoleMREPayload.self, forKey: .mrePayload)
+        contributingPluginIDs = try c.decodeIfPresent([GuardianPluginID].self, forKey: .contributingPluginIDs) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(rosterDeviceID, forKey: .rosterDeviceID)
+        try c.encode(slotLabel, forKey: .slotLabel)
+        try c.encode(behaviorRoleID, forKey: .behaviorRoleID)
+        try c.encodeIfPresent(mrePayload, forKey: .mrePayload)
+        try c.encode(contributingPluginIDs, forKey: .contributingPluginIDs)
     }
 }
 
@@ -44,12 +84,13 @@ enum MissionRunRosterRoleResolver {
     }
 
     static func resolve(device: RosterDevice) -> ResolvedRosterRole {
-        let payload = RosterRoleCatalog.mrePayload(for: device.role)
-        let plugins = RosterRoleExtensionRegistry.resolvedDefinition(for: device.role)?.contributingPluginIDs ?? []
+        let id = device.behaviorRoleID
+        let payload = RosterRoleCatalog.mrePayload(forBehaviorRoleID: id)
+        let plugins = RosterRoleCatalog.contributingPlugins(forBehaviorRoleID: id)
         return ResolvedRosterRole(
             rosterDeviceID: device.id,
             slotLabel: device.name,
-            role: device.role,
+            behaviorRoleID: id,
             mrePayload: payload,
             contributingPluginIDs: plugins
         )

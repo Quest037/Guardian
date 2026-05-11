@@ -23,9 +23,9 @@ struct PresentedAppDrawer: Identifiable {
 ///
 /// Inject via environment and attach ``View/withAppDrawer()`` on the window root (after ``RootView``).
 ///
-/// Ephemeral app toasts use ``View/withToasts()`` on the **main content** column inside ``RootView`` so they do not
-/// cover the nav rail. Apply ``withAppDrawer()`` **before** ``View/withGuardianConfirmOverlayHost()`` so the drawer
-/// sits above ``RootView`` but below blocking confirms — see ``GuardianLayoutPatterns``.
+/// Ephemeral app toasts use ``View/withToasts()`` **after** ``withGuardianConfirmOverlayHost()`` on the window root so
+/// they paint **above** the drawer and blocking confirms; ``RootView`` publishes ``GuardianToastShellAnchorPreferenceKey``
+/// so chips stay aligned to the main **content** column (off the nav rail) — see ``GuardianLayoutPatterns``.
 @MainActor
 final class AppDrawer: ObservableObject {
     @Published private(set) var presented: PresentedAppDrawer?

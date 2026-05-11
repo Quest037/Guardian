@@ -11,6 +11,10 @@
 - **Internationalization (i18n):** expand localization coverage beyond Paladin log templates to full UI copy, formatting rules, and locale-aware defaults.
 - **Extended Display Mode:** - convert app into extended display mode aware to allow user to have different main tabs on different displays (vehicles, logs, missions), and to allow them to do the same for MC-R.
 
+## Performance & diagnostics
+
+- **GuardianHQ CPU with SITL (Xcode process gauges):** With SITL running, Xcode shows the app jumping from ~idle (~4%) to **100%+** CPU (multi-core % is normal above 100%). Explore/debug: distinguish **burst vs sustained** load, **GuardianHQ vs separate sim child processes**, and hot paths (MAVLink / MAVSDK handling, Combine or Rx delivery, **main-thread** work, SwiftUI invalidation, logging). Use Instruments (Time Profiler, Main Thread Checker as needed) and capture what is expected under telemetry volume vs worth optimising.
+
 ## Plugins System
 
 
@@ -22,29 +26,23 @@
   - Soft barometer signal: treat `altitudeAmslM != nil` as "barometer alive" so ArduPilot SITL goes green without `SCALED_PRESSURE` flowing through MAVSDK.
   - Synthesise `healthAllOk` from the AND of the six per-flag health booleans so Estimator clears "Awaiting telemetry" once all `health` events have arrived.
   - RC presence gating: hide the RC marker (or label it "No RC bound") until `rcWasAvailableOnce == true`, so it stops being an amber line in pure-sim runs.
-  - Catalogue of calibration methods per telemetry element. **Layer 0 (Fleet Commands
-    Catalogue) ships the comprehensive command set** — see `CommandsCatalogueDoc.md` §6
-    and `CommandsRecipesToDo.md` Stage A. Twenty-one `do.calibrate.*` descriptors are
-    registered, with PX4 wiring the autopilot-driven sensor procedures via the MAVSDK
-    Calibration plugin, raw MAVLink-only procedures through the Guardian
-    `COMMAND_LONG` sender, and both stacks wiring the param-driven cals. The next
-    pass is the **Layer 1
-    recipe catalogue** — Stage C of `CommandsRecipesToDo.md` — which composes the
-    "if A is not working, calibration method is B" routing on top of Layer 0:
-    `recipe.fleet.calibrate.compass`, `.accelerometer`, `.gyro`, `.baro`, `.level`, etc.,
-    each branching on `error.calibrationDeclined` / `.calibrationDidNotConverge` /
-    `.notImplemented` and routing to alternate calibration paths or operator escalation.
-  - Manual Calibration Process
-    - Create a wizard process to calibrate a vehicle (live)
-    - Create a wizard process to calibrate a vehicle (sim)
+  - **Calibration commands + recipes:** Layer 0 `do.calibrate.*` catalogue + Layer 1
+    `recipe.fleet.calibrate.*` / diagnose / error-fix recipes ship in-tree; see
+    `README.md` (Fleet Commands & Recipes) and `CommandsCatalogueDoc.md` §6. **Vehicle
+    Inspector wizard + inline escalation** — `CommandsRecipesToDo.md` → **Stage E**.
+  - Manual Calibration Process (live + sim): **Stage E** wizard in
+    `CommandsRecipesToDo.md` (replaces one-off hardcoded flows).
   
 - **Vehicle Preflight:**
-  - Attempt to arm, get errors and utilise calibration catalogue to solve
-  - **Live-mission preflight override surfaces.** The default-deny gate now lives in
+  - Wire arm / calibration-help UX to catalogue recipes (`recipe.fleet.diagnose.armprobe`,
+    `recipe.fleet.errors.fix.*`) — **Stage E** in `CommandsRecipesToDo.md` (recipes already
+    registered).
+  - **Live-mission recipe / preflight override surfaces.** The default-deny gate now lives in
     `MissionControlStore.runSingleVehiclePreflightProbe` (parameter
     `allowDuringLiveMission: Bool = false`) and the Vehicle Inspector header shows a
-    "Preflight locked" pill when a vehicle is bound to a `.running` / `.paused` /
-    `.recovery` run. Wire deliberate override paths for the legitimate cases:
+    **Recipe locked** pill when a vehicle is bound to a `.running` / `.paused` /
+    `.recovery` run (the same signal disables non-`safeInLiveMission` catalogue **Run**
+    rows in the Calibration tab). Wire deliberate override paths for the legitimate cases:
     - Reserve drone swap-in (operator confirms before fleet repointing).
     - Drone-recovery flow (vehicle dropped link / went offline mid-mission and we
       need to re-probe arm before sending it back to its task).
@@ -52,12 +50,14 @@
       to call the probe with `allowDuringLiveMission: true` from their own
       reasoning, with an audit-line attribution.
     Each surface needs a clear confirmation step and an audit entry on the FVM
-    preflight history (`source` field) so post-mission review can see exactly which
+    recipe-run history (`source` field) so post-mission review can see exactly which
     operator / plugin overrode the gate and why.
 
 
 ### Commands Catalogue
 
+Fleet **mission** command atoms and composites still to add: see **FleetCommands** below.
+Core fleet vehicle catalogue + recipes: `README.md` (Fleet Commands & Recipes architecture).
 
 ### Controllers System
 The controllers system is designed to allow a user to control a linked vehicle with either their keyboard or a connected game controller/joystick. It will also possible to do a hybrid joystick + keyboard.
@@ -110,7 +110,7 @@ Missions are the templates created by users that involve telling one or more veh
   - Add a blacklist for hexcode ranges (no black on black)
 
 ### Mission Mechanics
-- **Points:** - Add a points system for Tasks/Missions.
+- **Points:** - Add a points system for Tasks/Missions. Implementation backlog: **[`MissionPointsTodo.md`](MissionPointsTodo.md)** (typed map points, catchment, MRE/MCR, logging).
   - **Rally Points:** - Extend points with rally points for Tasks/Missions.
   - **Extraction Points:** - Extend points with extraction points for Tasks/Missions.
 - **Mission Task.staggerDelay:** - Add a field (or fields) to control a tasks stagger delay between drone groups when method is staggered. (duration + time style e.g. 30+seconds, 10+mins, 1+hour)
@@ -121,7 +121,6 @@ Missions are the templates created by users that involve telling one or more veh
 
 ### Mission Roster Slots
 
-- **Roles:** Full subsystem plan (catalog, tags, MRE DTO, plugin extension) — see **`RosterRolesToDo.md`** next to this file. Summary: Missions owns definitions + persistence; MC/MRE consumes resolved profiles at run time.
 
 ## Mission Control
 
@@ -131,7 +130,8 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 
 ### Policies
 - **Structure:**
-  - Use Commands Catalogue
+  - Drive policies from **FleetCommandsCatalogue / recipes** where a mission verb maps
+    to a catalogue entry (design with `CommandsRecipesToDo.md` MRE executor track).
   - Allow chaining
   - Allow priority attempts + count (Try this policy first, then try that)
 
@@ -158,6 +158,8 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 - **Task Controls (Sidebar):**
 
 - **Map:** 
+  - context-menu for task paths, vehicles, points markers
+    - left click triggers Stack overlay
   - Integrate CesiumJS system to offer 3D map version as well as Leaflet 2D map.
 
 - **Mission Controls (Sidebar):**
@@ -176,27 +178,10 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 
 #### Executor
 
-- **Migrate MRE off bespoke `FleetVehicleCommand` dispatch onto the new
-  `FleetCommandsCatalogue` + Recipes system:**
-  - `MissionRunCommandSubsystem` currently builds `FleetVehicleCommand` cases directly
-    (`.arm`, `.gotoCoordinate`, `.uploadAndStartMission`, `.returnToLaunch`, …) and
-    hands them to `FleetLinkService.executeVehicleCommand`. Forward-port it to invoke
-    Layer 1 recipes (Stage B) by name, with the executor running one recipe thread per
-    assigned vehicle and branching on the typed `FleetCommandResponse` taxonomy
-    (`success / error.<kind> / cancelled / timeout`) instead of the current
-    free-form failure strings.
-  - Replace the implicit upload+arm+start composite (`runUploadArmStartMissionPipeline`
-    / `FleetVehicleCommand.uploadAndStartMission`) with the planned
-    `do.mission.upload.start` composite command (or its recipe equivalent), so the
-    only place upload+arm+start logic lives is the catalogue / recipes — not in MRE.
-  - Once every MRE call site goes through a recipe, retire
-    `FleetVehicleCommand.uploadAndStartMission`. The older `FleetCommandCatalog.json`
-    park / returnHome / hold compatibility path has already been deleted in
-    `CommandsRecipesToDo.md` Stage B0; those behaviours now flow through the new
-    Layer 0 command atoms.
-  - Track operator prompts MRE raises today as **escalation events** from the recipe
-    runner rather than ad-hoc `GuardianBottomPromptCenter` calls so wizards / plugins /
-    UserNotifications all consume the same channel.
+- **MRE → `FleetCommandsCatalogue` + `FleetRecipeRunner`:** canonical backlog lives in
+  `CommandsRecipesToDo.md` → **Next — MRE recipe executor** (subsystem forward-port,
+  upload+arm+start composite, retire `FleetVehicleCommand.uploadAndStartMission`, prompts
+  via escalation / operator prompt channel).
 
 #### Commander
 
@@ -299,9 +284,9 @@ Composite commands (command-contains-commands, 1 level deep):
 
 ## App Errors
 
-Cross-cutting error system. Foundation only — does not block Commands & Recipes work;
-pull in once the catalogue + recipe runner are settled. Approach is **protocol, not
-envelope**: a core `GuardianError` protocol that each system's existing typed enum
+Cross-cutting error system. Foundation only — **Fleet command + recipe layers are
+settled**; schedule this when prioritising typed errors across the app. Approach is
+**protocol, not envelope**: a core `GuardianError` protocol that each system's existing typed enum
 conforms to, so closed taxonomies stay first-class instead of being type-erased into a
 wrapper.
 

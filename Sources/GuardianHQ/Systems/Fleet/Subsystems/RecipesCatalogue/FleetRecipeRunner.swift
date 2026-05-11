@@ -5,15 +5,16 @@ import os
 // MARK: - Command invoker injection
 
 /// Function shape the runner uses to dispatch a single Layer 0 command. The
-/// production wiring forwards to ``FleetCommandsCatalogue/invoke(...)`` against a
-/// live ``FleetLinkService``; tests inject deterministic stubs so the runner's
-/// state machine can be exercised without spinning up MAVSDK.
+/// production wiring forwards to ``FleetCommandsCatalogue`` with the live link and
+/// ``FleetCommandsCatalogue/invoke(_:parameters:vehicleID:source:fleetLink:timeout:invokingPluginID:)``
+/// plugin argument set from the owning recipe's ``FleetRecipeDescriptor/pluginID``; tests inject stubs.
 typealias FleetRecipeCommandInvoker = @MainActor (
     _ name: FleetCommandName,
     _ parameters: FleetCommandParameters,
     _ vehicleID: String,
     _ source: String,
-    _ timeout: TimeInterval
+    _ timeout: TimeInterval,
+    _ invokingPluginID: GuardianPluginID?
 ) async -> FleetCommandResponse
 
 // MARK: - Live-mission gate injection
@@ -44,7 +45,7 @@ typealias FleetRecipeLiveMissionGate = @MainActor (_ vehicleID: String) -> Bool
 /// `invokeRecipe` step expansions bypass the per-vehicle gate because they are
 /// part of the parent run's accounting.
 ///
-/// **Cancellation:** ``cancel(vehicleID:)`` sets a flag on the active run. The
+/// **Cancellation:** ``cancel(vehicleID:)`` / ``cancel(runID:)`` sets a flag on the active run. The
 /// in-flight Layer 0 command runs to completion (Layer 0 doesn't expose mid-flight
 /// cancel for now), but no further steps are dispatched. If the descriptor
 /// declares ``FleetRecipeDescriptor/cancelRecipe`` the runner dispatches that
@@ -57,6 +58,14 @@ typealias FleetRecipeLiveMissionGate = @MainActor (_ vehicleID: String) -> Bool
 ///
 /// **Escalation:** see ``FleetRecipeEscalationEvent``. Unsupplied handlers fall
 /// back to ``FleetRecipeDefaultEscalationHandler/abort``.
+///
+/// **Live wizard progress:** while ``executeBody`` runs for a vehicle, ``wizardProgressByVehicleID``
+/// holds a ``FleetRecipeWizardProgressSnapshot`` for Vehicle Inspector chrome (Stage E). Cleared
+/// when the top-level ``run`` exits.
+///
+/// **Wizard escalation:** ``vehicleInspectorWizardEscalationHandler(for:)`` publishes
+/// ``wizardEscalationByVehicleID`` until the operator calls ``submitWizardEscalationVerb(vehicleID:verb:)``
+/// or ``cancel(vehicleID:)`` (which auto-picks an allowed verb to unblock the handler).
 @MainActor
 final class FleetRecipeRunner: ObservableObject {
 
@@ -65,6 +74,19 @@ final class FleetRecipeRunner: ObservableObject {
     static let shared = FleetRecipeRunner()
 
     private init() {}
+
+    // MARK: Wizard progress (Stage E UI)
+
+    /// Live per-vehicle procedure progress for operator surfaces (Vehicle Inspector, future MCR).
+    @Published private(set) var wizardProgressByVehicleID: [String: FleetRecipeWizardProgressSnapshot] = [:]
+
+    /// When a run uses ``vehicleInspectorWizardEscalationHandler(for:)``, Layer 2 escalation is
+    /// mirrored here until the operator picks a resumption verb (or cancel unblocks the await).
+    @Published private(set) var wizardEscalationByVehicleID: [String: FleetRecipeWizardEscalationSnapshot] = [:]
+
+    /// Mirrors the top-level ``activeRuns`` slot per vehicle so SwiftUI surfaces (Run row spinners,
+    /// sheet chrome) refresh as soon as a recipe starts, without waiting on ``wizardProgressByVehicleID``.
+    @Published private(set) var activeTopLevelRecipeNameByVehicleID: [String: FleetRecipeName] = [:]
 
     // MARK: Configuration
 
@@ -96,6 +118,9 @@ final class FleetRecipeRunner: ObservableObject {
     /// Active runs keyed by `vehicleID`. One run per vehicle (locked decision).
     private var activeRuns: [String: ActiveRun] = [:]
 
+    /// Continuations waiting on inline wizard escalation UI for a vehicle.
+    private var pendingWizardEscalations: [String: (allowed: Set<FleetRecipeResumptionVerb>, continuation: CheckedContinuation<FleetRecipeResumptionVerb, Never>)] = [:]
+
     private let log = OSLog(subsystem: "guardian.fleet.recipesCatalogue", category: "runner")
 
     // MARK: Public surface
@@ -125,6 +150,10 @@ final class FleetRecipeRunner: ObservableObject {
         allowDuringLiveMission: Bool = false,
         escalationHandler: FleetRecipeEscalationHandler? = nil
     ) async -> FleetRecipeOutcome {
+        defer {
+            clearWizardProgress(vehicleID: vehicleID)
+            abandonWizardEscalationAwaitingResume(vehicleID: vehicleID)
+        }
 
         let runID = FleetRecipeRunID()
         let trace = FleetRecipeAuditTrace(runID: runID, recipe: name, vehicleID: vehicleID)
@@ -201,7 +230,7 @@ final class FleetRecipeRunner: ObservableObject {
             )
         }
 
-        let invoker = commandInvokerOverride ?? { @MainActor [weak fleetLink] commandName, commandParams, vid, src, timeout in
+        let invoker = commandInvokerOverride ?? { @MainActor [weak fleetLink] commandName, commandParams, vid, src, timeout, invokingPluginID in
             guard let fleetLink else {
                 return .error(
                     .dispatchFailed,
@@ -215,7 +244,8 @@ final class FleetRecipeRunner: ObservableObject {
                 vehicleID: vid,
                 source: src,
                 fleetLink: fleetLink,
-                timeout: timeout
+                timeout: timeout,
+                invokingPluginID: invokingPluginID
             )
         }
 
@@ -224,8 +254,8 @@ final class FleetRecipeRunner: ObservableObject {
             recipeName: name,
             vehicleID: vehicleID
         )
-        activeRuns[vehicleID] = active
-        defer { activeRuns.removeValue(forKey: vehicleID) }
+        installActiveRunSlot(vehicleID: vehicleID, run: active, topLevelRecipe: name)
+        defer { removeActiveRunSlot(vehicleID: vehicleID) }
 
         os_log(
             .info,
@@ -235,6 +265,16 @@ final class FleetRecipeRunner: ObservableObject {
             String(describing: runID),
             vehicleID
         )
+
+        // Prime Vehicle Inspector chrome before the first awaited dispatch so fast recipes
+        // still show stable progress (and Run rows can observe ``activeTopLevelRecipeName``).
+        publishWizardRunStarting(
+            vehicleID: vehicleID,
+            activeRun: active,
+            descriptor: descriptor,
+            body: body
+        )
+        await Task.yield()
 
         let outcome = await executeBody(
             body,
@@ -288,6 +328,7 @@ final class FleetRecipeRunner: ObservableObject {
     func cancel(vehicleID: String) -> Bool {
         guard let active = activeRuns[vehicleID] else { return false }
         active.markCancelled()
+        unblockWizardEscalationForCancelledRun(vehicleID: vehicleID)
         os_log(
             .info,
             log: log,
@@ -298,9 +339,75 @@ final class FleetRecipeRunner: ObservableObject {
         return true
     }
 
+    /// Cancels the active run whose **top-level** id matches `runID`, if any.
+    ///
+    /// Prefer this from wizard chrome that carries ``FleetRecipeWizardProgressSnapshot/runID`` so
+    /// cancel targets the operator-visible run even when a nested ``invokeRecipe`` is executing.
+    /// Resolves to the same slot as ``cancel(vehicleID:)`` when `runID` matches that vehicle’s
+    /// active top-level run.
+    @discardableResult
+    func cancel(runID: FleetRecipeRunID) -> Bool {
+        for (vehicleID, active) in activeRuns where active.runID == runID {
+            return cancel(vehicleID: vehicleID)
+        }
+        return false
+    }
+
+    /// Escalation handler that surfaces ``FleetRecipeEscalationEvent`` on ``wizardEscalationByVehicleID``
+    /// until ``submitWizardEscalationVerb(vehicleID:verb:)`` returns the verb to the runner.
+    ///
+    /// - Precondition: the event's ``FleetRecipeEscalationEvent/vehicleID`` matches `vehicleID`
+    ///   (defensive abort if not).
+    func vehicleInspectorWizardEscalationHandler(for vehicleID: String) -> FleetRecipeEscalationHandler {
+        { event in
+            guard event.vehicleID == vehicleID else {
+                return .abort
+            }
+            let snapshot = FleetRecipeWizardEscalationSnapshot.from(event: event)
+            var next = self.wizardEscalationByVehicleID
+            next[vehicleID] = snapshot
+            self.wizardEscalationByVehicleID = next
+
+            let verb = await withCheckedContinuation { (continuation: CheckedContinuation<FleetRecipeResumptionVerb, Never>) in
+                self.pendingWizardEscalations[vehicleID] = (Set(event.allowedVerbs), continuation)
+            }
+
+            var cleared = self.wizardEscalationByVehicleID
+            cleared.removeValue(forKey: vehicleID)
+            self.wizardEscalationByVehicleID = cleared
+            self.pendingWizardEscalations.removeValue(forKey: vehicleID)
+            return verb
+        }
+    }
+
+    /// Resume a wizard-blocked escalation with an operator-chosen verb. Returns `false` when no
+    /// escalation is pending or `verb` is not in the event's ``FleetRecipeEscalationEvent/allowedVerbs``.
+    @discardableResult
+    func submitWizardEscalationVerb(vehicleID: String, verb: FleetRecipeResumptionVerb) -> Bool {
+        guard let pending = pendingWizardEscalations.removeValue(forKey: vehicleID) else { return false }
+        guard pending.allowed.contains(verb) else {
+            pendingWizardEscalations[vehicleID] = pending
+            return false
+        }
+        var next = wizardEscalationByVehicleID
+        next.removeValue(forKey: vehicleID)
+        wizardEscalationByVehicleID = next
+        pending.continuation.resume(returning: verb)
+        return true
+    }
+
     /// Whether `vehicleID` currently has an active recipe run.
     func hasActiveRun(forVehicleID vehicleID: String) -> Bool {
-        activeRuns[vehicleID] != nil
+        activeTopLevelRecipeNameByVehicleID[vehicleID] != nil
+    }
+
+    /// Top-level recipe name currently executing for `vehicleID`, if any.
+    ///
+    /// Child recipes expanded from ``invokeRecipe`` do **not** register their own slot in
+    /// ``activeRuns``; while a nested body runs, this still reports the **outer** recipe the
+    /// operator started (Vehicle Inspector row / cancel semantics stay aligned).
+    func activeTopLevelRecipeName(forVehicleID vehicleID: String) -> FleetRecipeName? {
+        activeTopLevelRecipeNameByVehicleID[vehicleID]
     }
 
     // MARK: Body execution
@@ -358,11 +465,11 @@ final class FleetRecipeRunner: ObservableObject {
 
         let active = ActiveRun(runID: runID, recipeName: name, vehicleID: vehicleID)
         if !bypassConflictGate {
-            activeRuns[vehicleID] = active
+            installActiveRunSlot(vehicleID: vehicleID, run: active, topLevelRecipe: name)
         }
         defer {
             if !bypassConflictGate {
-                activeRuns.removeValue(forKey: vehicleID)
+                removeActiveRunSlot(vehicleID: vehicleID)
             }
         }
 
@@ -435,6 +542,20 @@ final class FleetRecipeRunner: ObservableObject {
                     detail: "Unknown step ID \(cursor.rawValue) (parser invariant violated).",
                     trace: trace
                 )
+            }
+
+            publishWizardProgress(
+                vehicleID: vehicleID,
+                activeRun: active,
+                descriptor: descriptor,
+                body: body,
+                trace: trace,
+                step: step
+            )
+            // First dispatch of a run: let SwiftUI paint wizard chrome before a long Layer 0 await
+            // monopolises the main actor continuation (Vehicle Inspector Run row + banner).
+            if trace.entries.isEmpty {
+                await Task.yield()
             }
 
             // Dispatch the step (with auto-retry per the step / descriptor policy).
@@ -526,7 +647,7 @@ final class FleetRecipeRunner: ObservableObject {
 
             case .escalate(let reason, let allowedVerbs):
                 let event = FleetRecipeEscalationEvent(
-                    runID: active.runID,
+                    runID: wizardSnapshotRunID(vehicleID: vehicleID, activeRun: active),
                     recipe: descriptor.name,
                     vehicleID: vehicleID,
                     stepID: step.id,
@@ -618,7 +739,7 @@ final class FleetRecipeRunner: ObservableObject {
 
             while attempts <= policy.maxAttempts {
                 attempts += 1
-                response = await invoker(command, commandParams, vehicleID, source, stepTimeout)
+                response = await invoker(command, commandParams, vehicleID, source, stepTimeout, descriptor.pluginID)
                 if !policy.shouldRetry(response) { break }
                 if attempts > policy.maxAttempts { break }
                 if policy.delaySeconds > 0 {
@@ -638,6 +759,28 @@ final class FleetRecipeRunner: ObservableObject {
                     response: .error(.dispatchFailed, detail: detail, elapsed: 0),
                     attempts: 0
                 )
+            }
+            if let pluginID = descriptor.pluginID {
+                guard let manifest = GuardianPluginRegistry.shared.manifest(for: pluginID) else {
+                    return StepDispatchResult(
+                        response: .error(
+                            .dispatchFailed,
+                            detail: "No GuardianPluginManifest for plugin \(pluginID.rawValue).",
+                            elapsed: 0
+                        ),
+                        attempts: 0
+                    )
+                }
+                guard manifest.allowsInvoking(recipeRaw: recipeName.rawValue) else {
+                    return StepDispatchResult(
+                        response: .error(
+                            .dispatchFailed,
+                            detail: "Recipe \(recipeName.rawValue) is outside plugin \(pluginID.rawValue) invokedRecipeNamespaces claims.",
+                            elapsed: 0
+                        ),
+                        attempts: 0
+                    )
+                }
             }
             let childOutcome = await runInternal(
                 recipe: recipeName,
@@ -742,6 +885,132 @@ final class FleetRecipeRunner: ObservableObject {
         }
     }
 
+    // MARK: Wizard progress publishing
+
+    /// Wizard / escalation chrome always correlates to the **top-level** run (``activeRuns`` slot).
+    /// Nested ``invokeRecipe`` bodies use their own ``ActiveRun`` identity internally; snapshots and
+    /// ``FleetRecipeEscalationEvent`` still carry the outer run id so ``cancel(runID:)`` matches the
+    /// Vehicle Inspector banner.
+    private func wizardSnapshotRunID(vehicleID: String, activeRun: ActiveRun) -> FleetRecipeRunID {
+        if let slot = activeRuns[vehicleID] {
+            return slot.runID
+        }
+        return activeRun.runID
+    }
+
+    private func publishWizardRunStarting(
+        vehicleID: String,
+        activeRun: ActiveRun,
+        descriptor: FleetRecipeDescriptor,
+        body: FleetRecipeBody
+    ) {
+        guard let entryStep = body.step(withID: body.entryStepID) else { return }
+        let authoredFloor = max(body.steps.count, 1)
+        var next = wizardProgressByVehicleID
+        next[vehicleID] = FleetRecipeWizardProgressSnapshot(
+            runID: wizardSnapshotRunID(vehicleID: vehicleID, activeRun: activeRun),
+            recipeHumanTitle: descriptor.humanLabel,
+            stepOrdinal: 1,
+            stepTotal: authoredFloor,
+            currentStepID: entryStep.id,
+            activityLine: "Starting procedure…"
+        )
+        wizardProgressByVehicleID = next
+    }
+
+    private func publishWizardProgress(
+        vehicleID: String,
+        activeRun: ActiveRun,
+        descriptor: FleetRecipeDescriptor,
+        body: FleetRecipeBody,
+        trace: FleetRecipeAuditTrace,
+        step: FleetRecipeStep
+    ) {
+        let dispatchOrdinal = trace.entries.count + 1
+        let authoredFloor = max(body.steps.count, 1)
+        let displayTotal = max(authoredFloor, dispatchOrdinal)
+        var next = wizardProgressByVehicleID
+        next[vehicleID] = FleetRecipeWizardProgressSnapshot(
+            runID: wizardSnapshotRunID(vehicleID: vehicleID, activeRun: activeRun),
+            recipeHumanTitle: descriptor.humanLabel,
+            stepOrdinal: dispatchOrdinal,
+            stepTotal: displayTotal,
+            currentStepID: step.id,
+            activityLine: wizardActivityLine(for: step)
+        )
+        wizardProgressByVehicleID = next
+    }
+
+    private func clearWizardProgress(vehicleID: String) {
+        var next = wizardProgressByVehicleID
+        next.removeValue(forKey: vehicleID)
+        wizardProgressByVehicleID = next
+    }
+
+    /// Picks a verb that unblocks an escalation await after **Cancel** or run teardown. Prefers
+    /// ``abort`` so the recipe tends to end immediately when the operator asked to stop; otherwise
+    /// falls back through lighter-weight verbs so the handler always resumes.
+    private func bestUnblockVerb(from allowed: Set<FleetRecipeResumptionVerb>) -> FleetRecipeResumptionVerb {
+        if allowed.contains(.abort) { return .abort }
+        if allowed.contains(.skip) { return .skip }
+        if allowed.contains(.acknowledge) { return .acknowledge }
+        if allowed.contains(.retry) { return .retry }
+        return .abort
+    }
+
+    private func unblockWizardEscalationForCancelledRun(vehicleID: String) {
+        guard let pending = pendingWizardEscalations.removeValue(forKey: vehicleID) else { return }
+        var next = wizardEscalationByVehicleID
+        next.removeValue(forKey: vehicleID)
+        wizardEscalationByVehicleID = next
+        let verb = bestUnblockVerb(from: pending.allowed)
+        pending.continuation.resume(returning: verb)
+    }
+
+    /// If a wizard escalation continuation is still pending when the top-level ``run`` exits,
+    /// resume it so the handler never leaks an await (e.g. unexpected failure paths).
+    private func abandonWizardEscalationAwaitingResume(vehicleID: String) {
+        guard let pending = pendingWizardEscalations.removeValue(forKey: vehicleID) else {
+            var escOnly = wizardEscalationByVehicleID
+            if escOnly.removeValue(forKey: vehicleID) != nil {
+                wizardEscalationByVehicleID = escOnly
+            }
+            return
+        }
+        var esc = wizardEscalationByVehicleID
+        esc.removeValue(forKey: vehicleID)
+        wizardEscalationByVehicleID = esc
+        let verb = bestUnblockVerb(from: pending.allowed)
+        pending.continuation.resume(returning: verb)
+    }
+
+    private func installActiveRunSlot(vehicleID: String, run: ActiveRun, topLevelRecipe: FleetRecipeName) {
+        activeRuns[vehicleID] = run
+        var next = activeTopLevelRecipeNameByVehicleID
+        next[vehicleID] = topLevelRecipe
+        activeTopLevelRecipeNameByVehicleID = next
+    }
+
+    private func removeActiveRunSlot(vehicleID: String) {
+        activeRuns.removeValue(forKey: vehicleID)
+        var next = activeTopLevelRecipeNameByVehicleID
+        if next.removeValue(forKey: vehicleID) != nil {
+            activeTopLevelRecipeNameByVehicleID = next
+        }
+    }
+
+    private func wizardActivityLine(for step: FleetRecipeStep) -> String {
+        switch step {
+        case .invokeCommand(_, let command, _, _, _):
+            return command.rawValue
+        case .invokeRecipe(_, let recipe, _, _):
+            if let child = FleetRecipesCatalogue.shared.descriptor(for: recipe) {
+                return "Nested procedure: \(child.humanLabel)"
+            }
+            return "Nested procedure: \(recipe.rawValue)"
+        }
+    }
+
     // MARK: Active-run handle
 
     /// Mutable per-run state owned by the runner. Reference type so the loop
@@ -770,7 +1039,15 @@ final class FleetRecipeRunner: ObservableObject {
     /// so a refusing-on-conflict assertion in one test can't be polluted by a
     /// previous test's leaked run.
     func _testOnlyResetActiveRuns() {
+        let stuckVehicles = Array(pendingWizardEscalations.keys)
+        for vid in stuckVehicles {
+            abandonWizardEscalationAwaitingResume(vehicleID: vid)
+        }
         activeRuns.removeAll()
+        activeTopLevelRecipeNameByVehicleID = [:]
+        wizardProgressByVehicleID = [:]
+        wizardEscalationByVehicleID = [:]
+        pendingWizardEscalations.removeAll()
         commandInvokerOverride = nil
         defaultEscalationHandler = FleetRecipeDefaultEscalationHandler.abort
         liveMissionGate = nil

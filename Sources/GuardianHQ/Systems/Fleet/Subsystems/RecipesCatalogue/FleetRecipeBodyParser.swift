@@ -44,6 +44,24 @@ enum FleetRecipeBodyParseError: Error, Equatable, Sendable, CustomStringConverti
     /// an `.invokeRecipe(...)` step. Enforces the locked 1-level composition limit.
     case invokedRecipeBodyExceedsDepthLimit(parent: FleetRecipeName, child: FleetRecipeName)
 
+    /// Plugin-owned body: `.invokeCommand` target is outside the plugin manifest's
+    /// ``GuardianPluginManifest/invokedCommandNamespaces`` claims.
+    case invokedCommandOutsidePluginManifestClaims(
+        stepID: FleetRecipeStepID,
+        command: FleetCommandName,
+        pluginID: GuardianPluginID
+    )
+
+    /// Plugin-owned body: `.invokeRecipe` target is outside ``GuardianPluginManifest/invokedRecipeNamespaces``.
+    case invokedRecipeOutsidePluginManifestClaims(
+        stepID: FleetRecipeStepID,
+        recipe: FleetRecipeName,
+        pluginID: GuardianPluginID
+    )
+
+    /// Plugin-owned descriptor registered without a matching ``GuardianPluginManifest`` in the registry.
+    case pluginManifestMissingForBodyValidation(pluginID: GuardianPluginID)
+
     /// A `.stringMatches(regex:)` predicate's pattern failed to compile.
     case predicateRegexInvalid(pattern: String, fromStep: FleetRecipeStepID)
 
@@ -92,6 +110,12 @@ enum FleetRecipeBodyParseError: Error, Equatable, Sendable, CustomStringConverti
             return "recipe '\(name.rawValue)' is not registered in FleetRecipesCatalogue"
         case .invokedRecipeBodyExceedsDepthLimit(let parent, let child):
             return "recipe '\(parent.rawValue)' cannot invoke '\(child.rawValue)' because the child itself invokes other recipes (1-level depth limit)"
+        case .invokedCommandOutsidePluginManifestClaims(let id, let command, let pluginID):
+            return "step '\(id.rawValue)': command '\(command.rawValue)' is outside plugin \(pluginID.rawValue) invokedCommandNamespaces claims"
+        case .invokedRecipeOutsidePluginManifestClaims(let id, let recipe, let pluginID):
+            return "step '\(id.rawValue)': recipe '\(recipe.rawValue)' is outside plugin \(pluginID.rawValue) invokedRecipeNamespaces claims"
+        case .pluginManifestMissingForBodyValidation(let pluginID):
+            return "no GuardianPluginManifest registered for plugin \(pluginID.rawValue) (required for plugin-owned recipe body validation)"
         case .predicateRegexInvalid(let pattern, let step):
             return "step '\(step.rawValue)' uses uncompilable regex pattern '\(pattern)'"
         case .overallBudgetExceedsCap(let declared, let cap):
@@ -216,6 +240,19 @@ enum FleetRecipeBodyParser {
                             humanLabel: $0.humanLabel
                         ) }
                     ))
+                    if let pluginID = descriptor.pluginID {
+                        if let manifest = GuardianPluginRegistry.shared.manifest(for: pluginID) {
+                            if !manifest.allowsInvoking(commandRaw: command.rawValue) {
+                                errors.append(.invokedCommandOutsidePluginManifestClaims(
+                                    stepID: id,
+                                    command: command,
+                                    pluginID: pluginID
+                                ))
+                            }
+                        } else {
+                            errors.append(.pluginManifestMissingForBodyValidation(pluginID: pluginID))
+                        }
+                    }
                 } else {
                     errors.append(.invokedCommandNotRegistered(command))
                 }
@@ -237,6 +274,19 @@ enum FleetRecipeBodyParser {
                     descriptorParameters: descriptor.parameters,
                     targetParameters: child.parameters
                 ))
+                if let pluginID = descriptor.pluginID {
+                    if let manifest = GuardianPluginRegistry.shared.manifest(for: pluginID) {
+                        if !manifest.allowsInvoking(recipeRaw: recipe.rawValue) {
+                            errors.append(.invokedRecipeOutsidePluginManifestClaims(
+                                stepID: id,
+                                recipe: recipe,
+                                pluginID: pluginID
+                            ))
+                        }
+                    } else {
+                        errors.append(.pluginManifestMissingForBodyValidation(pluginID: pluginID))
+                    }
+                }
                 if child.bodyInvokesAnyRecipe {
                     errors.append(.invokedRecipeBodyExceedsDepthLimit(
                         parent: descriptor.name,

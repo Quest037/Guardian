@@ -29,7 +29,7 @@ enum MissionRunPrepLayout {
     /// Slot cards use ``GuardianCard``; same radius as ``GuardianCardLayout/cornerRadius`` (theme catalog / docs).
     static let rosterSlotCornerRadius: CGFloat = GuardianCardLayout.cornerRadius
     static let rosterSlotMinHeight: CGFloat = 100
-    /// Below this width, Rosters tab stacks map above the accordion.
+    /// Below this width, Setup **Tasks** tab stacks map above the accordion.
     static let rostersMapAccordionStackBreakpoint: CGFloat = GuardianSpacing.missionRosterMapAccordionBreakpoint
 }
 
@@ -393,18 +393,52 @@ enum MissionRunSetupTab: String, CaseIterable, Identifiable, Hashable {
     var title: String {
         switch self {
         case .timing: return "Timing"
-        case .rosters: return "Rosters"
+        case .rosters: return "Tasks"
         case .rules: return "Rules"
         }
     }
 }
 
+/// Segmented control inside MC-S **Tasks** (setup) tab: roster accordions vs template map points.
+enum MissionControlSetupRostersSidebarTab: String, CaseIterable, Identifiable {
+    case tasks
+    case points
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .tasks: "Tasks"
+        case .points: "Points"
+        }
+    }
+}
 
-struct SetupStagingMapSignature: Equatable {
+/// Inputs that affect roster staging map mission-point chrome (toolbar arm, hit testing, geometry placement flag).
+struct MissionControlSetupRosterStagingMissionPointChrome: Equatable {
+    let listTab: MissionControlSetupRostersSidebarTab
+    let selectedPointID: UUID?
+}
+
+/// Stable inputs for ``MissionRunDetailView`` staging map `.task(id:)` — **excludes** live lat/lon so fleet
+/// telemetry / ``FleetLinkService/applySimState`` cannot invalidate the task every frame (which breaks Leaflet drag
+/// and triggers “onChange … multiple times per frame”). Coordinate-only updates use ``setupStagingMapMarkerCoordinateDigest``.
+struct SetupStagingMapStructureIdentity: Equatable {
     let missionID: UUID?
     let homeCoord: RouteCoordinate?
     let allTasksCoords: [[RouteCoordinate]]
-    let markers: [MapVehicleMarker]
+    let taskPathIDs: [UUID]
+    /// Mission map points: ids, kind, closed, and map selection — not coordinates.
+    let missionPointTopologySignature: String
+    /// Roster ↔ fleet token rows (``setupMapBoundsSignature``).
+    let assignmentFleetBindingSignature: String
+    let rosterStagingMissionPointChrome: MissionControlSetupRosterStagingMissionPointChrome
+    /// Exclusive map chrome: which task polyline (if any) is the active map selection on MCS staging.
+    let selectedTaskPathID: UUID?
+    /// Which roster assignment is selected for staging-map vehicle chrome (draggable SIM, ring, tooltip).
+    let selectedStagingRosterAssignmentID: UUID?
+}
+
+private struct MissionControlSetupRosterMissionPointDeleteCandidate: Identifiable, Equatable {
+    let id: UUID
 }
 
 /// MC Setup roster: confirm before bulk-spawn SIMs (one task or entire mission).
@@ -420,13 +454,25 @@ enum MissionRunBulkSimSpawnBusyKind: Equatable {
 }
 
 /// Presented as one in-window overlay from ``MissionRunDetailView`` (replaces stacked `confirmationDialog` modifiers).
-private enum MissionRunPresentedConfirm: String, Identifiable, Equatable {
+private enum MissionRunPresentedConfirm: Identifiable, Equatable {
     case deleteRun
     case skipScheduledMissionStart
     case skipTaskStartDeferral
-    case bulkSpawnSims
+    /// Spawn scope is part of the item so the window-level confirm host always rebuilds with the correct copy (no orphaned `@State`).
+    case bulkSpawnSims(MissionRunBulkSpawnSimsConfirmKind)
 
-    var id: String { rawValue }
+    var id: String {
+        switch self {
+        case .deleteRun: "deleteRun"
+        case .skipScheduledMissionStart: "skipScheduledMissionStart"
+        case .skipTaskStartDeferral: "skipTaskStartDeferral"
+        case .bulkSpawnSims(let scope):
+            switch scope {
+            case .allMissionSlots: "bulkSpawnSims.allMissionSlots"
+            case .singleTask(let taskID): "bulkSpawnSims.task.\(taskID.uuidString)"
+            }
+        }
+    }
 }
 
 struct MissionRunDetailView: View {
@@ -449,6 +495,9 @@ struct MissionRunDetailView: View {
     let onDelete: (UUID) -> Void
 
     @State private var setupSelectedAssignmentId: UUID?
+    /// MCS staging SITL: operator-dragged lat/lon applied **synchronously** to the map payload so Leaflet is not
+    /// overwritten by stale hub telemetry until ``FleetLinkService/applySimState`` finishes (same frame as drag moves).
+    @State private var setupStagingSimDragCoordByAssignmentID: [UUID: RouteCoordinate] = [:]
     /// Shared model for both the Setup staging map and the Live overview map —
     /// owns the tile style, recenter nonce, and the per-tab content that gets
     /// pushed in via `.task(id:)`.
@@ -458,6 +507,17 @@ struct MissionRunDetailView: View {
     /// MC-R: focused roster slot triage — slides a vehicle detail sheet up over the Tasks card.
     /// Mutually exclusive with ``focusedLiveTaskID`` so only one overlay is mounted at a time.
     @State private var focusedLiveAssignmentID: UUID? = nil
+    /// MC-R §4.2: runtime map-points sheet over the Tasks card (slide-up; stacks above task triage and vehicle overlays).
+    @State private var liveRuntimeMissionPointsOverlayPresented = false
+    @State private var liveRuntimeMissionPointDrawerEditingID: UUID?
+    @State private var liveRuntimeMissionMapViewportCenter: RouteCoordinate?
+    /// MC-R live overview map: selected runtime map point (list + map pin); enables drag reposition on the pin.
+    @State private var liveRuntimeOverviewSelectedMissionPointID: UUID?
+    /// Bumps after adding a map point so the overlay list scrolls that row into view.
+    @State private var liveRuntimeMapPointsListScrollEpoch: UInt = 0
+    @State private var liveRuntimeMapPointsListScrollTargetRow: UUID?
+    /// MC-R: when true, log card body shrinks to one line so the live map column gains height.
+    @State private var liveLogPanelCollapsed = false
     /// User dismissed the recovery status anchored prompt for this visit (does not change MRE).
     @State private var dismissedRecoveryStatusPrompt = false
     /// User dismissed the abort-session status anchored prompt for this visit (does not change MRE).
@@ -479,13 +539,21 @@ struct MissionRunDetailView: View {
     @State private var setupMainTab: MissionRunSetupTab = .timing
     @State private var rosterSetupExpandedTaskIDs: Set<UUID> = []
     @State private var rosterSetupLegacyMissionRosterExpanded: Bool = true
-    @State private var bulkSpawnSimsConfirmKind: MissionRunBulkSpawnSimsConfirmKind?
     /// Single sheet for run-level confirms (replaces stacked `confirmationDialog` modifiers).
     @State private var presentedRunConfirm: MissionRunPresentedConfirm?
     @State private var rosterBulkSimSpawnBusy: MissionRunBulkSimSpawnBusyKind?
     @State private var rosterBulkSimSpawnWorkingAssignmentId: UUID?
     /// Stack segment for **Sim** on empty roster cards (`SimulationVehiclePickerSidebar`, same as Vehicles → Add Sim).
     @State private var rosterSimSidebarSpawnPlatform: SimulationPlatform = .ardupilot
+    @State private var rostersSidebarListTab: MissionControlSetupRostersSidebarTab = .tasks
+    @State private var setupRostersSelectedMissionPointID: UUID?
+    @State private var setupRostersMapViewportCenter: RouteCoordinate?
+    @State private var setupRostersMissionPointDrawerEditingID: UUID?
+    @State private var setupRostersMissionPointDeleteCandidate: MissionControlSetupRosterMissionPointDeleteCandidate?
+    @State private var setupRostersMapPointsListScrollEpoch: UInt = 0
+    @State private var setupRostersMapPointsListScrollTargetRow: UUID?
+    /// MCS staging map: at most one of point / vehicle / task path may be “map selected” at a time (see ``applyExclusiveMCSStagingMapSelectionForTaskPath`` / vehicle / point handlers).
+    @State private var setupStagingMapSelectedTaskPathID: UUID?
 
     /// Shared live progress / deferral values for task list rows and the in-card triage sheet.
     private struct MissionLiveTaskProgressDerived {
@@ -835,8 +903,8 @@ struct MissionRunDetailView: View {
         r.refreshDerivedTaskStates()
     }
 
-    private func bulkSpawnSimsConfirmMessagePlain() -> String {
-        switch bulkSpawnSimsConfirmKind {
+    private func bulkSpawnSimsConfirmMessagePlain(for scope: MissionRunBulkSpawnSimsConfirmKind) -> String {
+        switch scope {
         case .singleTask(let taskID):
             if let mission = resolvedMission,
                let t = mission.routeMacro.tasks.first(where: { $0.id == taskID }) {
@@ -844,9 +912,7 @@ struct MissionRunDetailView: View {
             }
             return "Spawn one built-in simulator for each empty roster slot? Each uses that slot’s vehicle class and your default simulation stack and spawn location from Settings."
         case .allMissionSlots:
-            return "Spawn one built-in simulator for every empty roster slot across all tasks and the mission roster (if any)? Each uses that slot’s vehicle class and your default simulation stack and spawn location from Settings."
-        case nil:
-            return ""
+            return "Spawn a suitable sim for every empty roster slot? Each empty slot uses that slot’s vehicle class and your default simulation stack and spawn location from Settings."
         }
     }
 
@@ -903,23 +969,20 @@ struct MissionRunDetailView: View {
                             presentedRunConfirm = nil
                         }
                     )
-                case .bulkSpawnSims:
+                case .bulkSpawnSims(let spawnScope):
                     GuardianConfirm(
                         title: "Spawn simulators?",
-                        message: bulkSpawnSimsConfirmMessagePlain(),
+                        message: bulkSpawnSimsConfirmMessagePlain(for: spawnScope),
                         systemImage: "wand.and.stars",
                         cancelTitle: "Cancel",
                         confirmTitle: "Spawn",
                         onCancel: {
-                            bulkSpawnSimsConfirmKind = nil
                             presentedRunConfirm = nil
                         },
                         onConfirm: {
-                            let spawnKind = bulkSpawnSimsConfirmKind
-                            bulkSpawnSimsConfirmKind = nil
                             presentedRunConfirm = nil
                             guard let mission = resolvedMission else { return }
-                            switch spawnKind {
+                            switch spawnScope {
                             case .singleTask(let taskID):
                                 guard let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }) else { return }
                                 Task { @MainActor in
@@ -929,8 +992,6 @@ struct MissionRunDetailView: View {
                                 Task { @MainActor in
                                     await performBulkSpawnSitlForAllMissionSlots(mission: mission)
                                 }
-                            case nil:
-                                break
                             }
                         }
                     )
@@ -1064,6 +1125,18 @@ struct MissionRunDetailView: View {
         .buttonStyle(GuardianPointerPlainButtonStyle())
         .keyboardShortcut(.cancelAction)
         .help("Close")
+    }
+
+    /// MC-R overlay header: plain hierarchical glyph (same weight as the close control), no bordered chip.
+    private func missionLiveOverlayHeaderGlyphButton(systemImage: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(GuardianTypography.font(.heroGlyph18Medium))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(theme.textSecondary)
+        }
+        .buttonStyle(GuardianPointerPlainButtonStyle())
+        .help(help)
     }
 
     /// Matches ``missionLiveSidebarStyleCloseButton`` weight; opens a settings sidebar (abort / complete policy overrides).
@@ -1667,6 +1740,16 @@ struct MissionRunDetailView: View {
         }
     }
 
+    /// Last event id in the live log strip (suffix window) — drives auto-scroll to the latest line.
+    private var liveLogVisibleTailAnchorID: UUID? {
+        liveLogEventsFiltered.suffix(80).last?.id
+    }
+
+    private var bulkSpawnSimsConfirmIsActive: Bool {
+        if case .bulkSpawnSims = presentedRunConfirm { return true }
+        return false
+    }
+
     private func assignmentMatchesLiveFocus(_ assignment: MissionRunAssignment, mission: Mission) -> Bool {
         guard let focus = focusedLiveTaskID else { return true }
         if assignment.taskId == focus { return true }
@@ -1896,6 +1979,20 @@ struct MissionRunDetailView: View {
                                 .guardianPointerOnHover()
 
                                 GuardianNeutralBorderedButton(
+                                    systemImage: liveRuntimeMissionPointsOverlayPresented
+                                        ? "mappin.circle.fill"
+                                        : "mappin.and.ellipse",
+                                    help: liveRuntimeMissionPointsOverlayPresented
+                                        ? "Hide map points panel on the Tasks card"
+                                        : "Runtime map points — shows the Tasks card panel to list or manage points for this run only (not saved to the mission file on disk)",
+                                    action: {
+                                        withAnimation(triageSheetSpring) {
+                                            liveRuntimeMissionPointsOverlayPresented.toggle()
+                                        }
+                                    }
+                                )
+
+                                GuardianNeutralBorderedButton(
                                     systemImage: "gearshape",
                                     help: "Run policies & rules of engagement",
                                     action: { presentRunControlsSidebar() }
@@ -2030,13 +2127,39 @@ struct MissionRunDetailView: View {
                     .onAppear {
                         refreshVehicleVoiceNarrativeFromTelemetry()
                     }
+                    .onChange(of: focusedLiveTaskID) { _ in
+                        pruneLiveRuntimeMapPointSelectionIfOutOfFilter()
+                    }
                 }
             }
         .background(theme.backgroundBase)
         .guardianConfirmOverlay(item: $presentedRunConfirm, onDismiss: {
-            bulkSpawnSimsConfirmKind = nil
             confirmSkipTaskStartDeferralTaskID = nil
         }, dialog: missionRunPresentedConfirmOverlayContent)
+        .guardianConfirmOverlay(item: $setupRostersMissionPointDeleteCandidate, dialog: { candidate in
+            GuardianConfirmDanger(
+                title: "Delete map point?",
+                message: "This removes the point from the mission template.",
+                cancelTitle: "Cancel",
+                confirmTitle: "Delete",
+                onCancel: { setupRostersMissionPointDeleteCandidate = nil },
+                onConfirm: {
+                    persistMissionMutation { mission in
+                        mission.missionPoints.removeAll { $0.id == candidate.id }
+                        mission.renumberMissionPointSlugsByListOrder()
+                    }
+                    if setupRostersSelectedMissionPointID == candidate.id {
+                        setupRostersSelectedMissionPointID = nil
+                    }
+                    if setupRostersMissionPointDrawerEditingID == candidate.id {
+                        setupRostersMissionPointDrawerEditingID = nil
+                        appDrawer.dismiss()
+                    }
+                    setupRostersMissionPointDeleteCandidate = nil
+                    toastCenter.show("Map point removed", style: .success)
+                }
+            )
+        })
         .sheet(isPresented: $startPreflightPresented) {
             MissionRunStartPreflightSheet(
                 run: run,
@@ -2070,17 +2193,6 @@ struct MissionRunDetailView: View {
                 onAbandonWithoutStart: {}
             )
         }
-        .sheet(isPresented: rosterCalibrationSheetPresented) {
-            if let vid = rosterCalibrationVehicleID {
-                VehicleCalibrationModal(
-                    fleetLink: fleetLink,
-                    controlStore: controlStore,
-                    sitl: sitl,
-                    vehicleID: vid,
-                    fallback: rosterCalibrationFallbackModel
-                )
-            }
-        }
         .onAppear {
             run.attachServices(fleetLink: fleetLink, sitl: sitl)
             installMissionTemplatePersister()
@@ -2112,6 +2224,7 @@ struct MissionRunDetailView: View {
             if newStatus == .setup || newStatus == .completed {
                 focusLiveTask(nil)
                 focusLiveAssignment(nil)
+                clearLiveRuntimeMissionPointsOverlayChrome()
                 dismissedRecoveryStatusPrompt = false
                 dismissedAbortStatusPrompt = false
                 bottomPromptCenter.dismiss()
@@ -2135,6 +2248,7 @@ struct MissionRunDetailView: View {
                 dismissedAbortStatusPrompt = false
                 bottomPromptCenter.dismiss()
                 syncAbortSessionPromptIfNeeded()
+                clearLiveRuntimeMissionPointsOverlayChrome()
                 appDrawer.dismiss()
             } else if newPhase == .aborted {
                 syncAbortSessionPromptIfNeeded()
@@ -2142,8 +2256,24 @@ struct MissionRunDetailView: View {
         }
         .onChange(of: setupMainTab) { newTab in
             appDrawer.dismiss()
+            if newTab != .rosters {
+                rostersSidebarListTab = .tasks
+                clearSetupRostersMissionPointChrome()
+            }
             if newTab == .rosters, rosterSetupExpandedTaskIDs.isEmpty, let mission = resolvedMission {
                 rosterSetupExpandedTaskIDs = Set(mission.routeMacro.tasks.map(\.id))
+            }
+        }
+        .onChange(of: rostersSidebarListTab) { newTab in
+            if newTab == .tasks {
+                appDrawer.dismiss()
+                setupRostersMissionPointDrawerEditingID = nil
+            }
+        }
+        .onChange(of: appDrawer.presented?.id) { newDrawerID in
+            if newDrawerID == nil {
+                setupRostersMissionPointDrawerEditingID = nil
+                liveRuntimeMissionPointDrawerEditingID = nil
             }
         }
         .onChange(of: run.assignments) { _ in
@@ -2171,19 +2301,32 @@ struct MissionRunDetailView: View {
             onUpdate(run)
         }
 
-            GuardianBottomPromptBanner(center: bottomPromptCenter)
-        }
-    }
-
-    private var rosterCalibrationSheetPresented: Binding<Bool> {
-        Binding(
-            get: { rosterCalibrationVehicleID != nil },
-            set: { presented in
-                guard !presented else { return }
-                rosterCalibrationVehicleID = nil
-                rosterCalibrationFallbackModel = nil
+            if let vid = rosterCalibrationVehicleID {
+                VehicleInspectorHostOverlay(onDismiss: {
+                    rosterCalibrationVehicleID = nil
+                    rosterCalibrationFallbackModel = nil
+                }) {
+                    VehicleCalibrationModal(
+                        fleetLink: fleetLink,
+                        controlStore: controlStore,
+                        sitl: sitl,
+                        vehicleID: vid,
+                        fallback: rosterCalibrationFallbackModel,
+                        onClose: {
+                            rosterCalibrationVehicleID = nil
+                            rosterCalibrationFallbackModel = nil
+                        }
+                    )
+                    .environmentObject(toastCenter)
+                }
+                .transition(.opacity)
+                // In-window modal above main run chrome, below bottom prompt (see shell z-order: content → modal → prompt).
+                .zIndex(1)
             }
-        )
+
+            GuardianBottomPromptBanner(center: bottomPromptCenter)
+                .zIndex(2)
+        }
     }
 
     /// SITL instances + aliveness — roster slots drop removed sims.
@@ -2398,17 +2541,213 @@ struct MissionRunDetailView: View {
         }
     }
 
-    /// MC-R left column: map **260** → **10** → roster **210** → **10** → Logs (**flex**, fills remainder).
+    private func clearLiveRuntimeMissionPointsOverlayChrome() {
+        liveRuntimeMissionPointsOverlayPresented = false
+        liveRuntimeMissionPointDrawerEditingID = nil
+        liveRuntimeMissionMapViewportCenter = nil
+        liveRuntimeOverviewSelectedMissionPointID = nil
+    }
+
+    private func pruneLiveRuntimeMapPointSelectionIfOutOfFilter() {
+        guard let sid = liveRuntimeOverviewSelectedMissionPointID else { return }
+        let visible = MissionPoint.filteredForMissionControlLiveMap(run.runtimeMissionPoints, focusedTaskID: focusedLiveTaskID)
+        if !visible.contains(where: { $0.id == sid }) {
+            liveRuntimeOverviewSelectedMissionPointID = nil
+        }
+    }
+
+    private var missionLiveFilteredRuntimeMissionPoints: [MissionPoint] {
+        MissionPoint.filteredForMissionControlLiveMap(run.runtimeMissionPoints, focusedTaskID: focusedLiveTaskID)
+    }
+
+    @ViewBuilder
+    private var missionLiveRuntimeMissionPointsOverlay: some View {
+        if liveRuntimeMissionPointsOverlayPresented {
+            VStack(alignment: .leading, spacing: 0) {
+                missionLiveOverlayHeader(
+                    title: "Map points",
+                    subtitle: nil,
+                    titleMuted: false
+                ) {
+                    HStack(spacing: GuardianSpacing.xs) {
+                        missionLiveOverlayHeaderGlyphButton(
+                            systemImage: "plus.circle",
+                            help: "Add map point at the live map centre (rally, default catchment) and select it for drag on the map"
+                        ) {
+                            addLiveRuntimeMissionPointAtMapCentreAndRevealInList()
+                        }
+                        missionLiveSidebarStyleCloseButton {
+                            withAnimation(triageSheetSpring) {
+                                liveRuntimeMissionPointsOverlayPresented = false
+                            }
+                        }
+                    }
+                }
+
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.md) {
+                            if missionLiveFilteredRuntimeMissionPoints.isEmpty {
+                                Text("No map points match the current filter.")
+                                    .font(GuardianTypography.font(.denseCaption12Regular))
+                                    .foregroundStyle(theme.textTertiary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            } else {
+                                ForEach(missionLiveFilteredRuntimeMissionPoints, id: \.id) { mp in
+                                    missionLiveRuntimeMissionPointRow(mp: mp)
+                                        .id(mp.id)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, GuardianCardLayout.defaultBodyPadding)
+                        .padding(.vertical, GuardianSpacing.denseGutter)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                    }
+                    .onChange(of: liveRuntimeMapPointsListScrollEpoch) { _ in
+                        guard let id = liveRuntimeMapPointsListScrollTargetRow else { return }
+                        DispatchQueue.main.async {
+                            withAnimation(.easeOut(duration: 0.22)) {
+                                proxy.scrollTo(id, anchor: .center)
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(theme.backgroundRaised)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .zIndex(3)
+        }
+    }
+
+    @ViewBuilder
+    private func missionLiveRuntimeMissionPointRow(mp: MissionPoint) -> some View {
+        let cur = run.runtimeMissionPoints.first(where: { $0.id == mp.id }) ?? mp
+        let rowSelected = liveRuntimeOverviewSelectedMissionPointID == mp.id
+        GuardianCard(
+            configuration: GuardianCardConfiguration(
+                border: rowSelected ? .primary : .subtle,
+                cornerRadius: GuardianCardLayout.cornerRadius,
+                bodyPadding: GuardianSpacing.cardBodyInset
+            ),
+            body: {
+                VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+                    HStack(alignment: .center, spacing: GuardianSpacing.sm) {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.micro) {
+                            Text(cur.mapChipLabel)
+                                .font(GuardianTypography.font(.subsectionTitleSemibold))
+                                .foregroundStyle(cur.isClosed ? theme.textTertiary : theme.textPrimary)
+                                .strikethrough(cur.isClosed)
+                            Text(cur.kind.rawValue.capitalized)
+                                .font(GuardianTypography.font(.denseCaption12Regular))
+                                .foregroundStyle(theme.textSecondary)
+                                .lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            if liveRuntimeOverviewSelectedMissionPointID == mp.id {
+                                liveRuntimeOverviewSelectedMissionPointID = nil
+                            } else {
+                                liveRuntimeOverviewSelectedMissionPointID = mp.id
+                            }
+                        }
+
+                        GuardianThemedButton(
+                            accent: .primary,
+                            surface: .outline,
+                            size: .small,
+                            shape: .cornered,
+                            contentSizing: .squareToolbarCell,
+                            action: { openLiveRuntimeMissionPointEditDrawer(missionPointID: mp.id) },
+                            label: {
+                                Image(systemName: "pencil")
+                                    .font(GuardianTypography.font(.sectionHeadingSemibold))
+                            }
+                        )
+                        .help("Edit map point")
+                    }
+
+                    Toggle(isOn: Binding(
+                        get: {
+                            run.runtimeMissionPoints.first(where: { $0.id == mp.id })?.isClosed ?? false
+                        },
+                        set: { closed in
+                            _ = run.applyRuntimeMissionPointSetClosed(id: mp.id, isClosed: closed, source: "operator")
+                            onUpdate(run)
+                        }
+                    )) {
+                        Text("Closed")
+                            .font(GuardianTypography.font(.formFieldLabel))
+                    }
+                    .tint(GuardianSemanticColors.infoForeground)
+                }
+            }
+        )
+    }
+
+    private func openLiveRuntimeMissionPointEditDrawer(missionPointID: UUID) {
+        guard let mission = resolvedMission else { return }
+        guard run.runtimeMissionPoints.contains(where: { $0.id == missionPointID }) else { return }
+        liveRuntimeMissionPointDrawerEditingID = missionPointID
+        appDrawer.present(title: "Edit map point", preferredWidth: 400, scrimTapDismisses: true) {
+            MissionControlRuntimeMissionPointEditDrawer(
+                missionPointID: missionPointID,
+                run: run,
+                mission: mission,
+                onPersist: {
+                    onUpdate(run)
+                }
+            )
+        }
+    }
+
+    /// Adds a rally point at the live map centre (or mission home / origin), selects it for map drag, and scrolls the list row into view.
+    private func addLiveRuntimeMissionPointAtMapCentreAndRevealInList() {
+        guard let mission = resolvedMission else {
+            toastCenter.show("No mission template for this run", style: .warning)
+            return
+        }
+        let coord =
+            liveRuntimeMissionMapViewportCenter
+            ?? mission.routeMacro.home?.coord
+            ?? RouteCoordinate()
+        let rowID = UUID()
+        let tempPointId = "mre.create.\(rowID.uuidString.lowercased())"
+        let point = MissionPoint(
+            id: rowID,
+            pointId: tempPointId,
+            label: "",
+            kind: .rally,
+            coordinate: coord,
+            taskID: focusedLiveTaskID,
+            catchmentRadiusM: MissionPoint.defaultCatchmentRadiusM
+        )
+        guard run.applyRuntimeMissionPointCreate(point, source: "operator") else {
+            toastCenter.show("Could not add map point", style: .warning)
+            return
+        }
+        onUpdate(run)
+        liveRuntimeOverviewSelectedMissionPointID = rowID
+        liveRuntimeMapPointsListScrollTargetRow = rowID
+        liveRuntimeMapPointsListScrollEpoch &+= 1
+        toastCenter.show("Map point added — drag the pin on the map to move it", style: .success)
+    }
+
+    /// MC-R left column: map **260** (grows when log is collapsed) → **10** → roster **210** → **10** → Logs (**flex** or one-line collapsed).
     private let liveConsoleMapHeight: CGFloat = 260
     private let liveConsoleRosterHeight: CGFloat = 210
     /// Vertical gap between map↔roster and roster↔log (same value both places).
     private let liveConsoleStackSpacing: CGFloat = GuardianSpacing.denseGutter
     private let liveConsoleStackGutter: CGFloat = GuardianSpacing.denseGutter
+    /// Total ``GuardianCard`` height (header + one log line body) when the log is collapsed.
+    private let liveLogCollapsedCardHeight: CGFloat = 100
 
     /// Running / paused: **70%** map + roster + live mission log; **30%** Tasks card (overview or task triage sheet).
     private var missionLiveConsole: some View {
         let gutter = liveConsoleStackGutter
-        let mapH = liveConsoleMapHeight
+        let baseMapH = liveConsoleMapHeight
         let rosterH = liveConsoleRosterHeight
         let vGap = liveConsoleStackSpacing
         return GeometryReader { geo in
@@ -2416,7 +2755,10 @@ struct MissionRunDetailView: View {
             let innerH = max(0, geo.size.height)
             let leftW = (innerW - gutter) * 0.7
             let rightW = (innerW - gutter) * 0.3
-            let logH = max(0, innerH - mapH - vGap - rosterH - vGap)
+            let defaultLogH = max(0, innerH - baseMapH - vGap - rosterH - vGap)
+            let collapsedLogH = min(liveLogCollapsedCardHeight, defaultLogH)
+            let logH = liveLogPanelCollapsed ? collapsedLogH : defaultLogH
+            let mapH = liveLogPanelCollapsed ? baseMapH + max(0, defaultLogH - collapsedLogH) : baseMapH
             HStack(alignment: .top, spacing: gutter) {
                 VStack(alignment: .leading, spacing: vGap) {
                     missionLiveMapOnlyColumn(width: leftW, height: mapH)
@@ -2424,12 +2766,13 @@ struct MissionRunDetailView: View {
                         .frame(maxWidth: .infinity)
                         .frame(height: rosterH, alignment: .topLeading)
                         .clipped()
-                    missionLiveLogPlaceholder(maxTotalHeight: logH)
+                    missionLiveLogPlaceholder(maxTotalHeight: logH, logCollapsed: $liveLogPanelCollapsed)
                         .frame(maxWidth: .infinity)
                         .frame(height: logH, alignment: .topLeading)
                 }
                 .frame(width: leftW, height: innerH, alignment: .topLeading)
                 .clipped()
+                .animation(GuardianMotion.drawerSlide, value: liveLogPanelCollapsed)
 
                 missionLiveTasksSideCard
                     .frame(width: rightW)
@@ -2463,7 +2806,7 @@ struct MissionRunDetailView: View {
         .spring(response: 0.42, dampingFraction: 0.86)
     }
 
-    /// Right column: ``GuardianCard`` with **Tasks** header; triage / vehicle layers use ``fullCardOverlay`` so they cover the entire card (header included).
+    /// Right column: ``GuardianCard`` with **Tasks** header; ``fullCardOverlay`` stacks **Task triage → Assignment (vehicle) → Map points** (bottom → top). ``zIndex`` must stay ordered so map points stay above in-flight triage/vehicle sheets.
     private var missionLiveTasksSideCard: some View {
         GuardianCard(
             configuration: mcSetupGroupCardConfiguration,
@@ -2476,6 +2819,7 @@ struct MissionRunDetailView: View {
                 ZStack(alignment: .top) {
                     missionLiveTaskTriageOverlay
                     missionLiveVehicleOverlay
+                    missionLiveRuntimeMissionPointsOverlay
                 }
             }
         )
@@ -2851,9 +3195,33 @@ struct MissionRunDetailView: View {
                             }
                         case .stopFollowingVehicle:
                             mapModel.followedVehicleMarkerID = nil
-                        case .centerMarker, .deleteWaypoint:
+                        case .centerMarker, .deleteWaypoint, .deleteMissionPoint:
                             break
                         }
+                    },
+                    onMissionPointClick: { id in
+                        if liveRuntimeOverviewSelectedMissionPointID == id {
+                            liveRuntimeOverviewSelectedMissionPointID = nil
+                        } else {
+                            liveRuntimeOverviewSelectedMissionPointID = id
+                        }
+                    },
+                    onMissionPointMoved: { id, lat, lon in
+                        _ = run.applyRuntimeMissionPointUpdate(id: id, source: "operator") {
+                            $0.coordinate.lat = lat
+                            $0.coordinate.lon = lon
+                        }
+                        onUpdate(run)
+                    },
+                    onVehicleTap: { ev in
+                        guard let raw = ev.markerID, let aid = UUID(uuidString: raw) else { return }
+                        focusLiveAssignment(aid)
+                    },
+                    onTaskPathTap: { ev in
+                        focusLiveTask(ev.taskPathID)
+                    },
+                    onViewportCenterChanged: { lat, lon in
+                        liveRuntimeMissionMapViewportCenter = RouteCoordinate(lat: lat, lon: lon)
                     }
                 )
                 .task(id: liveOverviewMapSignature) {
@@ -2861,12 +3229,15 @@ struct MissionRunDetailView: View {
                         mapModel.routeGeometry = GuardianRouteMapGeometry(
                             home: mission.routeMacro.home,
                             allTasksCoords: mission.routeMacro.tasks.map { $0.waypoints.map(\.coord) },
+                            taskPathIDs: mission.routeMacro.tasks.map(\.id),
                             selectedTaskWaypoints: [],
                             selectedWaypointIndex: nil,
                             headingPreview: nil,
                             cameraPreview: nil,
                             preserveView: true,
-                            isEditingTask: false
+                            isEditingTask: false,
+                            missionPointMarkers: missionLiveMissionPointMapMarkers,
+                            missionPointPlacementArmed: false
                         )
                     } else {
                         mapModel.routeGeometry = .empty
@@ -2899,8 +3270,53 @@ struct MissionRunDetailView: View {
             homeCoord: resolvedMission?.routeMacro.home?.coord,
             allTasksCoords: resolvedMission?.routeMacro.tasks.map { $0.waypoints.map(\.coord) } ?? [],
             markers: missionLiveVehicleMarkers,
-            focusedTaskID: focusedLiveTaskID
+            focusedTaskID: focusedLiveTaskID,
+            missionPointMarkers: missionLiveMissionPointMapMarkers
         )
+    }
+
+    private var missionLiveMissionPointMapMarkers: [GuardianMissionPointMapMarker] {
+        missionControlGuardianMissionPointMarkers(
+            from: MissionPoint.filteredForMissionControlLiveMap(run.runtimeMissionPoints, focusedTaskID: focusedLiveTaskID),
+            selectedMissionPointID: liveRuntimeOverviewSelectedMissionPointID
+        )
+    }
+
+    /// Points drawn on the MCS roster staging map. While the run is still in **setup**, prefer the **mission
+    /// template** list so markers appear even if ``runtimeMissionPoints`` has not been re-seeded yet; otherwise
+    /// use the run envelope.
+    private var setupStagingMissionPointRowsForMap: [MissionPoint] {
+        if run.status == .setup, let m = resolvedMission {
+            return m.missionPoints
+        }
+        return run.runtimeMissionPoints
+    }
+
+    /// Setup roster staging map: selected pin is **draggable** in Leaflet whenever a point is selected on the **Rosters** tab (sidebar Tasks vs Points does not strip selection from the map payload).
+    private var setupStagingMissionPointMapMarkers: [GuardianMissionPointMapMarker] {
+        let selected: UUID? = setupMainTab == .rosters ? setupRostersSelectedMissionPointID : nil
+        return missionControlGuardianMissionPointMarkers(
+            from: setupStagingMissionPointRowsForMap,
+            selectedMissionPointID: selected
+        )
+    }
+
+    private func missionControlGuardianMissionPointMarkers(
+        from points: [MissionPoint],
+        selectedMissionPointID: UUID? = nil
+    ) -> [GuardianMissionPointMapMarker] {
+        points.map { mp in
+            GuardianMissionPointMapMarker(
+                id: mp.id,
+                lat: mp.coordinate.lat,
+                lon: mp.coordinate.lon,
+                mapLabelCompact: mp.mapGlyphDigit,
+                mapLabelFull: mp.mapChipLabel,
+                kindRaw: mp.kind.rawValue,
+                isClosed: mp.isClosed,
+                isSelected: selectedMissionPointID == mp.id
+            )
+        }
     }
 
     private var missionLiveVehicleMarkers: [MapVehicleMarker] {
@@ -2975,7 +3391,7 @@ struct MissionRunDetailView: View {
     }
 
     /// Live mission log: ``GuardianCard`` header (elevated strip) + body with ``ScrollView`` so header/body match Settings chrome.
-    private func missionLiveLogPlaceholder(maxTotalHeight: CGFloat) -> some View {
+    private func missionLiveLogPlaceholder(maxTotalHeight: CGFloat, logCollapsed: Binding<Bool>) -> some View {
         GuardianCard(
             configuration: mcSetupGroupCardConfiguration,
             header: {
@@ -3020,25 +3436,53 @@ struct MissionRunDetailView: View {
                         isEnabled: !liveLogEventsFiltered.isEmpty,
                         action: { copyLiveLogToPasteboard() }
                     )
+
+                    GuardianNeutralBorderedButton(
+                        systemImage: logCollapsed.wrappedValue ? "chevron.up" : "chevron.down",
+                        help: logCollapsed.wrappedValue ? "Expand log panel" : "Collapse log to one line",
+                        action: {
+                            withAnimation(GuardianMotion.drawerSlide) {
+                                logCollapsed.wrappedValue.toggle()
+                            }
+                        }
+                    )
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             },
             body: {
                 Group {
                     if !liveLogEventsFiltered.isEmpty {
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
-                                ForEach(liveLogEventsFiltered.suffix(80)) { event in
-                                    logEventRow(event: event)
+                        ScrollViewReader { proxy in
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
+                                    ForEach(liveLogEventsFiltered.suffix(80)) { event in
+                                        logEventRow(event: event)
+                                            .id(event.id)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                                .textSelection(.enabled)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .environment(\.openURL, OpenURLAction { url in
+                                handleMcrLogURL(url)
+                            })
+                            .onAppear {
+                                if let id = liveLogVisibleTailAnchorID {
+                                    DispatchQueue.main.async {
+                                        proxy.scrollTo(id, anchor: .bottom)
+                                    }
                                 }
                             }
-                            .frame(maxWidth: .infinity, alignment: .topLeading)
-                            .textSelection(.enabled)
+                            .onChange(of: liveLogVisibleTailAnchorID) { newID in
+                                guard let id = newID else { return }
+                                DispatchQueue.main.async {
+                                    withAnimation(GuardianMotion.feedbackCrossfade) {
+                                        proxy.scrollTo(id, anchor: .bottom)
+                                    }
+                                }
+                            }
                         }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .environment(\.openURL, OpenURLAction { url in
-                            handleMcrLogURL(url)
-                        })
                     } else {
                         VStack(alignment: .leading, spacing: 0) {
                             Text(
@@ -3520,51 +3964,83 @@ struct MissionRunDetailView: View {
         GuardianCard(
             configuration: mcSetupGroupCardConfiguration,
             body: {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
-                        if run.assignments.isEmpty {
-                            Text("No roster slots on this mission template.")
-                                .foregroundStyle(theme.textSecondary)
-                        } else if let mission = resolvedMission {
-                            rostersTaskListHeaderBar(mission: mission)
-                            ForEach(mission.routeMacro.tasks) { task in
-                                taskRosterAccordionSection(task: task, mission: mission)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+                            if let mission = resolvedMission {
+                                rostersSidebarTabChromeRow(mission: mission)
+                                switch rostersSidebarListTab {
+                                case .tasks:
+                                    if run.assignments.isEmpty {
+                                        Text("No roster slots on this mission template.")
+                                            .foregroundStyle(theme.textSecondary)
+                                    } else {
+                                        ForEach(mission.routeMacro.tasks) { task in
+                                            taskRosterAccordionSection(task: task, mission: mission)
+                                        }
+                                        legacyRostersAccordionSection(mission: mission)
+                                    }
+                                case .points:
+                                    mcsRosterMissionPointsListScroll(mission: mission)
+                                }
+                            } else {
+                                missionMissingTemplateRosterFallback
                             }
-                            legacyRostersAccordionSection(mission: mission)
-                        } else {
-                            missionMissingTemplateRosterFallback
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    }
+                    .onChange(of: setupRostersMapPointsListScrollEpoch) { _ in
+                        guard let id = setupRostersMapPointsListScrollTargetRow else { return }
+                        DispatchQueue.main.async {
+                            withAnimation(.easeOut(duration: 0.22)) {
+                                proxy.scrollTo(id, anchor: .center)
+                            }
                         }
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
             }
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private func rostersTaskListHeaderBar(mission: Mission) -> some View {
+    private func rostersSidebarTabChromeRow(mission: Mission) -> some View {
         let emptyAll = emptyRosterSlotCountAcrossMission(mission: mission)
-        let confirming = bulkSpawnSimsConfirmKind != nil
         let busy = rosterBulkSimSpawnBusy != nil
-        return HStack(alignment: .center, spacing: GuardianSpacing.denseGutter) {
-            Text("Tasks")
-                .font(GuardianTypography.font(.panelSecondaryHeadingSemibold))
-                .foregroundStyle(theme.textPrimary)
-            Spacer(minLength: 0)
-            if fleetLink.isSimulateEnabled {
+        return HStack(alignment: .center, spacing: GuardianSpacing.sm) {
+            HStack(spacing: GuardianSpacing.denseGutter) {
+                Picker("", selection: $rostersSidebarListTab) {
+                    ForEach(MissionControlSetupRostersSidebarTab.allCases) { tab in
+                        Text(tab.title).tag(tab)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 240)
+            }
+            .fixedSize(horizontal: true, vertical: false)
+
+            Spacer(minLength: GuardianSpacing.sm)
+
+            if rostersSidebarListTab == .tasks, !run.assignments.isEmpty, fleetLink.isSimulateEnabled {
                 Button {
-                    bulkSpawnSimsConfirmKind = .allMissionSlots
-                    presentedRunConfirm = .bulkSpawnSims
+                    presentedRunConfirm = .bulkSpawnSims(.allMissionSlots)
                 } label: {
                     Image(systemName: "wand.and.stars")
                         .font(GuardianTypography.font(.subsectionTitleSemibold))
                 }
                 .buttonStyle(.bordered).guardianPointerOnHover()
                 .controlSize(.small)
-                .disabled(emptyAll == 0 || confirming || busy)
+                .disabled(emptyAll == 0 || bulkSpawnSimsConfirmIsActive || busy)
                 .help(
                     "Spawn a sim for every empty roster slot in this mission (all tasks and the mission roster, if any). Uses each slot’s class and your default stack and spawn location from Settings."
                 )
+            }
+
+            if rostersSidebarListTab == .points {
+                GuardianPrimaryProminentButton(title: "Add point") {
+                    appendSetupRosterMissionPointAtViewportCenter()
+                }
+                .guardianPointerOnHover()
             }
         }
         .padding(.horizontal, GuardianSpacing.denseGutter)
@@ -3576,6 +4052,88 @@ struct MissionRunDetailView: View {
             RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous)
                 .strokeBorder(theme.borderSubtle, lineWidth: 1)
         )
+    }
+
+    @ViewBuilder
+    private func mcsRosterMissionPointsListScroll(mission: Mission) -> some View {
+        VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+            if mission.missionPoints.isEmpty {
+                Text("No map points yet.")
+                    .font(GuardianTypography.font(.denseCaption12Regular))
+                    .foregroundStyle(theme.textTertiary)
+            } else {
+                ForEach(mission.missionPoints, id: \.id) { mp in
+                    mcsRosterMissionPointListRow(mp: mp)
+                        .id(mp.id)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func mcsRosterMissionPointListRow(mp: MissionPoint) -> some View {
+        let sel = mp.id == setupRostersSelectedMissionPointID
+        GuardianCard(
+            configuration: GuardianCardConfiguration(
+                border: .subtle,
+                cornerRadius: GuardianCardLayout.cornerRadius,
+                bodyPadding: GuardianSpacing.cardBodyInset
+            ),
+            body: {
+                HStack(alignment: .center, spacing: GuardianSpacing.sm) {
+                    VStack(alignment: .leading, spacing: GuardianSpacing.micro) {
+                        Text(mp.mapChipLabel)
+                            .font(GuardianTypography.font(.subsectionTitleSemibold))
+                            .foregroundStyle(mp.isClosed ? theme.textTertiary : theme.textPrimary)
+                            .strikethrough(mp.isClosed)
+                        Text(mp.kind.rawValue.capitalized)
+                            .font(GuardianTypography.font(.denseCaption12Regular))
+                            .foregroundStyle(theme.textSecondary)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    GuardianThemedButton(
+                        accent: .primary,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        contentSizing: .squareToolbarCell,
+                        action: { toggleSetupRostersMissionPointEditDrawer(missionPointID: mp.id) },
+                        label: {
+                            Image(systemName: "pencil")
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
+                        }
+                    )
+                    .help("Open or close edit drawer")
+
+                    GuardianThemedButton(
+                        accent: .danger,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        contentSizing: .squareToolbarCell,
+                        action: { setupRostersMissionPointDeleteCandidate = MissionControlSetupRosterMissionPointDeleteCandidate(id: mp.id) },
+                        label: {
+                            Image(systemName: "trash")
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
+                        }
+                    )
+                    .help("Delete map point")
+                }
+            }
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            toggleSetupRostersMissionPointMapSelection(missionPointID: mp.id)
+        }
+        .overlay {
+            if sel {
+                RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous)
+                    .strokeBorder(GuardianSemanticColors.infoForeground.opacity(0.45), lineWidth: 2)
+            }
+        }
     }
 
     private func missionRunAssignmentBelongsToTask(
@@ -3737,8 +4295,7 @@ struct MissionRunDetailView: View {
 
                 if fleetLink.isSimulateEnabled {
                     Button {
-                        bulkSpawnSimsConfirmKind = .singleTask(task.id)
-                        presentedRunConfirm = .bulkSpawnSims
+                        presentedRunConfirm = .bulkSpawnSims(.singleTask(task.id))
                     } label: {
                         Image(systemName: "wand.and.stars")
                             .font(GuardianTypography.font(.subsectionTitleSemibold))
@@ -3747,7 +4304,7 @@ struct MissionRunDetailView: View {
                     .controlSize(.small)
                     .disabled(
                         emptyRosterSlotCount == 0
-                            || bulkSpawnSimsConfirmKind != nil
+                            || bulkSpawnSimsConfirmIsActive
                             || rosterBulkSimSpawnBusy != nil
                     )
                     .help("Spawn a sim for each empty roster slot (class + default stack in Settings).")
@@ -4120,52 +4677,324 @@ struct MissionRunDetailView: View {
         Calendar.current.date(byAdding: .minute, value: 5, to: Date()) ?? Date().addingTimeInterval(300)
     }
 
-    /// Rosters tab: staging map in a media-only ``GuardianCard`` (matches accordion column chrome).
+    /// Setup **Tasks** tab: staging map in a media-only ``GuardianCard`` (matches accordion column chrome).
     private var rostersStagingMapBare: some View {
         GuardianCard(
             configuration: mcSetupGroupCardConfiguration,
             media: {
                 GuardianMapView(
                     model: mapModel,
-                    onMapClick: { lat, lon in
-                        applySetupMapClick(lat: lat, lon: lon)
+                    contextMenuPolicy: GuardianMapContextMenuPolicy(
+                        vehicleActions: [],
+                        waypointActions: [],
+                        homeActions: [],
+                        missionPointActions: rostersSidebarListTab == .points ? [.deleteMissionPoint] : []
+                    ),
+                    onMapClick: { _, _ in
+                        clearStagingSetupMapSelectionFromBackgroundTap()
                     },
                     onVehicleMarkerMoved: { markerID, lat, lon in
                         applySetupMarkerDrag(markerID: markerID, lat: lat, lon: lon)
+                    },
+                    onContextAction: { event in
+                        guard rostersSidebarListTab == .points,
+                              event.markerType == .missionPoint,
+                              event.action == .deleteMissionPoint,
+                              let raw = event.markerID,
+                              let uuid = UUID(uuidString: raw)
+                        else { return }
+                        setupRostersMissionPointDeleteCandidate = MissionControlSetupRosterMissionPointDeleteCandidate(id: uuid)
+                    },
+                    onMissionPointClick: { id in
+                        toggleSetupRostersMissionPointMapSelection(missionPointID: id)
+                    },
+                    onMissionPointMoved: { id, lat, lon in
+                        persistMissionMutation { mission in
+                            guard let idx = mission.missionPoints.firstIndex(where: { $0.id == id }) else { return }
+                            mission.missionPoints[idx].coordinate.lat = lat
+                            mission.missionPoints[idx].coordinate.lon = lon
+                        }
+                    },
+                    onVehicleTap: { ev in
+                        guard let raw = ev.markerID, let aid = UUID(uuidString: raw) else { return }
+                        toggleStagingVehicleMapSelection(assignmentId: aid)
+                    },
+                    onTaskPathTap: { ev in
+                        setupStagingMapSelectedTaskPathID = ev.taskPathID
+                        setupRostersSelectedMissionPointID = nil
+                        setupSelectedAssignmentId = nil
+                        setupStagingSimDragCoordByAssignmentID.removeAll()
+                        dismissSetupRostersMissionPointDrawerIfNeeded()
+                    },
+                    onViewportCenterChanged: { lat, lon in
+                        setupRostersMapViewportCenter = RouteCoordinate(lat: lat, lon: lon)
                     }
                 )
-                .task(id: setupStagingMapSignature) {
-                    if let mission = resolvedMission {
-                        mapModel.routeGeometry = GuardianRouteMapGeometry(
-                            home: mission.routeMacro.home,
-                            allTasksCoords: mission.routeMacro.tasks.map { $0.waypoints.map(\.coord) },
-                            selectedTaskWaypoints: [],
-                            selectedWaypointIndex: nil,
-                            headingPreview: nil,
-                            cameraPreview: nil,
-                            preserveView: true,
-                            isEditingTask: false
-                        )
-                    } else {
-                        mapModel.routeGeometry = .empty
-                    }
-                    mapModel.vehicleMarkers = setupVehicleMarkers
+                .task(id: setupStagingMapStructureIdentity) {
+                    pushSetupStagingMapModelFromMissionTemplate()
+                }
+                .onChange(of: setupStagingMapMarkerCoordinateDigest) { _ in
+                    pushSetupStagingMapMarkersOnly()
+                    reconcileSetupStagingSimDragOverlayWithHubTelemetry()
+                }
+                .onChange(of: fleetLink.hubTelemetry?.lastUpdate) { _ in
+                    reconcileSetupStagingSimDragOverlayWithHubTelemetry()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         )
     }
 
-    /// Equatable signature of all setup-staging-map inputs (mission home,
-    /// route tasks, and every vehicle marker). Pushed into `mapModel` whenever any
-    /// underlying coordinate or marker drag changes.
-    private var setupStagingMapSignature: SetupStagingMapSignature {
-        SetupStagingMapSignature(
-            missionID: resolvedMission?.id,
-            homeCoord: resolvedMission?.routeMacro.home?.coord,
-            allTasksCoords: resolvedMission?.routeMacro.tasks.map { $0.waypoints.map(\.coord) } ?? [],
-            markers: setupVehicleMarkers
+    /// Topology + bindings for staging map geometry (no live coordinates — see ``setupStagingMapMarkerCoordinateDigest``).
+    private var setupStagingMapStructureIdentity: SetupStagingMapStructureIdentity {
+        let mission = resolvedMission
+        let rows = setupStagingMissionPointRowsForMap
+        let topo = rows
+            .map { mp in
+                let sel = setupRostersSelectedMissionPointID == mp.id ? "1" : "0"
+                return "\(mp.id.uuidString)|\(mp.kind.rawValue)|\(mp.isClosed)|\(sel)"
+            }
+            .joined(separator: ";")
+        return SetupStagingMapStructureIdentity(
+            missionID: mission?.id,
+            homeCoord: mission?.routeMacro.home?.coord,
+            allTasksCoords: mission?.routeMacro.tasks.map { $0.waypoints.map(\.coord) } ?? [],
+            taskPathIDs: mission?.routeMacro.tasks.map(\.id) ?? [],
+            missionPointTopologySignature: topo,
+            assignmentFleetBindingSignature: setupMapBoundsSignature,
+            rosterStagingMissionPointChrome: MissionControlSetupRosterStagingMissionPointChrome(
+                listTab: rostersSidebarListTab,
+                selectedPointID: setupRostersSelectedMissionPointID
+            ),
+            selectedTaskPathID: setupStagingMapSelectedTaskPathID,
+            selectedStagingRosterAssignmentID: setupSelectedAssignmentId
         )
+    }
+
+    /// Quantized lat/lon for mission map points + roster vehicle markers; drives marker-only pushes without churning `.task(id:)`.
+    private var setupStagingMapMarkerCoordinateDigest: String {
+        let pts = setupStagingMissionPointRowsForMap
+            .map { mp in
+                String(format: "%@:%.5f:%.5f", mp.id.uuidString, mp.coordinate.lat, mp.coordinate.lon)
+            }
+            .joined(separator: "|")
+        let veh = setupVehicleMarkers
+            .map { m in
+                String(format: "%@:%.5f:%.5f", m.id, m.lat, m.lon)
+            }
+            .joined(separator: "|")
+        return pts + "§" + veh
+    }
+
+    /// Clears mission-point / task-path / roster-vehicle map selection after a map background tap (same policy as mutual exclusivity elsewhere).
+    private func clearStagingSetupMapSelectionFromBackgroundTap() {
+        setupRostersSelectedMissionPointID = nil
+        setupStagingMapSelectedTaskPathID = nil
+        setupSelectedAssignmentId = nil
+        setupStagingSimDragCoordByAssignmentID.removeAll()
+        dismissSetupRostersMissionPointDrawerIfNeeded()
+    }
+
+    /// Roster staging map: toggle which assignment is selected for vehicle ring + SIM drag (clears point / task-path map selection).
+    private func toggleStagingVehicleMapSelection(assignmentId: UUID) {
+        if setupSelectedAssignmentId == assignmentId {
+            setupSelectedAssignmentId = nil
+            setupStagingSimDragCoordByAssignmentID.removeValue(forKey: assignmentId)
+        } else {
+            setupRostersSelectedMissionPointID = nil
+            setupStagingMapSelectedTaskPathID = nil
+            dismissSetupRostersMissionPointDrawerIfNeeded()
+            setupStagingSimDragCoordByAssignmentID.removeAll()
+            setupSelectedAssignmentId = assignmentId
+        }
+    }
+
+    /// Hub lat/lon for a roster assignment when it is bound to SITL and telemetry exists (for drag-overlay reconcile).
+    private func stagingSimHubCoordinate(forAssignmentId assignmentId: UUID) -> RouteCoordinate? {
+        guard let assignment = run.assignments.first(where: { $0.id == assignmentId }),
+              let tokenKey = assignment.attachedFleetVehicleToken,
+              let token = FleetMissionVehicleToken(storageKey: tokenKey),
+              case .sitl(let sitlInstanceID) = token,
+              let inst = sitl.instances.first(where: { $0.id == sitlInstanceID })
+        else { return nil }
+        let systemID = inst.stackInstanceIndex + 1
+        let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
+        guard let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID),
+              let lat = hub.latitudeDeg,
+              let lon = hub.longitudeDeg
+        else { return nil }
+        return RouteCoordinate(lat: lat, lon: lon)
+    }
+
+    /// Drops SIM drag optimistic coords once hub reflects the same pose (avoids a visible jump back to stale telemetry).
+    private func reconcileSetupStagingSimDragOverlayWithHubTelemetry() {
+        guard !setupStagingSimDragCoordByAssignmentID.isEmpty else { return }
+        let eps = 2.5e-5
+        var toRemove: [UUID] = []
+        for (aid, pending) in setupStagingSimDragCoordByAssignmentID {
+            guard let hub = stagingSimHubCoordinate(forAssignmentId: aid) else { continue }
+            if abs(hub.lat - pending.lat) < eps, abs(hub.lon - pending.lon) < eps {
+                toRemove.append(aid)
+            }
+        }
+        for aid in toRemove {
+            setupStagingSimDragCoordByAssignmentID.removeValue(forKey: aid)
+        }
+    }
+
+    private func pushSetupStagingMapModelFromMissionTemplate() {
+        if let mission = resolvedMission {
+            mapModel.routeGeometry = GuardianRouteMapGeometry(
+                home: mission.routeMacro.home,
+                allTasksCoords: mission.routeMacro.tasks.map { $0.waypoints.map(\.coord) },
+                taskPathIDs: mission.routeMacro.tasks.map(\.id),
+                selectedTaskWaypoints: [],
+                selectedWaypointIndex: nil,
+                headingPreview: nil,
+                cameraPreview: nil,
+                preserveView: true,
+                isEditingTask: false,
+                missionPointMarkers: setupStagingMissionPointMapMarkers,
+                missionPointPlacementArmed: false
+            )
+        } else {
+            mapModel.routeGeometry = .empty
+        }
+        mapModel.vehicleMarkers = setupVehicleMarkers
+    }
+
+    private func pushSetupStagingMapMarkersOnly() {
+        guard let mission = resolvedMission else {
+            pushSetupStagingMapModelFromMissionTemplate()
+            return
+        }
+        let expectedIDs = mission.routeMacro.tasks.map(\.id)
+        if mapModel.routeGeometry.taskPathIDs != expectedIDs {
+            pushSetupStagingMapModelFromMissionTemplate()
+            return
+        }
+        var geo = mapModel.routeGeometry
+        geo.missionPointMarkers = setupStagingMissionPointMapMarkers
+        mapModel.routeGeometry = geo
+        mapModel.vehicleMarkers = setupVehicleMarkers
+    }
+
+    private var rosterMissionTemplateBinding: Binding<Mission> {
+        Binding(
+            get: {
+                missionStore.missions.first(where: { $0.id == run.missionId })
+                    ?? Mission(id: run.missionId, name: "", description: "", type: .mobile)
+            },
+            set: { newMission in
+                missionStore.updateMission(newMission)
+                if let fresh = missionStore.missions.first(where: { $0.id == newMission.id }) {
+                    run.updateTemplate(fresh)
+                } else {
+                    run.updateTemplate(newMission)
+                }
+                onUpdate(run)
+            }
+        )
+    }
+
+    private func persistRosterMissionTemplateFromPointsEditor() {
+        guard let m = missionStore.missions.first(where: { $0.id == run.missionId }) else { return }
+        missionStore.updateMission(m)
+        if let fresh = missionStore.missions.first(where: { $0.id == m.id }) {
+            run.updateTemplate(fresh)
+        } else {
+            run.updateTemplate(m)
+        }
+        onUpdate(run)
+    }
+
+    private func clearSetupRostersMissionPointChrome() {
+        setupRostersSelectedMissionPointID = nil
+        setupRostersMissionPointDrawerEditingID = nil
+        setupRostersMissionPointDeleteCandidate = nil
+        setupStagingMapSelectedTaskPathID = nil
+    }
+
+    private func dismissSetupRostersMissionPointDrawerIfNeeded() {
+        guard setupRostersMissionPointDrawerEditingID != nil else { return }
+        setupRostersMissionPointDrawerEditingID = nil
+        appDrawer.dismiss()
+    }
+
+    private func appendSetupRosterMissionPointAtViewportCenter() {
+        let coord = setupRostersMapViewportCenter ?? RouteCoordinate()
+        let newID = UUID()
+        persistMissionMutation { mission in
+            mission.missionPoints.append(
+                MissionPoint(
+                    id: newID,
+                    pointId: "rally.0",
+                    label: "",
+                    kind: .rally,
+                    coordinate: coord,
+                    taskID: nil
+                )
+            )
+            mission.renumberMissionPointSlugsByListOrder()
+        }
+        setupRostersSelectedMissionPointID = newID
+        setupSelectedAssignmentId = nil
+        setupStagingSimDragCoordByAssignmentID.removeAll()
+        setupStagingMapSelectedTaskPathID = nil
+        setupRostersMapPointsListScrollTargetRow = newID
+        setupRostersMapPointsListScrollEpoch &+= 1
+        toastCenter.show("Map point added — drag the pin on the map to move it", style: .success)
+    }
+
+    private func openSetupRostersMissionPointEditDrawer(missionPointID: UUID) {
+        guard resolvedMission?.missionPoints.contains(where: { $0.id == missionPointID }) == true else { return }
+        setupSelectedAssignmentId = nil
+        setupStagingSimDragCoordByAssignmentID.removeAll()
+        setupStagingMapSelectedTaskPathID = nil
+        setupRostersSelectedMissionPointID = missionPointID
+        setupRostersMissionPointDrawerEditingID = missionPointID
+        appDrawer.present(title: "Edit map point", preferredWidth: 400, scrimTapDismisses: true) {
+            MissionWorkspaceMissionPointEditDrawer(
+                missionPointID: missionPointID,
+                mission: rosterMissionTemplateBinding,
+                onStructuralChange: {
+                    persistMissionMutation { $0.renumberMissionPointSlugsByListOrder() }
+                },
+                persist: {
+                    persistRosterMissionTemplateFromPointsEditor()
+                }
+            )
+        }
+    }
+
+    private func toggleSetupRostersMissionPointEditDrawer(missionPointID: UUID) {
+        guard resolvedMission?.missionPoints.contains(where: { $0.id == missionPointID }) == true else { return }
+        if setupRostersMissionPointDrawerEditingID == missionPointID {
+            setupRostersMissionPointDrawerEditingID = nil
+            appDrawer.dismiss()
+            return
+        }
+        openSetupRostersMissionPointEditDrawer(missionPointID: missionPointID)
+    }
+
+    private func toggleSetupRostersMissionPointMapSelection(missionPointID: UUID) {
+        guard resolvedMission?.missionPoints.contains(where: { $0.id == missionPointID }) == true else { return }
+        if setupRostersSelectedMissionPointID == missionPointID {
+            setupRostersSelectedMissionPointID = nil
+            if setupRostersMissionPointDrawerEditingID == missionPointID {
+                setupRostersMissionPointDrawerEditingID = nil
+                appDrawer.dismiss()
+            }
+        } else {
+            setupSelectedAssignmentId = nil
+            setupStagingSimDragCoordByAssignmentID.removeAll()
+            setupStagingMapSelectedTaskPathID = nil
+            if setupRostersMissionPointDrawerEditingID != nil {
+                appDrawer.dismiss()
+                setupRostersMissionPointDrawerEditingID = nil
+            }
+            setupRostersSelectedMissionPointID = missionPointID
+        }
     }
 
     /// Bundled vehicle-class / SIM preset art — same basename resolution as ``MissionControlRosterSlotCard`` — for MCS staging and MCR live overview map thumbnails.
@@ -4207,17 +5036,21 @@ struct MissionRunDetailView: View {
                 let systemID = inst.stackInstanceIndex + 1
                 let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
                 let colorHex = fleetLink.mapColorHex(forVehicleID: vehicleID)
-                if let override = assignment.simStartOverrideCoord {
+                if let optimistic = setupStagingSimDragCoordByAssignmentID[assignment.id] {
+                    let heading: Double? = {
+                        guard let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID) else { return nil }
+                        return hub.headingDeg ?? hub.yawDeg
+                    }()
                     return MapVehicleMarker(
                         id: assignment.id.uuidString,
-                        lat: override.lat,
-                        lon: override.lon,
-                        label: "\(label) (SIM start)",
+                        lat: optimistic.lat,
+                        lon: optimistic.lon,
+                        label: "\(label) (SIM)",
                         colorHex: colorHex,
                         imageDataURL: imageDataURL,
                         selected: selected,
                         draggable: selected,
-                        headingDeg: nil
+                        headingDeg: heading
                     )
                 }
                 guard let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID),
@@ -4228,7 +5061,7 @@ struct MissionRunDetailView: View {
                     id: assignment.id.uuidString,
                     lat: lat,
                     lon: lon,
-                    label: "\(label) (SIM live)",
+                    label: "\(label) (SIM)",
                     colorHex: colorHex,
                     imageDataURL: imageDataURL,
                     selected: selected,
@@ -4257,25 +5090,52 @@ struct MissionRunDetailView: View {
         }
     }
 
-    private func applySetupMapClick(lat: Double, lon: Double) {
-        guard let aid = setupSelectedAssignmentId,
-              let idx = run.assignments.firstIndex(where: { $0.id == aid }),
-              let tokenKey = run.assignments[idx].attachedFleetVehicleToken,
-              let token = FleetMissionVehicleToken(storageKey: tokenKey)
-        else { return }
-        guard case .sitl = token else { return }
-        run.assignments[idx].simStartOverrideCoord = RouteCoordinate(lat: lat, lon: lon)
-    }
-
+    /// **SITL-only:** applies dragged lat/lon to the bound sim via ``FleetLinkService/applySimState`` (SIM_OPOS_* / SIH_LOC_*).
     private func applySetupMarkerDrag(markerID: String, lat: Double, lon: Double) {
         guard let aid = UUID(uuidString: markerID),
               let idx = run.assignments.firstIndex(where: { $0.id == aid }),
               let tokenKey = run.assignments[idx].attachedFleetVehicleToken,
               let token = FleetMissionVehicleToken(storageKey: tokenKey)
         else { return }
-        guard case .sitl = token else { return }
+        guard case .sitl(let sitlInstanceID) = token else { return }
+        guard let inst = sitl.instances.first(where: { $0.id == sitlInstanceID }) else { return }
+        let systemID = inst.stackInstanceIndex + 1
+        let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
+        let stack = fleetLink.hubTelemetry(forVehicleID: vehicleID)?.autopilotStack
+            ?? fleetLink.vehicleModel(forVehicleID: vehicleID)?.data.telemetry?.autopilotStack
+            ?? .unknown
+        guard stack != .unknown else { return }
+
+        let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID)
+        let alt = hub?.absoluteAltM ?? hub?.altitudeAmslM
+        let yaw = Float(hub?.headingDeg ?? hub?.yawDeg ?? 0)
+
+        setupRostersSelectedMissionPointID = nil
+        setupStagingMapSelectedTaskPathID = nil
+        dismissSetupRostersMissionPointDrawerIfNeeded()
         setupSelectedAssignmentId = aid
-        run.assignments[idx].simStartOverrideCoord = RouteCoordinate(lat: lat, lon: lon)
+
+        let sent = RouteCoordinate(lat: lat, lon: lon)
+        setupStagingSimDragCoordByAssignmentID[aid] = sent
+
+        let state = FleetSimState(
+            latitudeDeg: lat,
+            longitudeDeg: lon,
+            absoluteAltitudeM: alt,
+            yawDeg: yaw,
+            batteryVoltageV: nil,
+            ardupilotSimBattCapAh: nil,
+            px4SimBatDrain: nil
+        )
+        Task { @MainActor in
+            await fleetLink.applySimState(
+                vehicleID: vehicleID,
+                state: state,
+                autopilotStack: stack,
+                source: "mcs.setup_map_drag"
+            )
+            reconcileSetupStagingSimDragOverlayWithHubTelemetry()
+        }
     }
 
     private var setupMapBoundsSignature: String {
@@ -4372,13 +5232,13 @@ struct MissionRunDetailView: View {
             fleetDisplayShortID: fleetDisplayShortID,
             isSelectedForSetupMap: setupSelectedAssignmentId == assignmentId,
             onSelectForSetupMap: {
-                if setupSelectedAssignmentId == assignmentId {
-                    setupSelectedAssignmentId = nil
-                } else {
-                    setupSelectedAssignmentId = assignmentId
-                }
+                toggleStagingVehicleMapSelection(assignmentId: assignmentId)
             },
             onChooseVehicle: {
+                setupRostersSelectedMissionPointID = nil
+                setupStagingMapSelectedTaskPathID = nil
+                dismissSetupRostersMissionPointDrawerIfNeeded()
+                setupStagingSimDragCoordByAssignmentID.removeAll()
                 setupSelectedAssignmentId = assignmentId
                 presentMissionRosterVehiclePicker(assignmentId: assignmentId)
             },
@@ -4403,7 +5263,7 @@ struct MissionRunDetailView: View {
 
     private func rosterRoleSubtitle(_ device: RosterDevice?) -> String {
         guard let device else { return "—" }
-        return "\(device.slot.rawValue) · \(device.role.rawValue)"
+        return "\(device.slot.rawValue) · \(device.behaviorRoleID)"
     }
 
     /// `nil` when there is no fleet token (unassigned or legacy typed label only).
@@ -4421,16 +5281,14 @@ struct MissionRunDetailView: View {
         guard let idx = run.assignments.firstIndex(where: { $0.id == assignmentId }) else { return }
         run.assignments[idx].attachedFleetVehicleToken = vehicle.token.storageKey
         run.assignments[idx].attachedDevice = vehicle.title
-        if !vehicle.isSimulation {
-            run.assignments[idx].simStartOverrideCoord = nil
-        }
+        setupStagingSimDragCoordByAssignmentID.removeValue(forKey: assignmentId)
     }
 
     private func clearFleetVehicle(assignmentId: UUID) {
         guard let idx = run.assignments.firstIndex(where: { $0.id == assignmentId }) else { return }
         run.assignments[idx].attachedFleetVehicleToken = nil
         run.assignments[idx].attachedDevice = ""
-        run.assignments[idx].simStartOverrideCoord = nil
+        setupStagingSimDragCoordByAssignmentID.removeValue(forKey: assignmentId)
     }
 
     private func rosterPickDisabledReason(_ vehicle: MissionPickableFleetVehicle, assignmentId: UUID) -> String? {

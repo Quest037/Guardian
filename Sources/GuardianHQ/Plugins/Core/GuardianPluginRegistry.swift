@@ -34,6 +34,10 @@ final class GuardianPluginRegistry: ObservableObject {
         manifests.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
+    func manifest(for pluginID: GuardianPluginID) -> GuardianPluginManifest? {
+        manifests.first { $0.pluginID == pluginID }
+    }
+
     func sidebarItems(for placement: GuardianPluginSidebarPlacement) -> [GuardianPluginSidebarItem] {
         sidebarContributions
             .filter { $0.placement == placement && isPluginEnabled($0.pluginID) }

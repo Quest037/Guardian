@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import WebKit
 
@@ -39,6 +40,7 @@ struct MapVehicleMarker: Equatable {
 struct OSMMapView: NSViewRepresentable {
     var home: RouteHome?
     var allTasksCoords: [[RouteCoordinate]]
+    var taskPathIDs: [UUID]
     var selectedTaskWaypoints: [RouteWaypoint]
     var selectedWaypointIndex: Int?
     var vehicleMarkers: [MapVehicleMarker]
@@ -49,6 +51,8 @@ struct OSMMapView: NSViewRepresentable {
     var followedVehicleMarkerID: String?
     var preserveView: Bool
     var isEditingTask: Bool
+    var missionPointMarkers: [GuardianMissionPointMapMarker] = []
+    var missionPointPlacementArmed: Bool = false
     var contextMenuPolicy: GuardianMapContextMenuPolicy
     var onMapClick: (Double, Double) -> Void
     var onVehicleMarkerMoved: (String, Double, Double) -> Void
@@ -57,6 +61,16 @@ struct OSMMapView: NSViewRepresentable {
     var onWaypointMoved: (Int, Double, Double) -> Void
     var onWaypointDelete: (Int) -> Void
     var onTaskMapInsert: (Int, Double, Double) -> Void
+    var onMissionPointClick: (UUID) -> Void = { _ in }
+    var onMissionPointMoved: (UUID, Double, Double) -> Void = { _, _, _ in }
+    var onMissionPointDoubleClick: (UUID) -> Void = { _ in }
+    var onVehicleTap: (GuardianMapVehiclePointerEvent) -> Void = { _ in }
+    var onVehicleDoubleTap: (GuardianMapVehiclePointerEvent) -> Void = { _ in }
+    var onTaskPathTap: (GuardianMapTaskPathPointerEvent) -> Void = { _ in }
+    var onTaskPathDoubleTap: (GuardianMapTaskPathPointerEvent) -> Void = { _ in }
+    var onHomeTap: (GuardianMapHomePointerEvent) -> Void = { _ in }
+    var onHomeDoubleTap: (GuardianMapHomePointerEvent) -> Void = { _ in }
+    var onViewportCenterChanged: (Double, Double) -> Void = { _, _ in }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -66,7 +80,17 @@ struct OSMMapView: NSViewRepresentable {
             onWaypointClick: onWaypointClick,
             onWaypointMoved: onWaypointMoved,
             onWaypointDelete: onWaypointDelete,
-            onTaskMapInsert: onTaskMapInsert
+            onTaskMapInsert: onTaskMapInsert,
+            onMissionPointClick: onMissionPointClick,
+            onMissionPointMoved: onMissionPointMoved,
+            onMissionPointDoubleClick: onMissionPointDoubleClick,
+            onVehicleTap: onVehicleTap,
+            onVehicleDoubleTap: onVehicleDoubleTap,
+            onTaskPathTap: onTaskPathTap,
+            onTaskPathDoubleTap: onTaskPathDoubleTap,
+            onHomeTap: onHomeTap,
+            onHomeDoubleTap: onHomeDoubleTap,
+            onViewportCenterChanged: onViewportCenterChanged
         )
     }
 
@@ -74,11 +98,21 @@ struct OSMMapView: NSViewRepresentable {
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: "mapClick")
         controller.add(context.coordinator, name: "vehicleMove")
+        controller.add(context.coordinator, name: "vehicleClick")
+        controller.add(context.coordinator, name: "vehicleDoubleClick")
         controller.add(context.coordinator, name: "waypointClick")
         controller.add(context.coordinator, name: "waypointMove")
         controller.add(context.coordinator, name: "waypointDelete")
         controller.add(context.coordinator, name: "routeInsert")
         controller.add(context.coordinator, name: "markerContextAction")
+        controller.add(context.coordinator, name: "missionPointClick")
+        controller.add(context.coordinator, name: "missionPointDoubleClick")
+        controller.add(context.coordinator, name: "missionPointMove")
+        controller.add(context.coordinator, name: "taskPathClick")
+        controller.add(context.coordinator, name: "taskPathDoubleClick")
+        controller.add(context.coordinator, name: "homeClick")
+        controller.add(context.coordinator, name: "homeDoubleClick")
+        controller.add(context.coordinator, name: "mapViewportCenter")
 
         let config = WKWebViewConfiguration()
         config.userContentController = controller
@@ -95,6 +129,24 @@ struct OSMMapView: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        let c = context.coordinator
+        c.onMapClick = onMapClick
+        c.onVehicleMarkerMoved = onVehicleMarkerMoved
+        c.onContextAction = onContextAction
+        c.onWaypointClick = onWaypointClick
+        c.onWaypointMoved = onWaypointMoved
+        c.onWaypointDelete = onWaypointDelete
+        c.onTaskMapInsert = onTaskMapInsert
+        c.onMissionPointClick = onMissionPointClick
+        c.onMissionPointMoved = onMissionPointMoved
+        c.onMissionPointDoubleClick = onMissionPointDoubleClick
+        c.onViewportCenterChanged = onViewportCenterChanged
+        c.onVehicleTap = onVehicleTap
+        c.onVehicleDoubleTap = onVehicleDoubleTap
+        c.onTaskPathTap = onTaskPathTap
+        c.onTaskPathDoubleTap = onTaskPathDoubleTap
+        c.onHomeTap = onHomeTap
+        c.onHomeDoubleTap = onHomeDoubleTap
         let homeJSON: String
         if let home {
             homeJSON = "{\"lat\":\(home.coord.lat),\"lon\":\(home.coord.lon)}"
@@ -105,6 +157,12 @@ struct OSMMapView: NSViewRepresentable {
         let allPathsJSON = allTasksCoords.map { path in
             "[\(path.map { "{\"lat\":\($0.lat),\"lon\":\($0.lon)}" }.joined(separator: ","))]"
         }.joined(separator: ",")
+        let taskPathIDsJSON: String
+        if taskPathIDs.count == allTasksCoords.count, !allTasksCoords.isEmpty {
+            taskPathIDsJSON = "[\(taskPathIDs.map { Self.jsStringLiteral($0.uuidString) }.joined(separator: ","))]"
+        } else {
+            taskPathIDsJSON = "null"
+        }
         let waypointsJSON = selectedTaskWaypoints.enumerated().map { idx, wp in
             let anchorJSON = wp.pathRole == .anchor ? "true" : "false"
             return "{\"idx\":\(idx),\"lat\":\(wp.coord.lat),\"lon\":\(wp.coord.lon),\"anchor\":\(anchorJSON)}"
@@ -133,11 +191,37 @@ struct OSMMapView: NSViewRepresentable {
             cameraPreviewJSON = "null"
         }
         let followedVehicleMarkerIDJSON = followedVehicleMarkerID.map(Self.jsStringLiteral) ?? "null"
+        let missionPointsJSON = missionPointMarkers.map { m in
+            "{\"id\":\(Self.jsStringLiteral(m.id.uuidString)),\"lat\":\(m.lat),\"lon\":\(m.lon),\"chipCompact\":\(Self.jsStringLiteral(m.mapLabelCompact)),\"chipFull\":\(Self.jsStringLiteral(m.mapLabelFull)),\"kind\":\(Self.jsStringLiteral(m.kindRaw)),\"closed\":\(m.isClosed ? "true" : "false"),\"selected\":\(m.isSelected ? "true" : "false")}"
+        }.joined(separator: ",")
         let contextMenuPolicyJSON = """
-        {"vehicleActions":[\(contextMenuPolicy.vehicleActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"waypointActions":[\(contextMenuPolicy.waypointActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"homeActions":[\(contextMenuPolicy.homeActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))]}
+        {"vehicleActions":[\(contextMenuPolicy.vehicleActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"waypointActions":[\(contextMenuPolicy.waypointActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"homeActions":[\(contextMenuPolicy.homeActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"missionPointActions":[\(contextMenuPolicy.missionPointActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))]}
         """
-        let js = "setMissionData(\(homeJSON), [\(allPathsJSON)], [\(waypointsJSON)], \(selectedWaypointIndexJS), [\(vehicleMarkersJSON)], \"\(mapStyle.rawValue)\", \(recenterNonce), \(headingPreviewJSON), \(cameraPreviewJSON), \(followedVehicleMarkerIDJSON), \(contextMenuPolicyJSON), \(preserveView ? "true" : "false"), \(isEditingTask ? "true" : "false"));"
+        let js = "setMissionData(\(homeJSON), [\(allPathsJSON)], \(taskPathIDsJSON), [\(waypointsJSON)], \(selectedWaypointIndexJS), [\(vehicleMarkersJSON)], \"\(mapStyle.rawValue)\", \(recenterNonce), \(headingPreviewJSON), \(cameraPreviewJSON), \(followedVehicleMarkerIDJSON), \(contextMenuPolicyJSON), \(preserveView ? "true" : "false"), \(isEditingTask ? "true" : "false"), \(missionPointPlacementArmed ? "true" : "false"), [\(missionPointsJSON)]);"
         context.coordinator.queueMissionUpdate(script: js)
+    }
+}
+
+extension OSMMapView {
+    /// Decodes numeric values from ``WKScriptMessage`` bodies (often ``NSNumber``, not native `Double` / `Int`).
+    enum WKScriptPayloadBridge {
+        static func double(_ any: Any?) -> Double? {
+            switch any {
+            case let d as Double: return d
+            case let f as Float: return Double(f)
+            case let n as NSNumber: return n.doubleValue
+            case let i as Int: return Double(i)
+            default: return nil
+            }
+        }
+
+        static func int(_ any: Any?) -> Int? {
+            switch any {
+            case let i as Int: return i
+            case let n as NSNumber: return n.intValue
+            default: return nil
+            }
+        }
     }
 }
 
@@ -163,13 +247,24 @@ extension OSMMapView {
         private var coalescedMissionWorkItem: DispatchWorkItem?
         /// Last script we successfully pushed to JS (skip duplicate evals).
         private var lastAppliedMissionScript: String?
-        private let onMapClick: (Double, Double) -> Void
-        private let onVehicleMarkerMoved: (String, Double, Double) -> Void
-        private let onContextAction: (GuardianMapContextActionEvent) -> Void
-        private let onWaypointClick: (Int) -> Void
-        private let onWaypointMoved: (Int, Double, Double) -> Void
-        private let onWaypointDelete: (Int) -> Void
-        private let onTaskMapInsert: (Int, Double, Double) -> Void
+        /// Refreshed from ``OSMMapView/updateNSView`` every pass so WKWebView callbacks always hit the **current** SwiftUI closures (``State`` / ``Binding`` / parent actions). Do not leave these frozen from ``init`` only — stale handlers break mission-point drag, waypoint edits, and map taps after the first frame.
+        var onMapClick: (Double, Double) -> Void
+        var onVehicleMarkerMoved: (String, Double, Double) -> Void
+        var onContextAction: (GuardianMapContextActionEvent) -> Void
+        var onWaypointClick: (Int) -> Void
+        var onWaypointMoved: (Int, Double, Double) -> Void
+        var onWaypointDelete: (Int) -> Void
+        var onTaskMapInsert: (Int, Double, Double) -> Void
+        var onMissionPointClick: (UUID) -> Void
+        var onMissionPointMoved: (UUID, Double, Double) -> Void
+        var onViewportCenterChanged: (Double, Double) -> Void
+        var onMissionPointDoubleClick: (UUID) -> Void
+        var onVehicleTap: (GuardianMapVehiclePointerEvent) -> Void
+        var onVehicleDoubleTap: (GuardianMapVehiclePointerEvent) -> Void
+        var onTaskPathTap: (GuardianMapTaskPathPointerEvent) -> Void
+        var onTaskPathDoubleTap: (GuardianMapTaskPathPointerEvent) -> Void
+        var onHomeTap: (GuardianMapHomePointerEvent) -> Void
+        var onHomeDoubleTap: (GuardianMapHomePointerEvent) -> Void
 
         init(
             onMapClick: @escaping (Double, Double) -> Void,
@@ -178,7 +273,17 @@ extension OSMMapView {
             onWaypointClick: @escaping (Int) -> Void,
             onWaypointMoved: @escaping (Int, Double, Double) -> Void,
             onWaypointDelete: @escaping (Int) -> Void,
-            onTaskMapInsert: @escaping (Int, Double, Double) -> Void
+            onTaskMapInsert: @escaping (Int, Double, Double) -> Void,
+            onMissionPointClick: @escaping (UUID) -> Void,
+            onMissionPointMoved: @escaping (UUID, Double, Double) -> Void,
+            onMissionPointDoubleClick: @escaping (UUID) -> Void,
+            onVehicleTap: @escaping (GuardianMapVehiclePointerEvent) -> Void,
+            onVehicleDoubleTap: @escaping (GuardianMapVehiclePointerEvent) -> Void,
+            onTaskPathTap: @escaping (GuardianMapTaskPathPointerEvent) -> Void,
+            onTaskPathDoubleTap: @escaping (GuardianMapTaskPathPointerEvent) -> Void,
+            onHomeTap: @escaping (GuardianMapHomePointerEvent) -> Void,
+            onHomeDoubleTap: @escaping (GuardianMapHomePointerEvent) -> Void,
+            onViewportCenterChanged: @escaping (Double, Double) -> Void
         ) {
             self.onMapClick = onMapClick
             self.onVehicleMarkerMoved = onVehicleMarkerMoved
@@ -187,6 +292,16 @@ extension OSMMapView {
             self.onWaypointMoved = onWaypointMoved
             self.onWaypointDelete = onWaypointDelete
             self.onTaskMapInsert = onTaskMapInsert
+            self.onMissionPointClick = onMissionPointClick
+            self.onMissionPointMoved = onMissionPointMoved
+            self.onMissionPointDoubleClick = onMissionPointDoubleClick
+            self.onVehicleTap = onVehicleTap
+            self.onVehicleDoubleTap = onVehicleDoubleTap
+            self.onTaskPathTap = onTaskPathTap
+            self.onTaskPathDoubleTap = onTaskPathDoubleTap
+            self.onHomeTap = onHomeTap
+            self.onHomeDoubleTap = onHomeDoubleTap
+            self.onViewportCenterChanged = onViewportCenterChanged
         }
 
         /// Coalesces rapid ``updateNSView`` calls and skips identical mission payloads so the
@@ -226,46 +341,62 @@ extension OSMMapView {
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             if message.name == "mapClick",
                let payload = message.body as? [String: Any],
-               let lat = payload["lat"] as? Double,
-               let lon = payload["lon"] as? Double {
+               let lat = OSMMapView.WKScriptPayloadBridge.double(payload["lat"]),
+               let lon = OSMMapView.WKScriptPayloadBridge.double(payload["lon"]) {
                 onMapClick(lat, lon)
                 return
             }
 
             if message.name == "waypointClick",
                let payload = message.body as? [String: Any],
-               let idx = payload["idx"] as? Int {
+               let idx = OSMMapView.WKScriptPayloadBridge.int(payload["idx"]) {
                 onWaypointClick(idx)
             }
 
             if message.name == "waypointMove",
                let payload = message.body as? [String: Any],
-               let idx = payload["idx"] as? Int,
-               let lat = payload["lat"] as? Double,
-               let lon = payload["lon"] as? Double {
+               let idx = OSMMapView.WKScriptPayloadBridge.int(payload["idx"]),
+               let lat = OSMMapView.WKScriptPayloadBridge.double(payload["lat"]),
+               let lon = OSMMapView.WKScriptPayloadBridge.double(payload["lon"]) {
                 onWaypointMoved(idx, lat, lon)
             }
 
             if message.name == "waypointDelete",
                let payload = message.body as? [String: Any],
-               let idx = payload["idx"] as? Int {
+               let idx = OSMMapView.WKScriptPayloadBridge.int(payload["idx"]) {
                 onWaypointDelete(idx)
             }
 
             if message.name == "routeInsert",
                let payload = message.body as? [String: Any],
-               let idx = payload["idx"] as? Int,
-               let lat = payload["lat"] as? Double,
-               let lon = payload["lon"] as? Double {
+               let idx = OSMMapView.WKScriptPayloadBridge.int(payload["idx"]),
+               let lat = OSMMapView.WKScriptPayloadBridge.double(payload["lat"]),
+               let lon = OSMMapView.WKScriptPayloadBridge.double(payload["lon"]) {
                 onTaskMapInsert(idx, lat, lon)
             }
 
             if message.name == "vehicleMove",
                let payload = message.body as? [String: Any],
                let id = payload["id"] as? String,
-               let lat = payload["lat"] as? Double,
-               let lon = payload["lon"] as? Double {
+               let lat = OSMMapView.WKScriptPayloadBridge.double(payload["lat"]),
+               let lon = OSMMapView.WKScriptPayloadBridge.double(payload["lon"]) {
                 onVehicleMarkerMoved(id, lat, lon)
+            }
+
+            if message.name == "vehicleClick",
+               let payload = message.body as? [String: Any],
+               let lat = OSMMapView.WKScriptPayloadBridge.double(payload["lat"]),
+               let lon = OSMMapView.WKScriptPayloadBridge.double(payload["lon"]) {
+                let id = payload["id"] as? String
+                onVehicleTap(GuardianMapVehiclePointerEvent(markerID: id, lat: lat, lon: lon))
+            }
+
+            if message.name == "vehicleDoubleClick",
+               let payload = message.body as? [String: Any],
+               let lat = OSMMapView.WKScriptPayloadBridge.double(payload["lat"]),
+               let lon = OSMMapView.WKScriptPayloadBridge.double(payload["lon"]) {
+                let id = payload["id"] as? String
+                onVehicleDoubleTap(GuardianMapVehiclePointerEvent(markerID: id, lat: lat, lon: lon))
             }
 
             if message.name == "markerContextAction",
@@ -274,8 +405,8 @@ extension OSMMapView {
                let markerTypeRaw = payload["markerType"] as? String,
                let action = GuardianMapContextAction(rawValue: actionRaw),
                let markerType = GuardianMapMarkerType(rawValue: markerTypeRaw),
-               let lat = payload["lat"] as? Double,
-               let lon = payload["lon"] as? Double {
+               let lat = OSMMapView.WKScriptPayloadBridge.double(payload["lat"]),
+               let lon = OSMMapView.WKScriptPayloadBridge.double(payload["lon"]) {
                 onContextAction(
                     GuardianMapContextActionEvent(
                         action: action,
@@ -285,6 +416,68 @@ extension OSMMapView {
                         lon: lon
                     )
                 )
+            }
+
+            if message.name == "missionPointClick",
+               let payload = message.body as? [String: Any],
+               let idStr = payload["id"] as? String,
+               let uuid = UUID(uuidString: idStr) {
+                onMissionPointClick(uuid)
+            }
+
+            if message.name == "missionPointDoubleClick",
+               let payload = message.body as? [String: Any],
+               let idStr = payload["id"] as? String,
+               let uuid = UUID(uuidString: idStr) {
+                onMissionPointDoubleClick(uuid)
+            }
+
+            if message.name == "missionPointMove",
+               let payload = message.body as? [String: Any],
+               let idStr = payload["id"] as? String,
+               let uuid = UUID(uuidString: idStr),
+               let lat = OSMMapView.WKScriptPayloadBridge.double(payload["lat"]),
+               let lon = OSMMapView.WKScriptPayloadBridge.double(payload["lon"]) {
+                onMissionPointMoved(uuid, lat, lon)
+            }
+
+            if message.name == "mapViewportCenter",
+               let payload = message.body as? [String: Any],
+               let lat = OSMMapView.WKScriptPayloadBridge.double(payload["lat"]),
+               let lon = OSMMapView.WKScriptPayloadBridge.double(payload["lon"]) {
+                onViewportCenterChanged(lat, lon)
+            }
+
+            if message.name == "taskPathClick",
+               let payload = message.body as? [String: Any],
+               let idStr = payload["taskPathId"] as? String,
+               let taskPathID = UUID(uuidString: idStr),
+               let lat = OSMMapView.WKScriptPayloadBridge.double(payload["lat"]),
+               let lon = OSMMapView.WKScriptPayloadBridge.double(payload["lon"]) {
+                onTaskPathTap(GuardianMapTaskPathPointerEvent(taskPathID: taskPathID, lat: lat, lon: lon))
+            }
+
+            if message.name == "taskPathDoubleClick",
+               let payload = message.body as? [String: Any],
+               let idStr = payload["taskPathId"] as? String,
+               let taskPathID = UUID(uuidString: idStr),
+               let lat = OSMMapView.WKScriptPayloadBridge.double(payload["lat"]),
+               let lon = OSMMapView.WKScriptPayloadBridge.double(payload["lon"]) {
+                onTaskPathDoubleTap(GuardianMapTaskPathPointerEvent(taskPathID: taskPathID, lat: lat, lon: lon))
+            }
+
+            if message.name == "homeClick",
+               let payload = message.body as? [String: Any],
+               let lat = OSMMapView.WKScriptPayloadBridge.double(payload["lat"]),
+               let lon = OSMMapView.WKScriptPayloadBridge.double(payload["lon"]) {
+                onHomeTap(GuardianMapHomePointerEvent(lat: lat, lon: lon))
+            }
+
+            if message.name == "homeDoubleClick",
+               let payload = message.body as? [String: Any],
+               let lat = OSMMapView.WKScriptPayloadBridge.double(payload["lat"]),
+               let lon = OSMMapView.WKScriptPayloadBridge.double(payload["lon"]) {
+                onHomeDoubleTap(GuardianMapHomePointerEvent(lat: lat, lon: lon))
             }
 
         }
@@ -350,11 +543,12 @@ private extension OSMMapView {
     var headingCone = null;
     var cameraCone = null;
     const vehicleMarkers = [];
+    const missionPointMarkers = [];
     const pathLines = [];
     const state = { lastDataSignature: null, lastRecenterNonce: -1, lastFullMissionSig: null };
     let contextMenuEl = null;
     let followedVehicleMarkerID = null;
-    let contextMenuPolicy = { vehicleActions: [], waypointActions: [], homeActions: [] };
+    let contextMenuPolicy = { vehicleActions: [], waypointActions: [], homeActions: [], missionPointActions: [] };
 
     map.on('click', function(e) {
       hideContextMenu();
@@ -365,12 +559,28 @@ private extension OSMMapView {
     });
     map.on('movestart zoomstart', hideContextMenu);
 
+    let viewportCenterDebounce = null;
+    function emitViewportCenter() {
+      if (viewportCenterDebounce) clearTimeout(viewportCenterDebounce);
+      viewportCenterDebounce = setTimeout(() => {
+        try {
+          const c = map.getCenter();
+          if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.mapViewportCenter) {
+            window.webkit.messageHandlers.mapViewportCenter.postMessage({ lat: c.lat, lon: c.lng });
+          }
+        } catch (e) {}
+      }, 140);
+    }
+    map.on('moveend', emitViewportCenter);
+    map.on('zoomend', emitViewportCenter);
+
     function contextActionTitle(action) {
       switch (action) {
         case 'followVehicle': return 'Follow marker';
         case 'stopFollowingVehicle': return 'Stop following';
         case 'centerMarker': return 'Center map here';
         case 'deleteWaypoint': return 'Delete waypoint';
+        case 'deleteMissionPoint': return 'Delete map point';
         default: return action;
       }
     }
@@ -406,6 +616,7 @@ private extension OSMMapView {
       }
       if (markerType === 'waypoint') return contextMenuPolicy.waypointActions || [];
       if (markerType === 'home') return contextMenuPolicy.homeActions || [];
+      if (markerType === 'missionPoint') return contextMenuPolicy.missionPointActions || [];
       return [];
     }
 
@@ -531,11 +742,12 @@ private extension OSMMapView {
 
     const defaultSinglePointZoom = 15;
 
-    function setMissionData(home, allTasksCoords, selectedWaypoints, selectedWaypointIndex, missionVehicleMarkers, mapStyle, recenterNonce, headingPreview, cameraPreview, followVehicleMarkerID, menuPolicy, preserveView, isEditingTask) {
+    function setMissionData(home, allTasksCoords, taskPathIds, selectedWaypoints, selectedWaypointIndex, missionVehicleMarkers, mapStyle, recenterNonce, headingPreview, cameraPreview, followVehicleMarkerID, menuPolicy, preserveView, isEditingTask, missionPointPlacementArmed, missionPointMarkersArg) {
       const geometryTasks = (allTasksCoords || []).filter(path => path && path.length > 0);
       const fullMissionSig = JSON.stringify({
         home: home,
         geometryTasks: geometryTasks,
+        taskPathIds: taskPathIds || null,
         selectedWaypoints: selectedWaypoints || [],
         selectedWaypointIndex: selectedWaypointIndex,
         missionVehicleMarkers: missionVehicleMarkers || [],
@@ -546,7 +758,9 @@ private extension OSMMapView {
         followVehicleMarkerID: followVehicleMarkerID || null,
         menuPolicy: menuPolicy || {},
         preserveView: !!preserveView,
-        isEditingTask: !!isEditingTask
+        isEditingTask: !!isEditingTask,
+        missionPointPlacementArmed: !!missionPointPlacementArmed,
+        missionPoints: missionPointMarkersArg || []
       });
       if (fullMissionSig === state.lastFullMissionSig) {
         return;
@@ -554,7 +768,7 @@ private extension OSMMapView {
       state.lastFullMissionSig = fullMissionSig;
 
       followedVehicleMarkerID = followVehicleMarkerID || null;
-      contextMenuPolicy = menuPolicy || { vehicleActions: [], waypointActions: [], homeActions: [] };
+      contextMenuPolicy = menuPolicy || { vehicleActions: [], waypointActions: [], homeActions: [], missionPointActions: [] };
       if (homeMarker) { map.removeLayer(homeMarker); homeMarker = null; }
       if (headingCone) { map.removeLayer(headingCone); headingCone = null; }
       if (cameraCone) { map.removeLayer(cameraCone); cameraCone = null; }
@@ -570,8 +784,12 @@ private extension OSMMapView {
         const m = vehicleMarkers.pop();
         map.removeLayer(m);
       }
+      while (missionPointMarkers.length > 0) {
+        const m = missionPointMarkers.pop();
+        map.removeLayer(m);
+      }
       applyStyle(mapStyle);
-      map.getContainer().style.cursor = isEditingTask ? 'pointer' : '';
+      map.getContainer().style.cursor = (isEditingTask || missionPointPlacementArmed) ? 'pointer' : '';
 
       const points = [];
       const dataSignature = JSON.stringify({
@@ -594,17 +812,57 @@ private extension OSMMapView {
         homeMarker.on('contextmenu', function(e) {
           openContextMenu(e, 'home', 'home', home.lat, home.lon);
         });
+        homeMarker.on('click', function(e) {
+          if (e.originalEvent) L.DomEvent.stopPropagation(e.originalEvent);
+          window.webkit.messageHandlers.homeClick.postMessage({
+            lat: home.lat,
+            lon: home.lon
+          });
+        });
+        homeMarker.on('dblclick', function(e) {
+          if (e.originalEvent) {
+            L.DomEvent.stopPropagation(e.originalEvent);
+            L.DomEvent.preventDefault(e.originalEvent);
+          }
+          window.webkit.messageHandlers.homeDoubleClick.postMessage({
+            lat: home.lat,
+            lon: home.lon
+          });
+        });
         points.push([home.lat, home.lon]);
       }
 
       if (allTasksCoords && allTasksCoords.length > 0) {
-        allTasksCoords.forEach(taskCoords => {
+        const idsAligned = taskPathIds && taskPathIds.length === allTasksCoords.length;
+        allTasksCoords.forEach((taskCoords, pathIdx) => {
           if (!taskCoords || taskCoords.length === 0) return;
           const latlngs = taskCoords.map(p => [p.lat, p.lon]);
           const idx = pathLines.length;
           const line = L.polyline(latlngs, { color: pathColor(idx), weight: 3 }).addTo(map);
           pathLines.push(line);
           for (const p of latlngs) points.push(p);
+          const pathId = idsAligned ? taskPathIds[pathIdx] : null;
+          if (pathId) {
+            line.on('click', function(e) {
+              if (e.originalEvent) L.DomEvent.stopPropagation(e.originalEvent);
+              window.webkit.messageHandlers.taskPathClick.postMessage({
+                taskPathId: pathId,
+                lat: e.latlng.lat,
+                lon: e.latlng.lng
+              });
+            });
+            line.on('dblclick', function(e) {
+              if (e.originalEvent) {
+                L.DomEvent.stopPropagation(e.originalEvent);
+                L.DomEvent.preventDefault(e.originalEvent);
+              }
+              window.webkit.messageHandlers.taskPathDoubleClick.postMessage({
+                taskPathId: pathId,
+                lat: e.latlng.lat,
+                lon: e.latlng.lng
+              });
+            });
+          }
         });
       }
 
@@ -689,18 +947,25 @@ private extension OSMMapView {
               "></div>`
             : '';
           const imageHTML = vm.image
-            ? `<img src="${vm.image}" alt="" style="width:${inner}px;height:${inner}px;border-radius:999px;object-fit:cover;display:block;"/>`
-            : `<div style="width:${inner}px;height:${inner}px;border-radius:999px;background:#1f2937;"></div>`;
+            ? `<img src="${vm.image}" alt="" draggable="false" style="-webkit-user-drag:none;user-drag:none;width:${inner}px;height:${inner}px;border-radius:999px;object-fit:cover;display:block;"/>`
+            : `<div style="width:${inner}px;height:${inner}px;border-radius:999px;background:#1f2937;touch-action:none;-webkit-user-drag:none;"></div>`;
+          // Mission-point pins use zIndexOffset 400 / 900 — keep roster vehicles above them so drags hit the
+          // vehicle marker (otherwise Leaflet map pan wins when a pin overlaps the vehicle stack).
+          const vehicleZ = vm.draggable ? 2500 : (vm.selected ? 1200 : 600);
           const marker = L.marker([vm.lat, vm.lon], {
             draggable: !!vm.draggable,
+            zIndexOffset: vehicleZ,
             title: vm.label || '',
             icon: L.divIcon({
               className: 'mission-vehicle-dot',
-              html: `<div style="position:relative;width:${size}px;height:${size}px;">${headingArrow}<div style="width:${size}px;height:${size}px;border-radius:999px;border:${border}px solid ${ringColor};background:#0b0f14;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 1px rgba(0,0,0,0.55);overflow:hidden;">${imageHTML}</div></div>`,
+              html: `<div style="position:relative;width:${size}px;height:${size}px;touch-action:none;-webkit-user-drag:none;">${headingArrow}<div style="width:${size}px;height:${size}px;border-radius:999px;border:${border}px solid ${ringColor};background:#0b0f14;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 1px rgba(0,0,0,0.55);overflow:hidden;touch-action:none;">${imageHTML}</div></div>`,
               iconSize: [size, size],
               iconAnchor: [size / 2, size / 2]
             })
           }).addTo(map);
+          if (vm.draggable && marker.dragging) {
+            marker.dragging.enable();
+          }
           if (vm.showLabel && vm.label && vm.selected) {
             marker.bindTooltip(vm.label, { permanent: true, direction: 'top', offset: [0, -10], opacity: 0.95 });
           }
@@ -717,9 +982,89 @@ private extension OSMMapView {
           marker.on('contextmenu', function(e) {
             openContextMenu(e, 'vehicle', vm.id || null, vm.lat, vm.lon);
           });
+          marker.on('click', function(e) {
+            const pos = e.target.getLatLng();
+            if (e.originalEvent) L.DomEvent.stopPropagation(e.originalEvent);
+            window.webkit.messageHandlers.vehicleClick.postMessage({
+              id: vm.id || null,
+              lat: pos.lat,
+              lon: pos.lng
+            });
+          });
+          marker.on('dblclick', function(e) {
+            const pos = e.target.getLatLng();
+            if (e.originalEvent) {
+              L.DomEvent.stopPropagation(e.originalEvent);
+              L.DomEvent.preventDefault(e.originalEvent);
+            }
+            window.webkit.messageHandlers.vehicleDoubleClick.postMessage({
+              id: vm.id || null,
+              lat: pos.lat,
+              lon: pos.lng
+            });
+          });
           vehicleMarkers.push(marker);
           points.push([vm.lat, vm.lon]);
           // Heading wedge removed for vehicle markers (arrow already shows heading).
+        });
+      }
+
+      if (missionPointMarkersArg && missionPointMarkersArg.length > 0) {
+        missionPointMarkersArg.forEach((mp) => {
+          if (!Number.isFinite(mp.lat) || !Number.isFinite(mp.lon) || !mp.id) return;
+          const isExtraction = mp.kind === 'extraction';
+          const hue = isExtraction ? 150 : 32;
+          const border = mp.selected ? '3px solid #fff' : '2px solid rgba(0,0,0,0.55)';
+          const opacity = mp.closed ? 0.42 : 1.0;
+          const deco = mp.closed ? 'line-through' : 'none';
+          const sz = mp.selected ? 30 : 22;
+          const chipC = (mp.chipCompact != null && mp.chipCompact !== '') ? String(mp.chipCompact) : (mp.chip || '');
+          // Always show the compact digit on the pin; hue encodes rally vs extraction; selected state uses size/border/drag.
+          const labelText = chipC;
+          const fontPx = mp.selected ? 11 : 10;
+          const ellip = mp.selected ? 'ellipsis' : 'clip';
+          const grabCursor = mp.selected ? 'grab' : 'pointer';
+          const html = `<div style="opacity:${opacity};width:${sz}px;height:${sz}px;transform:rotate(45deg);background:hsl(${hue},85%,52%);border:${border};box-shadow:0 0 0 1px rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;cursor:${grabCursor};-webkit-user-select:none;user-select:none;touch-action:none;">
+            <span style="transform:rotate(-45deg);font:${fontPx}px/1 -apple-system,sans-serif;font-weight:700;color:#0b0f14;max-width:${sz - 4}px;overflow:hidden;text-overflow:${ellip};white-space:nowrap;text-decoration:${deco};-webkit-user-select:none;user-select:none;pointer-events:none">${labelText.replace(/</g,'')}</span>
+          </div>`;
+          const marker = L.marker([mp.lat, mp.lon], {
+            draggable: !!mp.selected,
+            zIndexOffset: mp.selected ? 900 : 400,
+            icon: L.divIcon({
+              className: 'mission-point-pin',
+              html: html,
+              iconSize: [sz, sz],
+              iconAnchor: [sz / 2, sz / 2]
+            })
+          }).addTo(map);
+          if (mp.selected && marker.dragging) {
+            marker.dragging.enable();
+          }
+          marker.on('click', function() {
+            window.webkit.messageHandlers.missionPointClick.postMessage({ id: mp.id });
+          });
+          marker.on('dblclick', function(e) {
+            if (e.originalEvent) {
+              L.DomEvent.stopPropagation(e.originalEvent);
+              L.DomEvent.preventDefault(e.originalEvent);
+            }
+            window.webkit.messageHandlers.missionPointDoubleClick.postMessage({ id: mp.id });
+          });
+          if (mp.selected) {
+            marker.on('dragend', function(e) {
+              const pos = e.target.getLatLng();
+              window.webkit.messageHandlers.missionPointMove.postMessage({
+                id: mp.id,
+                lat: pos.lat,
+                lon: pos.lng
+              });
+            });
+          }
+          marker.on('contextmenu', function(e) {
+            openContextMenu(e, 'missionPoint', mp.id, mp.lat, mp.lon);
+          });
+          missionPointMarkers.push(marker);
+          points.push([mp.lat, mp.lon]);
         });
       }
 

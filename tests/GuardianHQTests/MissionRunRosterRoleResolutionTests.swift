@@ -27,7 +27,7 @@ final class MissionRunRosterRoleResolutionTests: XCTestCase {
         XCTAssertEqual(map[idMedic]?.mrePayload?.role_id, "medic")
         XCTAssertTrue(map[idMedic]?.mrePayload?.tags.contains("recovery.primary") == true)
         XCTAssertNil(map[idNone]?.mrePayload)
-        XCTAssertEqual(map[idNone]?.role, RosterRole.none)
+        XCTAssertEqual(map[idNone]?.behaviorRoleID, RosterRole.none.rawValue)
     }
 
     func test_resolutions_includesMergedPluginTagsInMrePayload() throws {
@@ -56,5 +56,29 @@ final class MissionRunRosterRoleResolutionTests: XCTestCase {
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(ResolvedRosterRole.self, from: data)
         XCTAssertEqual(decoded, original)
+    }
+
+    func test_resolution_usesPluginCatalogRow_whenSlugMatches() throws {
+        let plugin = try GuardianPluginID(validating: "guardian.plugin.roster.mc.catalog")
+        RosterRolePluginCatalog.register(
+            RosterRolePluginCatalogEntry(
+                id: "scout",
+                displayName: "ScoutPlugin",
+                blurb: "Plugin scout",
+                tags: ["plugin.scout.full.row"],
+                weights: RosterRoleWeights(
+                    aggression: 0.11, tenacity: 0.22, cohesion: 0.33, roe_slack: 0.44, support_bias: 0.55
+                ),
+                schemaVersion: 42,
+                pluginID: plugin
+            )
+        )
+        var mission = Mission(name: "Plugin row", description: "", type: .mobile)
+        let rid = UUID()
+        mission.rosterDevices = [RosterDevice(id: rid, name: "S", role: .scout, slot: .primary)]
+        let resolved = try XCTUnwrap(MissionRunRosterRoleResolver.resolution(forRosterDeviceID: rid, mission: mission))
+        XCTAssertTrue(resolved.mrePayload?.tags.contains("plugin.scout.full.row") == true)
+        XCTAssertEqual(resolved.mrePayload?.role_schema, 42)
+        XCTAssertEqual(resolved.contributingPluginIDs, [plugin])
     }
 }

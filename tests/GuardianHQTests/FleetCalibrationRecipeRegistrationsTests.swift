@@ -670,7 +670,7 @@ final class FleetCalibrationRecipeRegistrationsTests: XCTestCase {
         )
     }
 
-    // MARK: - recipe.fleet.diagnose.cancel + recipe.fleet.diagnose.armprobe
+    // MARK: - recipe.fleet.diagnose.cancel + armprobe (+ armprobe.hold)
 
     func test_registerAll_registersDiagnoseArmProbeCancel() {
         FleetCalibrationRecipeRegistrations.registerAll()
@@ -821,6 +821,50 @@ final class FleetCalibrationRecipeRegistrationsTests: XCTestCase {
         }
     }
 
+    func test_registerAll_registersDiagnoseArmProbeHold() {
+        FleetCalibrationRecipeRegistrations.registerAll()
+
+        let descriptor = FleetRecipesCatalogue.shared
+            .descriptor(forRawValue: "recipe.fleet.diagnose.armprobe.hold")
+
+        XCTAssertNotNil(descriptor, "Arm probe (hold) must register after registerAll().")
+        XCTAssertEqual(descriptor?.riskTier, .groundOnly)
+        XCTAssertEqual(
+            descriptor?.cancelRecipe?.rawValue,
+            "recipe.fleet.diagnose.cancel",
+            "Hold variant must still declare diagnose cancel so mid-probe cancel attempts disarm."
+        )
+        XCTAssertEqual(descriptor?.appliesToSystems, ["arm", "preflight"])
+    }
+
+    func test_armProbeHold_bodyIsSingleArmStepWithSucceedTerminals() throws {
+        FleetCalibrationRecipeRegistrations.registerAll()
+
+        let body = try XCTUnwrap(
+            FleetRecipesCatalogue.shared
+                .descriptor(forRawValue: "recipe.fleet.diagnose.armprobe.hold")?
+                .body
+        )
+        XCTAssertEqual(body.steps.count, 1, "Hold probe stops after arm — no trailing disarm step.")
+        XCTAssertEqual(body.overallBudgetSeconds, 15)
+
+        let armMatchers = body.steps[0].matchers
+        let succeedKinds: [(String, FleetRecipeResponseMatcher)] = [
+            ("success",      .success(payload: nil)),
+            ("alreadyArmed", .error(kind: .alreadyArmed)),
+        ]
+        for (label, matcherKind) in succeedKinds {
+            let matcher = try XCTUnwrap(
+                armMatchers.first(where: { $0.when == matcherKind }),
+                "Hold arm step must carry a matcher for \(label)."
+            )
+            guard case .succeed = matcher.then else {
+                XCTFail("\(label) matcher must succeed (no disarm follow-up); got \(matcher.then).")
+                return
+            }
+        }
+    }
+
     /// The disarm step is the safety floor — anything other than "vehicle no
     /// longer armed" is a hard failure because a vehicle that armed but won't
     /// disarm is the worst-case probe outcome.
@@ -881,13 +925,13 @@ final class FleetCalibrationRecipeRegistrationsTests: XCTestCase {
         )
         XCTAssertEqual(
             countAfterFirst,
-            24,
-            "Calibration subsystem currently ships exactly 24 recipes: cancel + 5 core sensor cals " +
+            25,
+            "Calibration subsystem currently ships exactly 25 recipes: cancel + 5 core sensor cals " +
             "(compass, accelerometer, gyro, baro, level) + 7 additional sensor cals " +
             "(compass.motor, baro.temperature, airspeed, esc, rc, rc.trim, gimbal) + " +
             "3 v1 discoverability shells (rangefinder, flow, vision) + 6 param-driven cals " +
             "(compass.declination, battery.voltage/current/capacity, servo, gimbal.neutral) + " +
-            "2 diagnose recipes (cancel, armprobe). " +
+            "3 diagnose recipes (cancel, armprobe, armprobe.hold). " +
             "When new calibration or diagnose recipes land, update this assertion."
         )
     }

@@ -10,6 +10,13 @@ struct GuardianPluginID: Hashable, Sendable, Codable, Identifiable {
 
     var id: String { rawValue }
 
+    /// Namespace tail after the ``guardian.`` prefix — used when mapping a plugin id to
+    /// owned `command.*` / `recipe.*` prefixes (e.g. `guardian.plugin.paladin` → `plugin.paladin`).
+    var fleetNamespaceTail: String {
+        guard rawValue.hasPrefix("guardian.") else { return "" }
+        return String(rawValue.dropFirst("guardian.".count))
+    }
+
     /// Mission Control assistant and related surfaces.
     static let paladin: GuardianPluginID = GuardianPluginID(uncheckedRawValue: "guardian.plugin.paladin")
 

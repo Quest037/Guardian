@@ -283,15 +283,6 @@ final class MissionRunPlannerSubsystem {
                 rd.slot == .wingman && rd.leaderRosterDeviceId == primary.id
             }
             var items: [Mavsdk.Mission.MissionItem] = []
-            if let staging = assignment.simStartOverrideCoord, let firstWP = task.waypoints.first {
-                items.append(
-                    Utilities.mission.path.waypoint.mavItem(
-                        coord: staging,
-                        waypoint: firstWP,
-                        useWaypointHeadingForYaw: true
-                    )
-                )
-            }
             for (index, wp) in task.waypoints.enumerated() {
                 let ignoreDelay = Utilities.mission.path.waypoint.shouldIgnoreClosingWaypointDelay(
                     path: task,
@@ -356,10 +347,6 @@ final class MissionRunPlannerSubsystem {
         case let .updateAssignmentTask(assignmentID, taskID):
             guard let idx = environment.assignments.firstIndex(where: { $0.id == assignmentID }) else { return false }
             environment.assignments[idx].taskId = taskID
-            return true
-        case let .updateAssignmentSimStartOverride(assignmentID, coordinate):
-            guard let idx = environment.assignments.firstIndex(where: { $0.id == assignmentID }) else { return false }
-            environment.assignments[idx].simStartOverrideCoord = coordinate
             return true
         }
     }

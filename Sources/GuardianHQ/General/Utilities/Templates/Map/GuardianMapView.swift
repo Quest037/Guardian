@@ -4,6 +4,8 @@ enum GuardianMapMarkerType: String, Codable {
     case vehicle
     case waypoint
     case home
+    /// Mission template / map pin (rally, extraction) — distinct from route waypoints.
+    case missionPoint
 }
 
 enum GuardianMapContextAction: String, Codable, CaseIterable {
@@ -11,6 +13,7 @@ enum GuardianMapContextAction: String, Codable, CaseIterable {
     case stopFollowingVehicle
     case centerMarker
     case deleteWaypoint
+    case deleteMissionPoint
 
     var title: String {
         switch self {
@@ -22,6 +25,8 @@ enum GuardianMapContextAction: String, Codable, CaseIterable {
             return "Center map here"
         case .deleteWaypoint:
             return "Delete waypoint"
+        case .deleteMissionPoint:
+            return "Delete map point"
         }
     }
 }
@@ -34,22 +39,59 @@ struct GuardianMapContextActionEvent {
     let lon: Double
 }
 
+/// Primary (single) click on a vehicle marker decoded from the Leaflet bridge.
+struct GuardianMapVehiclePointerEvent: Equatable, Sendable {
+    var markerID: String?
+    var lat: Double
+    var lon: Double
+}
+
+/// Primary or double click on a task route polyline when ``GuardianRouteMapGeometry/taskPathIDs`` aligns with ``allTasksCoords``.
+struct GuardianMapTaskPathPointerEvent: Equatable, Sendable {
+    var taskPathID: UUID
+    var lat: Double
+    var lon: Double
+}
+
+/// Primary or double click on the home circle marker.
+struct GuardianMapHomePointerEvent: Equatable, Sendable {
+    var lat: Double
+    var lon: Double
+}
+
 struct GuardianMapContextMenuPolicy {
     var vehicleActions: [GuardianMapContextAction]
     var waypointActions: [GuardianMapContextAction]
     var homeActions: [GuardianMapContextAction]
+    var missionPointActions: [GuardianMapContextAction]
 
     init(
         vehicleActions: [GuardianMapContextAction] = [],
         waypointActions: [GuardianMapContextAction] = [],
-        homeActions: [GuardianMapContextAction] = []
+        homeActions: [GuardianMapContextAction] = [],
+        missionPointActions: [GuardianMapContextAction] = []
     ) {
         self.vehicleActions = vehicleActions
         self.waypointActions = waypointActions
         self.homeActions = homeActions
+        self.missionPointActions = missionPointActions
     }
 
     static let disabled = GuardianMapContextMenuPolicy()
+}
+
+/// One rally / extraction pin for Leaflet (mission editor or read-only previews).
+struct GuardianMissionPointMapMarker: Equatable, Sendable {
+    var id: UUID
+    var lat: Double
+    var lon: Double
+    /// Unselected marker text (e.g. `1`); kind colour conveys rally vs extraction.
+    var mapLabelCompact: String
+    /// Selected marker text (e.g. `RP:1`).
+    var mapLabelFull: String
+    var kindRaw: String
+    var isClosed: Bool
+    var isSelected: Bool
 }
 
 /// Home, route polylines, editable waypoint overlay, and heading/camera previews — published as **one**
@@ -58,22 +100,31 @@ struct GuardianMapContextMenuPolicy {
 struct GuardianRouteMapGeometry: Equatable {
     var home: RouteHome?
     var allTasksCoords: [[RouteCoordinate]]
+    /// When `count` equals ``allTasksCoords``, each id labels the matching task polyline for ``GuardianMapView`` path tap callbacks. Otherwise the bridge does not attach path click handlers.
+    var taskPathIDs: [UUID]
     var selectedTaskWaypoints: [RouteWaypoint]
     var selectedWaypointIndex: Int?
     var headingPreview: HeadingPreview?
     var cameraPreview: CameraPreview?
     var preserveView: Bool
     var isEditingTask: Bool
+    /// Typed map pins (rally / extraction) — orthogonal to route waypoint editing.
+    var missionPointMarkers: [GuardianMissionPointMapMarker]
+    /// Mission editor: next map tap places a new mission point (mutually exclusive with route edit in UI).
+    var missionPointPlacementArmed: Bool
 
     static let empty = GuardianRouteMapGeometry(
         home: nil,
         allTasksCoords: [],
+        taskPathIDs: [],
         selectedTaskWaypoints: [],
         selectedWaypointIndex: nil,
         headingPreview: nil,
         cameraPreview: nil,
         preserveView: true,
-        isEditingTask: false
+        isEditingTask: false,
+        missionPointMarkers: [],
+        missionPointPlacementArmed: false
     )
 }
 
@@ -188,6 +239,17 @@ struct GuardianMapView: View {
     var onWaypointMoved: (Int, Double, Double) -> Void
     var onWaypointDelete: (Int) -> Void
     var onTaskMapInsert: (Int, Double, Double) -> Void
+    var onMissionPointClick: (UUID) -> Void
+    var onMissionPointMoved: (UUID, Double, Double) -> Void
+    var onMissionPointDoubleClick: (UUID) -> Void
+    var onVehicleTap: (GuardianMapVehiclePointerEvent) -> Void
+    var onVehicleDoubleTap: (GuardianMapVehiclePointerEvent) -> Void
+    var onTaskPathTap: (GuardianMapTaskPathPointerEvent) -> Void
+    var onTaskPathDoubleTap: (GuardianMapTaskPathPointerEvent) -> Void
+    var onHomeTap: (GuardianMapHomePointerEvent) -> Void
+    var onHomeDoubleTap: (GuardianMapHomePointerEvent) -> Void
+    /// Fired when the map viewport center changes (debounced on the JS side).
+    var onViewportCenterChanged: (Double, Double) -> Void
 
     init(
         model: GuardianMapModel,
@@ -199,7 +261,17 @@ struct GuardianMapView: View {
         onWaypointClick: @escaping (Int) -> Void = { _ in },
         onWaypointMoved: @escaping (Int, Double, Double) -> Void = { _, _, _ in },
         onWaypointDelete: @escaping (Int) -> Void = { _ in },
-        onTaskMapInsert: @escaping (Int, Double, Double) -> Void = { _, _, _ in }
+        onTaskMapInsert: @escaping (Int, Double, Double) -> Void = { _, _, _ in },
+        onMissionPointClick: @escaping (UUID) -> Void = { _ in },
+        onMissionPointMoved: @escaping (UUID, Double, Double) -> Void = { _, _, _ in },
+        onMissionPointDoubleClick: @escaping (UUID) -> Void = { _ in },
+        onVehicleTap: @escaping (GuardianMapVehiclePointerEvent) -> Void = { _ in },
+        onVehicleDoubleTap: @escaping (GuardianMapVehiclePointerEvent) -> Void = { _ in },
+        onTaskPathTap: @escaping (GuardianMapTaskPathPointerEvent) -> Void = { _ in },
+        onTaskPathDoubleTap: @escaping (GuardianMapTaskPathPointerEvent) -> Void = { _ in },
+        onHomeTap: @escaping (GuardianMapHomePointerEvent) -> Void = { _ in },
+        onHomeDoubleTap: @escaping (GuardianMapHomePointerEvent) -> Void = { _ in },
+        onViewportCenterChanged: @escaping (Double, Double) -> Void = { _, _ in }
     ) {
         self.model = model
         self.toolbar = toolbar
@@ -211,6 +283,16 @@ struct GuardianMapView: View {
         self.onWaypointMoved = onWaypointMoved
         self.onWaypointDelete = onWaypointDelete
         self.onTaskMapInsert = onTaskMapInsert
+        self.onMissionPointClick = onMissionPointClick
+        self.onMissionPointMoved = onMissionPointMoved
+        self.onMissionPointDoubleClick = onMissionPointDoubleClick
+        self.onVehicleTap = onVehicleTap
+        self.onVehicleDoubleTap = onVehicleDoubleTap
+        self.onTaskPathTap = onTaskPathTap
+        self.onTaskPathDoubleTap = onTaskPathDoubleTap
+        self.onHomeTap = onHomeTap
+        self.onHomeDoubleTap = onHomeDoubleTap
+        self.onViewportCenterChanged = onViewportCenterChanged
     }
 
     var body: some View {
@@ -218,6 +300,7 @@ struct GuardianMapView: View {
             OSMMapView(
                 home: model.routeGeometry.home,
                 allTasksCoords: model.routeGeometry.allTasksCoords,
+                taskPathIDs: model.routeGeometry.taskPathIDs,
                 selectedTaskWaypoints: model.routeGeometry.selectedTaskWaypoints,
                 selectedWaypointIndex: model.routeGeometry.selectedWaypointIndex,
                 vehicleMarkers: model.vehicleMarkers,
@@ -228,6 +311,8 @@ struct GuardianMapView: View {
                 followedVehicleMarkerID: model.followedVehicleMarkerID,
                 preserveView: model.routeGeometry.preserveView,
                 isEditingTask: model.routeGeometry.isEditingTask,
+                missionPointMarkers: model.routeGeometry.missionPointMarkers,
+                missionPointPlacementArmed: model.routeGeometry.missionPointPlacementArmed,
                 contextMenuPolicy: contextMenuPolicy,
                 onMapClick: onMapClick,
                 onVehicleMarkerMoved: onVehicleMarkerMoved,
@@ -235,7 +320,17 @@ struct GuardianMapView: View {
                 onWaypointClick: onWaypointClick,
                 onWaypointMoved: onWaypointMoved,
                 onWaypointDelete: onWaypointDelete,
-                onTaskMapInsert: onTaskMapInsert
+                onTaskMapInsert: onTaskMapInsert,
+                onMissionPointClick: onMissionPointClick,
+                onMissionPointMoved: onMissionPointMoved,
+                onMissionPointDoubleClick: onMissionPointDoubleClick,
+                onVehicleTap: onVehicleTap,
+                onVehicleDoubleTap: onVehicleDoubleTap,
+                onTaskPathTap: onTaskPathTap,
+                onTaskPathDoubleTap: onTaskPathDoubleTap,
+                onHomeTap: onHomeTap,
+                onHomeDoubleTap: onHomeDoubleTap,
+                onViewportCenterChanged: onViewportCenterChanged
             )
 
             if toolbar.hasAnyVisibleButton {

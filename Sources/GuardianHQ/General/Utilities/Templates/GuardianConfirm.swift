@@ -55,6 +55,16 @@ private struct GuardianConfirmShell: View {
         return t.isEmpty ? nil : t
     }
 
+    /// Body copy under a headline must stay readable on ``theme/backgroundRaised`` (and on danger tint); `textSecondary` alone can read as “missing” on some displays.
+    private var confirmMessageForeground: Color {
+        switch kind {
+        case .standard:
+            theme.textPrimary.opacity(0.82)
+        case .danger:
+            theme.textPrimary.opacity(0.88)
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: GuardianSpacing.cardBodyInset) {
@@ -71,7 +81,7 @@ private struct GuardianConfirmShell: View {
 
                     Text(message)
                         .font(GuardianTypography.font(.confirmBody))
-                        .foregroundStyle(theme.textSecondary)
+                        .foregroundStyle(confirmMessageForeground)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
@@ -79,7 +89,7 @@ private struct GuardianConfirmShell: View {
                         headerIcon
                         Text(message)
                             .font(GuardianTypography.font(.confirmBody))
-                            .foregroundStyle(theme.textSecondary)
+                            .foregroundStyle(confirmMessageForeground)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -156,9 +166,11 @@ private struct GuardianConfirmShell: View {
                         action: onCancel
                     )
                     .keyboardShortcut(.cancelAction)
+                    .guardianPointerOnHover()
                     Spacer(minLength: GuardianSpacing.xs)
                     GuardianPrimaryProminentButton(title: confirmTitle, action: onConfirm)
                         .keyboardShortcut(.defaultAction)
+                        .guardianPointerOnHover()
                 case .danger:
                     GuardianThemedButton(
                         title: cancelTitle,
@@ -169,8 +181,10 @@ private struct GuardianConfirmShell: View {
                         action: onCancel
                     )
                     .keyboardShortcut(.cancelAction)
+                    .guardianPointerOnHover()
                     Spacer(minLength: GuardianSpacing.xs)
                     GuardianDestructiveProminentButton(title: confirmTitle, action: onConfirm)
+                        .guardianPointerOnHover()
                 // Intentionally no `.defaultAction` on destructive confirm — see ``GuardianChromeInteraction`` (Theme §9.1).
                 }
             }

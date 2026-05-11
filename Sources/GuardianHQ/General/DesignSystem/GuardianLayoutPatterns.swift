@@ -8,28 +8,24 @@ import SwiftUI
 ///
 /// 1. ``RootView`` — app navigation rail, top bar, and feature `content`.
 /// 2. ``View/withAppDrawer()`` — app-wide **trailing drawer** (scrim + panel). Not the main nav rail.
-/// 3. ``View/withGuardianConfirmOverlayHost()`` — **blocking** confirm scrim + panel over the whole stack.
+/// 3. ``View/withGuardianConfirmOverlayHost()`` — **blocking** confirm scrim + panel over the drawer stack.
+/// 4. ``View/withToasts()`` — ephemeral toasts on top of that shell; placement follows ``GuardianToastShellAnchorPreferenceKey``
+///    from ``RootView`` so chips stay in the **content** column (off the nav rail).
 ///
 /// ```swift
 /// RootView(...)
 ///     .withAppDrawer()
 ///     .withGuardianConfirmOverlayHost()
+///     .withToasts()
 /// ```
-///
-/// ``ToastCenter`` / ``View/withToasts()`` is applied **inside** ``RootView`` on the main **content** column only
-/// (toasts stay off the nav rail).
 ///
 /// ## Back-to-front visual stack (single main window)
 ///
 /// 1. **Navigation chrome** — ``RootView`` sidebar + top bar + feature content (maps, tables, etc.).
-/// 2. **Toasts** — ``ToastHost`` overlays only the **content** column (below the top bar, beside the rail).
-/// 3. **App drawer** — ``AppDrawerHostModifier`` draws a full-window scrim and trailing panel **above** the entire
-///    ``RootView``, so an open drawer covers toasts as well as the rail.
-/// 4. **Blocking confirm** — ``GuardianConfirmOverlayRootModifier`` wraps the drawer stack; the live panel uses a
-///    high ``zIndex`` so a presented confirm sits **above** an open drawer and dims everything under it.
-///
-/// Screen-local feedback (bottom prompts, inline notices) lives inside feature stacks — see
-/// ``GuardianFeedbackSeverity``. If a blocking confirm can appear, dismiss or avoid overlapping prompts first.
+/// 2. **App drawer** — ``AppDrawerHostModifier`` draws a full-window scrim and trailing panel above ``RootView``.
+/// 3. **Blocking confirm** — ``GuardianConfirmOverlayRootModifier`` adds a dimmed scrim + panel above the drawer stack.
+/// 4. **Toasts** — ``ToastHost`` (window-level) draws above the confirm layer; ``RootView`` publishes shell insets so the chip
+///    aligns with the content column.
 ///
 /// ## Trailing slide-in panels
 ///

@@ -91,7 +91,7 @@ extension FleetCalibrationCollection {
         hub: FleetHubVehicleTelemetry?,
         lifecycleStatus: VehicleLifecycleStatus?,
         vehicleType _: FleetVehicleType,
-        latestPreflight: PreflightProbeHistoryEntry? = nil
+        latestRecipeRun: RecipeRunHistoryEntry? = nil
     ) -> FleetCalibrationCollection {
         let items: [FleetCalibrationItem] = [
             healthFlagItem(
@@ -131,7 +131,7 @@ extension FleetCalibrationCollection {
             makeEkfItem(hub: hub, lifecycleStatus: lifecycleStatus),
         ]
 
-        let overlaid = applyPreflightOverlay(items: items, latestPreflight: latestPreflight)
+        let overlaid = applyRecipeRunOverlay(items: items, latestRecipeRun: latestRecipeRun)
 
         return FleetCalibrationCollection(
             items: overlaid.sorted { lhs, rhs in
@@ -141,18 +141,18 @@ extension FleetCalibrationCollection {
         )
     }
 
-    /// If the most recent preflight failed and its ``patternId`` maps to a known calibration system,
-    /// escalate that system's marker to `.error` and replace its remediation advice with the probe's
-    /// (more specific) advice. Live telemetry continues to overwrite this on each subsequent probe so
-    /// the canvas keeps auto-updating; operators can also clear it via the banner dismiss control.
-    private static func applyPreflightOverlay(
+    /// If the most recent **failed** recipe run carries remediation whose ``patternId`` maps to a known
+    /// calibration system, escalate that system's marker to `.error` and replace its remediation advice.
+    /// Live telemetry continues to refresh markers on each hub update; operators clear the overlay via
+    /// ``FleetLinkService/clearRecipeRuns(vehicleID:)`` / banner dismiss.
+    private static func applyRecipeRunOverlay(
         items: [FleetCalibrationItem],
-        latestPreflight: PreflightProbeHistoryEntry?
+        latestRecipeRun: RecipeRunHistoryEntry?
     ) -> [FleetCalibrationItem] {
         guard
-            let entry = latestPreflight,
-            entry.result.passed == false,
-            let advice = entry.result.remediationAdvice,
+            let entry = latestRecipeRun,
+            entry.outcome.passed == false,
+            let advice = entry.outcome.remediationAdvice,
             let targetID = preflightSystemID(forPatternID: advice.patternId)
         else {
             return items
@@ -165,7 +165,7 @@ extension FleetCalibrationCollection {
                 id: original.id,
                 status: .error,
                 message: advice.summary,
-                technicalDetail: entry.result.detail,
+                technicalDetail: entry.outcome.detail,
                 remediationAdvice: advice
             )
         }
@@ -176,6 +176,10 @@ extension FleetCalibrationCollection {
     /// Patterns without a per-system home (e.g. `common.geofence`, `generic.arm_denied`) return `nil`
     /// — the banner still surfaces them, but no marker is repainted.
     private static func preflightSystemID(forPatternID patternId: String) -> FleetCalibrationSystemID? {
+        if patternId.hasPrefix(VehicleInspectorRecipeRunHistoryMapper.wizardCalibrationFailurePatternPrefix) {
+            let raw = String(patternId.dropFirst(VehicleInspectorRecipeRunHistoryMapper.wizardCalibrationFailurePatternPrefix.count))
+            return FleetCalibrationSystemID(rawValue: raw)
+        }
         switch patternId {
         case "common.compass_mag", "px4.heading_estimate_invalid":
             return .compass

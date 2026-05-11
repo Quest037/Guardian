@@ -39,6 +39,9 @@ final class FleetRecipesCatalogue: ObservableObject {
     ///
     /// Rejects (returns `false`) when:
     /// - the descriptor's name fails ``FleetRecipeName/isValidRawValue(_:)``;
+    /// - the descriptor has a non-`nil` ``FleetRecipeDescriptor/pluginID`` but the name
+    ///   is outside that plugin’s ``GuardianPluginManifest/publishedRecipeNamespaces``
+    ///   claims in ``GuardianPluginRegistry``, or the manifest is missing;
     /// - the descriptor declares a contained child that is not already registered;
     /// - the descriptor declares a contained child that itself has a non-empty
     ///   `containsRecipes` (composition-depth limit of 1);
@@ -58,6 +61,29 @@ final class FleetRecipesCatalogue: ObservableObject {
                 descriptor.name.rawValue
             )
             return false
+        }
+
+        if let pluginID = descriptor.pluginID {
+            guard let manifest = GuardianPluginRegistry.shared.manifest(for: pluginID) else {
+                os_log(
+                    .fault,
+                    log: log,
+                    "Refusing to register %{public}@: no GuardianPluginManifest for plugin %{public}@.",
+                    descriptor.name.rawValue,
+                    pluginID.rawValue
+                )
+                return false
+            }
+            guard manifest.allowsPublishing(recipeRaw: descriptor.name.rawValue) else {
+                os_log(
+                    .fault,
+                    log: log,
+                    "Refusing to register %{public}@: name is outside plugin %{public}@ publishedRecipeNamespaces claims.",
+                    descriptor.name.rawValue,
+                    pluginID.rawValue
+                )
+                return false
+            }
         }
 
         for childName in descriptor.containsRecipes {

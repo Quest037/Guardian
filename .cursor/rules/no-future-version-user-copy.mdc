@@ -1,0 +1,36 @@
+---
+description: User-visible copy must never promise or reference future releases
+alwaysApply: true
+---
+
+# No “future version” product copy
+
+When writing **operator-facing** strings in Guardian (SwiftUI `Text`, `.help`,
+tooltips, alerts, empty states, button labels, accessibility labels, onboarding,
+plugin UI, etc.):
+
+- **Do not** mention “a future build”, “in a future version”, “coming soon”,
+  “not yet — will …”, “for now”, “temporarily until we ship …”, or any wording
+  that frames the **current** app as an incomplete preview of something else.
+- Write as if **this build is the product**: describe **what is true right now**
+  (what is locked, disabled, unavailable, or not supported) without teasing
+  roadmap or release timing.
+
+**OK:** “Arm preflight stays disabled until this Mission Control run ends.”
+
+**Not OK:** “Overrides will arrive in a future build.”
+
+## Exceptions
+
+- **Internal** diagnostics (`notImplemented` command details, logs, developer
+  comments, `TODO.md`, tracker markdown) may still note wiring gaps for
+  contributors — not as customer-facing chrome.
+- **Version numbers** in About / settings (“Guardian 1.2.3”) are not roadmap
+  copy.
+
+## When a surface is stubbed
+
+Prefer neutral present tense: **“Unavailable.”**, **“No options in this group.”**,
+or **hide** the element from accessibility (`accessibilityHidden(true)`) when
+it is purely layout chrome with no behavior — do not use “Coming soon” as
+placeholder UI copy.

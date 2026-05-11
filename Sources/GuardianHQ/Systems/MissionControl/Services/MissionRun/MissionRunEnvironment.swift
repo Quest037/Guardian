@@ -35,6 +35,14 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     /// Refreshed from ``Mission`` in ``captureExecutionContext(_:)``, ``updateTemplate(_:)``, and run init.
     private(set) var rosterRoleResolutionsByDeviceID: [UUID: ResolvedRosterRole] = [:]
 
+    /// Live **mission points** envelope for this run (rally / extraction / …): seeded from the mission template,
+    /// then mutated by operator / MRE / plugins without rewriting the saved ``Mission`` document (see ``MissionPointsTodo.md`` §1.2).
+    ///
+    /// While ``status`` is ``MissionRunStatus/setup``, ``updateTemplate(_:)`` re-syncs from ``Mission/missionPoints`` so
+    /// authoring changes flow in. After the run leaves setup, this array is **not** replaced from the template—only
+    /// ``applyRuntimeMissionPointCreate`` / ``applyRuntimeMissionPointUpdate`` / ``applyRuntimeMissionPointSetClosed``.
+    @Published private(set) var runtimeMissionPoints: [MissionPoint] = []
+
     /// Substatus of MC runtime execution while a run is active.
     @Published private(set) var sessionPhase: MissionRunSessionPhase = .draft
 
@@ -129,6 +137,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         self.systems.policyAuthority.environment = self
         refreshDerivedTaskStates()
         syncRosterRoleResolutions(from: mission)
+        syncRuntimeMissionPointsFromTemplate(mission, reason: .initial)
     }
 
     convenience init(
@@ -188,10 +197,10 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
 
     /// One MC log line summarizing non-`.none` behavior roles (template key ``MissionRunLogTemplateKey/rosterBehaviorRolesSnapshot``).
     func logRosterBehaviorRolesSnapshotAtExecutionStart() {
-        let rows = rosterRoleResolutionsByDeviceID.values.filter { $0.role != .none }
+        let rows = rosterRoleResolutionsByDeviceID.values.filter { $0.behaviorRoleID != RosterRole.none.rawValue }
         guard !rows.isEmpty else { return }
         let summary = rows
-            .map { "\($0.slotLabel):\($0.role.rawValue)" }
+            .map { "\($0.slotLabel):\($0.behaviorRoleID)" }
             .sorted()
             .joined(separator: ", ")
         systems.logging.appendLogEvent(
@@ -489,10 +498,139 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             missionId = mission.id
             missionName = mission.name
             syncRosterRoleResolutions(from: mission)
+            syncRuntimeMissionPointsFromTemplate(mission, reason: .templateRefresh)
         } else {
             rosterRoleResolutionsByDeviceID = [:]
+            runtimeMissionPoints = []
         }
         refreshDerivedTaskStates()
+    }
+
+    private enum RuntimeMissionPointsSyncReason {
+        case initial
+        case templateRefresh
+    }
+
+    /// Copies ``Mission/missionPoints`` into ``runtimeMissionPoints`` while still in **setup**, or when the
+    /// mission identity changes; preserves live edits after the run has started.
+    private func syncRuntimeMissionPointsFromTemplate(_ mission: Mission, reason: RuntimeMissionPointsSyncReason) {
+        let shouldReplaceFromTemplate: Bool = {
+            if mission.id != missionId { return true }
+            if status == .setup { return true }
+            return false
+        }()
+        guard shouldReplaceFromTemplate else { return }
+        let previousCount = runtimeMissionPoints.count
+        runtimeMissionPoints = mission.missionPoints
+        let newCount = runtimeMissionPoints.count
+        if newCount > 0 || previousCount != newCount {
+            logRuntimeMissionPointsSeeded(count: newCount, reason: reason)
+        }
+    }
+
+    private func logRuntimeMissionPointsSeeded(count: Int, reason: RuntimeMissionPointsSyncReason) {
+        let reasonLabel = reason == .initial ? "init" : "template"
+        systems.logging.appendLogEvent(
+            level: .info,
+            speaker: .missionControl,
+            templateKey: MissionRunLogTemplateKey.missionPointRuntimeSeeded,
+            templateParams: [
+                "count": "\(count)",
+                "reason": reasonLabel,
+            ]
+        )
+    }
+
+    /// Appends a run-only point. Fails if ``pointId`` duplicates an existing runtime row (empty ids get a unique temp slug first). Does **not** mutate ``Mission`` on disk.
+    ///
+    /// New rows receive the next numeric `rally.n` / `extraction.n` slug (same parsing rules as ``MissionPoint/slugOrdinalSuffix``) so ``MissionPoint/mapChipLabel`` matches the Missions editor without rewriting template-seeded slugs elsewhere in the list.
+    @discardableResult
+    func applyRuntimeMissionPointCreate(_ point: MissionPoint, source: String = "operator") -> Bool {
+        var p = point
+        if p.pointId.isEmpty {
+            p.pointId = "mre.create.\(p.id.uuidString.lowercased())"
+        }
+        guard !runtimeMissionPoints.contains(where: { $0.pointId == p.pointId }) else { return false }
+        p.catchmentRadiusM = MissionPoint.clampedCatchmentRadiusM(p.catchmentRadiusM)
+        let rowID = p.id
+        runtimeMissionPoints.append(p)
+        guard let idx = runtimeMissionPoints.firstIndex(where: { $0.id == rowID }) else { return false }
+        let others = runtimeMissionPoints.enumerated().filter { $0.offset != idx }.map(\.element)
+        runtimeMissionPoints[idx].pointId = Self.nextRuntimeMissionPointSlug(kind: runtimeMissionPoints[idx].kind, among: others)
+        let created = runtimeMissionPoints[idx]
+        systems.logging.appendLogEvent(
+            level: .info,
+            speaker: .missionControl,
+            templateKey: MissionRunLogTemplateKey.missionPointRuntimeCreated,
+            templateParams: [
+                "pointId": created.pointId,
+                "kind": created.kind.rawValue,
+                "source": source,
+                "lat": "\(created.coordinate.lat)",
+                "lon": "\(created.coordinate.lon)",
+            ]
+        )
+        return true
+    }
+
+    /// Mutates one runtime point by row ``MissionPoint/id``. Re-clamps ``catchmentRadiusM`` after mutation.
+    @discardableResult
+    func applyRuntimeMissionPointUpdate(id: UUID, source: String = "operator", mutate: (inout MissionPoint) -> Void) -> Bool {
+        guard let idx = runtimeMissionPoints.firstIndex(where: { $0.id == id }) else { return false }
+        var p = runtimeMissionPoints[idx]
+        let oldKind = p.kind
+        mutate(&p)
+        p.catchmentRadiusM = MissionPoint.clampedCatchmentRadiusM(p.catchmentRadiusM)
+        if p.kind != oldKind {
+            let others = runtimeMissionPoints.enumerated().filter { $0.offset != idx }.map(\.element)
+            p.pointId = Self.nextRuntimeMissionPointSlug(kind: p.kind, among: others)
+        }
+        runtimeMissionPoints[idx] = p
+        let logged = runtimeMissionPoints[idx]
+        systems.logging.appendLogEvent(
+            level: .info,
+            speaker: .missionControl,
+            templateKey: MissionRunLogTemplateKey.missionPointRuntimeUpdated,
+            templateParams: [
+                "pointId": logged.pointId,
+                "source": source,
+            ]
+        )
+        return true
+    }
+
+    /// Next `rally.n` / `extraction.n` with integer **n** strictly greater than any existing same-kind slug in `among` whose `pointId` is already `kind` + dot + digits (template / MCR rows). Non-numeric tails (e.g. `rally.alpha`) are ignored for the max so they do not consume ordinals.
+    private static func nextRuntimeMissionPointSlug(kind: MissionPointKind, among points: [MissionPoint]) -> String {
+        let prefix = kind == .rally ? "rally." : "extraction."
+        var maxN = 0
+        for p in points where p.kind == kind {
+            guard p.pointId.hasPrefix(prefix) else { continue }
+            let tail = String(p.pointId.dropFirst(prefix.count))
+            guard let n = Int(tail) else { continue }
+            maxN = max(maxN, n)
+        }
+        return "\(prefix)\(maxN + 1)"
+    }
+
+    /// Sets ``MissionPoint/isClosed`` for soft retirement / reopen. Does **not** delete the row (MRE cannot delete points).
+    @discardableResult
+    func applyRuntimeMissionPointSetClosed(id: UUID, isClosed: Bool, source: String = "operator") -> Bool {
+        guard let idx = runtimeMissionPoints.firstIndex(where: { $0.id == id }) else { return false }
+        var p = runtimeMissionPoints[idx]
+        guard p.isClosed != isClosed else { return true }
+        p.isClosed = isClosed
+        runtimeMissionPoints[idx] = p
+        systems.logging.appendLogEvent(
+            level: .info,
+            speaker: .missionControl,
+            templateKey: MissionRunLogTemplateKey.missionPointRuntimeClosedChanged,
+            templateParams: [
+                "pointId": p.pointId,
+                "closed": isClosed ? "true" : "false",
+                "source": source,
+            ]
+        )
+        return true
     }
 
     internal func mutateCompiledPlan(_ plan: MissionControlPlan?) {
@@ -761,5 +899,11 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
 extension MissionRunLogTemplateKey {
     static let taskForceStateChanged = "missioncontrol.mre.task.taskforce_state"
     static let operatorMarkedMissionTaskTriageState = "missioncontrol.mre.operator.marked_task_triage_state"
+
+    // Mission points (run envelope; see ``MissionRunEnvironment/runtimeMissionPoints``)
+    static let missionPointRuntimeSeeded = "missioncontrol.mre.point.runtime_seeded"
+    static let missionPointRuntimeCreated = "missioncontrol.mre.point.runtime_created"
+    static let missionPointRuntimeUpdated = "missioncontrol.mre.point.runtime_updated"
+    static let missionPointRuntimeClosedChanged = "missioncontrol.mre.point.runtime_closed_changed"
 }
 

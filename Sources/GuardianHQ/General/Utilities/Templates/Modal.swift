@@ -97,5 +97,11 @@ struct Modal<BodyContent: View, HeaderActions: View>: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .background(theme.backgroundBase)
+        .clipShape(RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous)
+                .strokeBorder(theme.borderSubtle, lineWidth: 1)
+        )
+        .guardianDropShadow(GuardianElevation.inspectorPanel)
     }
 }

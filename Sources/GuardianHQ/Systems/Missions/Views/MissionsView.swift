@@ -261,13 +261,40 @@ private struct CloneMissionContext: Identifiable {
     let sourceMissionName: String
 }
 
+private struct RouteTabMissionPointRowSig: Equatable {
+    let id: UUID
+    let lat: Double
+    let lon: Double
+    let chip: String
+    let kind: MissionPointKind
+    let closed: Bool
+}
+
+/// Segmented control inside the mission workspace **Tasks** tab: route tasks vs map points.
+private enum MissionWorkspaceTasksInnerTab: String, CaseIterable, Identifiable {
+    case routes
+    case points
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .routes: "Tasks"
+        case .points: "Points"
+        }
+    }
+}
+
 private struct RouteTabMapSignature: Equatable {
     let allTasksCoords: [[RouteCoordinate]]
+    let taskPathIDs: [UUID]
     let selectedWaypoints: [RouteCoordinate]
     let selectedWaypointIndex: Int?
     let headingPreview: HeadingPreview?
     let cameraPreview: CameraPreview?
     let isEditingTask: Bool
+    let missionPointRows: [RouteTabMissionPointRowSig]
+    let selectedMissionPointID: UUID?
+    let missionPointPlacementArmed: Bool
+    let tasksInnerTab: MissionWorkspaceTasksInnerTab
 }
 
 /// Drives ``View/sheet(item:onDismiss:content:)`` so bulk-edit content is never built as ``EmptyView`` on first open.
@@ -279,8 +306,8 @@ private struct BulkWaypointEditorSheetContext: Identifiable {
 private struct MissionWorkspaceView: View {
     enum WorkspaceTab: String, CaseIterable, Identifiable {
         case details = "Details"
-        case roster = "Roster"
         case tasks = "Tasks"
+        case roster = "Roster"
         var id: String { rawValue }
     }
 
@@ -295,6 +322,10 @@ private struct MissionWorkspaceView: View {
         case deleteTask
         case closeLoop
         var id: String { rawValue }
+    }
+
+    private struct MissionPointDeleteCandidate: Identifiable, Equatable {
+        let id: UUID
     }
 
     /// One row in the Roster tab vehicle list (order may differ from ``MissionTask/rosterDeviceIds`` for grouped display).
@@ -321,6 +352,16 @@ private struct MissionWorkspaceView: View {
     @State private var focusedWaypointCameraFieldKey: String?
     @State private var focusedTransitionCameraFieldKey: String?
     @State private var suppressNextMapClick = false
+    @State private var selectedMissionPointID: UUID?
+    /// Non-`nil` when ``AppDrawer`` is showing ``MissionWorkspaceMissionPointEditDrawer`` for that point (only opened via sidebar pencil).
+    @State private var missionPointDrawerEditingID: UUID?
+    @State private var missionPointPlacementArmed = false
+    @State private var missionPointDeleteCandidate: MissionPointDeleteCandidate?
+    @State private var tasksInnerTab: MissionWorkspaceTasksInnerTab = .routes
+    /// After **Add point**, scroll this row into view in the Tasks sidebar list.
+    @State private var missionWorkspaceMapPointsListScrollEpoch: UInt = 0
+    @State private var missionWorkspaceMapPointsListScrollTargetRow: UUID?
+    @State private var mapViewportCenter: RouteCoordinate?
     @State private var detailsDescriptionEditorHeight: CGFloat = 96
     /// Task settings panel hosted **inside** this view so `draft` updates refresh pickers (global ``AppDrawer`` does not re-run with mission `@State`).
     @State private var taskSettingsOverlayTaskIndex: Int?
@@ -501,7 +542,9 @@ private struct MissionWorkspaceView: View {
         .onChange(of: editingTaskIndex) { newIndex in
             clearPreviewFocusState()
             if newIndex != nil {
+                missionPointPlacementArmed = false
                 appDrawer.dismiss()
+                missionPointDrawerEditingID = nil
                 taskSettingsOverlayTaskIndex = nil
                 rosterDeviceEditContext = nil
             }
@@ -512,13 +555,39 @@ private struct MissionWorkspaceView: View {
         .onChange(of: activeTab) { tab in
             if tab != .tasks {
                 appDrawer.dismiss()
+                missionPointDrawerEditingID = nil
                 taskSettingsOverlayTaskIndex = nil
                 clearPreviewFocusState()
+                missionPointPlacementArmed = false
+                selectedMissionPointID = nil
+                tasksInnerTab = .routes
             }
             if tab != .roster {
                 rosterDeviceEditContext = nil
             }
         }
+        .guardianConfirmOverlay(item: $missionPointDeleteCandidate, dialog: { candidate in
+            GuardianConfirmDanger(
+                title: "Delete map point?",
+                message: "This removes the point from the mission template.",
+                cancelTitle: "Cancel",
+                confirmTitle: "Delete",
+                onCancel: { missionPointDeleteCandidate = nil },
+                onConfirm: {
+                    draft.missionPoints.removeAll { $0.id == candidate.id }
+                    if selectedMissionPointID == candidate.id {
+                        selectedMissionPointID = nil
+                    }
+                    if missionPointDrawerEditingID == candidate.id {
+                        missionPointDrawerEditingID = nil
+                        appDrawer.dismiss()
+                    }
+                    draft.renumberMissionPointSlugsByListOrder()
+                    missionPointDeleteCandidate = nil
+                    persistMissionToStoreNow()
+                }
+            )
+        })
         .guardianConfirmOverlay(item: $missionWorkspacePresentedConfirm, onDismiss: {
             pendingRosterDelete = nil
             pendingDeleteTaskIndex = nil
@@ -526,6 +595,22 @@ private struct MissionWorkspaceView: View {
         }, dialog: missionWorkspaceConfirmOverlayContent)
         .sheet(item: $bulkWaypointEditorSheetContext) { ctx in
             bulkWaypointEditorSheet(taskIndex: ctx.taskIndex)
+        }
+        .onChange(of: tasksInnerTab) { newTab in
+            if newTab == .points {
+                editingTaskIndex = nil
+                selectedWaypointIndex = nil
+            }
+            if newTab == .routes {
+                missionPointPlacementArmed = false
+                appDrawer.dismiss()
+                missionPointDrawerEditingID = nil
+            }
+        }
+        .onChange(of: appDrawer.presented?.id) { newDrawerID in
+            if newDrawerID == nil {
+                missionPointDrawerEditingID = nil
+            }
         }
         .onChange(of: draft.name) { _ in scheduleDebouncedPersistMission() }
         .onChange(of: draft.description) { _ in scheduleDebouncedPersistMission() }
@@ -801,16 +886,16 @@ private struct MissionWorkspaceView: View {
                             Picker(
                                 "Role",
                                 selection: Binding(
-                                    get: { taskRosterDrafts[taskId]?.role ?? .none },
+                                    get: { taskRosterDrafts[taskId]?.behaviorRoleID ?? RosterRole.none.rawValue },
                                     set: { v in
                                         var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
-                                        d.role = v
+                                        d.behaviorRoleID = v
                                         taskRosterDrafts[taskId] = d
                                     }
                                 )
                             ) {
-                                ForEach(RosterRole.allCases) { c in
-                                    Text(c.rosterCatalogDisplayName).tag(c)
+                                ForEach(RosterRoleCatalog.missionUIPickerBehaviorRoleIDs(), id: \.self) { rid in
+                                    Text(RosterRoleCatalog.displayName(forBehaviorRoleID: rid)).tag(rid)
                                 }
                             }
                             .pickerStyle(.menu)
@@ -923,7 +1008,7 @@ private struct MissionWorkspaceView: View {
         HStack(spacing: GuardianSpacing.xsTight) {
             rosterNeutralCapsuleBadge(device.vehicleClass.classCode)
             rosterSlotSemanticCapsuleBadge(device.slot)
-            rosterNeutralCapsuleBadge(rosterBehaviorRoleLabel(device.role))
+            rosterNeutralCapsuleBadge(rosterBehaviorRoleLabel(device.behaviorRoleID))
             if device.slot == .wingman || device.slot == .reserve {
                 rosterNeutralCapsuleBadge(rosterLeaderBadgeCaption(device))
             }
@@ -967,11 +1052,11 @@ private struct MissionWorkspaceView: View {
             .clipShape(Capsule())
     }
 
-    private func rosterBehaviorRoleLabel(_ role: RosterRole) -> String {
-        role.rosterCatalogDisplayName
+    private func rosterBehaviorRoleLabel(_ behaviorRoleID: String) -> String {
+        RosterRoleCatalog.displayName(forBehaviorRoleID: behaviorRoleID)
     }
 
-    /// App-wide drawer: catalog copy for every ``RosterRole`` (add-slot row info control).
+    /// App-wide drawer: catalog copy for every behavior role id (add-slot row info control).
     private func presentRosterBehaviorRolesCatalogDrawer() {
         appDrawer.present(
             title: "Behavior roles",
@@ -1129,13 +1214,19 @@ private struct MissionWorkspaceView: View {
                         onConfirm: {
                             if let idx = pendingDeleteTaskIndex,
                                draft.routeMacro.tasks.indices.contains(idx) {
+                                let removedTaskID = draft.routeMacro.tasks[idx].id
                                 draft.routeMacro.tasks.remove(at: idx)
+                                draft.removeMissionPoints(forRemovedTaskID: removedTaskID)
                                 if editingTaskIndex == idx {
                                     editingTaskIndex = nil
                                     selectedWaypointIndex = nil
                                 }
                                 if selectedTaskIndex >= draft.routeMacro.tasks.count {
                                     selectedTaskIndex = max(0, draft.routeMacro.tasks.count - 1)
+                                }
+                                if let sid = selectedMissionPointID,
+                                   !draft.missionPoints.contains(where: { $0.id == sid }) {
+                                    selectedMissionPointID = nil
                                 }
                             }
                             pendingDeleteTaskIndex = nil
@@ -1374,6 +1465,90 @@ private struct MissionWorkspaceView: View {
         persistMissionToStoreNow()
     }
 
+    private func addMissionPointAtMap(lat: Double, lon: Double) {
+        let p = MissionPoint(
+            pointId: "rally.0",
+            label: "",
+            kind: .rally,
+            coordinate: RouteCoordinate(lat: lat, lon: lon),
+            taskID: nil
+        )
+        draft.missionPoints.append(p)
+        draft.renumberMissionPointSlugsByListOrder()
+        selectedMissionPointID = p.id
+        missionWorkspaceMapPointsListScrollTargetRow = p.id
+        missionWorkspaceMapPointsListScrollEpoch &+= 1
+        missionPointPlacementArmed = false
+        persistMissionToStoreNow()
+        onToast("Map point added — drag the pin on the map to move it", .success)
+    }
+
+    private func appendMissionPointAtViewportCenter() {
+        let coord = mapViewportCenter ?? RouteCoordinate()
+        let p = MissionPoint(
+            pointId: "rally.0",
+            label: "",
+            kind: .rally,
+            coordinate: coord,
+            taskID: nil
+        )
+        draft.missionPoints.append(p)
+        draft.renumberMissionPointSlugsByListOrder()
+        selectedMissionPointID = p.id
+        missionWorkspaceMapPointsListScrollTargetRow = p.id
+        missionWorkspaceMapPointsListScrollEpoch &+= 1
+        persistMissionToStoreNow()
+        onToast("Map point added — drag the pin on the map to move it", .success)
+    }
+
+    /// Presents the edit drawer (sidebar pencil only). Map marker / list row taps use ``toggleMissionPointMapSelection`` instead.
+    private func openMissionPointEditDrawer(missionPointID: UUID) {
+        guard draft.missionPoints.contains(where: { $0.id == missionPointID }) else { return }
+        selectedMissionPointID = missionPointID
+        missionPointDrawerEditingID = missionPointID
+        appDrawer.present(title: "Edit map point", preferredWidth: 400, scrimTapDismisses: true) {
+            MissionWorkspaceMissionPointEditDrawer(
+                missionPointID: missionPointID,
+                mission: $draft,
+                onStructuralChange: {
+                    draft.renumberMissionPointSlugsByListOrder()
+                },
+                persist: {
+                    persistMissionToStoreNow()
+                }
+            )
+        }
+    }
+
+    /// Sidebar pencil only: open drawer for this point, or close if already editing this point.
+    private func toggleMissionPointEditDrawer(missionPointID: UUID) {
+        guard draft.missionPoints.contains(where: { $0.id == missionPointID }) else { return }
+        if missionPointDrawerEditingID == missionPointID {
+            missionPointDrawerEditingID = nil
+            appDrawer.dismiss()
+            return
+        }
+        openMissionPointEditDrawer(missionPointID: missionPointID)
+    }
+
+    /// Map marker or sidebar row: select/deselect only; never opens the edit drawer.
+    private func toggleMissionPointMapSelection(missionPointID: UUID) {
+        guard draft.missionPoints.contains(where: { $0.id == missionPointID }) else { return }
+        if selectedMissionPointID == missionPointID {
+            selectedMissionPointID = nil
+            if missionPointDrawerEditingID == missionPointID {
+                missionPointDrawerEditingID = nil
+                appDrawer.dismiss()
+            }
+        } else {
+            if missionPointDrawerEditingID != nil {
+                appDrawer.dismiss()
+                missionPointDrawerEditingID = nil
+            }
+            selectedMissionPointID = missionPointID
+        }
+    }
+
     @MainActor
     private func maybeRebuildFollowRoadAfterWaypointMove(taskIndex: Int, movedIndex: Int) async {
         guard draft.routeMacro.tasks.indices.contains(taskIndex) else { return }
@@ -1419,14 +1594,39 @@ private struct MissionWorkspaceView: View {
                 VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
                     GuardianMapView(
                         model: mapModel,
+                        toolbar: GuardianMapToolbarOptions(
+                            extraButtons: tasksInnerTab == .points
+                                ? [
+                                    GuardianMapToolbarButton(
+                                        id: "missionPointDrop",
+                                        systemImage: missionPointPlacementArmed ? "mappin.circle.fill" : "mappin.and.ellipse",
+                                        help: missionPointPlacementArmed
+                                            ? "Cancel placing a map point"
+                                            : "Place map point — tap map (exits route edit)",
+                                        action: {
+                                            missionPointPlacementArmed.toggle()
+                                            if missionPointPlacementArmed {
+                                                editingTaskIndex = nil
+                                                selectedWaypointIndex = nil
+                                            }
+                                        }
+                                    ),
+                                ]
+                                : []
+                        ),
                         contextMenuPolicy: GuardianMapContextMenuPolicy(
                             vehicleActions: [],
                             waypointActions: [.deleteWaypoint],
-                            homeActions: []
+                            homeActions: [],
+                            missionPointActions: [.deleteMissionPoint]
                         ),
                         onMapClick: { lat, lon in
                             if suppressNextMapClick {
                                 suppressNextMapClick = false
+                                return
+                            }
+                            if missionPointPlacementArmed, editingTaskIndex == nil {
+                                addMissionPointAtMap(lat: lat, lon: lon)
                                 return
                             }
                             Task { @MainActor in
@@ -1434,6 +1634,11 @@ private struct MissionWorkspaceView: View {
                             }
                         },
                         onContextAction: { event in
+                            if event.markerType == .missionPoint, event.action == .deleteMissionPoint,
+                               let raw = event.markerID, let uuid = UUID(uuidString: raw) {
+                                missionPointDeleteCandidate = MissionPointDeleteCandidate(id: uuid)
+                                return
+                            }
                             guard event.markerType == .waypoint,
                                   event.action == .deleteWaypoint,
                                   let markerID = event.markerID,
@@ -1506,18 +1711,38 @@ private struct MissionWorkspaceView: View {
                             selectedWaypointIndex = safeInsert
                             onToast("Waypoint inserted", .success)
                             persistMissionToStoreNow()
+                        },
+                        onMissionPointClick: { id in
+                            toggleMissionPointMapSelection(missionPointID: id)
+                        },
+                        onMissionPointMoved: { id, lat, lon in
+                            guard let idx = draft.missionPoints.firstIndex(where: { $0.id == id }) else { return }
+                            draft.missionPoints[idx].coordinate.lat = lat
+                            draft.missionPoints[idx].coordinate.lon = lon
+                            persistMissionToStoreNow()
+                        },
+                        onTaskPathTap: { event in
+                            if let idx = draft.routeMacro.tasks.firstIndex(where: { $0.id == event.taskPathID }) {
+                                selectedTaskIndex = idx
+                            }
+                        },
+                        onViewportCenterChanged: { lat, lon in
+                            mapViewportCenter = RouteCoordinate(lat: lat, lon: lon)
                         }
                     )
                     .task(id: routeTabMapSignature) {
                         mapModel.routeGeometry = GuardianRouteMapGeometry(
                             home: nil,
                             allTasksCoords: allTasksCoords,
+                            taskPathIDs: allTaskPathIDs,
                             selectedTaskWaypoints: selectedTask?.waypoints ?? [],
                             selectedWaypointIndex: selectedWaypointIndex,
                             headingPreview: headingPreview,
                             cameraPreview: cameraPreview,
                             preserveView: editingTaskIndex != nil,
-                            isEditingTask: editingTaskIndex != nil
+                            isEditingTask: editingTaskIndex != nil,
+                            missionPointMarkers: missionPointMapMarkers,
+                            missionPointPlacementArmed: missionPointPlacementArmed
                         )
                     }
                     .frame(width: mapWidth)
@@ -1532,171 +1757,204 @@ private struct MissionWorkspaceView: View {
                     .frame(height: geo.size.height)
 
                 ZStack(alignment: .topTrailing) {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
-                            HStack(alignment: .center, spacing: GuardianSpacing.denseGutter) {
-                                Text("Tasks")
-                                    .font(GuardianTypography.font(.sectionHeadingSemibold))
-                                    .foregroundStyle(theme.textPrimary)
-                                Spacer(minLength: 0)
-                                GuardianThemedButton(
-                                    accent: .primary,
-                                    surface: .solid,
-                                    size: .small,
-                                    shape: .cornered,
-                                    contentSizing: .squareToolbarCell,
-                                    action: {
-                                        let nextNum = draft.routeMacro.tasks.count + 1
-                                        draft.routeMacro.tasks.append(MissionTask(name: "Task \(nextNum)"))
-                                        selectedTaskIndex = draft.routeMacro.tasks.count - 1
-                                        editingTaskIndex = nil
-                                        selectedWaypointIndex = nil
-                                    },
-                                    label: {
-                                        Image(systemName: "plus")
-                                            .font(GuardianTypography.font(.sectionHeadingSemibold))
+                    VStack(spacing: 0) {
+                        HStack(alignment: .center, spacing: GuardianSpacing.sm) {
+                            HStack(spacing: GuardianSpacing.denseGutter) {
+                                Picker("", selection: $tasksInnerTab) {
+                                    ForEach(MissionWorkspaceTasksInnerTab.allCases) { tab in
+                                        Text(tab.title).tag(tab)
                                     }
-                                )
-                                .help("Add task")
+                                }
+                                .labelsHidden()
+                                .pickerStyle(.segmented)
+                                .frame(maxWidth: 240)
                             }
+                            .fixedSize(horizontal: true, vertical: false)
 
-                            if draft.routeMacro.tasks.isEmpty {
-                                Text("No tasks yet")
-                                    .font(GuardianTypography.font(.denseCaption12Regular))
-                                    .foregroundStyle(theme.textSecondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            } else {
-                                ForEach(Array(draft.routeMacro.tasks.enumerated()), id: \.offset) { index, path in
-                                    GuardianCard(
-                                        configuration: GuardianCardConfiguration(
-                                            border: .subtle,
-                                            cornerRadius: GuardianCardLayout.cornerRadius,
-                                            bodyPadding: GuardianSpacing.cardBodyInset
-                                        ),
-                                        body: {
-                                            HStack(alignment: .center, spacing: GuardianSpacing.sm) {
-                                                VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
-                                                    TextField(
-                                                        "Task name",
-                                                        text: Binding(
-                                                            get: { path.name },
-                                                            set: { newValue in
-                                                                draft.routeMacro.tasks[index].name = newValue
-                                                            }
-                                                        )
-                                                    )
-                                                    .textFieldStyle(.plain)
-                                                    .font(GuardianTypography.font(.panelSecondaryHeadingSemibold))
-                                                    .foregroundStyle(theme.textPrimary)
+                            Spacer(minLength: GuardianSpacing.sm)
 
-                                                    VStack(alignment: .leading, spacing: GuardianSpacing.micro) {
-                                                        Text("\(path.waypoints.count) wp")
-                                                            .foregroundStyle(theme.textSecondary)
-                                                        Text(distanceLabel(for: path))
-                                                            .foregroundStyle(theme.textSecondary)
-                                                        Text(durationLabel(for: path))
-                                                            .foregroundStyle(theme.textSecondary)
-                                                    }
-                                                    .font(GuardianTypography.font(.denseCaption12Medium))
-                                                }
+                            GuardianPrimaryProminentButton(title: tasksInnerTab == .routes ? "Add task" : "Add point") {
+                                if tasksInnerTab == .routes {
+                                    let nextNum = draft.routeMacro.tasks.count + 1
+                                    draft.routeMacro.tasks.append(MissionTask(name: "Task \(nextNum)"))
+                                    selectedTaskIndex = draft.routeMacro.tasks.count - 1
+                                    editingTaskIndex = nil
+                                    selectedWaypointIndex = nil
+                                } else {
+                                    appendMissionPointAtViewportCenter()
+                                }
+                            }
+                            .guardianPointerOnHover()
+                        }
+                        .padding(.horizontal, GuardianSpacing.md)
+                        .padding(.vertical, GuardianSpacing.sm)
+
+                        Rectangle()
+                            .fill(theme.borderSubtle)
+                            .frame(height: 1)
+
+                        ScrollViewReader { proxy in
+                        ScrollView {
+                            Group {
+                                if tasksInnerTab == .routes {
+                                    VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+                                        if draft.routeMacro.tasks.isEmpty {
+                                            Text("No tasks yet")
+                                                .font(GuardianTypography.font(.denseCaption12Regular))
+                                                .foregroundStyle(theme.textSecondary)
                                                 .frame(maxWidth: .infinity, alignment: .leading)
+                                        } else {
+                                            ForEach(Array(draft.routeMacro.tasks.enumerated()), id: \.offset) { index, path in
+                                                GuardianCard(
+                                                    configuration: GuardianCardConfiguration(
+                                                        border: .subtle,
+                                                        cornerRadius: GuardianCardLayout.cornerRadius,
+                                                        bodyPadding: GuardianSpacing.cardBodyInset
+                                                    ),
+                                                    body: {
+                                                        HStack(alignment: .center, spacing: GuardianSpacing.sm) {
+                                                            VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
+                                                                TextField(
+                                                                    "Task name",
+                                                                    text: Binding(
+                                                                        get: { path.name },
+                                                                        set: { newValue in
+                                                                            draft.routeMacro.tasks[index].name = newValue
+                                                                        }
+                                                                    )
+                                                                )
+                                                                .textFieldStyle(.plain)
+                                                                .font(GuardianTypography.font(.panelSecondaryHeadingSemibold))
+                                                                .foregroundStyle(theme.textPrimary)
 
-                                                HStack(spacing: GuardianSpacing.xs) {
-                                                    GuardianThemedButton(
-                                                        accent: .neutral,
-                                                        surface: .outline,
-                                                        size: .small,
-                                                        shape: .cornered,
-                                                        contentSizing: .squareToolbarCell,
-                                                        action: { presentTaskSettingsSidebar(taskIndex: index) },
-                                                        label: {
-                                                            Image(systemName: "gearshape.fill")
-                                                                .font(GuardianTypography.font(.sectionHeadingSemibold))
-                                                        }
-                                                    )
-                                                    .help("Task settings")
-
-                                                    if editingTaskIndex == index {
-                                                        GuardianThemedButton(
-                                                            accent: .primary,
-                                                            surface: .solid,
-                                                            size: .small,
-                                                            shape: .cornered,
-                                                            contentSizing: .squareToolbarCell,
-                                                            action: {
-                                                                if shouldOfferCloseLoop(path) {
-                                                                    pendingCloseLoopTaskIndex = index
-                                                                } else {
-                                                                    editingTaskIndex = nil
-                                                                    selectedWaypointIndex = nil
-                                                                    persistMissionToStoreNow()
-                                                                    onToast("Task edit mode disabled", .info)
+                                                                VStack(alignment: .leading, spacing: GuardianSpacing.micro) {
+                                                                    Text("\(path.waypoints.count) wp")
+                                                                        .foregroundStyle(theme.textSecondary)
+                                                                    Text(distanceLabel(for: path))
+                                                                        .foregroundStyle(theme.textSecondary)
+                                                                    Text(durationLabel(for: path))
+                                                                        .foregroundStyle(theme.textSecondary)
                                                                 }
-                                                            },
-                                                            label: {
-                                                                Image(systemName: "pencil")
-                                                                    .font(GuardianTypography.font(.sectionHeadingSemibold))
+                                                                .font(GuardianTypography.font(.denseCaption12Medium))
                                                             }
-                                                        )
-                                                        .help("Exit task edit mode")
-                                                    } else {
-                                                        GuardianThemedButton(
-                                                            accent: .primary,
-                                                            surface: .outline,
-                                                            size: .small,
-                                                            shape: .cornered,
-                                                            contentSizing: .squareToolbarCell,
-                                                            action: {
-                                                                editingTaskIndex = index
-                                                                selectedTaskIndex = index
-                                                                pendingOutgoingSegmentKind = .direct
-                                                                onToast("Task edit mode enabled. Click map to add waypoints.", .info)
-                                                            },
-                                                            label: {
-                                                                Image(systemName: "pencil")
-                                                                    .font(GuardianTypography.font(.sectionHeadingSemibold))
-                                                            }
-                                                        )
-                                                        .help("Edit route on map")
-                                                    }
+                                                            .frame(maxWidth: .infinity, alignment: .leading)
 
-                                                    GuardianThemedButton(
-                                                        accent: .danger,
-                                                        surface: .outline,
-                                                        size: .small,
-                                                        shape: .cornered,
-                                                        contentSizing: .squareToolbarCell,
-                                                        action: {
-                                                            pendingDeleteTaskIndex = index
-                                                            missionWorkspacePresentedConfirm = .deleteTask
-                                                        },
-                                                        label: {
-                                                            Image(systemName: "trash")
-                                                                .font(GuardianTypography.font(.sectionHeadingSemibold))
+                                                            HStack(spacing: GuardianSpacing.xs) {
+                                                                GuardianThemedButton(
+                                                                    accent: .neutral,
+                                                                    surface: .outline,
+                                                                    size: .small,
+                                                                    shape: .cornered,
+                                                                    contentSizing: .squareToolbarCell,
+                                                                    action: { presentTaskSettingsSidebar(taskIndex: index) },
+                                                                    label: {
+                                                                        Image(systemName: "gearshape.fill")
+                                                                            .font(GuardianTypography.font(.sectionHeadingSemibold))
+                                                                    }
+                                                                )
+                                                                .help("Task settings")
+
+                                                                if editingTaskIndex == index {
+                                                                    GuardianThemedButton(
+                                                                        accent: .primary,
+                                                                        surface: .solid,
+                                                                        size: .small,
+                                                                        shape: .cornered,
+                                                                        contentSizing: .squareToolbarCell,
+                                                                        action: {
+                                                                            missionPointPlacementArmed = false
+                                                                            if shouldOfferCloseLoop(path) {
+                                                                                pendingCloseLoopTaskIndex = index
+                                                                            } else {
+                                                                                editingTaskIndex = nil
+                                                                                selectedWaypointIndex = nil
+                                                                                persistMissionToStoreNow()
+                                                                                onToast("Task edit mode disabled", .info)
+                                                                            }
+                                                                        },
+                                                                        label: {
+                                                                            Image(systemName: "pencil")
+                                                                                .font(GuardianTypography.font(.sectionHeadingSemibold))
+                                                                        }
+                                                                    )
+                                                                    .help("Exit task edit mode")
+                                                                } else {
+                                                                    GuardianThemedButton(
+                                                                        accent: .primary,
+                                                                        surface: .outline,
+                                                                        size: .small,
+                                                                        shape: .cornered,
+                                                                        contentSizing: .squareToolbarCell,
+                                                                        action: {
+                                                                            missionPointPlacementArmed = false
+                                                                            editingTaskIndex = index
+                                                                            selectedTaskIndex = index
+                                                                            pendingOutgoingSegmentKind = .direct
+                                                                            onToast("Task edit mode enabled. Click map to add waypoints.", .info)
+                                                                        },
+                                                                        label: {
+                                                                            Image(systemName: "pencil")
+                                                                                .font(GuardianTypography.font(.sectionHeadingSemibold))
+                                                                        }
+                                                                    )
+                                                                    .help("Edit route on map")
+                                                                }
+
+                                                                GuardianThemedButton(
+                                                                    accent: .danger,
+                                                                    surface: .outline,
+                                                                    size: .small,
+                                                                    shape: .cornered,
+                                                                    contentSizing: .squareToolbarCell,
+                                                                    action: {
+                                                                        pendingDeleteTaskIndex = index
+                                                                        missionWorkspacePresentedConfirm = .deleteTask
+                                                                    },
+                                                                    label: {
+                                                                        Image(systemName: "trash")
+                                                                            .font(GuardianTypography.font(.sectionHeadingSemibold))
+                                                                    }
+                                                                )
+                                                                .help("Delete task")
+                                                            }
                                                         }
-                                                    )
-                                                    .help("Delete task")
+                                                    }
+                                                )
+                                                .contentShape(Rectangle())
+                                                .onTapGesture { selectedTaskIndex = index }
+                                                .overlay {
+                                                    if selectedTaskIndex == index {
+                                                        RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous)
+                                                            .strokeBorder(GuardianSemanticColors.infoForeground.opacity(0.45), lineWidth: 2)
+                                                    }
                                                 }
                                             }
                                         }
-                                    )
-                                    .contentShape(Rectangle())
-                                    .onTapGesture { selectedTaskIndex = index }
-                                    .overlay {
-                                        if selectedTaskIndex == index {
-                                            RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous)
-                                                .strokeBorder(GuardianSemanticColors.infoForeground.opacity(0.45), lineWidth: 2)
-                                        }
                                     }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                } else {
+                                    missionPointsListScrollContent
+                                }
+                            }
+                            .padding(.horizontal, GuardianSpacing.md)
+                            .padding(.vertical, GuardianSpacing.sm)
+                        }
+                        .onChange(of: missionWorkspaceMapPointsListScrollEpoch) { _ in
+                            guard let id = missionWorkspaceMapPointsListScrollTargetRow else { return }
+                            DispatchQueue.main.async {
+                                withAnimation(.easeOut(duration: 0.22)) {
+                                    proxy.scrollTo(id, anchor: .center)
                                 }
                             }
                         }
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                    .padding(.horizontal, GuardianSpacing.md)
-                    .padding(.vertical, GuardianSpacing.sm)
-                    .frame(maxWidth: .infinity)
+                    .frame(width: listWidth, height: geo.size.height)
+                    .background(theme.backgroundElevated)
 
-                    if let taskIndex = editingTaskIndex,
+                    if tasksInnerTab == .routes,
+                       let taskIndex = editingTaskIndex,
                        draft.routeMacro.tasks.indices.contains(taskIndex) {
                         waypointSidebar(taskIndex: taskIndex)
                             .frame(width: listWidth, height: geo.size.height)
@@ -1705,7 +1963,6 @@ private struct MissionWorkspaceView: View {
                     }
                 }
                 .frame(width: listWidth, height: geo.size.height)
-                .background(theme.backgroundElevated)
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
@@ -1726,23 +1983,142 @@ private struct MissionWorkspaceView: View {
         draft.routeMacro.tasks.map { $0.waypoints.map(\.coord) }
     }
 
+    private var allTaskPathIDs: [UUID] {
+        draft.routeMacro.tasks.map(\.id)
+    }
+
+    private var routeTabMissionPointRowSigs: [RouteTabMissionPointRowSig] {
+        draft.missionPoints.map {
+            RouteTabMissionPointRowSig(
+                id: $0.id,
+                lat: $0.coordinate.lat,
+                lon: $0.coordinate.lon,
+                chip: $0.mapChipLabel,
+                kind: $0.kind,
+                closed: $0.isClosed
+            )
+        }
+    }
+
+    private var missionPointMapMarkers: [GuardianMissionPointMapMarker] {
+        draft.missionPoints.map { mp in
+            GuardianMissionPointMapMarker(
+                id: mp.id,
+                lat: mp.coordinate.lat,
+                lon: mp.coordinate.lon,
+                mapLabelCompact: mp.mapGlyphDigit,
+                mapLabelFull: mp.mapChipLabel,
+                kindRaw: mp.kind.rawValue,
+                isClosed: mp.isClosed,
+                isSelected: mp.id == selectedMissionPointID
+            )
+        }
+    }
+
     /// Equatable signature of every input the route-tab map cares about.
     /// Drives `.task(id:)` so the shared `mapModel` is re-pushed whenever the
     /// tasks/selection/preview/edit-state changes.
     private var routeTabMapSignature: RouteTabMapSignature {
         RouteTabMapSignature(
             allTasksCoords: allTasksCoords,
+            taskPathIDs: allTaskPathIDs,
             selectedWaypoints: selectedTask?.waypoints.map(\.coord) ?? [],
             selectedWaypointIndex: selectedWaypointIndex,
             headingPreview: headingPreview,
             cameraPreview: cameraPreview,
-            isEditingTask: editingTaskIndex != nil
+            isEditingTask: editingTaskIndex != nil,
+            missionPointRows: routeTabMissionPointRowSigs,
+            selectedMissionPointID: selectedMissionPointID,
+            missionPointPlacementArmed: missionPointPlacementArmed,
+            tasksInnerTab: tasksInnerTab
         )
     }
 
     private var selectedTask: MissionTask? {
         guard !draft.routeMacro.tasks.isEmpty else { return nil }
         return draft.routeMacro.tasks[validTaskIndex]
+    }
+
+    /// Map points sub-tab scroll body (header with tabs + Add lives in ``tasksTab`` sidebar chrome).
+    private var missionPointsListScrollContent: some View {
+        VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+            if draft.missionPoints.isEmpty {
+                Text("No map points yet.")
+                    .font(GuardianTypography.font(.denseCaption12Regular))
+                    .foregroundStyle(theme.textTertiary)
+            } else {
+                ForEach(Array(draft.missionPoints.enumerated()), id: \.element.id) { _, mp in
+                    missionPointListRow(mp: mp)
+                        .id(mp.id)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func missionPointListRow(mp: MissionPoint) -> some View {
+        let sel = mp.id == selectedMissionPointID
+        GuardianCard(
+            configuration: GuardianCardConfiguration(
+                border: .subtle,
+                cornerRadius: GuardianCardLayout.cornerRadius,
+                bodyPadding: GuardianSpacing.cardBodyInset
+            ),
+            body: {
+                HStack(alignment: .center, spacing: GuardianSpacing.sm) {
+                    VStack(alignment: .leading, spacing: GuardianSpacing.micro) {
+                        Text(mp.mapChipLabel)
+                            .font(GuardianTypography.font(.subsectionTitleSemibold))
+                            .foregroundStyle(mp.isClosed ? theme.textTertiary : theme.textPrimary)
+                            .strikethrough(mp.isClosed)
+                        Text(mp.kind.rawValue.capitalized)
+                            .font(GuardianTypography.font(.denseCaption12Regular))
+                            .foregroundStyle(theme.textSecondary)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    GuardianThemedButton(
+                        accent: .primary,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        contentSizing: .squareToolbarCell,
+                        action: { toggleMissionPointEditDrawer(missionPointID: mp.id) },
+                        label: {
+                            Image(systemName: "pencil")
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
+                        }
+                    )
+                    .help("Open or close edit drawer")
+
+                    GuardianThemedButton(
+                        accent: .danger,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        contentSizing: .squareToolbarCell,
+                        action: { missionPointDeleteCandidate = MissionPointDeleteCandidate(id: mp.id) },
+                        label: {
+                            Image(systemName: "trash")
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
+                        }
+                    )
+                    .help("Delete map point")
+                }
+            }
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            toggleMissionPointMapSelection(missionPointID: mp.id)
+        }
+        .overlay {
+            if sel {
+                RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous)
+                    .strokeBorder(GuardianSemanticColors.infoForeground.opacity(0.45), lineWidth: 2)
+            }
+        }
     }
 
     private var headingPreview: HeadingPreview? {
@@ -2768,7 +3144,7 @@ private struct MissionWorkspaceView: View {
         }
         let device = RosterDevice(
             name: name,
-            role: fields.role,
+            behaviorRoleID: fields.behaviorRoleID,
             slot: fields.slot,
             vehicleClass: fields.vehicleClass,
             leaderRosterDeviceId: leaderId
@@ -3047,7 +3423,7 @@ private struct MissionWorkspaceView: View {
 
     private struct TaskRosterDraft: Equatable {
         var name: String = ""
-        var role: RosterRole = .none
+        var behaviorRoleID: String = RosterRole.none.rawValue
         var slot: MissionRosterSlotRole = .primary
         var vehicleClass: FleetVehicleType = .unknown
         var leaderRosterDeviceId: UUID?
@@ -3104,15 +3480,18 @@ private struct MissionRosterDeviceSettingsSidebar: View {
                         .fixedSize()
                     }
                     rosterDeviceFieldRow(label: "Role") {
-                        Picker("", selection: $device.role) {
-                            ForEach(RosterRole.allCases) { r in
-                                Text(r.rosterCatalogDisplayName).tag(r)
+                        Picker("", selection: $device.behaviorRoleID) {
+                            ForEach(RosterRoleCatalog.missionUIPickerBehaviorRoleIDs(), id: \.self) { rid in
+                                Text(RosterRoleCatalog.displayName(forBehaviorRoleID: rid)).tag(rid)
                             }
                         }
                         .labelsHidden()
                         .pickerStyle(.menu)
                         .fixedSize()
-                        .help(device.role.rosterCatalogBlurb ?? "Optional behavior role for Mission Control / Paladin.")
+                        .help(
+                            RosterRoleCatalog.blurb(forBehaviorRoleID: device.behaviorRoleID)
+                                ?? "Optional behavior role for Mission Control / Paladin."
+                        )
                     }
                     rosterDeviceFieldRow(label: "Slot") {
                         Picker("", selection: $device.slot) {
@@ -3818,25 +4197,25 @@ private struct RosterBehaviorRolesCatalogDrawerContent: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GuardianSpacing.md) {
-                ForEach(RosterRole.allCases) { role in
+                ForEach(RosterRoleCatalog.behaviorRoleReferenceOrderedIDs(), id: \.self) { rid in
                     GuardianCard(
                         configuration: GuardianCardConfiguration(
                             border: .subtle,
                             cornerRadius: GuardianCardLayout.cornerRadius,
                             bodyPadding: GuardianCardLayout.defaultBodyPadding
                         ),
-                        header: {
-                            Text(role.rosterCatalogDisplayName)
-                                .font(GuardianTypography.font(.sectionHeadingSemibold))
-                                .foregroundStyle(theme.textPrimary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        },
                         body: {
-                            Text(Self.blurb(for: role))
-                                .font(GuardianTypography.font(.denseCaption12Regular))
-                                .foregroundStyle(theme.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+                                Text(RosterRoleCatalog.displayName(forBehaviorRoleID: rid))
+                                    .font(GuardianTypography.font(.sectionHeadingSemibold))
+                                    .foregroundStyle(theme.textPrimary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                Text(Self.blurb(forBehaviorRoleID: rid))
+                                    .font(GuardianTypography.font(.denseCaption12Regular))
+                                    .foregroundStyle(theme.textSecondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
                         }
                     )
                 }
@@ -3846,11 +4225,11 @@ private struct RosterBehaviorRolesCatalogDrawerContent: View {
         }
     }
 
-    private static func blurb(for role: RosterRole) -> String {
-        if role == .none {
+    private static func blurb(forBehaviorRoleID id: String) -> String {
+        if id == RosterRole.none.rawValue {
             return "Neutral — no behavior-role catalog row is applied. Mission Control and Paladin treat this slot without role-specific tags or weights."
         }
-        if let b = role.rosterCatalogBlurb, !b.isEmpty { return b }
+        if let b = RosterRoleCatalog.blurb(forBehaviorRoleID: id), !b.isEmpty { return b }
         return "No description in catalog."
     }
 }

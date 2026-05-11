@@ -67,7 +67,7 @@ struct VehiclePreflightSheet: View {
                     } else if let result {
                         outcomeBlock(result)
 
-                        if result.passed, result.armedDuringProbe {
+                        if result.passed, result.armedDuringProbe, !leaveArmed {
                             Text("The vehicle was disarmed automatically after the test.")
                                 .font(GuardianTypography.font(.denseFootnoteRegular))
                                 .foregroundStyle(theme.textSecondary)

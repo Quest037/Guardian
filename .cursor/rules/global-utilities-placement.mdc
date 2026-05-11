@@ -1,0 +1,15 @@
+---
+description: Shared system/subsystem utilities belong in Global Utilities (Utilities namespace), not siloed in one feature folder
+alwaysApply: true
+---
+
+# Global Utilities placement
+
+When you add **new utilities** (pure helpers, derivations, small services, formatters, validation, bridging logic) that are **not** tied to a single screen’s private layout state:
+
+- **Prefer the Global Utilities system** under `Sources/GuardianHQ/Systems/Utilities/` and expose them through the ``Utilities`` enum / ``GlobalUtilities`` graph (e.g. ``Utilities/mission``, ``Utilities/fleet``, and nested namespaces like ``MissionPathWaypointUtilities``), following the existing nesting style.
+- **Do not** leave broadly reusable logic only inside `Systems/<Feature>/…` or a single plugin if other systems or plugins are likely to import the same behavior — promote it to Global Utilities and call from feature code instead.
+- **Domain-specific** orchestration, heavy UI, and feature-only models stay in their system; **cross-cutting** math, string/date rules, MAV/telemetry conversions, and shared policy snippets belong in Utilities.
+- When extending Utilities: keep types **focused and documented**; match **concurrency** with surrounding code (e.g. `@MainActor` on the graph where the rest of the file already is); add or extend the smallest namespace that fits (`mission`, `fleet`, or a new top-level branch on ``GlobalUtilities`` / ``Utilities`` if a whole new domain appears).
+
+**Reference:** `Sources/GuardianHQ/Systems/Utilities/Utilities.swift` and the **Global Utilities migration** note in `TODO.md`.

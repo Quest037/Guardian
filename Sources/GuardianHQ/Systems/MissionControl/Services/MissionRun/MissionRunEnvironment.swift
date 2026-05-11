@@ -31,6 +31,10 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     /// Latest execution context from start/cycle ingest; required for queued dispatch and observer enqueue APIs.
     private(set) var lastExecutionContext: MissionRunExecutionContext?
 
+    /// Resolved roster **behavior** roles for the current template / last execution mission (``ResolvedRosterRole``).
+    /// Refreshed from ``Mission`` in ``captureExecutionContext(_:)``, ``updateTemplate(_:)``, and run init.
+    private(set) var rosterRoleResolutionsByDeviceID: [UUID: ResolvedRosterRole] = [:]
+
     /// Substatus of MC runtime execution while a run is active.
     @Published private(set) var sessionPhase: MissionRunSessionPhase = .draft
 
@@ -124,6 +128,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         self.systems.scheduling.environment = self
         self.systems.policyAuthority.environment = self
         refreshDerivedTaskStates()
+        syncRosterRoleResolutions(from: mission)
     }
 
     convenience init(
@@ -171,6 +176,30 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
 
     func captureExecutionContext(_ context: MissionRunExecutionContext?) {
         lastExecutionContext = context
+        if let mission = context?.mission {
+            syncRosterRoleResolutions(from: mission)
+        }
+    }
+
+    /// Recomputes ``rosterRoleResolutionsByDeviceID`` from a mission snapshot (catalog + plugin overlays).
+    func syncRosterRoleResolutions(from mission: Mission) {
+        rosterRoleResolutionsByDeviceID = MissionRunRosterRoleResolver.resolutions(for: mission)
+    }
+
+    /// One MC log line summarizing non-`.none` behavior roles (template key ``MissionRunLogTemplateKey/rosterBehaviorRolesSnapshot``).
+    func logRosterBehaviorRolesSnapshotAtExecutionStart() {
+        let rows = rosterRoleResolutionsByDeviceID.values.filter { $0.role != .none }
+        guard !rows.isEmpty else { return }
+        let summary = rows
+            .map { "\($0.slotLabel):\($0.role.rawValue)" }
+            .sorted()
+            .joined(separator: ", ")
+        systems.logging.appendLogEvent(
+            level: .info,
+            speaker: .missionControl,
+            templateKey: MissionRunLogTemplateKey.rosterBehaviorRolesSnapshot,
+            templateParams: ["summary": summary]
+        )
     }
 
     /// When ``lastExecutionContext`` is unset, builds one from the run template and attached link services.
@@ -459,6 +488,9 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         if let mission {
             missionId = mission.id
             missionName = mission.name
+            syncRosterRoleResolutions(from: mission)
+        } else {
+            rosterRoleResolutionsByDeviceID = [:]
         }
         refreshDerivedTaskStates()
     }

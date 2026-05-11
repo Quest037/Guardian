@@ -35,6 +35,7 @@ final class GuardianHQSitlSmokeTests: XCTestCase {
         let systemID: Int
     }
 
+    @MainActor
     private final class Harness {
         let fleetLink = FleetLinkService()
         let sitl = SitlService()

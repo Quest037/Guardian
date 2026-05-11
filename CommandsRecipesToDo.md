@@ -11,23 +11,17 @@ architecture"). This file only tracks **what's still to do**.
 
 ## Stage D — Operator prompt channel (new infrastructure)
 
-Goal: a unified, routeable operator-prompt channel so any process can escalate without
-inventing its own delivery path. Driven by the escalation contract from Stage B.
+Status: building blocks complete (`OperatorPromptEvent` + `OperatorPromptTarget` +
+`OperatorPromptOption` + `OperatorPromptAnswer`; delivery-target catalogue;
+`ProcessPromptPolicy`; `OperatorPromptRouter`; `OperatorPromptResumptionChannel`).
+All documented in `README.md` under "Operator-prompt …" sections.
 
-- [ ] Audit `MissionRunEnvironment` Rules of Engagement seeds for prompt concepts already in code.
-- [ ] Define `OperatorPromptEvent` type mirroring escalation contract payload.
-- [ ] Define delivery targets:
-  - MCR prompt panel
-  - Persistent toast
-  - UserNotifications (incl. "get back to MCR" alert variant)
-  - LiveDrive prompt
-  - Vehicle Inspector wizard prompt
-- [ ] Define `ProcessPromptPolicy`: ordered fallback list per process context.
-- [ ] Implement router: pick target by policy + current operator presence/context.
-- [ ] Resumption verbs flow back through router to the runner that emitted the event.
-- [ ] **Stage D needs its own design pass before any code lands** — this is genuinely
-      new infrastructure, not just plumbing.
-- [ ] Document: prompt event shape, target catalogue, fallback semantics.
+The remaining integration — the stateful `OperatorPromptCenter` that wraps the
+building blocks with host registration, dispatch / mirror withdrawal, the
+per-event expiry timer, and the `publish(_:) async -> Answer` convenience API —
+lands during Stage E wizard wiring, alongside the first real delivery surfaces.
+Until then publishers can be written against `OperatorPromptResumptionChannel`
+directly and route via `OperatorPromptRouter.shared.route(_:)`.
 
 ## Stage E — Operator wizard process in Vehicle Inspector
 

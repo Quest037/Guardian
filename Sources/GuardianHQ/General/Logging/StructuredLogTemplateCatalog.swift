@@ -169,6 +169,11 @@ enum StructuredLogTemplateCatalog: Sendable {
 
         put(MissionRunLogTemplateKey.executionStarted, "Mission execution started.", mcr: "Execution started (MC)")
         put(
+            MissionRunLogTemplateKey.rosterBehaviorRolesSnapshot,
+            "Roster behavior roles — {{summary}}.",
+            mcr: "Roster roles · {{summary}}"
+        )
+        put(
             MissionRunLogTemplateKey.executionMissionMissing,
             "Mission template missing from store; cannot upload MAVLink mission.",
             mcr: "No mission template in store · cannot upload MAVLink"

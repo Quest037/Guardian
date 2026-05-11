@@ -7,9 +7,18 @@ enum MissionType: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-/// Mission behavioral / persona role for MRE and Paladin (e.g. scout); extend over time.
+/// Mission behavioral / persona role for MRE and Paladin.
+/// Catalog: ``RosterRoleCatalog``; resolved per run for MC export: ``MissionRunRosterRoleResolver``.
 enum RosterRole: String, Codable, CaseIterable, Identifiable {
     case none
+    case guardian
+    case scout
+    case marauder
+    case relay
+    case shepherd
+    case warden
+    case breacher
+    case medic
 
     var id: String { rawValue }
 }
@@ -58,12 +67,28 @@ struct RosterDevice: Identifiable, Codable, Equatable {
         case positionHint
     }
 
+    /// Unknown or future `rawValue` strings map to ``RosterRole/none`` so missions stay loadable.
+    private static func decodeLossyRosterRole(
+        from c: KeyedDecodingContainer<CodingKeys>,
+        primaryKey: CodingKeys,
+        legacyKey: CodingKeys
+    ) -> RosterRole {
+        if let raw = try? c.decodeIfPresent(String.self, forKey: primaryKey), let r = RosterRole(rawValue: raw) {
+            return r
+        }
+        if let raw = try? c.decodeIfPresent(String.self, forKey: legacyKey), let r = RosterRole(rawValue: raw) {
+            return r
+        }
+        if let r = try? c.decodeIfPresent(RosterRole.self, forKey: primaryKey) { return r }
+        if let r = try? c.decodeIfPresent(RosterRole.self, forKey: legacyKey) { return r }
+        return .none
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
-        role = try c.decodeIfPresent(RosterRole.self, forKey: .role)
-            ?? (try c.decodeIfPresent(RosterRole.self, forKey: .legacyCharacter)) ?? .none
+        role = Self.decodeLossyRosterRole(from: c, primaryKey: .role, legacyKey: .legacyCharacter)
         if let sr = try c.decodeIfPresent(MissionRosterSlotRole.self, forKey: .slot) {
             slot = sr
         } else if let sr = try c.decodeIfPresent(MissionRosterSlotRole.self, forKey: .legacySlotRole) {

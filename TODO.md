@@ -13,8 +13,6 @@
 
 ## Plugins System
 
-- **Registry:**
-  - Fix up how plugins register to extend the app
 
 ## Vehicles System
 
@@ -60,19 +58,6 @@
 
 ### Commands Catalogue
 
-- **Commands:**
-  - Build more generic commands
-    - "Charge_Battery"
-  - Build more specific commands
-    - "Pull over"
-
-- **Stack Converters:**
-  - Build out PX4 converter
-  - Build out AP converter
-  
-- **StepTypes:**
-  - Add any missing step types
-
 
 ### Controllers System
 The controllers system is designed to allow a user to control a linked vehicle with either their keyboard or a connected game controller/joystick. It will also possible to do a hybrid joystick + keyboard.
@@ -99,6 +84,7 @@ The controllers system is designed to allow a user to control a linked vehicle w
 ## Map System
 
 - **CesiumJS 3D map spike (LiveDrive + MC Running):** evaluate replacing the current Leaflet 2D map in **LiveDrive** and **Mission Control Running** with a CesiumJS-based 3D map mode (camera follow/tracked entity, per-marker context menu parity, route/vehicle overlays, and acceptable telemetry update performance in `WKWebView`). Keep **Settings → default SIM coords** and mission authoring maps on lightweight 2D for now; this spike is for operational views first.
+
 - Fix reset button going to a fixed zoom (it should use a bbox for everything)
 
 ## Live Drive
@@ -135,9 +121,7 @@ Missions are the templates created by users that involve telling one or more veh
 
 ### Mission Roster Slots
 
-- **Roles:**
-  - Develop roles for vehicles to give MC/assistants easier decisions
-    - Guardian, Scout, and Marauder play different roles
+- **Roles:** Full subsystem plan (catalog, tags, MRE DTO, plugin extension) — see **`RosterRolesToDo.md`** next to this file. Summary: Missions owns definitions + persistence; MC/MRE consumes resolved profiles at run time.
 
 ## Mission Control
 
@@ -179,14 +163,14 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 - **Mission Controls (Sidebar):**
 
 - **Vehicles:**
-  - Calibration image colour-coded triage
+  
 
 - **Vehicles (Sidebar):**
 
 
 #### Squads
 - **Formations:** 
-  - allow user to define a formation for the VG to use. This overrides pattern behaviour.
+  - allow user to define a formation for the Squad to use. This overrides pattern behaviour.
 
 ### MissionRunEnvironment
 

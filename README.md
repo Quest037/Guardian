@@ -148,6 +148,29 @@ Do **not** add parallel `setVehicleFloatParameter` call sites for the same SIM_O
 
 While a Live Drive session is active, `FleetLinkService` sets **`liveDriveControlSessionVehicleID`** (`setLiveDriveControlSessionVehicle` / `clearLiveDriveControlSessionVehicleIfMatches`). Only that vehicle may receive **`liveDrive.*`** commands with **`.manualTakeover`** or run **manual control streaming** (`startManualControlStream`, `updateManualControlIntent`). This applies to **SIM and real aircraft**; **freestyle** and **mission** handoff both use the same gate (session kind is stored on `LiveDriveSessionRecord` for export). Param-only paths (e.g. SIM battery drain from the cog) are not gated by this.
 
+## Mission roster behavior roles (Missions v1)
+
+**Behavior roles** (`RosterDevice.role`, `RosterRole`) describe how MRE/Paladin should bias a device on the mission roster. They are **not** the same as **slot** roles (`MissionRosterSlotRole`: primary / wingman / reserve).
+
+| Concern | Owner |
+| --- | --- |
+| Catalog (display copy, tags, default weights), persistence on the template | **Missions** |
+| Plugin tag/weight **overlays** on built-in roles | **Missions** — `RosterRoleExtensionRegistry.registerOverlay` (`@MainActor`); each `GuardianPluginID` may contribute at most one overlay per `RosterRole`. |
+| Entirely new `role_id` strings (not in `RosterRole`) | Deferred until template persistence can carry them; overlays target existing enum cases today. |
+| Run-time resolution / logging | **Mission Control** — `MissionRunRosterRoleResolver` + `MissionRunEnvironment.rosterRoleResolutionsByDeviceID`; MC execution start logs a one-line behavior-role snapshot (template key `rosterBehaviorRolesSnapshot`). **Paladin** logs a policy-tilt stub when execution engages (`paladinRosterRolePolicyTiltStub`). |
+
+**Implementation (shipped):**
+
+- `Sources/GuardianHQ/Systems/Missions/Models/RosterRoleCatalog.swift` — built-in eight roles + `none`; `RosterRoleDefinition`, `RosterRoleWeights`, `RosterRoleMREPayload` (JSON keys `role_schema`, `role_id`, `tags`, `weights`). `RosterRoleCatalog.mrePayload(for:)` is `@MainActor`, returns `nil` for `.none`, and merges **plugin overlays** into tags/weights via `RosterRoleExtensionRegistry`.
+- `Sources/GuardianHQ/Systems/Missions/Models/RosterRoleExtensionRegistry.swift` — `RosterRolePluginOverlay`, `RosterRoleWeightDeltas` (per-knob deltas summed across plugins, total clamped to ±0.25 per knob before adding to built-in weights, then 0…1); `resolvedDefinition(for:)` exposes merged tags, weights, and contributing plugin IDs (for audit / export).
+- `Sources/GuardianHQ/Systems/MissionControl/Models/MissionRunRosterRoleResolution.swift` — `ResolvedRosterRole`, `MissionRunRosterRoleResolver` (per-device DTO + `mrePayload`); avoids MC re-parsing overlay merge rules ad hoc.
+- `Sources/GuardianHQ/Systems/MissionControl/Services/MissionRun/MissionRunEnvironment.swift` — keeps `rosterRoleResolutionsByDeviceID` in sync with the mission template / execution context.
+- `Sources/GuardianHQ/Systems/Missions/Models/Mission.swift` — `RosterRole` enum (raw values = stable slugs); `RosterDevice` decodes `role` and legacy `character`, maps unknown strings to `.none`.
+- `Sources/GuardianHQ/Systems/Missions/Views/MissionsView.swift` — role pickers use **built-in** catalog display names and blurbs (overlays do not change operator copy in v1).
+- Tests: `RosterRoleCatalogTests`, `RosterRoleExtensionRegistryTests`, `MissionRunRosterRoleResolutionTests`.
+
+Tag vocabulary, plugin open-set roles, and optional UI polish are summarized in [`RosterRolesToDo.md`](RosterRolesToDo.md) at the repo root (v1 checklist there is **complete**).
+
 ## Fleet Commands & Recipes architecture
 
 Guardian commands vehicles through a strict three-layer stack. This is the
@@ -271,6 +294,154 @@ These are baked into the validators / registries. Changing one is an explicit, r
 - **Escalation handler:** `FleetRecipeEscalationHandler` is `@MainActor (FleetRecipeEscalationEvent) async -> FleetRecipeResumptionVerb`. Callers pass a handler to `run(...)`; absent that, the runner uses `FleetRecipeRunner.shared.defaultEscalationHandler` (defaults to `.abort`, replaced by Stage D's router at app start). The runner **rejects** any verb that is not a member of the escalating matcher's `allowedVerbs` list (the run fails with attribution).
 - **Audit trace:** `FleetRecipeAuditTrace` attaches to every outcome. One entry per dispatched step (retries within a single dispatch collapse into the entry's `attempt` count; explicit `.retry` outcomes produce additional entries because they re-enter the step). Each entry carries the step ID, the kind (`command` / `recipe`), attempt count, response, control outcome, and timestamp. The trace is **flat** — child-recipe expansions produce a single parent entry rather than a nested trace.
 - **Body-less descriptors are refused at entry.** Stage C registers descriptors and bodies in independent passes; the runner short-circuits a body-less recipe with `.failed(detail: "… has no body …")` rather than silently succeeding on an empty step list.
+
+### Operator-prompt channel — pre-existing hooks
+
+Stage D will wire a single app-layer `OperatorPromptCenter` + `OperatorPromptRouter`. These are the **seeds already in code** that Stage D plugs into rather than reinventing; new prompt origins should reuse these surfaces rather than grow parallel ones.
+
+- **Recipe-side escalation contract.** `FleetRecipeEscalationEvent` carries `runID`, `recipe`, `vehicleID`, `stepID`, `reason` (closed top-level `operatorActionRequired | unrecoverableFailure | confirmation`, each with string-backed extensible kinds), `allowedVerbs`, and `lastResponse`. `FleetRecipeEscalationHandler` is `@MainActor (FleetRecipeEscalationEvent) async -> FleetRecipeResumptionVerb` and is the install point for Stage D's router. `FleetRecipeResumptionVerb` is the closed transport (`acknowledge | retry | skip | abort`) every prompt resolves to — custom options layer on top of it.
+- **MRE Rules-of-Engagement seeds.** `MissionRunEngagementAction` (`rtl | land | forceDisarm | swapInReserve`) × `MissionRunEngagementDisposition` (`autonomous | ask | defer | forbidden | handoff`) are stored on `MissionRunPolicies.engagement`, editable through `updateMissionEngagementRules` / `updateMissionEngagementDisposition` in `MissionRunEnvironment+PolicyAPI.swift`, and audit-trace logged via `policyAuthorityEditApplied` / `policyAuthorityEditDenied`. The dispositions `.ask`, `.defer`, `.handoff`, `.forbidden` have **no consumer today** — they are declarative input to Stage D's router. `resolvedEngagementDisposition(for:)` is the lookup used by future planner gating; `.ask` and `.defer` publish through `OperatorPromptCenter`, `.handoff` invokes a LiveDrive takeover, `.forbidden` is a planner guard (not a prompt).
+- **MRE operator-acknowledgement APIs.** `operatorMarkMissionTaskTriageState(taskID:state:)`, `acknowledgeTaskMissionEndRecovery(taskID:)`, and `acknowledgeTaskMissionEndAbort(taskID:)` already exist on `MissionRunEnvironment`. They are direct UI-driven calls today; Stage D prompts whose decision affects a task's triage state should call into these rather than mutate state in parallel.
+- **Bottom-banner primitives.** `GuardianBottomPromptCenter` (`present(...)` single-dismiss, `presentChoice(...)` confirm/dismiss) and `GuardianBottomPromptBanner` are the existing solid-fill banner chrome used by MCR (recovery banner, abort banner, graceful-stop choice in `MissionControlSetupView`) and LiveDrive. Stage D reuses these as the rendering primitive for the new generic `GuardianPromptPanel` — the chrome stays, the management indirection becomes `OperatorPromptCenter`.
+- **App-wide drawer primitive.** `AppDrawer` + `withAppDrawer()` and `SidebarOverlay` + `withSidebarOverlay()` are the trailing slide-in primitives on the window root. Stage D's top-bar in-app notifications inbox uses one of these (drawer for full inbox surface, overlay for transient peek); routing all cross-context prompts to a single drawer is what makes prompts addressable from any screen.
+- **OOA notifications.** `UserNotificationService` is the macOS UNUserNotification adapter; `stubNotifyMissionRunOperatorPrompt(runID:missionName:summary:)` is the placeholder hook that Stage D's router replaces with the real `OperatorPromptEvent` delivery when the operator is out-of-app.
+
+Open follow-up surfaced during the audit (not part of Stage D's scope):
+
+- **Engagement disposition gating must land in MRE planner code, not in Stage D.** Stage D supplies the channel; the planner is the publisher. Until a planner consumes `.ask` / `.defer` / `.handoff`, those dispositions remain inert config and the prompt channel is exercised only by Layer 2 recipe escalations and migrated MCR/LD status banners.
+- **Abort-policy / RTL-recipe circular-loop.** Once `MissionRunAbortPolicy.returnToLaunch` (and similar) route through a recipe path that itself contains a `confirmInLiveMission` matcher, an operator-initiated abort will re-prompt the very operator who initiated it. The publisher-side `OperatorDecisionCache.policyKey` mechanism is the right hook — the abort policy publisher seeds the cache for the about-to-run recipe so its confirmation matcher auto-resolves `.acknowledge`. The MRE policies / RoE system upgrade that exposes this is a downstream task tracked outside Stage D.
+
+### Operator-prompt event type
+
+Live at `Sources/GuardianHQ/Systems/OperatorPrompts/OperatorPromptEvent.swift`. The unified payload every Guardian process publishes through Stage D's `OperatorPromptCenter`; the routing / center / cache / UI primitives plug into this shape.
+
+- **`OperatorPromptEvent`** — `id`, `origin`, `target`, `severity`, `title`, `body`, `contextFacts`, `options?`, `allowedVerbs`, `policyKey?`, `createdAt`, `expiresAt`. Shape parallels ``FleetRecipeEscalationEvent`` so a recipe escalation lifts losslessly via `OperatorPromptEvent.init(fromRecipeEscalation:)`.
+- **`OperatorPromptOrigin`** — closed v1 set: `recipeEscalation(event)`, `mreEngagementAsk(runID, action)`, `mreEngagementHandoff(runID, action)`, `freeform(source)`. New origin classes are additive; migrated status banners (MCR recovery / abort / graceful-stop, LiveDrive status) ride on `freeform` with a namespace-qualified source string until a tighter case is justified.
+- **`OperatorPromptTarget` (addressing)** — first-class struct of optional fields the router, drawer, audit log, and `OperatorDecisionCache` all read uniformly: `missionRunID`, `missionTaskID`, `squad?`, `affectedRosterSlotID`, `affectedAssignmentID`, `affectedVehicleID`, `recipeRunID`, `pluginID`. Origin says **who is asking**; target says **what the prompt is about**. Defaults to `.unspecified` (every field nil → universal-drawer-only delivery, no panel match possible). Every publisher should fill in as much addressing as it knows so the operator can identify the prompt's scope before deciding.
+- **`OperatorPromptSquadContext`** — squad addressing for a target. Squad is the set of slots attached to a single primary roster device (Guardian's roster model — `primary | wingman | reserve` with `leaderRosterDeviceId == primary.id`). Carries `primaryRosterDeviceID`, optional `primaryAssignmentID` + `primaryVehicleID`, and the `wingmanRosterDeviceIDs` + `reserveRosterDeviceIDs` lists so the renderer can show the full squad composition.
+- **Target filter matching** — `OperatorPromptTarget.matches(_:)` is directional: receiver is the filter (panel's declared context), argument is the prompt's target. Nil filter fields are wildcards; non-nil filter fields must equal the prompt's corresponding field. Squad match is keyed on `primaryRosterDeviceID` because that's the squad's canonical identity.
+- **`OperatorPromptContextFact` (rich context)** — ordered list of `(label, value)` operator-readable facts the publisher attaches so the operator has the data they need to decide. Each fact carries an `emphasis` (`normal | caption | success | warning | error`), optional SF Symbol `icon`, and optional `group` string for visual sectioning ("Where", "State", "Impact"). `Codable` so the audit log can persist them verbatim. Auto-populated facts (recipe-escalation lift adds `Recipe` + `Step` facts in group `"Recipe"`) precede caller-supplied facts.
+- **`OperatorPromptOption`** — publisher-supplied labelled choice. Each option carries a stable `id`, `humanLabel`, optional `summary` (one-line description of the consequence — surfaced under the button text), `role` (`confirm | neutral | cancel` — drives blue / default / red per the app-wide button-color rule), an underlying ``FleetRecipeResumptionVerb`` (the closed transport every resolution flows through), and an optional typed `payload`. Custom options layer **on top of** the closed verb set — every option still resolves to one of `acknowledge | retry | skip | abort`.
+- **Default option synthesis** — when `options` is `nil`, `OperatorPromptOption.standardOptions(forAllowedVerbs:)` synthesises a standard button set with ordering `acknowledge → retry → skip → abort` and role mapping `acknowledge=.confirm`, `retry=.neutral`, `skip=.neutral`, `abort=.cancel`. Sentinel ids `verb.<rawValue>` so the publisher can distinguish synthesised from author-supplied options. Existing recipe escalation matchers consume this path unchanged.
+- **`OperatorPromptAnswer`** — `promptID`, `selectedOptionID`, `verb`, `remember`, `resolution`, `answeredAt`. The recipe runner reads only `verb`; the publisher reads `selectedOptionID` for branching; the prompt log (and the eventual RoE learner) consumes the whole record.
+- **`OperatorPromptResolutionSource`** — closed v1: `operatorChose | rememberedFromCache | timeoutAborted`. Audit and learner code branches on this so a timeout-aborted decision is never weighted as training data.
+- **Remember-this-choice gating** — `policyKey` non-nil ⇒ UI shows the "remember this choice" checkbox; nil ⇒ checkbox hidden (no cache to record into). Publisher consults `OperatorDecisionCache` (Stage D follow-up) at publish boundary; cache scope is the current run / session.
+- **Timeout default** — five minutes (`OperatorPromptEvent.defaultTimeout`). `expiresAt = createdAt + timeout`; on expiry the router synthesises an answer with `resolution = .timeoutAborted`, `selectedOptionID = OperatorPromptOption.timeoutOptionID`, `verb = .abort` if `.abort` is allowed else the first ``OperatorPromptEvent/allowedVerbs`` entry.
+- **Recipe-escalation default severities** — `operatorActionRequired → .warning`, `unrecoverableFailure → .error`, `confirmation → .info`. Construction overrides accept explicit `title` / `body` / `severity` / `options` / `policyKey` / `target` / `contextFacts` when the default phrasing or addressing is wrong for the context. The recipe runner doesn't know about missions, so the auto-populated target only fills `recipeRunID` + `affectedVehicleID`; publishers that *do* know the recipe is running inside a mission task (Stage E wizard, MRE) supply the rest by passing an explicit `target:` override.
+
+### Operator-prompt delivery targets
+
+Closed catalogue of the surfaces `OperatorPromptRouter` is allowed to dispatch to. Lives at `Sources/GuardianHQ/Systems/OperatorPrompts/OperatorPromptDeliveryTarget.swift`. One enum case per physical delivery channel; each case carries the addressing the channel needs to find its actual UI host (mission run id for the MCR panel, vehicle id + optional recipe-run id for the Vehicle Inspector wizard, etc.).
+
+- **`mcrPromptPanel(missionRunID)`** — contextual MCR panel; matches only when the operator's MCR window is showing the same run.
+- **`liveDrivePromptPanel(missionRunID?, vehicleID?)`** — contextual LiveDrive HUD panel. Setting only one field matches on that field; setting both tightens the match to require both; setting neither matches nothing (catalogue refuses fully-unaddressed LiveDrive targets to avoid silent broadcasts).
+- **`vehicleInspectorWizardPanel(vehicleID, recipeRunID?)`** — contextual Vehicle Inspector wizard panel. Always requires the vehicle id to match; setting `recipeRunID` further restricts the channel to a single recipe run so unrelated escalations don't leak into a wizard's chrome.
+- **`persistentToast`** — sticky corner toast (distinct from `ToastCenter`'s ephemeral toasts). Doesn't auto-dismiss; click opens the prompt in the inbox.
+- **`userNotification(style:)`** — macOS `UNUserNotificationCenter` delivery. Style is `.banner` (standard list/banner/sound) or `.mcrCriticalReturn` (time-sensitive alert that pulls operator focus back into MCR on tap).
+- **`inAppInbox`** — universal `AppDrawer`-hosted notifications inbox. Every prompt mirrors here regardless of contextual delivery so prompts that resolved or fired while the operator was looking elsewhere are still reviewable.
+
+Role flags on every case so the router can build policies without case-matching everywhere:
+
+- **`isContextual`** — `true` for the three panels; `false` for toast / OOA notification / inbox.
+- **`isBroadcast`** — exact inverse of `isContextual`.
+- **`isOutOfApp`** — `true` only for `.userNotification`; routing keeps OOA targets last in fallback policies and gates them on operator-presence heuristics so the app never double-notifies when the operator is on a contextual panel.
+- **`isUniversalArchive`** — `true` only for `.inAppInbox`; the router reserves this slot as a mirror and never treats it as a primary target.
+
+**Addressing match.** `OperatorPromptDeliveryTarget.accepts(eventTarget:)` is the single predicate every router pre-filter funnels through:
+
+- Contextual targets reject any event whose `OperatorPromptTarget` doesn't satisfy their required id fields.
+- LiveDrive matches when **either** the run id **or** the vehicle id (or both, if both are set on the target) match the event's target.
+- Vehicle Inspector with `recipeRunID == nil` accepts any recipe run for the vehicle; with a non-nil `recipeRunID` it requires an exact match.
+- Broadcast targets (toast / OOA notification / inbox) accept every event.
+
+**`Kind` discriminator.** Every case has a stable rawValue (`mcrPromptPanel`, `liveDrivePromptPanel`, `vehicleInspectorWizardPanel`, `persistentToast`, `userNotification`, `inAppInbox`) used by the audit log, telemetry, and any serialised routing rules. These rawValues are locked — changing them requires a migration plan.
+
+**Router contract (preview).** `ProcessPromptPolicy` (next Stage D item) resolves an event to an ordered list of targets. The router pre-filters with `accepts(eventTarget:)`, checks runtime availability (panel mounted, OOA permission granted, operator presence), picks the first available target as the **primary**, and mirrors to the rest. Plugins do **not** add new targets — they publish prompts that flow through the existing channels; the catalogue stays finite so audit-log shape is stable.
+
+### Operator-prompt process policies
+
+`ProcessPromptPolicy` (`Sources/GuardianHQ/Systems/OperatorPrompts/ProcessPromptPolicy.swift`) is the ordered fallback list a publisher's prompts fan through. The policy describes which channels a process **wants**; runtime availability and operator-presence filtering land in the router itself.
+
+- **`entries: [Entry]`** — ordered channel templates: `mcrPanel`, `liveDrivePanel`, `vehicleInspectorWizard`, `persistentToast`, `userNotification(style:)`. Templates carry **no addressing** — they bind to a concrete `OperatorPromptDeliveryTarget` at resolve time using the event's `OperatorPromptTarget`.
+- **`mirrorToInbox: Bool`** (default `true`) — when set, `inAppInbox` is appended last so every prompt is reviewable from the universal drawer. The inbox is **not** an `Entry` case; representing it as a flag keeps entry lists focused on operator-facing channels and makes "every prompt is reviewable" a uniform guarantee instead of a per-policy concern.
+- **`resolveTargets(for:)`** — pure resolution: walks `entries` in order, binds each to a concrete target using `event.target`, skips entries whose required addressing is absent (e.g. `mcrPanel` skipped when the event has no `missionRunID`), and appends the inbox when `mirrorToInbox`. The router applies runtime availability filtering on top of this list.
+
+Binding rules:
+
+| Entry | Required event addressing | Concrete target |
+|---|---|---|
+| `mcrPanel` | `missionRunID` | `.mcrPromptPanel(missionRunID:)` |
+| `liveDrivePanel` | `missionRunID` **or** `affectedVehicleID` (at least one) | `.liveDrivePromptPanel(missionRunID:, vehicleID:)` |
+| `vehicleInspectorWizard` | `affectedVehicleID` (required); `recipeRunID` (forwarded if present) | `.vehicleInspectorWizardPanel(vehicleID:, recipeRunID:)` |
+| `persistentToast` | — | `.persistentToast` |
+| `userNotification(style:)` | — | `.userNotification(style:)` |
+
+**Default policies per origin** (`ProcessPromptPolicy.default(for:)`):
+
+- `recipeEscalation` — wizard → MCR → LiveDrive → toast → standard banner. Wizard first because if a recipe wizard is running, that's where the operator is focused.
+- `mreEngagementAsk` — MCR → LiveDrive → toast → `mcrCriticalReturn` notification. MRE asking permission for `rtl` / `land` / `forceDisarm` / `swapInReserve` needs operator attention back at MCR; the OOA variant pulls them back.
+- `mreEngagementHandoff` — LiveDrive → MCR → `mcrCriticalReturn`. Handoff asks the operator to drive; LiveDrive is the takeover surface.
+- `freeform` — MCR → LiveDrive → wizard → toast → standard banner. Broad coverage; specialised publishers should declare a tailored policy rather than ride the freeform default.
+
+All defaults mirror to inbox. The router's policy provider (Stage D follow-up) can override these per process.
+
+### Operator-prompt router
+
+`OperatorPromptRouter` (`Sources/GuardianHQ/Systems/OperatorPrompts/OperatorPromptRouter.swift`) is the pure decision component of Stage D. Lives on the main actor; consumed by `OperatorPromptCenter` (next item) for actual dispatch.
+
+**Responsibilities (v1):**
+
+1. Resolve the policy for an event's origin via `policyProvider`.
+2. Resolve the policy's entries against the event's `OperatorPromptTarget` (delegates to `ProcessPromptPolicy.resolveTargets(for:)`).
+3. Classify each resolved target via `availabilityProbe`:
+   - Accepted → first one is `primary`, rest become `mirrors`.
+   - Rejected → collected under `suppressed` for audit.
+4. Return an `OperatorPromptRoutingDecision` value. The router does **not** dispatch; the center does.
+
+**Why split router and center?** The decision is pure data and trivially testable; the center is stateful (host registry, in-flight prompts, timeouts, answer-fan-in). Keeping them separate means policy / routing edits don't touch any side-effect machinery, and exhaustive routing tests run with no UI fixture.
+
+**`OperatorPromptRoutingDecision` shape:**
+
+- `event` — the event being routed (kept on the decision so audit logging and downstream dispatch don't thread it separately).
+- `primary: OperatorPromptDeliveryTarget?` — first available target in policy order. `nil` only when no target was available (reachable only when a policy with `mirrorToInbox = false` runs against a probe that rejects everything — the default policies always mirror to the always-available inbox).
+- `mirrors: [OperatorPromptDeliveryTarget]` — available targets after the primary. Center dispatches to these too for cross-surface visibility; the first resolution wins and the center withdraws the rest.
+- `suppressed: [OperatorPromptDeliveryTarget]` — targets the policy wanted but the probe rejected.
+- `dispatched` (computed) — `[primary] + mirrors` when a primary exists, else just `mirrors`.
+- `isUnroutable` (computed) — `primary == nil && mirrors.isEmpty`. Center uses this to escalate (e.g. force an OOA `mcrCriticalReturn`) or to mark the event as queued.
+
+**Injection points:**
+
+- `policyProvider: @MainActor (OperatorPromptOrigin) -> ProcessPromptPolicy` — defaults to `ProcessPromptPolicy.default(for:)`. Center can swap for per-process overrides.
+- `availabilityProbe: @MainActor (OperatorPromptDeliveryTarget) -> Bool` — defaults to **inbox-only availability**. Center installs a real host-registry-backed probe at app start; the default keeps the router safe to construct before any host has registered (prompts route to the inbox and queue for the operator's next visit).
+
+The inbox-only default is the v1 boot fallback: until the center wires up host discovery, the router still produces a well-formed decision that routes everything to the universal archive. Prompts don't get lost during startup.
+
+### Operator-prompt resumption channel
+
+`OperatorPromptResumptionChannel` (`Sources/GuardianHQ/Systems/OperatorPrompts/OperatorPromptResumptionChannel.swift`) is the answer-side transport. Carries operator picks back from delivery surfaces to the originating publisher (recipe runner escalation handler, MRE engagement planner, freeform plugin or migrated status banner). Pure transport — no host knowledge, no routing decisions, no dispatch.
+
+**Publisher API.** A single async call:
+
+```swift
+let answer = await OperatorPromptResumptionChannel.shared.awaitAnswer(for: event)
+```
+
+`answer.verb` is the closed transport (``FleetRecipeResumptionVerb``) every process consumes; `answer.selectedOptionID` gives publisher-side branching; `answer.remember` feeds the future `OperatorDecisionCache`; `answer.resolution` distinguishes operator-chose vs cache-hit vs timeout-aborted.
+
+**Host / center / cache API.**
+
+- `submit(_:) -> Bool` — applies an answer to a pending event. Returns `true` when a waiter was resumed; `false` when no waiter was found (race or stray submission). Audit-stream emits on every successful application.
+- `resolveExpiry(for:) -> Bool` — synthesises a timeout answer and submits it. Equivalent to `submit(event.synthesisedTimeoutAnswer())`.
+
+**Cancellation.** `awaitAnswer(for:)` respects Swift Task cancellation. When the publisher's task is cancelled while awaiting an answer, the channel resolves the pending event with a synthesised timeout-style answer and cleans up the continuation. Cancellation propagates end-to-end without the publisher needing custom logic.
+
+**Already-expired events.** `awaitAnswer(for:)` short-circuits when `event.isExpired()` is true at call time — returns the synthesised timeout answer immediately without ever installing a continuation. Keeps the publisher's `await` honest when an event slips through with a stale `expiresAt`.
+
+**Audit stream.** `allAnswers` is a Combine publisher that emits every resolved answer in publish order. The inbox / audit-log surfaces subscribe to it; the channel itself does not retain history (the inbox owns persistence).
+
+**Timeout-answer synthesis.** `OperatorPromptEvent.synthesisedTimeoutAnswer(at:)` is the canonical builder for timeout / cancellation answers. Prefers `.abort` when in `allowedVerbs`; otherwise the first allowed verb; final fallback is `.abort` (guard for the unsafe `allowedVerbs == []` construction). `selectedOptionID = OperatorPromptOption.timeoutOptionID` (`"verb.timeout"`); `remember = false`; `resolution = .timeoutAborted`.
+
+**Why split channel and center?** Same rationale as splitting router and center: the channel is a thin pure transport with a tiny state surface (one dictionary of pending continuations) and is exhaustively testable on its own. The center wraps it with host registration, dispatch, expiry timer, and policy-provider injection.
 
 ### Extension points
 

@@ -797,24 +797,41 @@ private struct MissionWorkspaceView: View {
                         .frame(minWidth: 100, idealWidth: 120, maxWidth: 160, alignment: .leading)
                         .layoutPriority(1)
 
-                        Picker(
-                            "Role",
-                            selection: Binding(
-                                get: { taskRosterDrafts[taskId]?.role ?? .none },
-                                set: { v in
-                                    var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
-                                    d.role = v
-                                    taskRosterDrafts[taskId] = d
+                        HStack(spacing: GuardianSpacing.xxs) {
+                            Picker(
+                                "Role",
+                                selection: Binding(
+                                    get: { taskRosterDrafts[taskId]?.role ?? .none },
+                                    set: { v in
+                                        var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
+                                        d.role = v
+                                        taskRosterDrafts[taskId] = d
+                                    }
+                                )
+                            ) {
+                                ForEach(RosterRole.allCases) { c in
+                                    Text(c.rosterCatalogDisplayName).tag(c)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .controlSize(.small)
+                            .help("Optional behavior role for Mission Control / Paladin (see roster catalog).")
+
+                            GuardianThemedButton(
+                                accent: .neutral,
+                                surface: .outline,
+                                size: .small,
+                                shape: .cornered,
+                                contentSizing: .squareToolbarCell,
+                                action: { presentRosterBehaviorRolesCatalogDrawer() },
+                                label: {
+                                    Image(systemName: "info.circle")
+                                        .font(GuardianTypography.font(.sectionHeadingSemibold))
                                 }
                             )
-                        ) {
-                            ForEach(RosterRole.allCases) { c in
-                                Text(c.rawValue.capitalized).tag(c)
-                            }
+                            .help("Open reference for all behavior roles")
                         }
-                        .pickerStyle(.menu)
-                        .controlSize(.small)
-                        .frame(minWidth: 148, idealWidth: 168, maxWidth: 220, alignment: .leading)
+                        .frame(minWidth: 160, idealWidth: 196, maxWidth: 260, alignment: .leading)
                         .layoutPriority(1)
 
                         Picker(
@@ -951,7 +968,18 @@ private struct MissionWorkspaceView: View {
     }
 
     private func rosterBehaviorRoleLabel(_ role: RosterRole) -> String {
-        role == .none ? "None" : role.rawValue.capitalized
+        role.rosterCatalogDisplayName
+    }
+
+    /// App-wide drawer: catalog copy for every ``RosterRole`` (add-slot row info control).
+    private func presentRosterBehaviorRolesCatalogDrawer() {
+        appDrawer.present(
+            title: "Behavior roles",
+            preferredWidth: 420,
+            scrimTapDismisses: true
+        ) {
+            RosterBehaviorRolesCatalogDrawerContent()
+        }
     }
 
     private func rosterLeaderBadgeCaption(_ device: RosterDevice) -> String {
@@ -3078,12 +3106,13 @@ private struct MissionRosterDeviceSettingsSidebar: View {
                     rosterDeviceFieldRow(label: "Role") {
                         Picker("", selection: $device.role) {
                             ForEach(RosterRole.allCases) { r in
-                                Text(r.rawValue.capitalized).tag(r)
+                                Text(r.rosterCatalogDisplayName).tag(r)
                             }
                         }
                         .labelsHidden()
                         .pickerStyle(.menu)
                         .fixedSize()
+                        .help(device.role.rosterCatalogBlurb ?? "Optional behavior role for Mission Control / Paladin.")
                     }
                     rosterDeviceFieldRow(label: "Slot") {
                         Picker("", selection: $device.slot) {
@@ -3777,6 +3806,52 @@ private struct AutoGrowingEditorHeightKey: PreferenceKey {
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
+    }
+}
+
+// MARK: - Roster behavior roles reference (drawer)
+
+private struct RosterBehaviorRolesCatalogDrawerContent: View {
+    @Environment(\.colorScheme) private var colorScheme
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: GuardianSpacing.md) {
+                ForEach(RosterRole.allCases) { role in
+                    GuardianCard(
+                        configuration: GuardianCardConfiguration(
+                            border: .subtle,
+                            cornerRadius: GuardianCardLayout.cornerRadius,
+                            bodyPadding: GuardianCardLayout.defaultBodyPadding
+                        ),
+                        header: {
+                            Text(role.rosterCatalogDisplayName)
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
+                                .foregroundStyle(theme.textPrimary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        },
+                        body: {
+                            Text(Self.blurb(for: role))
+                                .font(GuardianTypography.font(.denseCaption12Regular))
+                                .foregroundStyle(theme.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    )
+                }
+            }
+            .padding(GuardianSpacing.md)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private static func blurb(for role: RosterRole) -> String {
+        if role == .none {
+            return "Neutral — no behavior-role catalog row is applied. Mission Control and Paladin treat this slot without role-specific tags or weights."
+        }
+        if let b = role.rosterCatalogBlurb, !b.isEmpty { return b }
+        return "No description in catalog."
     }
 }
 

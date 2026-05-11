@@ -85,6 +85,8 @@ final class MissionRunExecutionSubsystem {
             sitl: context.sitl,
             missionProvider: context.missionProvider
         )
+        environment.syncRosterRoleResolutions(from: mission)
+        environment.logRosterBehaviorRolesSnapshotAtExecutionStart()
         return .started
     }
 

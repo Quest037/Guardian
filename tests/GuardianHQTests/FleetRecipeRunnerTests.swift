@@ -39,7 +39,7 @@ final class FleetRecipeRunnerTests: XCTestCase {
 
         var queueByCommand: [FleetCommandName: [FleetCommandResponse]] = [:]
         var defaultResponse: FleetCommandResponse = .success()
-        private(set) var calls: [Call] = []
+        var calls: [Call] = []
 
         @MainActor
         func makeInvoker() -> FleetRecipeCommandInvoker {
@@ -750,11 +750,13 @@ final class FleetRecipeRunnerTests: XCTestCase {
         }
         defer { FleetRecipeRunner.shared.commandInvokerOverride = nil }
 
+        // Hoist link so `async let` does not capture MainActor `self` via `dummyFleetLink()`.
+        let fleetLink = dummyFleetLink()
         async let firstOutcome = FleetRecipeRunner.shared.run(
             recipe: recipe,
             vehicleID: "TEST-VEHICLE",
             source: "first",
-            fleetLink: dummyFleetLink()
+            fleetLink: fleetLink
         )
 
         await fulfillment(of: [started], timeout: 2)
@@ -763,7 +765,7 @@ final class FleetRecipeRunnerTests: XCTestCase {
             recipe: recipe,
             vehicleID: "TEST-VEHICLE",
             source: "second",
-            fleetLink: dummyFleetLink()
+            fleetLink: fleetLink
         )
 
         if case .failed(_, _, let detail, _) = secondOutcome {
@@ -919,7 +921,6 @@ final class FleetRecipeRunnerTests: XCTestCase {
         }
         XCTAssertEqual(stub.calls.count, 0, "No dispatch should occur when validation fails.")
     }
-}
 
     // MARK: - Live-mission gate
 
@@ -1089,7 +1090,7 @@ final class FleetRecipeRunnerTests: XCTestCase {
         let outcome = await runWithStub(recipe: parent, stub: stub)
 
         XCTAssertTrue(outcome.isSuccess, "Gate must not re-check at child boundary; got: \(outcome.loggable)")
-        XCTAssertEqual(stub.calls.map(\.command), [childCmd])
+        XCTAssertEqual(stub.calls.map { $0.command }, [childCmd])
     }
 }
 

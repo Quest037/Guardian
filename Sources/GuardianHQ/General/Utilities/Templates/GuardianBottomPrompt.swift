@@ -10,6 +10,8 @@ struct GuardianBottomPrompt: Identifiable, Equatable {
     enum Buttons: Equatable {
         case singleDismiss
         case pair(confirm: String, dismiss: String)
+        /// Three explicit actions (e.g. MC-R reserve swap-in arm probe failure: cancel pick vs pick another pool row vs Vehicle Inspector).
+        case trio(cancelTitle: String, switchTitle: String, inspectTitle: String)
     }
 
     let id: UUID
@@ -27,16 +29,20 @@ struct GuardianBottomPrompt: Identifiable, Equatable {
 
 // MARK: - Center
 
-/// Host for a single bottom **prompt** (dismiss or confirm/dismiss). Independent from ``ToastCenter``.
+/// Host for a single bottom **prompt** (dismiss, confirm/dismiss, or three explicit actions). Independent from ``ToastCenter``.
 @MainActor
 final class GuardianBottomPromptCenter: ObservableObject {
     @Published private(set) var activePrompt: GuardianBottomPrompt?
     private var onDismissCallback: (() -> Void)?
     private var onConfirmCallback: (() -> Void)?
+    private var onTrioCancel: (() -> Void)?
+    private var onTrioSwitchPool: (() -> Void)?
+    private var onTrioInspect: (() -> Void)?
 
     init() {}
 
     func present(_ text: String, style: GuardianBottomPromptStyle = .info, onDismiss: (() -> Void)? = nil) {
+        clearTrioCallbacks()
         onDismissCallback = onDismiss
         onConfirmCallback = nil
         withAnimation(GuardianMotion.feedbackCrossfade) {
@@ -53,6 +59,7 @@ final class GuardianBottomPromptCenter: ObservableObject {
         onConfirm: @escaping () -> Void,
         onDismiss: (() -> Void)? = nil
     ) {
+        clearTrioCallbacks()
         onDismissCallback = onDismiss
         onConfirmCallback = onConfirm
         withAnimation(GuardianMotion.feedbackCrossfade) {
@@ -64,7 +71,33 @@ final class GuardianBottomPromptCenter: ObservableObject {
         }
     }
 
+    /// Three actions (e.g. cancel a flow, branch to a secondary path, open tooling). Replaces any active prompt.
+    func presentTripleChoice(
+        _ text: String,
+        style: GuardianBottomPromptStyle = .warning,
+        cancelTitle: String,
+        switchTitle: String,
+        inspectTitle: String,
+        onCancel: @escaping () -> Void,
+        onSwitchPoolRow: @escaping () -> Void,
+        onOpenVehicleInspector: @escaping () -> Void
+    ) {
+        onDismissCallback = nil
+        onConfirmCallback = nil
+        onTrioCancel = onCancel
+        onTrioSwitchPool = onSwitchPoolRow
+        onTrioInspect = onOpenVehicleInspector
+        withAnimation(GuardianMotion.feedbackCrossfade) {
+            activePrompt = GuardianBottomPrompt(
+                text: text,
+                style: style,
+                buttons: .trio(cancelTitle: cancelTitle, switchTitle: switchTitle, inspectTitle: inspectTitle)
+            )
+        }
+    }
+
     func dismiss() {
+        clearTrioCallbacks()
         let dismissCb = onDismissCallback
         onDismissCallback = nil
         onConfirmCallback = nil
@@ -75,6 +108,7 @@ final class GuardianBottomPromptCenter: ObservableObject {
     }
 
     func confirmPrimary() {
+        clearTrioCallbacks()
         let confirmCb = onConfirmCallback
         onDismissCallback = nil
         onConfirmCallback = nil
@@ -82,6 +116,35 @@ final class GuardianBottomPromptCenter: ObservableObject {
             activePrompt = nil
         }
         confirmCb?()
+    }
+
+    func trioCancelTapped() {
+        completeTrio(onTrioCancel)
+    }
+
+    func trioSwitchTapped() {
+        completeTrio(onTrioSwitchPool)
+    }
+
+    func trioInspectTapped() {
+        completeTrio(onTrioInspect)
+    }
+
+    private func clearTrioCallbacks() {
+        onTrioCancel = nil
+        onTrioSwitchPool = nil
+        onTrioInspect = nil
+    }
+
+    private func completeTrio(_ block: (() -> Void)?) {
+        let action = block
+        clearTrioCallbacks()
+        onDismissCallback = nil
+        onConfirmCallback = nil
+        withAnimation(GuardianMotion.feedbackCrossfade) {
+            activePrompt = nil
+        }
+        action?()
     }
 }
 
@@ -98,39 +161,85 @@ struct GuardianBottomPromptBanner: View {
     var body: some View {
         Group {
             if let prompt = center.activePrompt {
-                HStack(alignment: .center, spacing: GuardianSpacing.denseGutter) {
-                    Image(systemName: prompt.style.icon)
-                        .font(GuardianTypography.font(.bottomPromptIcon))
-                        .foregroundStyle(.white)
-                    Text(prompt.text)
-                        .font(GuardianTypography.font(.bottomPromptMessage))
-                        .foregroundStyle(.white)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
+                Group {
                     switch prompt.buttons {
-                    case .singleDismiss:
-                        Button("Dismiss") {
-                            center.dismiss()
+                    case .trio(let cancelTitle, let switchTitle, let inspectTitle):
+                        VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+                            HStack(alignment: .top, spacing: GuardianSpacing.denseGutter) {
+                                Image(systemName: prompt.style.icon)
+                                    .font(GuardianTypography.font(.bottomPromptIcon))
+                                    .foregroundStyle(.white)
+                                Text(prompt.text)
+                                    .font(GuardianTypography.font(.bottomPromptMessage))
+                                    .foregroundStyle(.white)
+                                    .multilineTextAlignment(.leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            HStack(spacing: GuardianSpacing.xs) {
+                                GuardianThemedButton(
+                                    title: cancelTitle,
+                                    accent: .danger,
+                                    surface: .outline,
+                                    size: .small,
+                                    shape: .cornered,
+                                    action: { center.trioCancelTapped() }
+                                )
+                                .guardianPointerOnHover()
+                                GuardianThemedButton(
+                                    title: switchTitle,
+                                    accent: .primary,
+                                    surface: .outline,
+                                    size: .small,
+                                    shape: .cornered,
+                                    action: { center.trioSwitchTapped() }
+                                )
+                                .guardianPointerOnHover()
+                                GuardianPrimaryProminentButton(title: inspectTitle) {
+                                    center.trioInspectTapped()
+                                }
+                                .guardianPointerOnHover()
+                            }
+                            .frame(maxWidth: .infinity, alignment: .trailing)
                         }
-                        .buttonStyle(.bordered).guardianPointerOnHover()
-                        .controlSize(.small)
-                        .tint(.white)
-                    case let .pair(confirm, dismiss):
-                        HStack(spacing: GuardianSpacing.xs) {
-                            Button(dismiss) {
-                                center.dismiss()
+                    default:
+                        HStack(alignment: .center, spacing: GuardianSpacing.denseGutter) {
+                            Image(systemName: prompt.style.icon)
+                                .font(GuardianTypography.font(.bottomPromptIcon))
+                                .foregroundStyle(.white)
+                            Text(prompt.text)
+                                .font(GuardianTypography.font(.bottomPromptMessage))
+                                .foregroundStyle(.white)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+
+                            switch prompt.buttons {
+                            case .singleDismiss:
+                                Button("Dismiss") {
+                                    center.dismiss()
+                                }
+                                .buttonStyle(.bordered).guardianPointerOnHover()
+                                .controlSize(.small)
+                                .tint(.white)
+                            case let .pair(confirm, dismiss):
+                                HStack(spacing: GuardianSpacing.xs) {
+                                    Button(dismiss) {
+                                        center.dismiss()
+                                    }
+                                    .buttonStyle(.bordered).guardianPointerOnHover()
+                                    .controlSize(.small)
+                                    .tint(.white)
+                                    Button(confirm) {
+                                        center.confirmPrimary()
+                                    }
+                                    .buttonStyle(.borderedProminent).guardianPointerOnHover()
+                                    .tint(.blue)
+                                    .controlSize(.small)
+                                }
+                            case .trio:
+                                EmptyView()
                             }
-                            .buttonStyle(.bordered).guardianPointerOnHover()
-                            .controlSize(.small)
-                            .tint(.white)
-                            Button(confirm) {
-                                center.confirmPrimary()
-                            }
-                            .buttonStyle(.borderedProminent).guardianPointerOnHover()
-                            .tint(.blue)
-                            .controlSize(.small)
                         }
                     }
                 }

@@ -133,11 +133,11 @@ final class MissionPointTests: XCTestCase {
         XCTAssertEqual(mission.missionPoints.map(\.id), [idA, idB, idC])
     }
 
-    func test_mapChipLabel_usesKindPrefixAndShortSlug() {
+    func test_mapChipLabel_nonNumericSlug_suffixShowsPlaceholder() {
         let rally = MissionPoint(pointId: "rally.alpha", label: "A", kind: .rally, coordinate: RouteCoordinate())
-        XCTAssertEqual(rally.mapChipLabel, "RP:alpha")
+        XCTAssertEqual(rally.mapChipLabel, "RP:?")
         let ext = MissionPoint(pointId: "hold", label: "H", kind: .extraction, coordinate: RouteCoordinate())
-        XCTAssertEqual(ext.mapChipLabel, "EP:hold")
+        XCTAssertEqual(ext.mapChipLabel, "EP:?")
     }
 
     func test_makeUniquePointId_avoidsCollisions() {

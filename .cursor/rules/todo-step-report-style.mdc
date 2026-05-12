@@ -1,0 +1,47 @@
+---
+description: Brevity and shape of agent step-completion reports while working a todo list
+alwaysApply: true
+---
+
+# Todo Step Completion Reports
+
+When the agent is **working through a todo list** (any tracker file, `TodoWrite`
+session, or operator-given multi-step plan) and **reports back after finishing a
+step**, the reply must follow this shape:
+
+- **Always bulletpoints.** No prose paragraphs, no narrative wind-up.
+- **Hard cap: 150 words total** across the whole step report.
+- **Layman's terms.** Plain English. Avoid jargon, type names, file paths, and
+  internal subsystem terms unless they are the only sensible label.
+- **Cover three things**, each as its own bullet (or short sub-bullet group):
+  1. **Did:** What actually got done this step.
+  2. **Didn't:** What was deliberately deferred / proposed for a later
+     expansion (link to `NEXTVERSION.md` capture if one was made).
+  3. **Corners cut:** Any shortcut, assumption, stub, or skipped check the
+     operator should know about. Say **"none"** if there genuinely were none.
+- **No re-explaining the plan**, no restating the whole todo list, no "next I
+  will…" preamble. The operator already knows the plan.
+
+## Scope
+
+Applies to **every step completion message** during a multi-step task. It does
+**not** apply to:
+
+- The initial plan / scoping message before work starts.
+- The final wrap-up summary at the end of an entire feature pass (that one may
+  be longer if the operator asked for a full recap).
+- One-shot answers to a single question (no todo list in play).
+
+## Example
+
+**Good:**
+
+- **Did:** Added the new reserve swap button and wired it to the existing
+  swap service.
+- **Didn't:** Skipped the confirm dialog variant — captured for later in
+  `NEXTVERSION.md`.
+- **Corners cut:** Reused the existing icon instead of adding a new one;
+  flag if you want a dedicated glyph.
+
+**Bad:** A three-paragraph essay restating the plan, listing every file
+touched, and explaining the architecture.

@@ -57,10 +57,14 @@ struct MapVehicleMarker: Equatable {
     var showLabel: Bool = true
     var selected: Bool
     var draggable: Bool
+    /// MC-R **floating reserve pool** swap picker: subtle ring pulse in the Leaflet map shell for class-eligible pool markers (see **README** → **Floating reserve pool**). Leave `false` for all other markers.
+    var selectionAttentionPulse: Bool = false
     /// When set, a small heading wedge is drawn at this marker (degrees clockwise from north).
     var headingDeg: Double? = nil
     /// Roster / staging: show a sync spinner while SIM pose is applied and telemetry is catching up.
     var pendingSimSync: Bool = false
+    /// When set, Leaflet uses this for the marker `title` (tooltip / accessibility) instead of ``label`` alone.
+    var accessibilityTitle: String? = nil
 }
 
 struct OSMMapView: NSViewRepresentable {
@@ -205,7 +209,8 @@ struct OSMMapView: NSViewRepresentable {
                 headingJSON = "\"heading\":null"
             }
             let imageJSON = marker.imageDataURL.map(Self.jsStringLiteral) ?? "null"
-            return "{\"id\":\(Self.jsStringLiteral(marker.id)),\"lat\":\(marker.lat),\"lon\":\(marker.lon),\"label\":\(Self.jsStringLiteral(marker.label)),\"color\":\(Self.jsStringLiteral(marker.colorHex)),\"image\":\(imageJSON),\"showLabel\":\(marker.showLabel ? "true" : "false"),\"selected\":\(marker.selected ? "true" : "false"),\"draggable\":\(marker.draggable ? "true" : "false"),\"pendingSimSync\":\(marker.pendingSimSync ? "true" : "false"),\(headingJSON)}"
+            let accessibilityTitleJSON = marker.accessibilityTitle.map(Self.jsStringLiteral) ?? "null"
+            return "{\"id\":\(Self.jsStringLiteral(marker.id)),\"lat\":\(marker.lat),\"lon\":\(marker.lon),\"label\":\(Self.jsStringLiteral(marker.label)),\"color\":\(Self.jsStringLiteral(marker.colorHex)),\"image\":\(imageJSON),\"showLabel\":\(marker.showLabel ? "true" : "false"),\"selected\":\(marker.selected ? "true" : "false"),\"draggable\":\(marker.draggable ? "true" : "false"),\"pendingSimSync\":\(marker.pendingSimSync ? "true" : "false"),\"selectionAttentionPulse\":\(marker.selectionAttentionPulse ? "true" : "false"),\"accessibilityTitle\":\(accessibilityTitleJSON),\(headingJSON)}"
         }.joined(separator: ",")
         let headingPreviewJSON: String
         if let headingPreview {
@@ -680,6 +685,14 @@ private extension OSMMapView {
       from { transform: rotate(0deg); }
       to { transform: rotate(360deg); }
     }
+    /** MC-R reserve pool picker: soft glow on eligible floating-pool markers (WKWebView; period chosen for calm affordance). */
+    @keyframes guardianReservePickerPoolMarkerPulse {
+      0%, 100% { filter: brightness(1); }
+      50% { filter: brightness(1.07) drop-shadow(0 0 5px rgba(255,255,255,0.42)); }
+    }
+    .guardian-vehicle-ring--reservePickerPulse {
+      animation: guardianReservePickerPoolMarkerPulse 1.35s ease-in-out infinite;
+    }
   </style>
 </head>
 <body>
@@ -957,7 +970,18 @@ private extension OSMMapView {
      *  rebuilt the DivIcon subtree under the cursor. Heading is patched separately via ``guardianPatchVehicleHeadingWedge``. */
     function guardianVehicleChromeSigNoPos(vm) {
       return [vm.selected ? 1 : 0, vm.draggable ? 1 : 0, vm.showLabel ? 1 : 0,
-        String(vm.label || ''), String(vm.color || ''), String(vm.image || ''), vm.pendingSimSync ? 1 : 0].join('\u{001f}');
+        String(vm.label || ''), String(vm.color || ''), String(vm.image || ''), vm.pendingSimSync ? 1 : 0,
+        vm.selectionAttentionPulse ? 1 : 0, String(vm.accessibilityTitle || '')].join('\u{001f}');
+    }
+
+    function guardianVehicleMarkerTitleText(vm) {
+      const a = vm.accessibilityTitle;
+      if (a != null && String(a) !== '') return String(a);
+      return String(vm.label || '');
+    }
+
+    function guardianEscapeHtmlAttrStrict(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
     }
 
     function guardianPatchVehicleHeadingWedge(marker, vm, size) {
@@ -1045,6 +1069,8 @@ private extension OSMMapView {
           const border = vm.selected ? 3 : 2;
           const inner = Math.max(14, size - (border * 2) - 2);
           const ringColor = vm.color || '#94a3b8';
+          const titleText = guardianVehicleMarkerTitleText(vm);
+          const safeImgAlt = guardianEscapeHtmlAttrStrict(titleText);
           const headingArrow = Number.isFinite(vm.heading)
             ? `<div class="guardian-vehicle-heading-wedge" style="
                 position:absolute;
@@ -1063,18 +1089,20 @@ private extension OSMMapView {
               "></div>`
             : '';
           const imageHTML = vm.image
-            ? `<img src="${vm.image}" alt="" draggable="false" style="-webkit-user-drag:none;user-drag:none;width:${inner}px;height:${inner}px;border-radius:999px;object-fit:cover;display:block;"/>`
+            ? `<img src="${vm.image}" alt="${safeImgAlt}" draggable="false" style="-webkit-user-drag:none;user-drag:none;width:${inner}px;height:${inner}px;border-radius:999px;object-fit:cover;display:block;"/>`
             : `<div style="width:${inner}px;height:${inner}px;border-radius:999px;background:#1f2937;touch-action:none;-webkit-user-drag:none;"></div>`;
           const pendingSimSync = !!vm.pendingSimSync;
+          const selectionAttentionPulse = !!vm.selectionAttentionPulse;
           const syncSpinner = pendingSimSync
             ? `<div title="Syncing vehicle position with telemetry…" style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:22px;height:22px;border-radius:999px;background:rgba(15,23,42,0.92);border:1px solid rgba(255,255,255,0.38);display:flex;align-items:center;justify-content:center;pointer-events:none;box-shadow:0 1px 5px rgba(0,0,0,0.55);z-index:4;">
                  <span style="display:block;width:11px;height:11px;border-radius:50%;border:2px solid rgba(255,255,255,0.2);border-top-color:#fff;animation:guardianSimSyncSpin 0.72s linear infinite;"></span>
                </div>`
             : '';
           const vehicleZ = vm.draggable ? 2500 : (vm.selected ? 1200 : 600);
+          const ringPulseClass = selectionAttentionPulse ? ' guardian-vehicle-ring--reservePickerPulse' : '';
           const icon = L.divIcon({
             className: 'mission-vehicle-dot',
-            html: `<div style="position:relative;width:${size}px;height:${size}px;touch-action:none;-webkit-user-drag:none;">${headingArrow}<div style="width:${size}px;height:${size}px;border-radius:999px;border:${border}px solid ${ringColor};background:#0b0f14;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 1px rgba(0,0,0,0.55);overflow:hidden;touch-action:none;">${imageHTML}</div>${syncSpinner}</div>`,
+            html: `<div style="position:relative;width:${size}px;height:${size}px;touch-action:none;-webkit-user-drag:none;">${headingArrow}<div class="guardian-vehicle-ring${ringPulseClass}" style="width:${size}px;height:${size}px;border-radius:999px;border:${border}px solid ${ringColor};background:#0b0f14;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 1px rgba(0,0,0,0.55);overflow:hidden;touch-action:none;">${imageHTML}</div>${syncSpinner}</div>`,
             iconSize: [size, size],
             iconAnchor: [size / 2, size / 2]
           });
@@ -1084,7 +1112,7 @@ private extension OSMMapView {
             marker = L.marker([vm.lat, vm.lon], {
               draggable: !!vm.draggable,
               zIndexOffset: vehicleZ,
-              title: vm.label || '',
+              title: titleText,
               icon: icon
             }).addTo(map);
             marker._guardianVehicleChromeSig = chromeSig;
@@ -1096,7 +1124,7 @@ private extension OSMMapView {
           } else {
             marker.setLatLng([vm.lat, vm.lon]);
             marker.setZIndexOffset(vehicleZ);
-            marker.options.title = vm.label || '';
+            marker.options.title = titleText;
             if (marker._guardianVehicleChromeSig !== chromeSig) {
               marker._guardianVehicleChromeSig = chromeSig;
               marker.setIcon(icon);

@@ -45,7 +45,7 @@ final class RecipeEscalationOperatorPromptIntegrationTests: XCTestCase {
         XCTAssertTrue(decision.mirrors.contains(.inAppInbox))
     }
 
-    func test_resumptionChannel_resolvesPromptLiftedFromRecipeEscalation() async {
+    func test_resumptionChannel_resolvesPromptLiftedFromRecipeEscalation() async throws {
         let channel = OperatorPromptResumptionChannel()
         let escalation = sampleEscalation(allowedVerbs: [.retry, .abort])
         let prompt = OperatorPromptEvent(fromRecipeEscalation: escalation)

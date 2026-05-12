@@ -39,4 +39,35 @@ enum MissionControlLiveMapFitCoordinates {
         }
         return out
     }
+
+    /// MC-R live overview **fit-to-content** inputs: home, drawn path vertices, filtered runtime map points, and live vehicle marker positions (same scope as the map payload).
+    static func liveOverviewMissionContentPoints(
+        homeCoordinate: RouteCoordinate?,
+        taskPathCoordinates: [[RouteCoordinate]],
+        runtimeMissionPoints: [MissionPoint],
+        focusedTaskID: UUID?,
+        vehicleMarkerLatLon: [(Double, Double)]
+    ) -> [(Double, Double)] {
+        var out: [(Double, Double)] = []
+        if let h = homeCoordinate, isUsableWgs84ForMapFit(lat: h.lat, lon: h.lon) {
+            out.append((h.lat, h.lon))
+        }
+        for path in taskPathCoordinates {
+            for c in path {
+                guard isUsableWgs84ForMapFit(lat: c.lat, lon: c.lon) else { continue }
+                out.append((c.lat, c.lon))
+            }
+        }
+        for mp in MissionPoint.filteredForMissionControlLiveMap(runtimeMissionPoints, focusedTaskID: focusedTaskID) {
+            let lat = mp.coordinate.lat
+            let lon = mp.coordinate.lon
+            guard isUsableWgs84ForMapFit(lat: lat, lon: lon) else { continue }
+            out.append((lat, lon))
+        }
+        for (lat, lon) in vehicleMarkerLatLon {
+            guard isUsableWgs84ForMapFit(lat: lat, lon: lon) else { continue }
+            out.append((lat, lon))
+        }
+        return out
+    }
 }

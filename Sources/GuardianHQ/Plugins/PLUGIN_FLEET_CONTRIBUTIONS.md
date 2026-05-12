@@ -2,7 +2,7 @@
 
 GuardianHQ loads **core** fleet commands and recipes from subsystem bootstraps (`FleetCommandsCatalogueBootstrap`, `FleetRecipesCatalogueBootstrap`). Plugins may also contribute **plugin-owned** `command.*` / `recipe.*` entries when they need namespaced fleet behaviour that ships with the integration.
 
-Paladin intentionally keeps **empty** publish and invoke manifest arrays: it orchestrates through **core** recipes and operator surfaces (Vehicle Inspector, Mission Control, LiveDrive, MRE) rather than registering parallel Paladin-branded fleet descriptors. Other plugins that *do* own fleet rows must declare claims and align registrations.
+Paladin intentionally keeps **empty** publish and invoke manifest arrays: it orchestrates through **core** recipes and **Mission Control / MRE APIs** (headless — no Paladin UI) rather than registering parallel Paladin-branded fleet descriptors. Other plugins that *do* own fleet rows must declare claims and align registrations.
 
 ## 1. Manifest (`GuardianPluginManifest`)
 

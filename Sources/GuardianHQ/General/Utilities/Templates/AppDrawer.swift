@@ -99,15 +99,16 @@ struct AppDrawerChrome<Content: View>: View {
             .padding(.horizontal, GuardianSpacing.md)
             .padding(.vertical, GuardianSpacing.cardBodyInset)
             .background(theme.backgroundElevated)
-            .overlay(alignment: .bottom) {
-                Rectangle()
-                    .fill(theme.borderSubtle)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 1)
-            }
 
+            GuardianModalHeaderSeparator()
+
+            // One continuous elevated surface with the host panel (see Theme catalog App drawer): body matches header token;
+            // child views should not paint their own full-panel `backgroundBase` unless they intentionally inset a sheet.
             content()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(theme.backgroundElevated)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 

@@ -190,8 +190,8 @@ final class OperatorPromptRouterTests: XCTestCase {
             target: target
         ))
 
-        // recipe default: wizard → mcr → liveDrive → toast → banner (+ inbox)
-        // No mission run id → mcr suppressed.
+        // recipe default: mcr → wizard → liveDrive → toast → banner (+ inbox)
+        // No mission run id → mcr skipped; wizard is first bound target.
         XCTAssertEqual(decision.primary, .vehicleInspectorWizardPanel(
             vehicleID: "ALPHA-1",
             recipeRunID: escalation.runID
@@ -203,6 +203,70 @@ final class OperatorPromptRouterTests: XCTestCase {
         XCTAssertTrue(decision.mirrors.contains(.persistentToast))
         XCTAssertTrue(decision.mirrors.contains(.userNotification(style: .banner)))
         XCTAssertTrue(decision.mirrors.contains(.inAppInbox))
+    }
+
+    func test_route_needsAirframeReplacement_withMissionRunID_omitsVehicleInspectorWizard() {
+        let router = OperatorPromptRouter(availabilityProbe: OperatorPromptRouterTestProbes.acceptAll)
+        let runID = UUID()
+        let escalation = sampleNeedsAirframeEscalationEvent(vehicleID: "ALPHA-1")
+        let target = OperatorPromptTarget(
+            missionRunID: runID,
+            affectedVehicleID: "ALPHA-1",
+            recipeRunID: escalation.runID
+        )
+        let decision = router.route(event(
+            origin: .recipeEscalation(event: escalation),
+            target: target
+        ))
+
+        XCTAssertEqual(decision.primary, .mcrPromptPanel(missionRunID: runID))
+        XCTAssertFalse(decision.dispatched.contains(where: {
+            if case .vehicleInspectorWizardPanel = $0 { return true }
+            return false
+        }))
+        XCTAssertTrue(decision.dispatched.contains(.userNotification(style: .mcrCriticalReturn)))
+        XCTAssertTrue(decision.dispatched.contains(.inAppInbox))
+    }
+
+    func test_route_needsAirframeReplacement_probeRejectsMCR_skipsWizardToLiveDrive() {
+        let router = OperatorPromptRouter(availabilityProbe: OperatorPromptRouterTestProbes.rejectMCRAcceptRest)
+        let runID = UUID()
+        let escalation = sampleNeedsAirframeEscalationEvent(vehicleID: "ALPHA-1")
+        let target = OperatorPromptTarget(
+            missionRunID: runID,
+            affectedVehicleID: "ALPHA-1",
+            recipeRunID: escalation.runID
+        )
+        let decision = router.route(event(
+            origin: .recipeEscalation(event: escalation),
+            target: target
+        ))
+
+        XCTAssertEqual(decision.primary, .liveDrivePromptPanel(missionRunID: runID, vehicleID: "ALPHA-1"))
+        XCTAssertEqual(decision.suppressed, [.mcrPromptPanel(missionRunID: runID)])
+        XCTAssertFalse(decision.dispatched.contains(where: {
+            if case .vehicleInspectorWizardPanel = $0 { return true }
+            return false
+        }))
+    }
+
+    func test_route_needsAirframeReplacement_withoutMissionRunID_usesDefaultRecipePolicy() {
+        let router = OperatorPromptRouter(availabilityProbe: OperatorPromptRouterTestProbes.acceptAll)
+        let escalation = sampleNeedsAirframeEscalationEvent(vehicleID: "ALPHA-1")
+        let target = OperatorPromptTarget(
+            affectedVehicleID: "ALPHA-1",
+            recipeRunID: escalation.runID
+        )
+        let decision = router.route(event(
+            origin: .recipeEscalation(event: escalation),
+            target: target
+        ))
+
+        XCTAssertEqual(decision.primary, .vehicleInspectorWizardPanel(
+            vehicleID: "ALPHA-1",
+            recipeRunID: escalation.runID
+        ))
+        XCTAssertTrue(decision.dispatched.contains(.userNotification(style: .banner)))
     }
 
     func test_route_mreEngagementAsk_endsWithCriticalReturnNotification() {
@@ -253,8 +317,20 @@ final class OperatorPromptRouterTests: XCTestCase {
             runID: FleetRecipeRunID(),
             recipe: .literal("recipe.fleet.test.sample"),
             vehicleID: vehicleID,
-            stepID: .literal("step.sample"),
+            stepID: .literal("sampleStep"),
             reason: .operatorActionRequired(kind: .rotateDrone),
+            allowedVerbs: [.acknowledge, .abort],
+            lastResponse: .success()
+        )
+    }
+
+    private func sampleNeedsAirframeEscalationEvent(vehicleID: String = "ALPHA-1") -> FleetRecipeEscalationEvent {
+        FleetRecipeEscalationEvent(
+            runID: FleetRecipeRunID(),
+            recipe: .literal("recipe.fleet.test.needsAirframe"),
+            vehicleID: vehicleID,
+            stepID: .literal("sampleStep"),
+            reason: .unrecoverableFailure(kind: .needsAirframeReplacement),
             allowedVerbs: [.acknowledge, .abort],
             lastResponse: .success()
         )

@@ -14,6 +14,16 @@ extension MissionRunEnvironment {
     func resolvedEngagementDisposition(for action: MissionRunEngagementAction) -> MissionRunEngagementDisposition {
         MissionRunEngagementResolver.resolvedDisposition(for: action, rules: policies.engagement)
     }
+
+    /// Rules-of-engagement gate for reserve **reposition** fleet verbs (swap pipeline). Uses ``policies/engagement`` via
+    /// ``resolvedEngagementDisposition(for:)`` — same editor surface as MCS / MC-R engagement rows.
+    func repositionReserveFleetVerbEngagementGate(
+        for verb: MissionRunReserveRepositionFleetVerb
+    ) -> MissionRunReserveRepositionEngagementGateOutcome {
+        let action = MissionRunReserveRepositionCommandEngagementPolicy.engagementAction(for: verb)
+        let disposition = resolvedEngagementDisposition(for: action)
+        return MissionRunReserveRepositionCommandEngagementPolicy.gateOutcome(disposition: disposition, action: action)
+    }
 }
 
 extension MissionRunEngagementAction {

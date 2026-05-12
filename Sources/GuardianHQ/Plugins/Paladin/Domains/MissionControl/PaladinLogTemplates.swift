@@ -28,5 +28,41 @@ enum PaladinLogTemplateCatalog {
             defaultPattern: "Paladin execution started.",
             mcr: "Paladin · execution started"
         )
+        StructuredLogTemplateCatalog.registerTemplate(
+            pluginID: .paladin,
+            forKey: MissionRunLogTemplateKey.paladinReserveSwapProposed,
+            defaultPattern: "Paladin proposed swapping fixed reserve {{reserveSlot}} onto active slot {{primarySlot}} (task {{missionTaskID}}, issuer {{issuerKey}}).",
+            mcr: "Paladin · reserve swap proposed — {{primarySlot}} ← {{reserveSlot}} (task {{missionTaskID}})"
+        )
+        StructuredLogTemplateCatalog.registerTemplate(
+            pluginID: .paladin,
+            forKey: MissionRunLogTemplateKey.paladinReserveSwapEngagementAutonomous,
+            defaultPattern: "Paladin reserve swap proposal accepted under autonomous engagement (Mission Control does not register an engagement prompt). Primary {{primarySlot}}, reserve {{reserveSlot}}, issuer {{issuerKey}}.",
+            mcr: "Paladin · reserve swap — autonomous engagement ({{primarySlot}} / {{reserveSlot}})"
+        )
+        StructuredLogTemplateCatalog.registerTemplate(
+            pluginID: .paladin,
+            forKey: MissionRunLogTemplateKey.paladinReserveSwapEngagementForbidden,
+            defaultPattern: "Paladin reserve swap proposal rejected — swap-in-reserve engagement is forbidden for this run. Primary {{primarySlot}}, reserve {{reserveSlot}}, issuer {{issuerKey}}.",
+            mcr: "Paladin · reserve swap blocked — engagement forbidden ({{primarySlot}} / {{reserveSlot}})"
+        )
+        StructuredLogTemplateCatalog.registerTemplate(
+            pluginID: .paladin,
+            forKey: MissionRunLogTemplateKey.paladinReserveSwapPromptResolved,
+            defaultPattern: "Paladin reserve swap Mission Control engagement prompt resolved with verb {{verb}} (issuer {{issuerKey}}).",
+            mcr: "Reserve swap engagement · {{verb}}"
+        )
+        StructuredLogTemplateCatalog.registerTemplate(
+            pluginID: .paladin,
+            forKey: MissionRunLogTemplateKey.paladinReserveSwapCommitted,
+            defaultPattern: "Paladin reserve swap roster commit succeeded (commitOutcome {{commitOutcome}}; issuer {{issuerKey}}).",
+            mcr: "Paladin · reserve swap committed · {{commitOutcome}}"
+        )
+        StructuredLogTemplateCatalog.registerTemplate(
+            pluginID: .paladin,
+            forKey: MissionRunLogTemplateKey.paladinReserveSwapCommitRejected,
+            defaultPattern: "Paladin reserve swap roster commit did not apply (commitOutcome {{commitOutcome}}; issuer {{issuerKey}}).",
+            mcr: "Paladin · reserve swap commit blocked · {{commitOutcome}}"
+        )
     }
 }

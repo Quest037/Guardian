@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// MC-R bottom operator prompts for recipe escalations raised by MRE (headless recipe runs).
-/// Uses ``MissionRunRecipeOperatorPromptBridge`` + ``OperatorPromptResumptionChannel``; styling aligns with ``GuardianBottomPromptBanner``.
+/// Uses ``MissionRunRecipeOperatorPromptBridge`` + ``OperatorPromptCenter``; styling aligns with ``GuardianBottomPromptBanner``.
 struct MissionRunOperatorRecipePromptBanner: View {
     let missionRunID: UUID
 

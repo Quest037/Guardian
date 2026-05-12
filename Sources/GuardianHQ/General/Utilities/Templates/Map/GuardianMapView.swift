@@ -248,16 +248,21 @@ struct GuardianMapToolbarOptions {
     /// Caller-supplied buttons appended after the built-ins.
     var extraButtons: [GuardianMapToolbarButton]
 
+    /// When set, the reset toolbar control runs this instead of ``GuardianMapModel/recenter()`` (e.g. MC-R bbox fit).
+    var mapResetAction: ((GuardianMapModel) -> Void)?
+
     init(
         enabled: Bool = true,
         showStyleButton: Bool = true,
         showResetButton: Bool = true,
-        extraButtons: [GuardianMapToolbarButton] = []
+        extraButtons: [GuardianMapToolbarButton] = [],
+        mapResetAction: ((GuardianMapModel) -> Void)? = nil
     ) {
         self.enabled = enabled
         self.showStyleButton = showStyleButton
         self.showResetButton = showResetButton
         self.extraButtons = extraButtons
+        self.mapResetAction = mapResetAction
     }
 
     var hasAnyVisibleButton: Bool {
@@ -458,8 +463,16 @@ private struct GuardianMapToolbarOverlay: View {
                 GuardianMapToolbarButton(
                     id: "reset",
                     systemImage: "scope",
-                    help: "Recenter map",
-                    action: { [model] in model.recenter() }
+                    help: toolbar.mapResetAction != nil
+                        ? "Fit map to routes, map points, and live vehicles"
+                        : "Recenter map",
+                    action: { [model] in
+                        if let custom = toolbar.mapResetAction {
+                            custom(model)
+                        } else {
+                            model.recenter()
+                        }
+                    }
                 )
             )
         }

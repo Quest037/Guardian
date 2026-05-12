@@ -278,6 +278,54 @@ enum FleetVehicleType: String, Equatable, Codable, CaseIterable, Sendable {
     }
 }
 
+/// Policy for **substituting** one ``FleetVehicleType`` for another (reserve swap-in, roster vacancy fill, automation).
+///
+/// Locked rules are summarised in **README.md** → **Floating reserve pool** (class substitution row). Extend here when
+/// product adds tiers (e.g. USV vs UUV); keep call sites on ``FleetVehicleType/substitutionMatches(required:candidate:policy:)``.
+enum FleetVehicleSubstitutionPolicy: String, Equatable, Codable, CaseIterable, Sendable {
+    /// Candidate must equal the required granular type. ``unknown`` matches only ``unknown``.
+    case exactGranularType
+    /// Default for mission-run reserve draw / swap: exact match, plus **UGV-Wheeled ↔ UGV-Tracked** interchange.
+    /// UAV kinds (copter / fixed-wing / VTOL), USV, UUV, and legged UGV stay **exact** only.
+    case missionRunReserveSwap
+}
+
+extension FleetVehicleType {
+    /// Whether `candidate` may fill a vacancy that expects `required` under `policy`.
+    ///
+    /// **Unknown:** If the vacancy’s required type is ``unknown``, substitution is refused (no guess). If the
+    /// candidate is ``unknown`` while the vacancy is typed, substitution is refused. Both ``unknown`` matches under
+    /// ``FleetVehicleSubstitutionPolicy/exactGranularType`` only (equality).
+    static func substitutionMatches(
+        required: FleetVehicleType,
+        candidate: FleetVehicleType,
+        policy: FleetVehicleSubstitutionPolicy
+    ) -> Bool {
+        switch policy {
+        case .exactGranularType:
+            return required == candidate
+        case .missionRunReserveSwap:
+            if required == candidate { return true }
+            if required == .unknown || candidate == .unknown { return false }
+            return Self.ugvWheeledTrackedPair(required, candidate)
+        }
+    }
+
+    /// Convenience: `self` is the vacancy’s expected type; `candidate` is the reserve (or bound vehicle) type.
+    func substitutionMatches(candidate: FleetVehicleType, policy: FleetVehicleSubstitutionPolicy) -> Bool {
+        Self.substitutionMatches(required: self, candidate: candidate, policy: policy)
+    }
+
+    private static func ugvWheeledTrackedPair(_ a: FleetVehicleType, _ b: FleetVehicleType) -> Bool {
+        switch (a, b) {
+        case (.ugvWheeled, .ugvTracked), (.ugvTracked, .ugvWheeled):
+            return true
+        default:
+            return false
+        }
+    }
+}
+
 enum ManualControlIntent: String, Equatable, Codable, CaseIterable {
     case moveForward
     case moveLeft

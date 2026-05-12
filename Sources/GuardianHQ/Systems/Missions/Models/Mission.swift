@@ -1036,6 +1036,20 @@ struct MissionPoint: Identifiable, Codable, Equatable, Sendable {
 }
 
 extension MissionPoint {
+    /// Next `rally.n` / `extraction.n` with integer **n** strictly greater than any existing same-kind slug in `existing`
+    /// whose tail is all digits (template / editor rows). Non-numeric tails (e.g. `rally.alpha`) are ignored for the max
+    /// so they do not consume ordinals — matches ``MissionRunEnvironment`` runtime slug rules.
+    static func makeUniquePointId(kind: MissionPointKind, existing: Set<String>) -> String {
+        let prefix = kind == .rally ? "rally." : "extraction."
+        var maxN = 0
+        for raw in existing where raw.hasPrefix(prefix) {
+            let tail = String(raw.dropFirst(prefix.count))
+            guard let n = Int(tail) else { continue }
+            maxN = max(maxN, n)
+        }
+        return "\(prefix)\(maxN + 1)"
+    }
+
     /// Mission Control run **live overview** map — see README **Mission template points** and `MissionPoint.filteredForMissionControlLiveMap`.
     /// When `focusedTaskID` is `nil`, returns all points. Otherwise returns mission-wide (`taskID == nil`) plus rows scoped to that task.
     static func filteredForMissionControlLiveMap(_ points: [MissionPoint], focusedTaskID: UUID?) -> [MissionPoint] {

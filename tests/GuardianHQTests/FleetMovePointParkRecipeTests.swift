@@ -40,7 +40,10 @@ final class FleetMovePointParkRecipeTests: XCTestCase {
             XCTFail("missing descriptor")
             return
         }
-        let body = descriptor.body
+        guard let body = descriptor.body else {
+            XCTFail("missing recipe body on descriptor")
+            return
+        }
         XCTAssertEqual(body.entryStepID.rawValue, "armProbe")
         XCTAssertEqual(body.overallBudgetSeconds, 600)
         XCTAssertEqual(body.steps.count, 4)
@@ -57,7 +60,7 @@ final class FleetMovePointParkRecipeTests: XCTestCase {
             XCTFail("expected reArm invokeCommand")
             return
         }
-        XCTAssertEqual(armCmd, .fleetVehicleDoArm)
+        XCTAssertEqual(armCmd, FleetCommandName.fleetVehicleDoArm)
         XCTAssertTrue(armParams.values.isEmpty)
         XCTAssertEqual(armRetry?.maxAttempts, 3)
 
@@ -65,19 +68,19 @@ final class FleetMovePointParkRecipeTests: XCTestCase {
             XCTFail("expected move invokeCommand")
             return
         }
-        XCTAssertEqual(moveCmd, .fleetVehicleDoMovePoint)
+        XCTAssertEqual(moveCmd, FleetCommandName.fleetVehicleDoMovePoint)
         XCTAssertEqual(moveRetry?.maxAttempts, 3)
-        XCTAssertEqual(moveParams.value(named: "pointKind"), .reference(name: "pointKind"))
-        XCTAssertEqual(moveParams.value(named: "latitudeDeg"), .reference(name: "latitudeDeg"))
-        XCTAssertEqual(moveParams.value(named: "longitudeDeg"), .reference(name: "longitudeDeg"))
-        XCTAssertEqual(moveParams.value(named: "relativeAltitudeM"), .reference(name: "relativeAltitudeM"))
-        XCTAssertEqual(moveParams.value(named: "yawDeg"), .reference(name: "yawDeg"))
+        XCTAssertEqual(moveParams.value(named: "pointKind"), FleetRecipeParameterValue.reference(name: "pointKind"))
+        XCTAssertEqual(moveParams.value(named: "latitudeDeg"), FleetRecipeParameterValue.reference(name: "latitudeDeg"))
+        XCTAssertEqual(moveParams.value(named: "longitudeDeg"), FleetRecipeParameterValue.reference(name: "longitudeDeg"))
+        XCTAssertEqual(moveParams.value(named: "relativeAltitudeM"), FleetRecipeParameterValue.reference(name: "relativeAltitudeM"))
+        XCTAssertEqual(moveParams.value(named: "yawDeg"), FleetRecipeParameterValue.reference(name: "yawDeg"))
 
         guard case .invokeCommand(_, let parkCmd, let parkParams, let parkRetry, _) = body.steps[3] else {
             XCTFail("expected park invokeCommand")
             return
         }
-        XCTAssertEqual(parkCmd, .fleetVehicleDoPark)
+        XCTAssertEqual(parkCmd, FleetCommandName.fleetVehicleDoPark)
         XCTAssertTrue(parkParams.values.isEmpty)
         XCTAssertEqual(parkRetry?.maxAttempts, 2)
     }
@@ -88,8 +91,12 @@ final class FleetMovePointParkRecipeTests: XCTestCase {
             XCTFail("missing descriptor")
             return
         }
+        guard let body = descriptor.body else {
+            XCTFail("missing recipe body on descriptor")
+            return
+        }
         let errors = FleetRecipeBodyParser.validate(
-            descriptor.body,
+            body,
             against: descriptor,
             recipes: FleetRecipesCatalogue.shared,
             commands: FleetCommandsCatalogue.shared

@@ -217,6 +217,41 @@ final class MissionControlStore: ObservableObject {
         run.refreshDerivedTaskStates()
     }
 
+    /// Recompiles the Mission Control plan after a **reserve → roster** swap (floating pool pick or fixed template reserve row).
+    ///
+    /// While ``MissionRunEnvironment/status`` is ``MissionRunStatus/setup``, this matches ``compileMissionControlPlan`` (clear log scratch state, ``markCompiled``, notification). For any **non-setup** status, it only refreshes the compiled plan + task log context and **does not** regress ``MissionRunEnvironment/sessionPhase`` or wipe logging state.
+    func recompileMissionControlPlanAfterFloatingReserveSwap(
+        run: MissionRunEnvironment,
+        mission: Mission,
+        fleetVehicles: [MissionPickableFleetVehicle],
+        planCompileSource: String = MissionRunReserveSwapPlanRecompilationPolicy.floatingReserveSwapPlanCompileSource
+    ) {
+        if run.status == .setup {
+            compileMissionControlPlan(run: run, mission: mission, fleetVehicles: fleetVehicles)
+            return
+        }
+        run.updateTemplate(mission)
+            guard let planningResult = run.systems.planner.compileInitialPlan(
+                mission: mission,
+                fleetVehicles: fleetVehicles,
+                source: planCompileSource,
+                reason: nil
+            ) else { return }
+        let plan = planningResult.plan
+        run.systems.logging.setTaskContextFromRoleTracks(plan.roleTracks)
+        run.systems.logging.appendLogEvent(
+            level: .info,
+            speaker: .missionControl,
+            templateKey: MissionRunLogTemplateKey.compileSummary,
+            templateParams: [
+                "tracks": String(plan.roleTracks.count),
+                "taskTopology": plan.taskTopology.rawValue,
+                "teamTopology": plan.teamTopology.rawValue,
+            ]
+        )
+        run.refreshDerivedTaskStates()
+    }
+
     func ingestFleetMirrorLine(
         vehicleID: String,
         line: String,
@@ -329,13 +364,16 @@ final class MissionControlStore: ObservableObject {
     ///   LiveDrive pre-session probe, etc.) safe by construction.
     /// - Parameter preflightAuditSource: Passed through to ``FleetRecipeRunner/run`` as `source`
     ///   for catalogue dispatch audit (e.g. `vehicles.preflightProbe` vs `missionControl.preflightProbe`).
+    /// - Parameter telemetryGateMode: When ``MissionControlPreflightTelemetryGateMode/reserveSwapIn``, runs
+    ///   ``MissionControlReserveSwapInPreflightGates`` on the hub snapshot **before** the arm recipe (no catalogue audit).
     func runSingleVehiclePreflightProbe(
         vehicleID: String,
         fleetLink: FleetLinkService,
         sitl: SitlService,
         leaveArmed: Bool = false,
         allowDuringLiveMission: Bool = false,
-        preflightAuditSource: String = "vehicles.preflightProbe"
+        preflightAuditSource: String = "vehicles.preflightProbe",
+        telemetryGateMode: MissionControlPreflightTelemetryGateMode = .none
     ) async -> SingleVehiclePreflightProbeResult {
         if let blocked = preflightProbeReadinessBlocker(
             vehicleID: vehicleID,
@@ -347,6 +385,13 @@ final class MissionControlStore: ObservableObject {
         }
 
         let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID)
+        if telemetryGateMode == .reserveSwapIn,
+           let gate = MissionControlReserveSwapInPreflightGates.evaluate(
+            hub: hub,
+            isSimulation: isVehicleSimulationStream(vehicleID: vehicleID, fleetLink: fleetLink, sitl: sitl)
+           ) {
+            return gate
+        }
         if hub?.isArmed == true {
             return SingleVehiclePreflightProbeResult(
                 passed: true,
@@ -375,7 +420,36 @@ final class MissionControlStore: ObservableObject {
         )
     }
 
-    /// Attempts to **arm** every roster assignment and every **filled** floating reserve pool slot that has a fleet token + resolvable vehicle id (see ``MissionRunEnvironment/orderedStartRunPreflightProbeTargets()``). Rows are reported via `rowUpdated` as each step completes.
+    /// Runs a catalogue recipe on the **reserve** fleet stream with ``MissionRunReserveRecipeRunnerCorrelation``
+    /// encoded into ``FleetRecipeRunner/run(source:)`` (``missioncontrol.reserveSwap.*`` namespace).
+    ///
+    /// Defaults ``allowDuringLiveMission`` to `true` so swap-time gates can run while the run is live,
+    /// matching the contract documented on ``runSingleVehiclePreflightProbe(allowDuringLiveMission:)``.
+    /// Wire ``MissionRunRecipeOperatorPromptBridge/awaitMissionRecipeEscalationAnswer`` with
+    /// ``MissionRunReserveRecipeRunnerCorrelation/reserveStreamAssignmentID`` (or ``vacancyAssignmentID``,
+    /// depending on failure locus) when presenting MC-R prompts for reserve-side escalations.
+    func runReserveSwapStreamRecipe(
+        recipe: FleetRecipeName,
+        parameters: FleetRecipeParameters = .empty,
+        correlation: MissionRunReserveRecipeRunnerCorrelation,
+        phase: MissionRunReserveSwapPipelinePhase,
+        fleetLink: FleetLinkService,
+        allowDuringLiveMission: Bool = true,
+        escalationHandler: FleetRecipeEscalationHandler? = nil
+    ) async -> FleetRecipeOutcome {
+        let source = correlation.recipeRunnerSource(phase: phase)
+        return await FleetRecipeRunner.shared.run(
+            recipe: recipe,
+            parameters: parameters,
+            vehicleID: correlation.vehicleID,
+            source: source,
+            fleetLink: fleetLink,
+            allowDuringLiveMission: allowDuringLiveMission,
+            escalationHandler: escalationHandler
+        )
+    }
+
+    /// Attempts to **arm** every roster assignment that has a fleet token + resolvable vehicle id (see ``MissionRunEnvironment/orderedStartRunPreflightProbeSequence(mission:)`` — **floating reserve pool** berths are excluded at start run and probed at **reserve swap-in**). Rows are reported via `rowUpdated` as each step completes.
     /// - Returns: whether every slot passed, and vehicle IDs that **became armed** during this probe (for optional disarm on abandon).
     func runSingleVehiclePreflightProbeForStartRun(
         run: MissionRunEnvironment,
@@ -386,61 +460,76 @@ final class MissionControlStore: ObservableObject {
         var armedDuringProbe: [String] = []
         var allPassed = true
 
-        for target in run.orderedStartRunPreflightProbeTargets() {
-            let assignment = target.assignment
-            var row = MissionRunPreflightSlotRow(
+        for target in run.orderedStartRunPreflightProbeSequence(mission: run.template) {
+            let outcome = await runStartRunPreflightProbeForTarget(
                 identity: target.identity,
-                slotName: target.displayTitle,
-                phase: .testing,
-                detail: "Requesting arm…"
-            )
-            rowUpdated(row)
-
-            guard let tokenKey = assignment.attachedFleetVehicleToken,
-                  FleetMissionVehicleToken(storageKey: tokenKey) != nil
-            else {
-                row.phase = .failed
-                row.detail =
-                    "No fleet vehicle on this slot — pick a vehicle from the fleet list so Paladin can verify arming."
-                rowUpdated(row)
-                allPassed = false
-                continue
-            }
-
-            guard let vehicleID = resolvedFleetStreamVehicleID(assignment: assignment, fleetLink: fleetLink, sitl: sitl) else {
-                row.phase = .failed
-                row.detail =
-                    "No live MAVLink session for this slot (SIM not running, vehicle offline, or live bridge not connected)."
-                rowUpdated(row)
-                allPassed = false
-                continue
-            }
-
-            let probe = await runSingleVehiclePreflightProbe(
-                vehicleID: vehicleID,
+                displayTitle: target.displayTitle,
+                assignment: target.assignment,
                 fleetLink: fleetLink,
-                sitl: sitl,
-                leaveArmed: true,
-                allowDuringLiveMission: false,
-                preflightAuditSource: "missionControl.preflightProbe"
+                sitl: sitl
             )
-            if probe.passed {
-                if probe.armedDuringProbe {
-                    armedDuringProbe.append(vehicleID)
-                }
-                row.phase = .passed
-                row.detail = probe.detail
-                rowUpdated(row)
-            } else {
-                row.phase = .failed
-                row.detail = probe.detail
-                row.remediationAdvice = probe.remediationAdvice
-                rowUpdated(row)
+            rowUpdated(outcome.row)
+            if !outcome.rowPassed {
                 allPassed = false
+            }
+            if let vid = outcome.vehicleIDArmedDuringProbe {
+                armedDuringProbe.append(vid)
             }
         }
 
         return (allPassed, armedDuringProbe)
+    }
+
+    /// One step of start-run Mission Preflight (arm probe with `leaveArmed: true`).
+    func runStartRunPreflightProbeForTarget(
+        identity: MissionRunPreflightSlotIdentity,
+        displayTitle: String,
+        assignment: MissionRunAssignment,
+        fleetLink: FleetLinkService,
+        sitl: SitlService
+    ) async -> (row: MissionRunPreflightSlotRow, rowPassed: Bool, vehicleIDArmedDuringProbe: String?) {
+        var row = MissionRunPreflightSlotRow(
+            identity: identity,
+            slotName: displayTitle,
+            phase: .testing,
+            detail: "Requesting arm…"
+        )
+
+        guard let tokenKey = assignment.attachedFleetVehicleToken,
+              FleetMissionVehicleToken(storageKey: tokenKey) != nil
+        else {
+            row.phase = .failed
+            row.detail =
+                "No fleet vehicle on this slot — pick a vehicle from the fleet list so arming can be verified."
+            return (row, false, nil)
+        }
+
+        guard let vehicleID = resolvedFleetStreamVehicleID(assignment: assignment, fleetLink: fleetLink, sitl: sitl) else {
+            row.phase = .failed
+            row.detail =
+                "No live MAVLink session for this slot (SIM not running, vehicle offline, or live bridge not connected)."
+            return (row, false, nil)
+        }
+
+        let probe = await runSingleVehiclePreflightProbe(
+            vehicleID: vehicleID,
+            fleetLink: fleetLink,
+            sitl: sitl,
+            leaveArmed: true,
+            allowDuringLiveMission: false,
+            preflightAuditSource: "missionControl.preflightProbe"
+        )
+        if probe.passed {
+            row.phase = .passed
+            row.detail = probe.detail
+            let armed = probe.armedDuringProbe ? vehicleID : nil
+            return (row, true, armed)
+        } else {
+            row.phase = .failed
+            row.detail = probe.detail
+            row.remediationAdvice = probe.remediationAdvice
+            return (row, false, nil)
+        }
     }
 
     func registerRunObserver(
@@ -533,7 +622,18 @@ final class MissionControlStore: ObservableObject {
         }
     }
 
-    /// Swap-in-reserve operator prompts are not implemented in this build; Paladin may call this hook when ready.
+    /// Raises a **fixed template reserve → active primary/wingman** swap through Mission Control when rules of
+    /// engagement require handling; logs structured lines for the **issuer** (e.g. Paladin) either way.
+    ///
+    /// **Headless assistants** (Paladin has no UI) must use this Mission Control API so swap-in uses the same **MRE**
+    /// roster primitives as operator flows — not a second implementation in a plugin. MC-R chrome, if any, is owned by Mission Control.
+    ///
+    /// - Returns `true` when the proposal is structurally valid **and** engagement is not ``MissionRunEngagementDisposition/forbidden``.
+    ///   For **autonomous** engagement, Mission Control does not register an MC-R engagement prompt — the proposal is logged, a roster commit is attempted
+    ///   immediately via ``applyFixedTemplateReserveRosterSwapFromEngagementConsent``, and `true` is returned only when that commit succeeds.
+    ///   For **ask** / **defer** / **handoff**, Mission Control registers an **MC-R operator prompt** on ``MissionRunRecipeOperatorPromptBridge``;
+    ///   `true` means the prompt was raised. If the operator **Acknowledge**s, the same commit + plan recompile run
+    ///   asynchronously; **Abort** / timeout leaves the roster unchanged (see ``MissionRunLogTemplateKey/paladinReserveSwapPromptResolved``).
     @discardableResult
     func raiseOperatorPromptSwapInReserve(
         runID: UUID,
@@ -542,13 +642,202 @@ final class MissionControlStore: ObservableObject {
         issuerKey: String,
         observerToken: UUID
     ) -> Bool {
-        _ = primaryAssignmentID
-        _ = reserveAssignmentID
-        _ = issuerKey
-        guard observerPermissions(for: observerToken)?.contains(.act) == true,
-              runEnvironment(for: runID) != nil
-        else { return false }
-        return false
+        guard observerPermissions(for: observerToken)?.contains(.act) == true else { return false }
+        guard let run = runEnvironment(for: runID), let mission = run.template else { return false }
+
+        switch MissionRunPaladinReserveSwapProposalPolicy.evaluate(
+            run: run,
+            mission: mission,
+            primaryAssignmentID: primaryAssignmentID,
+            reserveAssignmentID: reserveAssignmentID
+        ) {
+        case .failure:
+            return false
+        case .success(let payload):
+            return Self.raisePaladinReserveSwapAfterValidation(
+                store: self,
+                run: run,
+                task: payload.task,
+                primary: payload.primary,
+                reserve: payload.reserve,
+                issuerKey: issuerKey
+            )
+        }
+    }
+
+    /// Must match ``PaladinMissionAssistant/assistantKey`` — Paladin-authored log lines use this speaker id.
+    private static let paladinMissionAssistantLogKey = "paladin.missionAssistant"
+
+    /// Mission Control **canonical** fixed-reserve roster commit after engagement rules allow it: delegates to
+    /// ``MissionRunEnvironment/swapRosterVacancyWithFixedTemplateReserveAssignment`` (MRE primitive), then plan recompile.
+    /// Assistants must not reimplement swap gates elsewhere — call through this store path only.
+    @discardableResult
+    private func applyFixedTemplateReserveRosterSwapFromEngagementConsent(
+        runID: UUID,
+        taskID: UUID,
+        taskName: String,
+        vacancyAssignmentID: UUID,
+        reserveAssignmentID: UUID,
+        triggerSource: String,
+        logParams: [String: String]
+    ) -> MissionRunFixedRosterReserveSwapOutcome {
+        guard let run = runEnvironment(for: runID) else { return .assignmentNotFound }
+        let outcome = run.swapRosterVacancyWithFixedTemplateReserveAssignment(
+            vacancyAssignmentID: vacancyAssignmentID,
+            reserveAssignmentID: reserveAssignmentID,
+            taskID: taskID,
+            triggerSource: triggerSource
+        )
+
+        var commitParams = logParams
+        commitParams["commitOutcome"] = Self.paladinFixedReserveCommitOutcomeToken(outcome)
+
+        switch outcome {
+        case .success:
+            if let mission = run.template,
+               let fleetLink = run.fleetLink,
+               let sitl = run.sitl {
+                let fleet = buildMissionPickableVehicles(fleetLink: fleetLink, sitl: sitl)
+                recompileMissionControlPlanAfterFloatingReserveSwap(
+                    run: run,
+                    mission: mission,
+                    fleetVehicles: fleet,
+                    planCompileSource: MissionRunReserveSwapPlanRecompilationPolicy.fixedRosterReserveSwapPlanCompileSource
+                )
+            }
+            updateRun(run)
+            run.systems.logging.appendLogEvent(
+                level: .info,
+                taskID: taskID,
+                taskLabel: taskName,
+                speaker: .assistant(key: Self.paladinMissionAssistantLogKey),
+                templateKey: MissionRunLogTemplateKey.paladinReserveSwapCommitted,
+                templateParams: commitParams
+            )
+        default:
+            run.systems.logging.appendLogEvent(
+                level: .warning,
+                taskID: taskID,
+                taskLabel: taskName,
+                speaker: .assistant(key: Self.paladinMissionAssistantLogKey),
+                templateKey: MissionRunLogTemplateKey.paladinReserveSwapCommitRejected,
+                templateParams: commitParams
+            )
+        }
+        return outcome
+    }
+
+    private static func paladinFixedReserveCommitOutcomeToken(_ outcome: MissionRunFixedRosterReserveSwapOutcome) -> String {
+        switch outcome {
+        case .success: return "success"
+        case .assignmentNotFound: return "assignmentNotFound"
+        case .assignmentNotBoundToTask: return "assignmentNotBoundToTask"
+        case .reserveNotEligibleForVacancy: return "reserveNotEligibleForVacancy"
+        case .identicalFleetBindingNoOp: return "identicalFleetBindingNoOp"
+        case .pickRejectedDuplicateOrStaleBinding: return "pickRejectedDuplicateOrStaleBinding"
+        }
+    }
+
+    @discardableResult
+    private static func raisePaladinReserveSwapAfterValidation(
+        store: MissionControlStore,
+        run: MissionRunEnvironment,
+        task: MissionTask,
+        primary: MissionRunAssignment,
+        reserve: MissionRunAssignment,
+        issuerKey: String
+    ) -> Bool {
+        let tid = task.id
+        let logParams: [String: String] = [
+            "issuerKey": issuerKey,
+            "primaryAssignmentID": primary.id.uuidString,
+            "reserveAssignmentID": reserve.id.uuidString,
+            "missionTaskID": tid.uuidString,
+            "primarySlot": primary.slotName,
+            "reserveSlot": reserve.slotName,
+            "engagement": run.resolvedEngagementDisposition(for: .swapInReserve).rawValue,
+        ]
+
+        let disposition = run.resolvedEngagementDisposition(for: .swapInReserve)
+        switch disposition {
+        case .autonomous:
+            run.systems.logging.appendLogEvent(
+                level: .info,
+                taskID: tid,
+                taskLabel: task.name,
+                speaker: .assistant(key: paladinMissionAssistantLogKey),
+                templateKey: MissionRunLogTemplateKey.paladinReserveSwapEngagementAutonomous,
+                templateParams: logParams
+            )
+            let committed = store.applyFixedTemplateReserveRosterSwapFromEngagementConsent(
+                runID: run.id,
+                taskID: tid,
+                taskName: task.name,
+                vacancyAssignmentID: primary.id,
+                reserveAssignmentID: reserve.id,
+                triggerSource: "paladin.missionAssistant.reserveSwapAutonomous",
+                logParams: logParams
+            )
+            return committed == .success
+
+        case .forbidden:
+            run.systems.logging.appendLogEvent(
+                level: .warning,
+                taskID: tid,
+                taskLabel: task.name,
+                speaker: .assistant(key: paladinMissionAssistantLogKey),
+                templateKey: MissionRunLogTemplateKey.paladinReserveSwapEngagementForbidden,
+                templateParams: logParams
+            )
+            return false
+
+        case .ask, .defer, .handoff:
+            run.systems.logging.appendLogEvent(
+                level: .info,
+                taskID: tid,
+                taskLabel: task.name,
+                speaker: .assistant(key: paladinMissionAssistantLogKey),
+                templateKey: MissionRunLogTemplateKey.paladinReserveSwapProposed,
+                templateParams: logParams
+            )
+            let runID = run.id
+            let primaryID = primary.id
+            let reserveID = reserve.id
+            let taskName = task.name
+            let paramsSnapshot = logParams
+            Task { @MainActor [weak store] in
+                guard let store else { return }
+                let verb = await MissionRunRecipeOperatorPromptBridge.shared.awaitPaladinFixedReserveSwapEngagementConsent(
+                    missionRunID: runID,
+                    primary: primary,
+                    reserve: reserve,
+                    missionTaskID: tid,
+                    taskName: taskName
+                )
+                guard let runNow = store.runEnvironment(for: runID) else { return }
+                var resolvedParams = paramsSnapshot
+                resolvedParams["verb"] = verb.rawValue
+                runNow.systems.logging.appendLogEvent(
+                    level: .info,
+                    taskID: tid,
+                    taskLabel: taskName,
+                    speaker: .assistant(key: paladinMissionAssistantLogKey),
+                    templateKey: MissionRunLogTemplateKey.paladinReserveSwapPromptResolved,
+                    templateParams: resolvedParams
+                )
+                guard verb == .acknowledge else { return }
+                _ = store.applyFixedTemplateReserveRosterSwapFromEngagementConsent(
+                    runID: runID,
+                    taskID: tid,
+                    taskName: taskName,
+                    vacancyAssignmentID: primaryID,
+                    reserveAssignmentID: reserveID,
+                    triggerSource: "paladin.missionAssistant.reserveSwapConsent",
+                    logParams: paramsSnapshot
+                )
+            }
+            return true
+        }
     }
 
 }

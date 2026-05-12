@@ -92,7 +92,10 @@ final class FleetVehicleLiveStatusBadgeRowTests: XCTestCase {
         let op = FleetVehicleOperationalModel(hub: hub, lifecycleStatus: nil)
         let row = FleetVehicleLiveStatusBadgeRow(hub: hub, operational: op)
         XCTAssertTrue(row.motion.isActive)
-        XCTAssertEqual(op.movement.horizontalSpeedMS, 0.25, accuracy: 1e-6)
+        guard let horizontal = op.movement.horizontalSpeedMS else {
+            return XCTFail("expected horizontal speed from odometry vx")
+        }
+        XCTAssertEqual(horizontal, 0.25, accuracy: 1e-6)
     }
 
     func test_mode_hold_inactive_other_active() {

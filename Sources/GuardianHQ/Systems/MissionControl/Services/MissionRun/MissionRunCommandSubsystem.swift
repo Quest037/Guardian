@@ -408,12 +408,11 @@ final class MissionRunCommandSubsystem {
         issued: MissionRunIssuedCommand,
         vehicleID: String
     ) -> FleetRecipeEscalationHandler {
-        let runID = environment?.id
         let missionTaskID = environment?.systems.logging.effectiveTaskFields(forAssignmentID: issued.assignmentID).0
         let assignmentID = issued.assignmentID
         let slotLabel = issued.slotName
-        return { escalation in
-            guard let runID else {
+        return { [weak self] escalation in
+            guard let self, let runID = self.environment?.id else {
                 let wizard = FleetRecipeRunner.shared.vehicleInspectorWizardEscalationHandler(for: vehicleID)
                 return await wizard(escalation)
             }
@@ -422,6 +421,7 @@ final class MissionRunCommandSubsystem {
                 assignmentID: assignmentID,
                 missionTaskID: missionTaskID,
                 slotLabel: slotLabel,
+                run: self.environment,
                 escalation: escalation
             )
         }

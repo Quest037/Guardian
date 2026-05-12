@@ -1,11 +1,11 @@
 {
   "_comment": "First composite recipe in the catalogue — sequential calibration sweep (compass → accelerometer → gyro) followed by an arm probe to verify the vehicle is actually arm-ready before declaring success. Used as the recovery flow when the autopilot reports calibration-required on arm, or when an operator triggers a 'fix calibration' from a system that's reporting `calibrationDeclined`. Composition rule v1 caps depth at 1 level, so every step here invokes an atomic (command-only) child recipe — no recipe-of-recipe-of-recipe. The runner synthesises the child's binary outcome down to a single FleetCommandResponse (success or error.unknown) which the matchers below branch on. Failing the parent on any child failure is intentional: a partial calibration sweep is worse than no sweep because the autopilot's pre-flight state is undefined.\nOverall budget is 600s — right at the parser cap. Component budgets sum to ~560s (compass 300 + accel 180 + gyro 60 + armprobe 20) plus per-step setup overhead.",
-  "entryStepID": "cal-compass",
+  "entryStepID": "cal_compass",
   "overallBudgetSeconds": 600,
   "steps": [
     {
       "kind": "invokeRecipe",
-      "id": "cal-compass",
+      "id": "cal_compass",
       "recipe": "recipe.fleet.calibrate.compass",
       "matchers": [
         { "when": { "kind": "success" }, "then": { "kind": "continueToNextStep" } },
@@ -20,7 +20,7 @@
     },
     {
       "kind": "invokeRecipe",
-      "id": "cal-accel",
+      "id": "cal_accel",
       "recipe": "recipe.fleet.calibrate.accelerometer",
       "matchers": [
         { "when": { "kind": "success" }, "then": { "kind": "continueToNextStep" } },
@@ -50,7 +50,7 @@
     },
     {
       "kind": "invokeRecipe",
-      "id": "verify-armprobe",
+      "id": "verify_armprobe",
       "recipe": "recipe.fleet.diagnose.armprobe",
       "matchers": [
         { "when": { "kind": "success" }, "then": { "kind": "succeed" } },

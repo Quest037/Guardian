@@ -681,8 +681,7 @@ extension OperatorPromptEvent {
     /// ``OperatorPromptTarget`` carrying the recipe run id and the vehicle id
     /// the recipe is targeting.
     ///
-    /// The runner's `FleetRecipeEscalationHandler` calls into the prompt center
-    /// with this constructor (Stage D wiring) so a recipe escalation becomes an
+    /// The ``FleetRecipeEscalationHandler`` calls into ``OperatorPromptCenter`` with this constructor so a recipe escalation becomes an
     /// operator prompt without losing any of the escalation contract data — the
     /// wrapped `FleetRecipeEscalationEvent` is preserved on the origin so the UI
     /// can render the step path, the last response, and the reason kind without
@@ -755,7 +754,7 @@ extension OperatorPromptEvent {
     /// Body is intentionally generic — the real UI surface (Stage E wizard, MCR
     /// panel) renders the step + last response on its own; the body here is the
     /// drawer-row / OOA-notification fallback that has no other context.
-    private static func defaultsFor(reason: FleetRecipeEscalationReason) -> (severity: GuardianFeedbackSeverity, title: String, body: String) {
+    static func defaultsFor(reason: FleetRecipeEscalationReason) -> (severity: GuardianFeedbackSeverity, title: String, body: String) {
         switch reason {
         case .operatorActionRequired(let kind):
             return (
@@ -764,6 +763,13 @@ extension OperatorPromptEvent {
                 "Recipe is waiting for: \(kind.rawValue)."
             )
         case .unrecoverableFailure(let kind):
+            if kind == .needsAirframeReplacement {
+                return (
+                    .warning,
+                    "Airframe replacement may be needed",
+                    "This step reports the aircraft is unlikely to continue in its current mission role."
+                )
+            }
             return (
                 .error,
                 "Recipe failed",

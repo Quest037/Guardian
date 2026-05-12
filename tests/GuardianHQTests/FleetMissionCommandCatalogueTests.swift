@@ -1,3 +1,4 @@
+import Mavsdk
 import XCTest
 @testable import GuardianHQ
 
@@ -109,6 +110,6 @@ final class FleetMissionCommandCatalogueTests: XCTestCase {
         XCTAssertEqual(items.count, 1)
         XCTAssertEqual(items[0].latitudeDeg, original.latitudeDeg, accuracy: 0.000_001)
         XCTAssertEqual(items[0].longitudeDeg, original.longitudeDeg, accuracy: 0.000_001)
-        XCTAssertEqual(items[0].cameraAction, .takePhoto)
+        XCTAssertEqual(items[0].cameraAction, Mavsdk.Mission.MissionItem.CameraAction.takePhoto)
     }
 }

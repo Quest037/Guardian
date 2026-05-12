@@ -54,6 +54,179 @@ enum MissionTaskState: String, Codable, CaseIterable, Equatable, Hashable {
     }
 }
 
+/// In-flight **intent** for a task’s abort or complete/recovery protocol — distinct from settled ``MissionTaskState``
+/// (see ``MissionRunEnvironment/taskAttemptingByTaskID``, recomputed in ``MissionRunEnvironment/refreshDerivedTaskStates()``).
+///
+/// v1 derives this only from per-task orchestration flags (issued wind-down + graceful **pending**). When per-slot
+/// evidence exists (``TaskRosterAssignmentStatesToDo.md`` §3+), clearing rules may split from ``MissionTaskState``.
+enum MissionTaskAttemptState: String, Codable, CaseIterable, Equatable, Hashable {
+    /// Abort-policy wind-down **commands were dispatched** for this task; operator / future slot rollup not finished.
+    case abortWindDownIssued
+    /// Complete-policy recovery wind-down **was dispatched**; recovery acknowledgement not finished.
+    case recoveryWindDownIssued
+    /// **Abort after this autopilot cycle** is scheduled; dispatch has not run yet.
+    case abortWindDownScheduledAfterCycle
+    /// **Complete after this cycle** is scheduled; dispatch has not run yet.
+    case recoveryWindDownScheduledAfterCycle
+
+    /// Short operator-facing title (MC-R / banners).
+    var displayTitle: String {
+        switch self {
+        case .abortWindDownIssued:
+            return "Abort wind-down in progress"
+        case .recoveryWindDownIssued:
+            return "Recovery wind-down in progress"
+        case .abortWindDownScheduledAfterCycle:
+            return "Abort scheduled after this cycle"
+        case .recoveryWindDownScheduledAfterCycle:
+            return "Complete scheduled after this cycle"
+        }
+    }
+}
+
+/// Per-roster-slot mission orchestration progress within a run (``TaskRosterAssignmentStatesToDo.md`` §2).
+///
+/// Values persist on ``MissionRunAssignment/slotLifecycleLanes`` (README **Roster slot state storage** — option **(a)** on-row). Operator-facing roster chip copy is ``displayTitle`` (**v1 UX lock**); revisit when §3 evidence surfaces ship.
+enum MissionRunAssignmentSlotState: String, Codable, CaseIterable, Equatable, Hashable {
+    case idle
+    case staging
+    case executingMission
+    case betweenCycles
+    case policyAborting
+    case policyCompleting
+    case policySucceeded
+    case policyFailed
+    case blockedNoVehicle
+    case notApplicableEmptySlot
+    case supersededReassigned
+
+    var displayTitle: String {
+        switch self {
+        case .idle: return "Idle"
+        case .staging: return "Staging"
+        case .executingMission: return "On mission"
+        case .betweenCycles: return "Between cycles"
+        case .policyAborting: return "Abort in progress"
+        case .policyCompleting: return "Recovery in progress"
+        case .policySucceeded: return "Policy complete"
+        case .policyFailed: return "Policy failed"
+        case .blockedNoVehicle: return "No vehicle bound"
+        case .notApplicableEmptySlot: return "Empty slot"
+        case .supersededReassigned: return "Reassigned"
+        }
+    }
+}
+
+/// Per-assignment **commanded** vs **observed** slot lifecycle (``TaskRosterAssignmentStatesToDo.md`` §2 v2).
+///
+/// - **commanded:** last state driven by MRE dispatch / policy issuance (never updated by hub-only ticks).
+/// - **observed:** hub / recipe / pull-conformance view (may lag or briefly disagree).
+///
+/// Use ``MissionRunAssignmentSlotLaneMerge/preferredDisplayState(lanes:)`` for UI so stale telemetry does not hide an issued abort/complete policy.
+struct MissionRunAssignmentSlotStateLanes: Codable, Equatable, Hashable {
+    var commanded: MissionRunAssignmentSlotState
+    var observed: MissionRunAssignmentSlotState
+
+    init(commanded: MissionRunAssignmentSlotState = .idle, observed: MissionRunAssignmentSlotState = .idle) {
+        self.commanded = commanded
+        self.observed = observed
+    }
+}
+
+extension MissionRunAssignmentSlotState {
+    /// When true, ``MissionRunAssignmentSlotLaneMerge/preferredDisplayState(lanes:)`` keeps **commanded** over **observed** so lagging hub data cannot mask an in-flight abort/complete policy.
+    var prefersCommandedLaneForDisplayMerge: Bool {
+        switch self {
+        case .policyAborting, .policyCompleting:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Commanded values that remain authoritative over observed updates for merge/display (terminal or non-participating).
+    var isCommandedTerminalOrNonParticipatingMergeLock: Bool {
+        switch self {
+        case .policySucceeded, .policyFailed, .supersededReassigned, .notApplicableEmptySlot, .blockedNoVehicle:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Mission Control roster / live-console chip severity. `nil` means **no pill** (quiet default lanes).
+    var missionControlRosterBadgeSeverity: GuardianFeedbackSeverity? {
+        switch self {
+        case .idle, .notApplicableEmptySlot:
+            return nil
+        case .staging, .executingMission, .betweenCycles, .supersededReassigned, .policyCompleting:
+            return .info
+        case .policyAborting:
+            return .warning
+        case .policySucceeded:
+            return .success
+        case .policyFailed, .blockedNoVehicle:
+            return .error
+        }
+    }
+}
+
+/// Resolves **commanded** vs **observed** ``MissionRunAssignmentSlotState`` for a single display label.
+enum MissionRunAssignmentSlotLaneMerge {
+    /// Picks one ``MissionRunAssignmentSlotState`` for chips / Paladin / rollup when the two lanes disagree.
+    ///
+    /// **Rules (v1):** (1) If **commanded** is ``policyAborting`` / ``policyCompleting``, return **commanded**. (2) If **commanded** is terminal or slot-non-participating (see ``MissionRunAssignmentSlotState/isCommandedTerminalOrNonParticipatingMergeLock``), return **commanded**. (3) If **observed** reports ``policyFailed`` or ``blockedNoVehicle`` while **commanded** is still ``idle`` / ``staging`` / ``executingMission`` / ``betweenCycles``, return **observed** so evidence-backed failures surface. (4) Otherwise return **commanded**.
+    ///
+    /// Extend when §3 evidence catalogue adds richer pull-path semantics.
+    static func preferredDisplayState(lanes: MissionRunAssignmentSlotStateLanes) -> MissionRunAssignmentSlotState {
+        let c = lanes.commanded
+        let o = lanes.observed
+        if c.prefersCommandedLaneForDisplayMerge || c.isCommandedTerminalOrNonParticipatingMergeLock {
+            return c
+        }
+        switch o {
+        case .policyFailed, .blockedNoVehicle:
+            switch c {
+            case .idle, .staging, .executingMission, .betweenCycles:
+                return o
+            default:
+                break
+            }
+        default:
+            break
+        }
+        return c
+    }
+}
+
+/// Roll-up helpers for MC-R task rows (worst slot attention across bound roster rows).
+enum MissionControlAssignmentSlotRosterAttention {
+    /// Picks the highest-precedence ``GuardianFeedbackSeverity`` among assignments’ merged slot states (for a compact task-row chip).
+    static func worstAmong(assignments: [MissionRunAssignment]) -> (severity: GuardianFeedbackSeverity, title: String)? {
+        var bestRank = -1
+        var picked: (GuardianFeedbackSeverity, String)?
+        for a in assignments {
+            let merged = MissionRunAssignmentSlotLaneMerge.preferredDisplayState(lanes: a.effectiveSlotLifecycleLanes)
+            guard let sev = merged.missionControlRosterBadgeSeverity else { continue }
+            let r = rank(sev)
+            if r > bestRank {
+                bestRank = r
+                picked = (sev, merged.displayTitle)
+            }
+        }
+        return picked
+    }
+
+    private static func rank(_ s: GuardianFeedbackSeverity) -> Int {
+        switch s {
+        case .error: return 3
+        case .warning: return 2
+        case .success: return 1
+        case .info: return 0
+        }
+    }
+}
+
 enum MissionRunStatus: String, Codable, CaseIterable, Identifiable {
     case setup
     case running
@@ -585,6 +758,8 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
     /// `FleetMissionVehicleToken.storageKey` when bound to the Vehicles list; `nil` if unassigned or legacy text-only.
     var attachedFleetVehicleToken: String?
     var policies: MissionRunAssignmentPolicies
+    /// Per-slot **commanded** vs **observed** lifecycle (``MissionRunAssignmentSlotStateLanes``). **Omitted** in legacy JSON and when never persisted — use ``effectiveSlotLifecycleLanes``. **Storage:** persisted slot evidence stays on this row (README **Roster slot state storage** — option **(a)** locked); ``MissionRunAssignment/syntheticForReservePool`` leaves this nil.
+    var slotLifecycleLanes: MissionRunAssignmentSlotStateLanes?
 
     init(
         id: UUID = UUID(),
@@ -593,7 +768,8 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         slotName: String,
         attachedDevice: String = "",
         attachedFleetVehicleToken: String? = nil,
-        policies: MissionRunAssignmentPolicies = MissionRunAssignmentPolicies()
+        policies: MissionRunAssignmentPolicies = MissionRunAssignmentPolicies(),
+        slotLifecycleLanes: MissionRunAssignmentSlotStateLanes? = nil
     ) {
         self.id = id
         self.taskId = taskId
@@ -602,11 +778,13 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         self.attachedDevice = attachedDevice
         self.attachedFleetVehicleToken = attachedFleetVehicleToken
         self.policies = policies
+        self.slotLifecycleLanes = slotLifecycleLanes
     }
 
     enum CodingKeys: String, CodingKey {
         case id, taskId, legacyAssignmentTaskUUID = "pathId", rosterDeviceId, slotName, attachedDevice, attachedFleetVehicleToken
         case policies
+        case slotLifecycleLanes
     }
 
     init(from decoder: Decoder) throws {
@@ -619,6 +797,7 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         attachedDevice = try c.decodeIfPresent(String.self, forKey: .attachedDevice) ?? ""
         attachedFleetVehicleToken = try c.decodeIfPresent(String.self, forKey: .attachedFleetVehicleToken)
         policies = try c.decodeIfPresent(MissionRunAssignmentPolicies.self, forKey: .policies) ?? MissionRunAssignmentPolicies()
+        slotLifecycleLanes = try c.decodeIfPresent(MissionRunAssignmentSlotStateLanes.self, forKey: .slotLifecycleLanes)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -634,6 +813,12 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         if hasAbort || hasComplete {
             try c.encode(policies, forKey: .policies)
         }
+        try c.encodeIfPresent(slotLifecycleLanes, forKey: .slotLifecycleLanes)
+    }
+
+    /// Lanes for runtime / UI: persisted ``slotLifecycleLanes`` when set, otherwise **idle** / **idle** (no slot writers yet).
+    var effectiveSlotLifecycleLanes: MissionRunAssignmentSlotStateLanes {
+        slotLifecycleLanes ?? MissionRunAssignmentSlotStateLanes()
     }
 
     /// Roster slot is ready to start when tied to a fleet vehicle or legacy free-text device.
@@ -644,7 +829,7 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
 }
 
 extension MissionRunAssignment {
-    /// Synthetic assignment for fleet resolution / Paladin preflight on a floating reserve **pool** slot (`rosterDeviceId` is a stable filler).
+    /// Synthetic assignment for fleet resolution / Mission Preflight on a floating reserve **pool** slot (`rosterDeviceId` is a stable filler).
     static func syntheticForReservePool(slot: MissionRunReservePoolSlot) -> MissionRunAssignment {
         MissionRunAssignment(
             id: slot.id,
@@ -665,10 +850,25 @@ enum MissionRunPreflightSlotPhase: String, Equatable {
     case failed
 }
 
-/// Which binding Paladin start preflight is probing (roster vs floating reserve pool).
+/// Which binding start-run Mission Preflight is probing (roster vs floating reserve pool).
 enum MissionRunPreflightSlotIdentity: Equatable, Hashable, Sendable {
     case rosterAssignment(UUID)
     case floatingReservePool(taskID: UUID, slotID: UUID)
+}
+
+/// One roster row in the Mission Preflight overlay (before / during / after arm probe).
+struct MissionRunPreflightUITarget: Equatable {
+    let identity: MissionRunPreflightSlotIdentity
+    let displayTitle: String
+    let assignment: MissionRunAssignment
+}
+
+/// Task-grouped roster targets for Mission Preflight (horizontal card rows per task).
+struct MissionRunPreflightUIProbeSection: Identifiable, Equatable {
+    let id: UUID
+    let title: String
+    let titleMuted: Bool
+    let targets: [MissionRunPreflightUITarget]
 }
 
 struct MissionRunPreflightSlotRow: Identifiable, Equatable {
@@ -694,6 +894,16 @@ struct SingleVehiclePreflightProbeResult: Equatable {
     let armedDuringProbe: Bool
     let detail: String
     let remediationAdvice: PreflightFailureRemediationAdvice?
+}
+
+/// Optional hub snapshot gates applied inside ``MissionControlStore/runSingleVehiclePreflightProbe`` **before**
+/// the arm-probe recipe. Modes that add checks must keep them **telemetry-only** (no catalogue dispatch) unless
+/// they use a distinct ``preflightAuditSource`` from start-run / swap-in arm probes.
+enum MissionControlPreflightTelemetryGateMode: Equatable {
+    /// Arm recipe only (after readiness / live-mission policy).
+    case none
+    /// MC-R floating reserve **swap-in**: GPS/battery/health/staleness/mode substring gates (see ``MissionControlReserveSwapInPreflightGates``).
+    case reserveSwapIn
 }
 
 enum MissionRunEventLevel: String, Equatable {
@@ -1274,6 +1484,149 @@ enum MissionControlPlanCompiler {
             handoffMode: handoffMode,
             roleTracks: roleTracks
         )
+    }
+}
+
+// MARK: - Reserve swap (operator copy)
+
+/// Operator-facing strings for Mission Control Running reserve swap-in confirms, toasts, and phase-log detail.
+enum MissionRunReserveSwapOperatorCopy {
+    /// Body for reserve pool pick confirm (short; detail belongs in docs / failure flows).
+    static let reserveSwapPoolPickConfirmMessage: String =
+        "An arm check runs on this reserve before it takes the roster slot. If it fails, try again after fixing the aircraft, or pick another pool row."
+
+    /// Prepended to the reserve arm-check failure dialog so operators know roster state is unchanged.
+    static let reserveSwapPreflightFailurePrologue: String =
+        "Nothing on the roster changes until the arm check passes successfully."
+
+    // MARK: MC-R toasts (floating pool swap-in + autonomous fixed)
+
+    static let toastReserveSwapChecksRunning = "Reserve swap checks are still running — wait for them to finish."
+    static let toastBerthBusyWaitArmPreflightBeforeSwap = "This berth is busy — wait for arm preflight on it to finish before swapping in."
+    static let toastMissionTemplateUnavailable = "Mission template unavailable."
+    static let toastRosterSlotNotBoundToTask = "This roster slot is not bound to a task."
+    static let toastSlotNotOnTaskRoster = "This slot is not on the task’s roster."
+    static let toastNoFloatingReserveForSlotFallback = "No floating reserve available for this slot."
+    static let toastReserveSwapStillRunningWaitHub = "A reserve swap is still running — wait for hub checks to finish."
+    static let toastReserveSwapInProgressWaitHub = "Reserve swap is in progress — wait for hub checks to finish."
+    static let toastReserveSwapAlreadyRunning = "Reserve swap is already running — wait for it to finish."
+    static let toastPoolBerthNoLongerOnTask = "That pool berth is no longer on this task."
+    static let toastNoLiveReserveLink = "No live link for this reserve — connect the vehicle or SIM, then try again."
+    static let toastBerthArmPreflightRunningBeforeSwap = "This berth’s arm preflight is still running — wait for it to finish before swapping in."
+    static let toastFloatingReserveSwappedOntoRoster = "Reserve swapped onto roster slot."
+    static let toastFloatingReserveAutoSwappedOntoRoster = "Reserve auto-swapped onto roster (autonomous engagement)."
+    static let toastNoEligibleFloatingReserveForTask = "No eligible floating reserve for this task."
+    static let toastRosterSlotNotFoundOnRun = "Roster slot not found on this run."
+    static let toastRosterSlotNotOnSelectedTask = "This roster slot is not on the selected task."
+    static let toastEveryPoolAircraftMatchesRosterBinding = "Every pool aircraft on this task already matches this roster fleet binding."
+    static let toastNoPoolClassMatchForRosterSlot = "No floating reserve on this task matches this roster slot’s vehicle class."
+    static let toastReserveSwapReturnRejectedPrefix = "Reserve swap aborted — the roster aircraft cannot occupy the pool berth:"
+    static let toastReserveSwapPoolClearFailed = "Reserve swap could not clear the pool berth. Check the mission log for this run."
+    static let toastReserveSwapPickRejectedStale = "Reserve swap aborted: that aircraft is no longer eligible (duplicate binding, written off, or operational state changed). Refresh the roster and pool."
+    static let toastPoolBerthNotAvailableForRosterSlot = "That pool berth is not available for this roster slot."
+    static let toastNoLiveReserveAutoSwapSkipped = "No live link for this reserve — auto-swap skipped."
+    static let toastReserveAutoSwapSkippedPreflight = "Reserve auto-swap skipped — reserve aircraft did not pass preflight."
+    static let toastFixedReserveNotAvailableForRosterSlot = "That fixed reserve row is not available for this roster slot."
+    static let toastEveryReserveMatchesRosterBinding = "Every reserve on this task already matches this roster fleet binding."
+    static let toastReserveAutoSwapAbortedPickRejected = "Reserve auto-swap aborted: that aircraft is no longer eligible (duplicate binding, written off, or operational state changed)."
+
+    static func toastReserveSwapReturnRejected(_ outcome: MissionRunReservePoolReturnAssignmentOutcome) -> String {
+        "\(toastReserveSwapReturnRejectedPrefix) \(reservePoolReturnRejectionSummary(outcome))"
+    }
+
+    /// Short `detail` for ``MissionRunReserveSwapPhaseLogTemplateKey`` when a floating pool **roster commit** path fails.
+    static func floatingPoolSwapRosterCommitFailureDetail(_ outcome: MissionRunFloatingReserveSwapOutcome) -> String {
+        switch outcome {
+        case .success: return "unexpected success branch"
+        case .noEligiblePoolSlots: return "No eligible pool berths on this task."
+        case .assignmentNotFound: return "Roster assignment id not found."
+        case .assignmentNotBoundToTask: return "Roster assignment not bound to this task."
+        case .identicalFleetBindingNoOp: return "Identical fleet binding — no-op."
+        case .noClassCompatiblePoolSlots: return "No class-compatible pool slot."
+        case .returnRejected(let r): return "Return-to-pool rejected: \(reservePoolReturnRejectionSummary(r))."
+        case .poolClearFailed: return "Pool clear failed after commit attempt."
+        case .pickRejectedDuplicateOrStaleBinding: return "Pre-commit dedupe or operational gate rejected pick."
+        case .poolSlotNotEligible: return "Pool berth not in enumerated candidates for this vacancy."
+        }
+    }
+
+    /// Short `detail` for phase logs when a fixed roster reserve swap commit fails.
+    static func fixedRosterSwapRosterCommitFailureDetail(_ outcome: MissionRunFixedRosterReserveSwapOutcome) -> String {
+        switch outcome {
+        case .success: return "unexpected success branch"
+        case .assignmentNotFound: return "Assignment not found."
+        case .assignmentNotBoundToTask: return "Assignment not bound to task."
+        case .reserveNotEligibleForVacancy: return "Fixed reserve row not eligible for this vacancy."
+        case .identicalFleetBindingNoOp: return "Identical fleet binding — no-op."
+        case .pickRejectedDuplicateOrStaleBinding: return "Pre-commit dedupe or operational gate rejected pick."
+        }
+    }
+
+    private static func reservePoolReturnRejectionSummary(_ r: MissionRunReservePoolReturnAssignmentOutcome) -> String {
+        switch r {
+        case .rejectedNoBinding: return "no binding"
+        case .rejectedFleetVehicleWrittenOff: return "aircraft written off for this run’s pool"
+        case .rejectedFleetContextUnavailable: return "fleet link unavailable"
+        case .rejectedFleetVehicleUnresolved: return "vehicle not resolved"
+        case .rejectedVehicleNotOperational: return "aircraft not operational"
+        case .rejectedBatteryCritical: return "battery critical"
+        case .appended, .mergedExisting: return "unexpected"
+        }
+    }
+}
+
+// MARK: - Reserve swap (VoiceOver / map bridge)
+
+/// Concise strings for **MC-R** reserve swap context: Leaflet marker `title` (via ``MapVehicleMarker/accessibilityTitle``) and SwiftUI health-card summaries.
+enum MissionRunReserveSwapAccessibilityCopy {
+    /// Leaflet `title` / ``MapVehicleMarker/accessibilityTitle`` for floating pool hub markers.
+    static func floatingPoolMapMarker(
+        taskName: String,
+        berthLabel: String,
+        swapPickActiveOnTask: Bool,
+        markerIsEligiblePickTarget: Bool,
+        browsingThisBerthOnTask: Bool
+    ) -> String {
+        var parts: [String] = [
+            "Floating reserve map marker",
+            "task \(taskName)",
+            "berth \(berthLabel)",
+        ]
+        if browsingThisBerthOnTask {
+            parts.append("floating reserve berth overlay is open for this marker")
+        }
+        if swapPickActiveOnTask {
+            if markerIsEligiblePickTarget {
+                parts.append("eligible reserve swap-in pick for this task")
+            } else {
+                parts.append("reserve swap-in is open on this task")
+            }
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    static func rosterVacancyDuringReserveSwapPick(taskName: String, slotName: String) -> String {
+        "Roster vacancy \(slotName) on \(taskName). Reserve swap-in is open; pick a class-compatible floating reserve on the map or in the candidate strip."
+    }
+
+    static func rosterBenchReserveDuringReserveSwapPick(taskName: String, slotName: String) -> String {
+        "Bench reserve \(slotName) on \(taskName). Fixed reserve roster row while reserve swap-in is open on this task."
+    }
+
+    static func floatingPoolStripSwapPickCandidate(taskName: String, berthLabel: String, aircraftShortID: String) -> String {
+        "Reserve swap candidate \(berthLabel) on \(taskName), aircraft \(aircraftShortID). Opens a confirmation; arm checks run before the roster changes."
+    }
+
+    static func floatingPoolStripBrowseCandidate(taskName: String, berthLabel: String, aircraftShortID: String) -> String {
+        "Floating reserve berth \(berthLabel) on \(taskName), aircraft \(aircraftShortID). Opens the floating reserve berth overlay."
+    }
+
+    static func floatingPoolBrowseEmptyStrip() -> String {
+        "No floating reserve berths on this task. Add floating reserve berths in Mission Control setup."
+    }
+
+    static func reserveSwapPickEmptyStrip(title: String, subtitle: String) -> String {
+        "\(title). \(subtitle)"
     }
 }
 

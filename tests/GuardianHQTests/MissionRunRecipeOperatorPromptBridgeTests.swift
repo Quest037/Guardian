@@ -23,6 +23,7 @@ final class MissionRunRecipeOperatorPromptBridgeTests: XCTestCase {
             assignmentID: assignID,
             missionTaskID: nil,
             slotLabel: "Alpha",
+            run: nil,
             escalation: escalation
         )
         try? await Task.sleep(nanoseconds: 50_000_000)

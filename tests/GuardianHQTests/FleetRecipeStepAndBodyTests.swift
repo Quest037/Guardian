@@ -50,7 +50,7 @@ final class FleetRecipeStepAndBodyTests: XCTestCase {
             .fail(detail: nil),
             .escalate(
                 reason: .operatorActionRequired(kind: .rotateDrone),
-                allowedVerbs: [.retry, .abort]
+                allowedVerbs: [.abort, .retry]
             ),
         ]
         for value in inputs {

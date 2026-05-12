@@ -56,6 +56,8 @@ struct FleetRecipeUnrecoverableFailureKind: Hashable, Sendable, Codable, RawRepr
     static let vehicleOffline = FleetRecipeUnrecoverableFailureKind(rawValue: "vehicleOffline")
     static let persistentAutopilotError = FleetRecipeUnrecoverableFailureKind(rawValue: "persistentAutopilotError")
     static let configurationMismatch = FleetRecipeUnrecoverableFailureKind(rawValue: "configurationMismatch")
+    /// Aircraft cannot continue in its current mission role; operator should consider a **class-matched** reserve swap when available (MC-R augments the recipe prompt).
+    static let needsAirframeReplacement = FleetRecipeUnrecoverableFailureKind(rawValue: "needsAirframeReplacement")
 }
 
 /// Confirmation-prompt kind reported by a `confirmation` escalation.

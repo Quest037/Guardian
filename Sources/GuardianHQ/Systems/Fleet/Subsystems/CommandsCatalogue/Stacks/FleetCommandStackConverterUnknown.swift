@@ -2,8 +2,10 @@ import Foundation
 
 /// Fallback converter for vehicles whose autopilot stack is not yet identified
 /// (`FleetAutopilotStack.unknown`). Telemetry reads are still served from the hub
-/// snapshot; everything else returns `.notImplemented` with a clear detail so recipes
-/// can either escalate or branch on the kind.
+/// snapshot; **mission** catalogue verbs remain `.notImplemented` here until the stack
+/// is known (no MAVLink mission plugin dispatch without a resolved autopilot). Other
+/// commands return `.notImplemented` with a clear detail so recipes can escalate or
+/// branch on the kind.
 ///
 /// Registering this explicitly keeps ``FleetCommandsCatalogue/invoke(...)`` from ever
 /// having to special-case a missing converter — the resolution always succeeds for the
@@ -25,12 +27,8 @@ struct FleetCommandStackConverterUnknown: FleetCommandStackConverter {
         ) {
             return immediate
         }
-        if let mission = FleetCommandStackConverterShared.translateFleetVehicleMissionIfNeeded(
-            commandName: commandName,
-            parameters: parameters
-        ) {
-            return mission
-        }
+        // Mission plugin verbs still require a resolved autopilot stack to dispatch safely;
+        // keep unknown-stack behaviour aligned with `.notImplemented` coverage (see tests).
         return .notImplemented(detail: "Autopilot stack is unknown — no translation available for \(commandName.rawValue) until MAVLink stack identification completes.")
     }
 

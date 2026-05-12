@@ -81,10 +81,10 @@ final class FleetErrorRecipeRegistrationsTests: XCTestCase {
         XCTAssertEqual(body.overallBudgetSeconds, 600, "Right at the parser cap — children sum to ~560s plus setup overhead.")
 
         let expected: [(stepID: String, recipe: String)] = [
-            ("cal-compass",      "recipe.fleet.calibrate.compass"),
-            ("cal-accel",        "recipe.fleet.calibrate.accelerometer"),
-            ("cal-gyro",         "recipe.fleet.calibrate.gyro"),
-            ("verify-armprobe",  "recipe.fleet.diagnose.armprobe"),
+            ("cal_compass",      "recipe.fleet.calibrate.compass"),
+            ("cal_accel",        "recipe.fleet.calibrate.accelerometer"),
+            ("cal_gyro",         "recipe.fleet.calibrate.gyro"),
+            ("verify_armprobe",  "recipe.fleet.diagnose.armprobe"),
         ]
         for (index, entry) in expected.enumerated() {
             guard case .invokeRecipe(let id, let recipe, _, _) = body.steps[index] else {

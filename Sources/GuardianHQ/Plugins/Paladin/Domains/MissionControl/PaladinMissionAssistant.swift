@@ -90,6 +90,7 @@ struct PaladinIssuedCommand: Equatable {
 }
 
 @MainActor
+/// Per-run Mission Control assistant. Task **attempting** (``MissionRunEnvironment/taskAttemptingByTaskID`` / ``MissionTaskAttemptState``) co-refreshes with ``taskStateByTaskID``; read that map when Paladin needs protocol intent distinct from settled ``MissionTaskState``.
 final class PaladinMissionAssistant {
     /// Plain string constant — `nonisolated` so non-MainActor sites (e.g. ``PaladinEvent`` initializers)
     /// can reference the canonical assistant key without crossing actor boundaries.
@@ -121,7 +122,8 @@ final class PaladinMissionAssistant {
         Self.registerProfile()
     }
 
-    /// Raises a swap-in-reserve operator prompt when the store token has ``MissionRunObserverPermissions/act``.
+    /// **Headless:** forwards a fixed-reserve → active swap proposal to ``MissionControlStore`` (no UI). Mission Control
+    /// may show an MC-R engagement prompt when rules of engagement require operator consent; requires ``MissionRunObserverPermissions/act``.
     @discardableResult
     func raiseSwapInReservePrompt(primaryAssignmentID: UUID, reserveAssignmentID: UUID) -> Bool {
         guard let store = missionControlStore, let token = missionControlObserverToken else { return false }

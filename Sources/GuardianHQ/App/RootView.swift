@@ -6,6 +6,7 @@ struct RootView: View {
     @ObservedObject var sitlService: SitlService
     @ObservedObject var generalSettingsStore: GeneralSettingsStore
     @EnvironmentObject private var appDrawer: AppDrawer
+    @EnvironmentObject private var operatorPromptCenter: OperatorPromptCenter
     @EnvironmentObject private var pluginRegistry: GuardianPluginRegistry
     @StateObject private var missionStore = MissionStore()
     @StateObject private var missionControlStore = MissionControlStore()
@@ -63,6 +64,7 @@ struct RootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.backgroundBase)
         .onAppear {
+            OperatorPromptCenter.shared.prepareOperatorPromptRoutingSession()
             PaladinEngine.shared.missionControlDomainBridge().connect(to: missionControlStore)
             fleetLinkService.applyLogRetentionProfile(generalSettingsStore.logRetentionProfile)
             fleetLinkService.onAutopilotMissionCycleFinished = { vehicleID in
@@ -266,6 +268,42 @@ struct RootView: View {
         }
     }
 
+    private var operatorPromptInboxTopBarButton: some View {
+        let count = operatorPromptCenter.inboxPrompts.count
+        return Button {
+            presentOperatorPromptInbox()
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "tray.full")
+                    .font(GuardianTypography.font(.sectionHeadingSemibold))
+                    .foregroundStyle(theme.textSecondary)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+                if count > 0 {
+                    Text(count > 99 ? "99+" : "\(count)")
+                        .font(GuardianTypography.relativeFixed(size: 9, weight: .heavy, relativeTo: .caption2))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, count > 9 ? 4 : 5)
+                        .padding(.vertical, 2)
+                        .background(Capsule(style: .continuous).fill(GuardianSemanticColors.dangerForeground))
+                        .offset(x: 8, y: -6)
+                        .accessibilityHidden(true)
+                }
+            }
+        }
+        .buttonStyle(GuardianPointerPlainButtonStyle())
+        .guardianPointerOnHover()
+        .help(count == 0 ? "Decisions" : "Decisions — \(count) pending")
+        .accessibilityLabel("Decisions")
+        .accessibilityHint(count == 0 ? "Opens Decisions. Nothing is waiting for an answer." : "Opens Decisions. \(count) waiting for an answer.")
+    }
+
+    private func presentOperatorPromptInbox() {
+        appDrawer.present(title: "Decisions", preferredWidth: 420) {
+            OperatorPromptInboxDrawerView()
+        }
+    }
+
     private var topBar: some View {
         HStack(spacing: GuardianSpacing.md) {
             Text(selection.rawValue)
@@ -273,6 +311,8 @@ struct RootView: View {
                 .foregroundStyle(theme.textPrimary)
                 .padding(.leading, GuardianSpacing.md)
             Spacer()
+
+            operatorPromptInboxTopBarButton
 
             HStack(spacing: GuardianSpacing.xs) {
                 Text("Simulate")

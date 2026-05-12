@@ -128,7 +128,8 @@ final class OperatorPromptRouter: ObservableObject {
     /// primary, subsequent available targets become mirrors, and rejected
     /// targets are collected under `suppressed` for audit.
     func route(_ event: OperatorPromptEvent) -> OperatorPromptRoutingDecision {
-        let policy = policyProvider(event.origin)
+        let basePolicy = policyProvider(event.origin)
+        let policy = Self.refinedPolicy(for: event, base: basePolicy)
         let resolved = policy.resolveTargets(for: event)
 
         var primary: OperatorPromptDeliveryTarget?
@@ -152,6 +153,21 @@ final class OperatorPromptRouter: ObservableObject {
             primary: primary,
             mirrors: mirrors,
             suppressed: suppressed
+        )
+    }
+
+    /// When a mission-scoped recipe escalation signals airframe replacement, prefer
+    /// MCR / engagement channels over the Vehicle Inspector wizard entry so
+    /// reserve-swap confirms stay on the run surface (see ``ProcessPromptPolicy/recipeEscalationMissionRunNeedsAirframeReplacement(mirrorToInbox:)``).
+    private static func refinedPolicy(
+        for event: OperatorPromptEvent,
+        base: ProcessPromptPolicy
+    ) -> ProcessPromptPolicy {
+        guard case .recipeEscalation(let esc) = event.origin else { return base }
+        guard case .unrecoverableFailure(let k) = esc.reason, k == .needsAirframeReplacement else { return base }
+        guard event.target.missionRunID != nil else { return base }
+        return ProcessPromptPolicy.recipeEscalationMissionRunNeedsAirframeReplacement(
+            mirrorToInbox: base.mirrorToInbox
         )
     }
 

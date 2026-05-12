@@ -26,8 +26,11 @@ final class FleetMissionRecipeRegistrationsTests: XCTestCase {
         XCTAssertEqual(body?.steps.map(\.id.rawValue), ["upload", "arm", "start"])
 
         guard let descriptor else { return }
+        guard let body = descriptor.body else {
+            return XCTFail("Mission upload/start recipe descriptor must carry a body")
+        }
         let parseErrors = FleetRecipeBodyParser.validate(
-            descriptor.body,
+            body,
             against: descriptor,
             recipes: FleetRecipesCatalogue.shared,
             commands: FleetCommandsCatalogue.shared
@@ -54,8 +57,11 @@ final class FleetMissionRecipeRegistrationsTests: XCTestCase {
         XCTAssertEqual(body?.steps.map(\.id.rawValue), ["returnHome"])
 
         guard let descriptor else { return }
+        guard let body = descriptor.body else {
+            return XCTFail("Return-home recipe descriptor must carry a body")
+        }
         let parseErrors = FleetRecipeBodyParser.validate(
-            descriptor.body,
+            body,
             against: descriptor,
             recipes: FleetRecipesCatalogue.shared,
             commands: FleetCommandsCatalogue.shared

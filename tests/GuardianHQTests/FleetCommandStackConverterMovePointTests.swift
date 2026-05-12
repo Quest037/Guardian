@@ -61,7 +61,11 @@ final class FleetCommandStackConverterMovePointTests: XCTestCase {
             "yawDeg": .double(42.5)
         ])
         let t = FleetCommandStackConverterShared.translateMovePoint(parameters: params, context: ctx)
-        XCTAssertEqual(gotoYaw(from: t), 42.5, accuracy: 0.001)
+        guard let yaw = gotoYaw(from: t) else {
+            XCTFail("expected vehicleCommands with gotoCoordinate")
+            return
+        }
+        XCTAssertEqual(yaw, 42.5, accuracy: 0.001)
     }
 
     func test_explicit_ugv_withoutHubPosition_fallsBackToRequestedYaw() {
@@ -78,7 +82,11 @@ final class FleetCommandStackConverterMovePointTests: XCTestCase {
             "yawDeg": .double(77)
         ])
         let t = FleetCommandStackConverterShared.translateMovePoint(parameters: params, context: ctx)
-        XCTAssertEqual(gotoYaw(from: t), 77, accuracy: 0.001)
+        guard let yaw = gotoYaw(from: t) else {
+            XCTFail("expected vehicleCommands with gotoCoordinate")
+            return
+        }
+        XCTAssertEqual(yaw, 77, accuracy: 0.001)
     }
 
     func test_explicit_ugv_coincidentWithHub_keepsRequestedYaw() {
@@ -98,6 +106,10 @@ final class FleetCommandStackConverterMovePointTests: XCTestCase {
             "yawDeg": .double(88)
         ])
         let t = FleetCommandStackConverterShared.translateMovePoint(parameters: params, context: ctx)
-        XCTAssertEqual(gotoYaw(from: t), 88, accuracy: 0.001)
+        guard let yaw = gotoYaw(from: t) else {
+            XCTFail("expected vehicleCommands with gotoCoordinate")
+            return
+        }
+        XCTAssertEqual(yaw, 88, accuracy: 0.001)
     }
 }

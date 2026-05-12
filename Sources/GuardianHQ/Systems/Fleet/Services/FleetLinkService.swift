@@ -3209,5 +3209,21 @@ final class FleetLinkService: ObservableObject {
         guard let data = userDefaults.data(forKey: defaultsKey) else { return nil }
         return try? JSONDecoder().decode(FleetLinkConfiguration.self, from: data)
     }
+
+    // MARK: - GuardianHQTests (mission-run reserve class gate)
+
+    /// Seeds a **live** stream vehicle so `live:` tokens resolve in ``resolvedFleetStreamVehicleID`` without MAVSDK.
+    func seedMissionRunTestLiveVehicle(vehicleID: String, vehicleType: FleetVehicleType, systemID: Int = 9) {
+        let lifecycle = VehicleLifecycleStatus(stage: .live)
+        let model = FleetVehicleModel(
+            vehicleID: vehicleID,
+            systemID: systemID,
+            vehicleType: vehicleType,
+            initialStatus: lifecycle
+        )
+        vehicleModelsByVehicleID[vehicleID] = model
+        vehicleIDBySystemID[systemID] = vehicleID
+        telemetryByVehicleID[vehicleID] = model.collections.telemetrySnapshot ?? .empty
+    }
 }
 

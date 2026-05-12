@@ -43,7 +43,7 @@
     **Recipe locked** pill when a vehicle is bound to a `.running` / `.paused` /
     `.recovery` run (the same signal disables non-`safeInLiveMission` catalogue **Run**
     rows in the Calibration tab). Wire deliberate override paths for the legitimate cases:
-    - Reserve drone swap-in (operator confirms before fleet repointing).
+    - Reserve drone swap-in — **MC-R pool swap confirm** runs **telemetry-only** snapshot gates (``MissionControlReserveSwapInPreflightGates`` / ``MissionControlPreflightTelemetryGateMode/reserveSwapIn``) then the arm probe with `allowDuringLiveMission: true` and audit `missionControl.preflightProbe.reserveSwapIn` before roster commit; additional swap-time catalogue steps should use distinct `source` strings under `missioncontrol.reserveSwap.*` (see ``MissionRunReserveRecipeRunnerCorrelation``).
     - Drone-recovery flow (vehicle dropped link / went offline mid-mission and we
       need to re-probe arm before sending it back to its task).
     - Plugin authority — Paladin and any future autonomous controller should be able
@@ -152,13 +152,14 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 
 ### Mission Control: Setup
 - **Rosters:** 
-  - Allow user to add a pool of reserves to Task rosters by default. — **Shipped:** run-envelope pool + MCS/MCR/MRE v1 (**`README.md`** → **Floating reserve pool (Mission Control run)**). **Still open:** template-default pool rows per task + automation backlog → **`NEXTVERSION.md`** → **Floating reserve pool — deferred phases** (2026-05-12).
   - **Live reserve swap-in** (replace active primary/wingman with reserve from **pool or fixed `.reserve` slot**): arm/calibrate, mission upload/resume, reposition, roster commit, disposition of replaced aircraft, map UX, class matching, escalation + manual + auto triggers — **`MissionRosterReservesToDo.md`**.
 
 - **Settings:**
   - Add a tab for user to control MCR settings
 
 ### Mission Control: Running
+
+- **MC-R reserve swap picker:** merit-ranked ordering (battery, proximity, link quality, etc.) for floating-pool health cards in the live roster strip; v1 uses ``enumerateReserveSwapCandidates`` order only (see ``MissionRunEnvironment/swapRosterAssignmentWithFloatingReservePoolSlot``).
 
 - **Tasks:**
   - add functionality to tell task to complete/abort. (buggy)

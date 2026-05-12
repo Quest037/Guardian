@@ -199,6 +199,25 @@ enum StructuredLogTemplateCatalog: Sendable {
             mcr: "Reserve in · @{{slotID}} · pool {{poolSlotID}} · {{source}}"
         )
         put(
+            MissionRunLogTemplateKey.fixedRosterReserveSwapEngaged,
+            "Fixed reserve roster swap — vacancy @{{vacancySlotID}} ({{vacancySlot}}) ↔ reserve @{{reserveSlotID}} ({{reserveSlot}}) (source {{source}}).",
+            mcr: "Reserve swap · roster · {{vacancySlot}} ↔ {{reserveSlot}} · {{source}}"
+        )
+        for phase in MissionRunReserveSwapPipelinePhase.allCases {
+            let passKey = MissionRunReserveSwapPhaseLogTemplateKey.templateKey(phase: phase, passed: true)
+            let failKey = MissionRunReserveSwapPhaseLogTemplateKey.templateKey(phase: phase, passed: false)
+            put(
+                passKey,
+                "Reserve swap phase {{phase}} passed — task {{missionTaskID}} · vehicle {{vehicleID}} · {{detail}}.",
+                mcr: "Swap {{phase}} · pass · {{vehicleID}} · {{detail}}"
+            )
+            put(
+                failKey,
+                "Reserve swap phase {{phase}} failed — task {{missionTaskID}} · vehicle {{vehicleID}} · {{detail}}.",
+                mcr: "Swap {{phase}} · fail · {{vehicleID}} · {{detail}}"
+            )
+        }
+        put(
             MissionRunLogTemplateKey.executionMissionMissing,
             "Mission template missing from store; cannot upload MAVLink mission.",
             mcr: "No mission template in store · cannot upload MAVLink"

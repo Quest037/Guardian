@@ -163,6 +163,10 @@ extension ProcessPromptPolicy {
     ///   MCR first when the event carries a ``OperatorPromptTarget/missionRunID``
     ///   (MRE headless recipes); entries that cannot bind (no run id) are skipped
     ///   so Vehicle Inspector still wins for inspector-started runs.
+    ///   ``OperatorPromptRouter`` refines this when the escalation reason is
+    ///   ``FleetRecipeEscalationReason/unrecoverableFailure`` ×
+    ///   ``FleetRecipeUnrecoverableFailureKind/needsAirframeReplacement`` **and**
+    ///   a mission run id is present — see ``recipeEscalationMissionRunNeedsAirframeReplacement(mirrorToInbox:)``.
     /// - `mreEngagementAsk` — MCR → LiveDrive → toast → mcrCriticalReturn.
     ///   MRE asking permission for `rtl` / `land` / `forceDisarm` /
     ///   `swapInReserve` needs operator attention back at MCR; the OOA variant
@@ -207,5 +211,25 @@ extension ProcessPromptPolicy {
                 .userNotification(style: .banner),
             ])
         }
+    }
+
+    /// Recipe-escalation policy **without** ``Entry/vehicleInspectorWizard``.
+    ///
+    /// ``OperatorPromptRouter`` applies this when the origin is
+    /// ``OperatorPromptOrigin/recipeEscalation`` with
+    /// ``FleetRecipeEscalationReason/unrecoverableFailure`` ×
+    /// ``FleetRecipeUnrecoverableFailureKind/needsAirframeReplacement`` and the
+    /// event carries a ``OperatorPromptTarget/missionRunID`` — reserve-replacement
+    /// copy should stay on Mission Control / engagement surfaces, not the
+    /// inspector wizard strip.
+    static func recipeEscalationMissionRunNeedsAirframeReplacement(
+        mirrorToInbox: Bool = true
+    ) -> ProcessPromptPolicy {
+        ProcessPromptPolicy(entries: [
+            .mcrPanel,
+            .liveDrivePanel,
+            .persistentToast,
+            .userNotification(style: .mcrCriticalReturn),
+        ], mirrorToInbox: mirrorToInbox)
     }
 }

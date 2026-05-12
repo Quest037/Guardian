@@ -322,7 +322,7 @@ final class MissionRunReservePoolTests: XCTestCase {
         let out = pool.applyReservePoolReturnPayload(payload, mergeFleetStorageKey: key)
         XCTAssertEqual(out, .mergedExisting(slotID: stableID))
         XCTAssertEqual(pool.entries.count, 1)
-        XCTAssertEqual(pool.entries[0].label, "new")
+        XCTAssertEqual(pool.entries[0].label, "old")
         XCTAssertEqual(pool.entries[0].attachedDevice, "aux")
     }
 
@@ -398,7 +398,7 @@ final class MissionRunReservePoolTests: XCTestCase {
         }
         XCTAssertEqual(run.reservePool(forTaskID: tid).entries.count, 1)
         XCTAssertEqual(run.reservePool(forTaskID: tid).entries[0].id, slotID)
-        XCTAssertEqual(run.reservePool(forTaskID: tid).entries[0].label, "W1")
+        XCTAssertEqual(run.reservePool(forTaskID: tid).entries[0].label, "Reserve 1")
     }
 
     @MainActor
@@ -494,18 +494,22 @@ final class MissionRunReservePoolTests: XCTestCase {
     @MainActor
     func test_swap_roster_random_reserve_moves_binding_and_returns_prior_legacy() {
         let task = MissionTask(name: "Alpha")
+        let rosterDeviceId = UUID()
         let mission = Mission(
             id: UUID(),
             name: "M",
             description: "",
             type: .mobile,
+            rosterDevices: [
+                RosterDevice(id: rosterDeviceId, name: "Primary", vehicleClass: .unknown),
+            ],
             routeMacro: RouteMacro(tasks: [task])
         )
         let assignID = UUID()
         let roster = MissionRunAssignment(
             id: assignID,
             taskId: task.id,
-            rosterDeviceId: UUID(),
+            rosterDeviceId: rosterDeviceId,
             slotName: "Primary",
             attachedDevice: "OLD",
             attachedFleetVehicleToken: nil
@@ -530,16 +534,14 @@ final class MissionRunReservePoolTests: XCTestCase {
             return
         }
         XCTAssertEqual(usedPool, poolSlotID)
-        guard case .appended? = ret else {
-            XCTFail("expected appended return, got \(String(describing: ret))")
-            return
-        }
+        XCTAssertNil(ret)
         XCTAssertEqual(run.assignments[0].attachedDevice, "NEWPOOL")
         let pool = run.reservePool(forTaskID: tid)
-        XCTAssertEqual(pool.entries.count, 2)
+        XCTAssertEqual(pool.entries.count, 1)
         let filled = pool.entries.filter(\.hasFleetOrLegacyBinding)
         XCTAssertEqual(filled.count, 1)
         XCTAssertEqual(filled[0].attachedDevice, "OLD")
+        XCTAssertEqual(filled[0].id, poolSlotID)
     }
 
     @MainActor
@@ -632,6 +634,361 @@ final class MissionRunReservePoolTests: XCTestCase {
         XCTAssertEqual(
             run.swapRosterAssignmentWithRandomFloatingReserve(assignmentID: assignID, taskID: task.id),
             .identicalFleetBindingNoOp
+        )
+    }
+
+    @MainActor
+    func test_swap_typed_vacancy_rejects_legacy_pool_without_fleet_type() {
+        let task = MissionTask(name: "Alpha")
+        let rd = UUID()
+        let mission = Mission(
+            id: UUID(),
+            name: "M",
+            description: "",
+            type: .mobile,
+            rosterDevices: [RosterDevice(id: rd, name: "P1", vehicleClass: .uavCopter)],
+            routeMacro: RouteMacro(tasks: [task])
+        )
+        let assignID = UUID()
+        let roster = MissionRunAssignment(
+            id: assignID,
+            taskId: task.id,
+            rosterDeviceId: rd,
+            slotName: "Primary",
+            attachedDevice: "BOUND",
+            attachedFleetVehicleToken: nil
+        )
+        let run = MissionRunEnvironment(mission: mission, assignments: [roster])
+        run.setReservePool(
+            MissionRunReservePool(entries: [
+                MissionRunReservePoolSlot(label: "P1", attachedFleetVehicleToken: nil, attachedDevice: "LEGACY_POOL"),
+            ]),
+            forTaskID: task.id
+        )
+        XCTAssertEqual(
+            run.swapRosterAssignmentWithRandomFloatingReserve(assignmentID: assignID, taskID: task.id),
+            .noClassCompatiblePoolSlots
+        )
+    }
+
+    @MainActor
+    func test_available_reserve_pool_entries_respects_assignment_class_gate() {
+        let task = MissionTask(name: "Alpha")
+        let rd = UUID()
+        let mission = Mission(
+            id: UUID(),
+            name: "M",
+            description: "",
+            type: .mobile,
+            rosterDevices: [RosterDevice(id: rd, name: "P1", vehicleClass: .uavCopter)],
+            routeMacro: RouteMacro(tasks: [task])
+        )
+        let assignID = UUID()
+        let roster = MissionRunAssignment(
+            id: assignID,
+            taskId: task.id,
+            rosterDeviceId: rd,
+            slotName: "Primary",
+            attachedDevice: "X",
+            attachedFleetVehicleToken: nil
+        )
+        let run = MissionRunEnvironment(mission: mission, assignments: [roster])
+        let tid = task.id
+        run.setReservePool(
+            MissionRunReservePool(entries: [
+                MissionRunReservePoolSlot(label: "leg", attachedFleetVehicleToken: nil, attachedDevice: "CALL"),
+            ]),
+            forTaskID: tid
+        )
+        XCTAssertEqual(run.availableReservePoolEntries(forTaskID: tid).count, 1)
+        XCTAssertEqual(run.availableReservePoolEntries(forTaskID: tid, classCompatibleWithAssignmentId: assignID).count, 0)
+    }
+
+    @MainActor
+    func test_swap_live_pool_class_mismatch_returns_no_class_compatible() {
+        let task = MissionTask(name: "Alpha")
+        let rd = UUID()
+        let mission = Mission(
+            id: UUID(),
+            name: "M",
+            description: "",
+            type: .mobile,
+            rosterDevices: [RosterDevice(id: rd, name: "P1", vehicleClass: .uavFixedWing)],
+            routeMacro: RouteMacro(tasks: [task])
+        )
+        let assignID = UUID()
+        let roster = MissionRunAssignment(
+            id: assignID,
+            taskId: task.id,
+            rosterDeviceId: rd,
+            slotName: "Primary",
+            attachedDevice: "LEGACY",
+            attachedFleetVehicleToken: nil
+        )
+        let fleet = FleetLinkService()
+        let sitl = SitlService()
+        sitl.attachFleetLink(fleet)
+        fleet.seedMissionRunTestLiveVehicle(vehicleID: "sysid:9", vehicleType: .uavCopter)
+        let run = MissionRunEnvironment(mission: mission, assignments: [roster])
+        run.attachServices(fleetLink: fleet, sitl: sitl)
+        let tid = task.id
+        let poolSlotID = UUID(uuidString: "00000000-0000-0000-0000-0000000000C1")!
+        run.setReservePool(
+            MissionRunReservePool(entries: [
+                MissionRunReservePoolSlot(
+                    id: poolSlotID,
+                    label: "P1",
+                    attachedFleetVehicleToken: "live",
+                    attachedDevice: ""
+                ),
+            ]),
+            forTaskID: tid
+        )
+        XCTAssertEqual(
+            run.swapRosterAssignmentWithRandomFloatingReserve(assignmentID: assignID, taskID: tid),
+            .noClassCompatiblePoolSlots
+        )
+    }
+
+    @MainActor
+    func test_swap_live_pool_class_match_succeeds() {
+        let task = MissionTask(name: "Alpha")
+        let rd = UUID()
+        let mission = Mission(
+            id: UUID(),
+            name: "M",
+            description: "",
+            type: .mobile,
+            rosterDevices: [RosterDevice(id: rd, name: "P1", vehicleClass: .uavCopter)],
+            routeMacro: RouteMacro(tasks: [task])
+        )
+        let assignID = UUID()
+        let roster = MissionRunAssignment(
+            id: assignID,
+            taskId: task.id,
+            rosterDeviceId: rd,
+            slotName: "Primary",
+            attachedDevice: "LEGACY",
+            attachedFleetVehicleToken: nil
+        )
+        let fleet = FleetLinkService()
+        let sitl = SitlService()
+        sitl.attachFleetLink(fleet)
+        fleet.seedMissionRunTestLiveVehicle(vehicleID: "sysid:9", vehicleType: .uavCopter)
+        let run = MissionRunEnvironment(mission: mission, assignments: [roster])
+        run.attachServices(fleetLink: fleet, sitl: sitl)
+        let tid = task.id
+        let poolSlotID = UUID(uuidString: "00000000-0000-0000-0000-0000000000C2")!
+        run.setReservePool(
+            MissionRunReservePool(entries: [
+                MissionRunReservePoolSlot(
+                    id: poolSlotID,
+                    label: "P1",
+                    attachedFleetVehicleToken: "live",
+                    attachedDevice: ""
+                ),
+            ]),
+            forTaskID: tid
+        )
+        let out = run.swapRosterAssignmentWithRandomFloatingReserve(assignmentID: assignID, taskID: tid)
+        guard case .success(let used, _) = out else {
+            XCTFail("expected success, got \(out)")
+            return
+        }
+        XCTAssertEqual(used, poolSlotID)
+        XCTAssertEqual(run.assignments[0].attachedFleetVehicleToken, "live")
+    }
+
+    @MainActor
+    func test_swap_live_pool_ugv_wheeled_template_accepts_tracked_reserve() {
+        let task = MissionTask(name: "Alpha")
+        let rd = UUID()
+        let mission = Mission(
+            id: UUID(),
+            name: "M",
+            description: "",
+            type: .mobile,
+            rosterDevices: [RosterDevice(id: rd, name: "G1", vehicleClass: .ugvWheeled)],
+            routeMacro: RouteMacro(tasks: [task])
+        )
+        let assignID = UUID()
+        let roster = MissionRunAssignment(
+            id: assignID,
+            taskId: task.id,
+            rosterDeviceId: rd,
+            slotName: "Primary",
+            attachedDevice: "LEGACY",
+            attachedFleetVehicleToken: nil
+        )
+        let fleet = FleetLinkService()
+        let sitl = SitlService()
+        sitl.attachFleetLink(fleet)
+        fleet.seedMissionRunTestLiveVehicle(vehicleID: "sysid:9", vehicleType: .ugvTracked)
+        let run = MissionRunEnvironment(mission: mission, assignments: [roster])
+        run.attachServices(fleetLink: fleet, sitl: sitl)
+        let tid = task.id
+        let poolSlotID = UUID(uuidString: "00000000-0000-0000-0000-0000000000C3")!
+        run.setReservePool(
+            MissionRunReservePool(entries: [
+                MissionRunReservePoolSlot(
+                    id: poolSlotID,
+                    label: "P1",
+                    attachedFleetVehicleToken: "live",
+                    attachedDevice: ""
+                ),
+            ]),
+            forTaskID: tid
+        )
+        let out = run.swapRosterAssignmentWithRandomFloatingReserve(assignmentID: assignID, taskID: tid)
+        guard case .success(let used, _) = out else {
+            XCTFail("expected success, got \(out)")
+            return
+        }
+        XCTAssertEqual(used, poolSlotID)
+        XCTAssertEqual(run.assignments[0].attachedFleetVehicleToken, "live")
+    }
+
+    @MainActor
+    func test_swap_precommit_aborts_when_fleet_token_already_on_other_roster_slot() {
+        let primaryID = UUID()
+        let wingID = UUID()
+        let task = MissionTask(name: "Alpha", rosterDeviceIds: [primaryID, wingID])
+        let mission = Mission(
+            id: UUID(),
+            name: "M",
+            description: "",
+            type: .mobile,
+            rosterDevices: [
+                RosterDevice(id: primaryID, name: "Lead", slot: .primary, vehicleClass: .unknown),
+                RosterDevice(id: wingID, name: "Wing", slot: .wingman, vehicleClass: .unknown),
+            ],
+            routeMacro: RouteMacro(tasks: [task])
+        )
+        let fleet = FleetLinkService()
+        let sitl = SitlService()
+        sitl.attachFleetLink(fleet)
+        fleet.seedMissionRunTestLiveVehicle(vehicleID: "sysid:9", vehicleType: .uavCopter)
+        let vacancyID = UUID()
+        let wingAssignID = UUID()
+        let vacancy = MissionRunAssignment(
+            id: vacancyID,
+            taskId: task.id,
+            rosterDeviceId: primaryID,
+            slotName: "Primary",
+            attachedDevice: "LEGACY",
+            attachedFleetVehicleToken: nil
+        )
+        let wing = MissionRunAssignment(
+            id: wingAssignID,
+            taskId: task.id,
+            rosterDeviceId: wingID,
+            slotName: "Wing",
+            attachedDevice: "W",
+            attachedFleetVehicleToken: "live"
+        )
+        let run = MissionRunEnvironment(mission: mission, assignments: [vacancy, wing])
+        run.attachServices(fleetLink: fleet, sitl: sitl)
+        let tid = task.id
+        let poolSlotID = UUID(uuidString: "00000000-0000-0000-0000-0000000000F1")!
+        run.setReservePool(
+            MissionRunReservePool(entries: [
+                MissionRunReservePoolSlot(
+                    id: poolSlotID,
+                    label: "Pool",
+                    attachedFleetVehicleToken: "live",
+                    attachedDevice: ""
+                ),
+            ]),
+            forTaskID: tid
+        )
+        XCTAssertEqual(
+            run.swapRosterAssignmentWithRandomFloatingReserve(assignmentID: vacancyID, taskID: tid),
+            .pickRejectedDuplicateOrStaleBinding
+        )
+    }
+
+    @MainActor
+    func test_swap_precommit_aborts_when_same_fleet_token_in_two_pool_berths() {
+        let rd = UUID()
+        let task = MissionTask(name: "Alpha", rosterDeviceIds: [rd])
+        let mission = Mission(
+            id: UUID(),
+            name: "M",
+            description: "",
+            type: .mobile,
+            rosterDevices: [RosterDevice(id: rd, name: "P", slot: .primary, vehicleClass: .unknown)],
+            routeMacro: RouteMacro(tasks: [task])
+        )
+        let fleet = FleetLinkService()
+        let sitl = SitlService()
+        sitl.attachFleetLink(fleet)
+        fleet.seedMissionRunTestLiveVehicle(vehicleID: "sysid:9", vehicleType: .uavCopter)
+        let vacancyID = UUID()
+        let vacancy = MissionRunAssignment(
+            id: vacancyID,
+            taskId: task.id,
+            rosterDeviceId: rd,
+            slotName: "Primary",
+            attachedDevice: "X",
+            attachedFleetVehicleToken: nil
+        )
+        let run = MissionRunEnvironment(mission: mission, assignments: [vacancy])
+        run.attachServices(fleetLink: fleet, sitl: sitl)
+        let tid = task.id
+        let s1 = UUID(uuidString: "00000000-0000-0000-0000-0000000000F2")!
+        let s2 = UUID(uuidString: "00000000-0000-0000-0000-0000000000F3")!
+        run.setReservePool(
+            MissionRunReservePool(entries: [
+                MissionRunReservePoolSlot(id: s1, label: "A", attachedFleetVehicleToken: "live", attachedDevice: ""),
+                MissionRunReservePoolSlot(id: s2, label: "B", attachedFleetVehicleToken: "live", attachedDevice: ""),
+            ]),
+            forTaskID: tid
+        )
+        XCTAssertEqual(
+            run.swapRosterAssignmentWithRandomFloatingReserve(assignmentID: vacancyID, taskID: tid),
+            .pickRejectedDuplicateOrStaleBinding
+        )
+    }
+
+    @MainActor
+    func test_swap_returns_noEligiblePoolSlots_when_fleet_token_written_off_before_swap() {
+        let rd = UUID()
+        let task = MissionTask(name: "Alpha", rosterDeviceIds: [rd])
+        let mission = Mission(
+            id: UUID(),
+            name: "M",
+            description: "",
+            type: .mobile,
+            rosterDevices: [RosterDevice(id: rd, name: "P", slot: .primary, vehicleClass: .unknown)],
+            routeMacro: RouteMacro(tasks: [task])
+        )
+        let fleet = FleetLinkService()
+        let sitl = SitlService()
+        sitl.attachFleetLink(fleet)
+        fleet.seedMissionRunTestLiveVehicle(vehicleID: "sysid:9", vehicleType: .uavCopter)
+        let vacancyID = UUID()
+        let vacancy = MissionRunAssignment(
+            id: vacancyID,
+            taskId: task.id,
+            rosterDeviceId: rd,
+            slotName: "Primary",
+            attachedDevice: "X",
+            attachedFleetVehicleToken: nil
+        )
+        let run = MissionRunEnvironment(mission: mission, assignments: [vacancy])
+        run.attachServices(fleetLink: fleet, sitl: sitl)
+        let tid = task.id
+        let poolSlotID = UUID(uuidString: "00000000-0000-0000-0000-0000000000F4")!
+        run.setReservePool(
+            MissionRunReservePool(entries: [
+                MissionRunReservePoolSlot(id: poolSlotID, label: "P1", attachedFleetVehicleToken: "live", attachedDevice: ""),
+            ]),
+            forTaskID: tid
+        )
+        run.markFleetVehicleWrittenOffForReservePool(storageKey: "live")
+        XCTAssertEqual(
+            run.swapRosterAssignmentWithRandomFloatingReserve(assignmentID: vacancyID, taskID: tid),
+            .noEligiblePoolSlots
         )
     }
 }

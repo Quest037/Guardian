@@ -2,9 +2,8 @@ import XCTest
 @testable import GuardianHQ
 
 /// Bootstrap coverage for the Layer 1 recipe catalogue. Mirrors the Layer 0
-/// bootstrap test shape. Both subsystem entry points (calibration, errors) are
-/// wired into the bootstrap; calibration ships compass + cancel as of Stage C's
-/// first authoring pass, errors still ships zero. Tests pin the idempotency
+/// bootstrap test shape. Subsystem entry points (calibration, errors, mission, move+park)
+/// are wired into the bootstrap; tests pin the idempotency
 /// contract plus the per-subsystem counts so accidental content additions or
 /// regressions are caught alongside the matching docs update.
 @MainActor

@@ -59,7 +59,10 @@ let package = Package(
         ),
         .testTarget(
             name: "GuardianHQTests",
-            dependencies: ["GuardianHQ"],
+            dependencies: [
+                "GuardianHQ",
+                .product(name: "Mavsdk", package: "MAVSDK-Swift"),
+            ],
             path: "Tests/GuardianHQTests",
             resources: [
                 .copy("Fixtures"),

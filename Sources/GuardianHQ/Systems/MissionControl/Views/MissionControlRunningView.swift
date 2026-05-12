@@ -3,7 +3,97 @@
 import AppKit
 import SwiftUI
 
-/// Stable identity for the MC-R **live overview** map topology (home, paths, task focus, roster bindings,
+/// Compact slot-state pill for MC-R roster rows, live console tiles, and task list (``MissionRunAssignmentSlotState/displayTitle`` + ``GuardianFeedbackSeverity``).
+struct MissionControlRosterSlotAttentionCapsule: View {
+    let severity: GuardianFeedbackSeverity
+    let title: String
+
+    var body: some View {
+        Text(title)
+            .font(GuardianTypography.font(.telemetryNano9Semibold))
+            .foregroundStyle(foreground)
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
+            .padding(.horizontal, GuardianSpacing.xsTight)
+            .padding(.vertical, 3)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(severity.legacyTranslucentChipBackground)
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(stroke.opacity(0.45), lineWidth: 1)
+            )
+            .help(title)
+            .accessibilityLabel("Roster slot: \(title)")
+    }
+
+    private var foreground: Color {
+        switch severity {
+        case .success: GuardianSemanticColors.successForeground
+        case .info: GuardianSemanticColors.infoForeground
+        case .warning: GuardianSemanticColors.warningForeground
+        case .error: GuardianSemanticColors.dangerForeground
+        }
+    }
+
+    private var stroke: Color {
+        switch severity {
+        case .success: GuardianSemanticColors.successStroke
+        case .info: GuardianSemanticColors.infoForeground
+        case .warning: GuardianSemanticColors.warningStroke
+        case .error: GuardianSemanticColors.dangerStroke
+        }
+    }
+}
+
+/// Battery visibility rules for ``MissionLiveVehicleHealthCard`` when MC-R **floating reserve pool** picker chrome is on.
+enum MissionLiveVehicleHealthCardReservePoolPickerPolicy {
+    /// MC-R console cards show the battery icon only when hub telemetry has a known age; the pool picker also shows it when **percent** is known (e.g. stale hub slice) so operators can triage candidates.
+    static func showCompactBattery(vehicleModel: FleetVehicleOperationalModel, reservePoolPickerChrome: Bool) -> Bool {
+        if reservePoolPickerChrome {
+            return vehicleModel.battery.percent0to100 != nil || vehicleModel.telemetryAgeS != nil
+        }
+        return vehicleModel.telemetryAgeS != nil
+    }
+
+    /// When the bracketed fleet short id already embeds ``FleetVehicleType/classCode`` (e.g. `[UGV-W:2]`), the neutral class pill beside the title is redundant in pool picker chrome.
+    static func showReservePoolClassCapsule(bracketedVehicleShortID: String, vehicleClassCode: String) -> Bool {
+        let id = bracketedVehicleShortID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if id == "—" || id.isEmpty { return true }
+        let code = vehicleClassCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        if code.isEmpty { return true }
+        return !id.contains("[\(code):")
+    }
+}
+
+private struct MissionLiveVehicleHealthCardAccessibility: ViewModifier {
+    let summary: String?
+    let hint: String?
+    let isButton: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let summary {
+            if let hint, !hint.isEmpty {
+                content
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(summary)
+                    .accessibilityHint(hint)
+                    .accessibilityAddTraits(isButton ? .isButton : [])
+            } else {
+                content
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(summary)
+                    .accessibilityAddTraits(isButton ? .isButton : [])
+            }
+        } else {
+            content
+        }
+    }
+}
+
+/// Stable identity for the MC-R **live overview** map topology (home, paths, task focus, roster/pool **row** ids,
 /// mission-point metadata). When ``focusedTaskID`` is set, ``allTasksCoords`` / ``taskPathIDs`` list only that task’s polyline.
 /// **Excludes** live GPS / heading / mission-point coordinates — those are pushed
 /// through ``MissionRunDetailView/liveOverviewMapMarkerCoordinateDigest`` + marker-only refresh so Leaflet
@@ -18,7 +108,9 @@ struct LiveOverviewMapStructureIdentity: Equatable {
     let focusedTaskID: UUID?
     /// Rally / extraction pins: id, kind, closed, and map selection — not lat/lon.
     let missionPointTopologySignature: String
-    /// Roster slots + floating reserve pool rows on the live map: assignment / slot ids + fleet binding keys — not live coordinates.
+    /// Roster + floating reserve **row topology** on the live map (assignment ids and `task|poolSlot` ids only).
+    /// Intentionally omits fleet tokens / bridge stream keys so reserve swap-in does not force a full map rebuild
+    /// (marker churn follows ``liveOverviewMapMarkerCoordinateDigest``).
     let rosterSlotBindingSignature: String
 }
 
@@ -41,6 +133,15 @@ struct MissionLiveVehicleHealthCard: View {
     /// Optional click-through; when non-nil the entire card becomes a button (used to open the
     /// MC-R vehicle overlay on the Tasks card). The empty-roster placeholder leaves this nil.
     var onTap: (() -> Void)?
+    /// Worst merged slot attention for this roster row (MC-R live console); `nil` hides the pill.
+    var slotAttention: (severity: GuardianFeedbackSeverity, title: String)? = nil
+    /// When true (MC-R **reserve pool swap** pick list): neutral **class** capsule, battery when percent or telemetry age is known, and percent text beside the battery icon.
+    var reservePoolPickerChrome: Bool = false
+    /// Overrides button `.help` when set (e.g. reserve **browse** vs swap **pick**).
+    var tapHelp: String? = nil
+    /// When set, the card is exposed as a single VoiceOver element with this label (swap / browse pool context).
+    var accessibilitySummary: String? = nil
+    var accessibilityHint: String? = nil
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -50,7 +151,15 @@ struct MissionLiveVehicleHealthCard: View {
     private var cardStrokeNeutral: Color { theme.borderSubtle }
 
     private var showCompactBattery: Bool {
-        vehicleModel.telemetryAgeS != nil
+        MissionLiveVehicleHealthCardReservePoolPickerPolicy.showCompactBattery(
+            vehicleModel: vehicleModel,
+            reservePoolPickerChrome: reservePoolPickerChrome
+        )
+    }
+
+    private var resolvedTapHelp: String {
+        if let h = tapHelp { return h }
+        return reservePoolPickerChrome ? "Select this reserve" : "Open vehicle details"
     }
 
     var body: some View {
@@ -60,20 +169,31 @@ struct MissionLiveVehicleHealthCard: View {
                     cardBody
                 }
                 .buttonStyle(GuardianPointerPlainButtonStyle())
-                .help("Open vehicle details")
+                .guardianPointerOnHover()
+                .help(resolvedTapHelp)
             } else {
                 cardBody
             }
         }
         .frame(maxWidth: Self.rosterCardMaxWidth, alignment: .leading)
+        .modifier(
+            MissionLiveVehicleHealthCardAccessibility(
+                summary: accessibilitySummary,
+                hint: accessibilityHint,
+                isButton: onTap != nil
+            )
+        )
     }
 
     private var cardBody: some View {
-        let thumbColumnWidth: CGFloat = 28
+        /// Minimum square edge so tiny slot heights still show usable art; main roster and pool rows both use a **square** thumb (no tall narrow stamp).
+        let thumbMinimumSide: CGFloat = 28
         let verticalPad = GuardianSpacing.xsTight * 2
-        let thumbnailStackHeight = max(thumbColumnWidth, slotHeight - verticalPad)
+        let thumbnailSide = max(thumbMinimumSide, slotHeight - verticalPad)
+        let thumbW = thumbnailSide
+        let thumbH = thumbnailSide
         return HStack(alignment: .center, spacing: GuardianSpacing.xs) {
-            vehicleThumbnailColumn(width: thumbColumnWidth, height: thumbnailStackHeight)
+            vehicleThumbnailColumn(width: thumbW, height: thumbH)
             VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                 HStack(alignment: .center, spacing: GuardianSpacing.xs) {
                     Text(slotTitle)
@@ -81,6 +201,19 @@ struct MissionLiveVehicleHealthCard: View {
                         .foregroundStyle(theme.textPrimary)
                         .lineLimit(1)
                         .layoutPriority(1)
+                    if reservePoolPickerChrome,
+                       MissionLiveVehicleHealthCardReservePoolPickerPolicy.showReservePoolClassCapsule(
+                        bracketedVehicleShortID: bracketedVehicleShortID,
+                        vehicleClassCode: vehicleClassForBundledDeviceArt.classCode
+                       ) {
+                        reservePoolPickerClassCapsule
+                    }
+                    if let slotAttention {
+                        MissionControlRosterSlotAttentionCapsule(
+                            severity: slotAttention.severity,
+                            title: slotAttention.title
+                        )
+                    }
                     Spacer(minLength: GuardianSpacing.xs)
                     Text(bracketedVehicleShortID)
                         .font(GuardianTypography.font(.telemetryMono10Semibold))
@@ -97,10 +230,19 @@ struct MissionLiveVehicleHealthCard: View {
                         .truncationMode(.tail)
                     Spacer(minLength: 0)
                     if showCompactBattery {
-                        Image(systemName: batterySymbol)
-                            .font(GuardianTypography.font(.denseCaption10Semibold))
-                            .foregroundStyle(vehicleModel.battery.trafficBand.trafficLightIconTint)
-                            .help(batteryHoverText)
+                        HStack(alignment: .center, spacing: GuardianSpacing.xxs) {
+                            Image(systemName: batterySymbol)
+                                .font(GuardianTypography.font(.denseCaption10Semibold))
+                                .foregroundStyle(vehicleModel.battery.trafficBand.trafficLightIconTint)
+                            if reservePoolPickerChrome {
+                                Text(vehicleModel.battery.compactPercentLabel)
+                                    .font(GuardianTypography.font(.denseCaption10Semibold))
+                                    .foregroundStyle(theme.textSecondary)
+                                    .monospacedDigit()
+                                    .lineLimit(1)
+                            }
+                        }
+                        .help(batteryHoverText)
                     }
                 }
             }
@@ -165,5 +307,25 @@ struct MissionLiveVehicleHealthCard: View {
             return lifecycleStatus.color.uiColor.opacity(0.72)
         }
         return cardStrokeNeutral
+    }
+
+    private var reservePoolPickerClassCapsule: some View {
+        Text(vehicleClassForBundledDeviceArt.classCode)
+            .font(GuardianTypography.font(.telemetryNano9Semibold))
+            .foregroundStyle(GuardianSemanticColors.neutralBadgeForeground)
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
+            .padding(.horizontal, GuardianSpacing.xsTight)
+            .padding(.vertical, 3)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(GuardianSemanticColors.neutralBadgeBackground)
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(theme.borderSubtle.opacity(0.45), lineWidth: 1)
+            )
+            .help(vehicleClassForBundledDeviceArt.displayName)
+            .accessibilityLabel("Vehicle class \(vehicleClassForBundledDeviceArt.classCode)")
     }
 }

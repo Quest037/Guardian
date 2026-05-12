@@ -111,6 +111,7 @@ struct GuardianHQApp: App {
                         .withGuardianConfirmOverlayHost()
                         .withToasts()
                         .environmentObject(appDrawer)
+                        .environmentObject(OperatorPromptCenter.shared)
                         .environmentObject(osmRoutingService)
                         .onAppear {
                             // SwiftPM / early launch: re-run after splash so permission + System Settings registration line up with a real NSApplication + window session.

@@ -775,6 +775,37 @@ struct FleetVehicleCommandMissionItemPayload: Codable, Equatable, Sendable {
     var yawDeg: Double
     var cameraPhotoDistanceM: Double
 
+    /// Memberwise initializer for catalogue JSON and tests (``init(mavsdk:)`` is the other entry point).
+    init(
+        latitudeDeg: Double,
+        longitudeDeg: Double,
+        relativeAltitudeM: Double,
+        speedMS: Double,
+        isFlyThrough: Bool,
+        gimbalPitchDeg: Double,
+        gimbalYawDeg: Double,
+        cameraAction: String,
+        loiterTimeS: Double,
+        cameraPhotoIntervalS: Double,
+        acceptanceRadiusM: Double,
+        yawDeg: Double,
+        cameraPhotoDistanceM: Double
+    ) {
+        self.latitudeDeg = latitudeDeg
+        self.longitudeDeg = longitudeDeg
+        self.relativeAltitudeM = relativeAltitudeM
+        self.speedMS = speedMS
+        self.isFlyThrough = isFlyThrough
+        self.gimbalPitchDeg = gimbalPitchDeg
+        self.gimbalYawDeg = gimbalYawDeg
+        self.cameraAction = cameraAction
+        self.loiterTimeS = loiterTimeS
+        self.cameraPhotoIntervalS = cameraPhotoIntervalS
+        self.acceptanceRadiusM = acceptanceRadiusM
+        self.yawDeg = yawDeg
+        self.cameraPhotoDistanceM = cameraPhotoDistanceM
+    }
+
     /// Decode a JSON array string into a list of MAVSDK mission items.
     static func decodeMissionItems(fromJSON json: String) throws -> [Mavsdk.Mission.MissionItem] {
         guard let data = json.data(using: .utf8) else {

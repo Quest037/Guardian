@@ -33,6 +33,15 @@ enum MissionRunPrepLayout {
     static let rostersMapAccordionStackBreakpoint: CGFloat = GuardianSpacing.missionRosterMapAccordionBreakpoint
     /// Floating reserve pool slot cards in the roster accordion (horizontal strip); slightly narrower than full roster grid cells.
     static let reservePoolSlotCardWidth: CGFloat = 212
+
+    /// MC-R live console roster strip: column-major ``Grid`` row count for ``itemCount`` cards with at most ``slotsPerColumn`` rows per column (matches ``missionLiveVehicleStatusRow`` / ``missionLiveVehicleStatusRowRosterGrid`` indexing).
+    static func liveConsoleColumnMajorGridRowCount(itemCount: Int, slotsPerColumn: Int) -> Int {
+        let n = max(0, itemCount)
+        if n == 0 { return 1 }
+        let cap = max(1, slotsPerColumn)
+        let maxRowIndex = (0 ..< n).map { $0 % cap }.max() ?? 0
+        return min(cap, maxRowIndex + 1)
+    }
 }
 
 /// Matches the golden-angle route line hue in ``OSMMapView`` so route lines and progress bars align visually.
@@ -46,6 +55,40 @@ enum MissionTaskMapColor {
     }
 }
 
+// MARK: - MC-R reserve pool mutation gates
+
+/// Pure predicates for **which** floating reserve pool berths must reject competing operator mutations
+/// (reserve swap-in preflight→commit vs berth arm preflight vs vehicle binding edits).
+enum MissionControlReservePoolMutationGate: Sendable {
+
+    /// Held for the whole ``MissionRunDetailView/runMcrFloatingReservePoolSwapAfterReservePreflight`` pipeline
+    /// (after eligibility checks, through hub probe, roster/pool commit, and plan recompile).
+    struct SwapOperationLock: Equatable, Sendable {
+        let vacancyAssignmentID: UUID
+        let taskID: UUID
+        /// Set for floating-pool swap-in; `nil` while a **fixed template reserve** roster swap pipeline runs (no berth is locked).
+        let poolSlotID: UUID?
+    }
+
+    /// `true` when a reserve swap-in pipeline is active (second confirms / new swap picks / berth edits must wait).
+    static func swapOperationInFlight(lock: SwapOperationLock?) -> Bool {
+        lock != nil
+    }
+
+    /// `true` when this **task + pool berth** must not accept vehicle binding changes, berth removal, or overlapping probes.
+    static func reservePoolSlotMutationLocked(
+        swapLock: SwapOperationLock?,
+        berthPreflightTaskID: UUID?,
+        berthPreflightSlotID: UUID?,
+        taskID: UUID,
+        slotID: UUID
+    ) -> Bool {
+        if let swapLock, swapLock.taskID == taskID,
+           let lockedPool = swapLock.poolSlotID, lockedPool == slotID { return true }
+        if let t = berthPreflightTaskID, let s = berthPreflightSlotID, t == taskID, s == slotID { return true }
+        return false
+    }
+}
 
 /// Roster slot card: role + vehicle from fleet picker (Vehicles tab inventory).
 struct MissionControlRosterSlotCard: View {
@@ -81,8 +124,10 @@ struct MissionControlRosterSlotCard: View {
     let showsWorkingOverlay: Bool
     /// Opens Mission Control slot settings (policies, etc.) in a trailing sidebar.
     var onOpenSettings: (() -> Void)? = nil
-    /// When set with ``isAttached``, draws a **random eligible** floating reserve binding onto this roster slot (MRE operator trigger).
-    var onSwapFromFloatingReserve: (() -> Void)? = nil
+    /// MC-R / MCS **running** roster: show merged slot-state chip when non-nil severity (``MissionRunAssignmentSlotState/missionControlRosterBadgeSeverity`` in ``MissionControlModels``).
+    var missionControlShowsSlotStateBadge: Bool = false
+    /// Merged slot display state (``MissionRunAssignmentSlotLaneMerge/preferredDisplayState``); ignored when ``missionControlShowsSlotStateBadge`` is false.
+    var missionControlMergedSlotDisplayState: MissionRunAssignmentSlotState = .idle
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -208,6 +253,10 @@ struct MissionControlRosterSlotCard: View {
                         .font(GuardianTypography.font(.denseCaption10Regular))
                         .foregroundStyle(theme.textSecondary)
                         .lineLimit(2)
+                    if missionControlShowsSlotStateBadge,
+                       let sev = missionControlMergedSlotDisplayState.missionControlRosterBadgeSeverity {
+                        MissionControlRosterSlotAttentionCapsule(severity: sev, title: missionControlMergedSlotDisplayState.displayTitle)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -268,17 +317,6 @@ struct MissionControlRosterSlotCard: View {
                 .buttonStyle(.bordered).guardianPointerOnHover()
                 .controlSize(.small)
                 .help("Change vehicle assignment")
-
-                if let onSwapFromFloatingReserve {
-                    Button(action: onSwapFromFloatingReserve) {
-                        Image(systemName: "arrow.triangle.swap")
-                            .font(GuardianTypography.font(.inlineNoticeTitle))
-                    }
-                    .buttonStyle(.bordered).guardianPointerOnHover()
-                    .tint(.blue)
-                    .controlSize(.small)
-                    .help("Assign a random eligible floating reserve to this roster slot.")
-                }
 
                 if let onCalibration {
                     Button(action: onCalibration) {
@@ -467,6 +505,8 @@ private enum MissionRunPresentedConfirm: Identifiable, Equatable {
     case skipTaskStartDeferral
     /// Spawn scope is part of the item so the window-level confirm host always rebuilds with the correct copy (no orphaned `@State`).
     case bulkSpawnSims(MissionRunBulkSpawnSimsConfirmKind)
+    /// MC-R: confirm floating **pool** berth chosen in ``liveReserveSwapPick`` before ``MissionRunEnvironment/swapRosterAssignmentWithFloatingReservePoolSlot``.
+    case reserveSwapPoolPick(vacancyAssignmentID: UUID, taskID: UUID, poolSlotID: UUID)
 
     var id: String {
         switch self {
@@ -478,8 +518,21 @@ private enum MissionRunPresentedConfirm: Identifiable, Equatable {
             case .allMissionSlots: "bulkSpawnSims.allMissionSlots"
             case .singleTask(let taskID): "bulkSpawnSims.task.\(taskID.uuidString)"
             }
+        case .reserveSwapPoolPick(let vacancy, let task, let slot):
+            "reserveSwap.\(vacancy.uuidString).\(task.uuidString).\(slot.uuidString)"
         }
     }
+}
+
+private struct LiveReserveSwapPickContext: Equatable {
+    let vacancyAssignmentID: UUID
+    let taskID: UUID
+}
+
+/// MC-R: focused floating **reserve pool berth** (not a roster ``MissionRunAssignment`` row).
+private struct LiveReservePoolBerthFocus: Equatable {
+    let taskID: UUID
+    let slotID: UUID
 }
 
 struct MissionRunDetailView: View {
@@ -516,6 +569,12 @@ struct MissionRunDetailView: View {
     /// MC-R: focused roster slot triage — slides a vehicle detail sheet up over the Tasks card.
     /// Mutually exclusive with ``focusedLiveTaskID`` so only one overlay is mounted at a time.
     @State private var focusedLiveAssignmentID: UUID? = nil
+    /// MC-R: while set, the **global** roster health-card strip lists floating **pool** candidates for reserve swap-in instead of squad roster rows.
+    @State private var liveReserveSwapPick: LiveReserveSwapPickContext? = nil
+    /// MC-R: while set (and swap pick is **not** active), the roster strip lists **all** pool berths for this task for browse / manage — taps open ``focusedLiveReservePoolBerth``, not swap confirm.
+    @State private var liveReservePoolBrowseTaskID: UUID? = nil
+    /// MC-R: reserve pool berth detail sheet (above roster vehicle overlay, below map points).
+    @State private var focusedLiveReservePoolBerth: LiveReservePoolBerthFocus? = nil
     /// MC-R §4.2: runtime map-points sheet over the Tasks card (slide-up; stacks above task triage and vehicle overlays).
     @State private var liveRuntimeMissionPointsOverlayPresented = false
     @State private var liveRuntimeMissionPointDrawerEditingID: UUID?
@@ -534,8 +593,17 @@ struct MissionRunDetailView: View {
     @State private var liveConsoleMediaTab: LiveConsoleMediaTab = .map
     @ObservedObject private var logTemplateRegistry: MissionRunLogTemplateRegistry
     @State private var startPreflightPresented = false
+    @State private var missionPreflightPostPickProbeAssignmentId: UUID?
     @State private var rosterCalibrationVehicleID: String?
     @State private var rosterCalibrationFallbackModel: FleetVehicleModel?
+    /// MC-R reserve pool berth sheet: one-shot arm probe running (outcome via toast), keyed so other berths stay editable.
+    @State private var reservePoolBerthPreflightFocus: LiveReservePoolBerthFocus? = nil
+    /// MC-R: held across reserve swap-in hub probe → roster/pool commit so the pool berth (and competing swap picks) cannot race.
+    @State private var mcrFloatingReserveSwapLock: MissionControlReservePoolMutationGate.SwapOperationLock? = nil
+    /// MC-R: last floating-reserve **auto-suggest** toast per fleet vehicle id (debounce; see ``MissionRunReserveAutoSuggestPolicy``).
+    @State private var reserveAutoSuggestLastToastAtByVehicleID: [String: Date] = [:]
+    /// MC-R: last **reserve auto-swap** executor attempt per roster vacancy id (debounce; ``MissionRunReserveAutoSwapExecutorPolicy``).
+    @State private var reserveAutoSwapLastAttemptAtByVacancyID: [UUID: Date] = [:]
     /// Deferred one-off schedule: value + unit for **Go** on the running countdown banner (same control model as MCS Timing Tasks).
     @State private var scheduledStartPostponeValue: Double = 5
     @State private var scheduledStartPostponeUnit: DelayUnit = .mins
@@ -664,7 +732,7 @@ struct MissionRunDetailView: View {
         }
     }
 
-    private func presentMissionRosterVehiclePicker(assignmentId: UUID) {
+    private func presentMissionRosterVehiclePicker(assignmentId: UUID, onVehicleApplied: (() -> Void)? = nil) {
         let anim = rosterPickerSpring
         appDrawer.present(
             title: nil,
@@ -678,6 +746,7 @@ struct MissionRunDetailView: View {
                 rowDisabledReason: { rosterPickDisabledReason($0, assignmentId: assignmentId) },
                 onSelect: { v in
                     applyFleetVehicle(v, assignmentId: assignmentId)
+                    onVehicleApplied?()
                     appDrawer.dismiss(animation: anim)
                 },
                 onClose: {
@@ -808,7 +877,7 @@ struct MissionRunDetailView: View {
         var n = 0
         for task in mission.routeMacro.tasks {
             let indices = run.assignments.indices.filter {
-                missionRunAssignmentBelongsToTask(run.assignments[$0], task: task, mission: mission)
+                run.missionControlAssignmentBelongsToTask(run.assignments[$0], task: task, mission: mission)
             }
             n += indices.filter { !run.assignments[$0].hasFleetOrLegacyAssignment }.count
         }
@@ -877,7 +946,7 @@ struct MissionRunDetailView: View {
             rosterBulkSimSpawnBusy = nil
             rosterBulkSimSpawnWorkingAssignmentId = nil
         }
-        let rows = missionRunTaskRosterOrderedSlots(task: task, mission: mission)
+        let rows = run.missionControlTaskRosterOrderedSlotAssignmentIndices(task: task, mission: mission)
         let assignedAny = await bulkSpawnAndAssignAlongOrderedRows(rows, mission: mission)
         if assignedAny {
             onUpdate(run)
@@ -894,7 +963,7 @@ struct MissionRunDetailView: View {
         }
         var assignedAny = false
         for task in mission.routeMacro.tasks {
-            let rows = missionRunTaskRosterOrderedSlots(task: task, mission: mission)
+            let rows = run.missionControlTaskRosterOrderedSlotAssignmentIndices(task: task, mission: mission)
             if await bulkSpawnAndAssignAlongOrderedRows(rows, mission: mission) {
                 assignedAny = true
             }
@@ -1002,6 +1071,25 @@ struct MissionRunDetailView: View {
                                 Task { @MainActor in
                                     await performBulkSpawnSitlForAllMissionSlots(mission: mission)
                                 }
+                            }
+                        }
+                    )
+                case .reserveSwapPoolPick(let vacancyAID, let taskID, let poolSlotID):
+                    GuardianConfirm(
+                        title: "Swap in this reserve?",
+                        message: MissionRunReserveSwapOperatorCopy.reserveSwapPoolPickConfirmMessage,
+                        systemImage: "arrow.triangle.swap",
+                        cancelTitle: "Cancel",
+                        confirmTitle: "Swap",
+                        onCancel: { presentedRunConfirm = nil },
+                        onConfirm: {
+                            presentedRunConfirm = nil
+                            Task { @MainActor in
+                                await runMcrFloatingReservePoolSwapAfterReservePreflight(
+                                    vacancyAssignmentID: vacancyAID,
+                                    taskID: taskID,
+                                    poolSlotID: poolSlotID
+                                )
                             }
                         }
                     )
@@ -1138,12 +1226,18 @@ struct MissionRunDetailView: View {
     }
 
     /// MC-R overlay header: plain hierarchical glyph (same weight as the close control), no bordered chip.
-    private func missionLiveOverlayHeaderGlyphButton(systemImage: String, help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+    private func missionLiveOverlayHeaderGlyphButton(
+        systemImage: String,
+        help: String,
+        foreground: Color? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
+        let fg = foreground ?? theme.textSecondary
+        return Button(action: action) {
             Image(systemName: systemImage)
                 .font(GuardianTypography.font(.heroGlyph18Medium))
                 .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(theme.textSecondary)
+                .foregroundStyle(fg)
         }
         .buttonStyle(GuardianPointerPlainButtonStyle())
         .help(help)
@@ -1642,6 +1736,85 @@ struct MissionRunDetailView: View {
         )
     }
 
+    /// MC-R: when telemetry / logs show distress on a **primary or wingman** roster aircraft and a class-matched
+    /// floating reserve exists on the focused task, surface a debounced toast pointing operators at **Swap in reserve**.
+    ///
+    /// When ``MissionRunEngagementAction/swapInReserve`` is **autonomous** and exactly **one** reserve swap candidate
+    /// exists (pool or fixed template reserve), may run **reserve auto-swap executor** (arm probe on the reserve, then roster commit) instead of toasting.
+    private func evaluateReserveAutoSuggestFromLiveSignalsIfNeeded(now: Date = Date()) {
+        syncRunFromStore()
+        guard liveReserveSwapPick == nil else { return }
+        guard !mcrReserveSwapOperationInFlight() else { return }
+        guard run.status == .running || run.status == .paused else { return }
+        guard run.sessionPhase == .executing else { return }
+        guard let mission = resolvedMission, let tid = focusedLiveTaskID else { return }
+        guard let task = mission.routeMacro.tasks.first(where: { $0.id == tid }) else { return }
+        guard task.enabled else { return }
+
+        if let auto = MissionRunReserveAutoSwapLiveEvaluator.firstMatch(
+            run: run,
+            mission: mission,
+            task: task,
+            fleetLink: fleetLink,
+            sitl: sitl,
+            now: now
+        ),
+           MissionRunReserveAutoSwapExecutorPolicy.debounceAllowsAttempt(
+            lastAttemptAt: reserveAutoSwapLastAttemptAtByVacancyID[auto.vacancyAssignment.id],
+            now: now
+           ) {
+            reserveAutoSwapLastAttemptAtByVacancyID[auto.vacancyAssignment.id] = now
+            Task { await performReserveAutoSwapIfNeeded(auto, taskID: tid) }
+            return
+        }
+
+        guard let match = MissionRunReserveAutoSuggestLiveEvaluator.firstSuggestMatch(
+            run: run,
+            mission: mission,
+            task: task,
+            fleetLink: fleetLink,
+            sitl: sitl,
+            now: now
+        ) else { return }
+
+        guard MissionRunReserveAutoSuggestPolicy.debounceAllowsToast(
+            lastToastAt: reserveAutoSuggestLastToastAtByVehicleID[match.vehicleID],
+            debounce: MissionRunReserveAutoSuggestPolicy.defaultToastDebouncePerVehicleSeconds,
+            now: now
+        ) else { return }
+
+        reserveAutoSuggestLastToastAtByVehicleID[match.vehicleID] = now
+        toastCenter.show(match.reason.operatorToastBody, style: .warning)
+    }
+
+    @MainActor
+    private func performReserveAutoSwapIfNeeded(_ match: MissionRunReserveAutoSwapLiveMatch, taskID: UUID) async {
+        syncRunFromStore()
+        guard liveReserveSwapPick == nil else { return }
+        guard !mcrReserveSwapOperationInFlight() else { return }
+        guard run.resolvedEngagementDisposition(for: .swapInReserve) == .autonomous else { return }
+        guard let mission = resolvedMission else { return }
+        guard let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }), task.enabled else { return }
+        let refreshed = run.enumerateReserveSwapCandidates(vacancyAssignmentID: match.vacancyAssignment.id, taskID: taskID)
+        guard refreshed.count == 1, refreshed[0] == match.loneCandidate else { return }
+
+        switch match.loneCandidate {
+        case .floatingPool(_, let slot):
+            await runMcrFloatingReservePoolSwapAfterReservePreflight(
+                vacancyAssignmentID: match.vacancyAssignment.id,
+                taskID: taskID,
+                poolSlotID: slot.id,
+                triggerSource: "operator.missionControlRunning.reserveSwap.autoExecutor"
+            )
+        case .fixedRosterReserve(let reserve):
+            await runMcrFixedTemplateReserveSwapAfterReservePreflight(
+                vacancyAssignmentID: match.vacancyAssignment.id,
+                reserveAssignment: reserve,
+                taskID: taskID
+            )
+        }
+    }
+
     private func applyAbortImmediate() {
         run.attachServices(fleetLink: fleetLink, sitl: sitl)
         run.systems.scheduling.abortNow()
@@ -1799,6 +1972,21 @@ struct MissionRunDetailView: View {
         return run.assignments.filter { assignmentMatchesLiveFocus($0, mission: mission) }
     }
 
+    /// When ``liveReserveSwapPick`` is active, pool berths (ids) that may replace the vacancy — same slice and **pool-row order** as ``MissionRunEnvironment/enumerateReserveSwapCandidates`` with default ordering (floating pool rows only).
+    private var mcrLiveReserveSwapEligiblePoolSlotsOrdered: [MissionRunReservePoolSlot] {
+        guard let pick = liveReserveSwapPick else { return [] }
+        return run.enumerateReserveSwapCandidates(vacancyAssignmentID: pick.vacancyAssignmentID, taskID: pick.taskID).compactMap { c in
+            guard case .floatingPool(let tid, let slot) = c, tid == pick.taskID else { return nil }
+            return slot
+        }
+    }
+
+    /// Hub-linked pool markers to emphasize on the live map while picking a reserve swap-in berth.
+    private var mcrLiveReserveSwapEligiblePoolSlotIDs: Set<UUID> {
+        guard liveReserveSwapPick != nil else { return [] }
+        return Set(mcrLiveReserveSwapEligiblePoolSlotsOrdered.map(\.id))
+    }
+
     private func syncRecoveryPromptIfNeeded() {
         guard run.status == .recovery, !dismissedRecoveryStatusPrompt else { return }
         guard bottomPromptCenter.activePrompt == nil else { return }
@@ -1906,7 +2094,7 @@ struct MissionRunDetailView: View {
                 size: .small,
                 shape: .cornered,
                 isEnabled: canStart(referenceNow: referenceNow),
-                action: { startPreflightPresented = true }
+                action: { withAnimation(triageSheetSpring) { startPreflightPresented = true } }
             )
 
             GuardianDestructiveProminentButton(title: "Delete Run") {
@@ -2106,62 +2294,135 @@ struct MissionRunDetailView: View {
                         }
                     }
                 }
-                if run.status == .setup {
+                ZStack(alignment: .topLeading) {
                     Group {
-                        if setupMainTab == .rosters {
-                            setupRostersTabContent
-                                .padding(.horizontal, MissionRunPrepLayout.setupScrollPaddingH)
-                                .padding(.vertical, MissionRunPrepLayout.setupScrollPaddingV)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                        } else {
-                            ScrollView {
-                                VStack(alignment: .leading, spacing: MissionRunPrepLayout.setupBlockSpacing) {
-                                    switch setupMainTab {
-                                    case .timing:
-                                        setupTimingTabContent
-                                    case .rules:
-                                        setupRulesTabContent
-                                    case .rosters:
-                                        EmptyView()
+                        if run.status == .setup {
+                            Group {
+                                if setupMainTab == .rosters {
+                                    setupRostersTabContent
+                                        .padding(.horizontal, MissionRunPrepLayout.setupScrollPaddingH)
+                                        .padding(.vertical, MissionRunPrepLayout.setupScrollPaddingV)
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                                } else {
+                                    ScrollView {
+                                        VStack(alignment: .leading, spacing: MissionRunPrepLayout.setupBlockSpacing) {
+                                            switch setupMainTab {
+                                            case .timing:
+                                                setupTimingTabContent
+                                            case .rules:
+                                                setupRulesTabContent
+                                            case .rosters:
+                                                EmptyView()
+                                            }
+                                        }
+                                        .padding(.horizontal, MissionRunPrepLayout.setupScrollPaddingH)
+                                        .padding(.vertical, MissionRunPrepLayout.setupScrollPaddingV)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
                                     }
                                 }
-                                .padding(.horizontal, MissionRunPrepLayout.setupScrollPaddingH)
-                                .padding(.vertical, MissionRunPrepLayout.setupScrollPaddingV)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        } else if run.status == .completed {
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: GuardianSpacing.md) {
+                                    missionCompletedReportCards
+                                    completedMissionLogExportSection
+                                }
+                                .padding(.horizontal, GuardianSpacing.xl)
+                                .padding(.vertical, GuardianSpacing.sectionStack)
+                                .frame(maxWidth: .infinity)
+                            }
+                        } else {
+                            VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
+                                missionLiveConsole
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            }
+                            .padding(.horizontal, GuardianSpacing.denseGutter)
+                            .padding(.vertical, GuardianSpacing.denseGutter)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .onChange(of: fleetLink.hubTelemetry?.lastUpdate) { _ in
+                                refreshVehicleVoiceNarrativeFromTelemetry()
+                                evaluateReserveAutoSuggestFromLiveSignalsIfNeeded()
+                            }
+                            .onChange(of: liveMissionProgressPulseDate) { _ in
+                                refreshVehicleVoiceNarrativeFromTelemetry()
+                                evaluateReserveAutoSuggestFromLiveSignalsIfNeeded()
+                            }
+                            .onAppear {
+                                refreshVehicleVoiceNarrativeFromTelemetry()
+                                evaluateReserveAutoSuggestFromLiveSignalsIfNeeded()
+                            }
+                            .onChange(of: run.events.count) { _ in
+                                evaluateReserveAutoSuggestFromLiveSignalsIfNeeded()
+                            }
+                            .onChange(of: run.sessionPhase) { _ in
+                                evaluateReserveAutoSuggestFromLiveSignalsIfNeeded()
+                            }
+                            .onChange(of: run.taskStateByTaskID) { _ in
+                                evaluateReserveAutoSuggestFromLiveSignalsIfNeeded()
+                            }
+                            .onChange(of: focusedLiveTaskID) { newID in
+                                pruneLiveRuntimeMapPointSelectionIfOutOfFilter()
+                                if let pick = liveReserveSwapPick, newID == nil || newID != pick.taskID {
+                                    liveReserveSwapPick = nil
+                                }
+                                if let browse = liveReservePoolBrowseTaskID, newID == nil || newID != browse {
+                                    liveReservePoolBrowseTaskID = nil
+                                    focusedLiveReservePoolBerth = nil
+                                }
+                                evaluateReserveAutoSuggestFromLiveSignalsIfNeeded()
                             }
                         }
                     }
                     .layoutPriority(1)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                } else if run.status == .completed {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: GuardianSpacing.md) {
-                            missionCompletedReportCards
-                            completedMissionLogExportSection
-                        }
-                        .padding(.horizontal, GuardianSpacing.xl)
-                        .padding(.vertical, GuardianSpacing.sectionStack)
-                        .frame(maxWidth: .infinity)
-                    }
-                } else {
-                    VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
-                        missionLiveConsole
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    }
-                    .padding(.horizontal, GuardianSpacing.denseGutter)
-                    .padding(.vertical, GuardianSpacing.denseGutter)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .onChange(of: fleetLink.hubTelemetry?.lastUpdate) { _ in
-                        refreshVehicleVoiceNarrativeFromTelemetry()
-                    }
-                    .onChange(of: liveMissionProgressPulseDate) { _ in
-                        refreshVehicleVoiceNarrativeFromTelemetry()
-                    }
-                    .onAppear {
-                        refreshVehicleVoiceNarrativeFromTelemetry()
-                    }
-                    .onChange(of: focusedLiveTaskID) { _ in
-                        pruneLiveRuntimeMapPointSelectionIfOutOfFilter()
+
+                    if startPreflightPresented && run.status == .setup {
+                        MissionRunStartPreflightOverlay(
+                            run: run,
+                            mission: resolvedMission,
+                            fleetLink: fleetLink,
+                            sitl: sitl,
+                            controlStore: controlStore,
+                            contentSpring: triageSheetSpring,
+                            resolveTelemetryVehicleID: { telemetryVehicleID(for: $0) },
+                            onSuccess: {
+                                if let mission = resolvedMission {
+                                    let fleet = buildMissionPickableVehicles(fleetLink: fleetLink, sitl: sitl)
+                                    controlStore.compileMissionControlPlan(
+                                        run: run,
+                                        mission: mission,
+                                        fleetVehicles: fleet
+                                    )
+                                }
+                                run.status = .running
+                                let deferOneOff: Bool = {
+                                    guard let t = run.oneOffStartAt else { return false }
+                                    return t.timeIntervalSince(Date()) > MissionRunEnvironment.oneOffScheduleTimeTolerance
+                                }()
+                                if deferOneOff, let executeAt = run.oneOffStartAt {
+                                    controlStore.updateRun(run)
+                                    run.systems.scheduling.scheduleDeferredOneOffExecution(executeAt: executeAt) {
+                                        onStart(run)
+                                    }
+                                } else {
+                                    onStart(run)
+                                }
+                                syncRunFromStore()
+                            },
+                            onAbandonWithoutStart: {},
+                            onDismiss: {
+                                startPreflightPresented = false
+                            },
+                            onOpenVehicleInspector: { presentRosterCalibrationSheet(for: $0) },
+                            onSwapVehicle: { assignmentId in
+                                presentMissionRosterVehiclePicker(assignmentId: assignmentId) {
+                                    missionPreflightPostPickProbeAssignmentId = assignmentId
+                                }
+                            },
+                            postVehiclePickPreflightAssignmentId: $missionPreflightPostPickProbeAssignmentId
+                        )
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .zIndex(0.5)
                     }
                 }
             }
@@ -2193,44 +2454,13 @@ struct MissionRunDetailView: View {
                 }
             )
         })
-        .sheet(isPresented: $startPreflightPresented) {
-            MissionRunStartPreflightSheet(
-                run: run,
-                fleetLink: fleetLink,
-                sitl: sitl,
-                controlStore: controlStore,
-                onSuccess: {
-                    if let mission = resolvedMission {
-                        let fleet = buildMissionPickableVehicles(fleetLink: fleetLink, sitl: sitl)
-                        controlStore.compileMissionControlPlan(
-                            run: run,
-                            mission: mission,
-                            fleetVehicles: fleet
-                        )
-                    }
-                    run.status = .running
-                    let deferOneOff: Bool = {
-                        guard let t = run.oneOffStartAt else { return false }
-                        return t.timeIntervalSince(Date()) > MissionRunEnvironment.oneOffScheduleTimeTolerance
-                    }()
-                    if deferOneOff, let executeAt = run.oneOffStartAt {
-                        controlStore.updateRun(run)
-                        run.systems.scheduling.scheduleDeferredOneOffExecution(executeAt: executeAt) {
-                            onStart(run)
-                        }
-                    } else {
-                        onStart(run)
-                    }
-                    syncRunFromStore()
-                },
-                onAbandonWithoutStart: {}
-            )
-        }
         .onAppear {
             run.attachServices(fleetLink: fleetLink, sitl: sitl)
             installMissionTemplatePersister()
             syncRunFromStore()
-            mapModel.recenter()
+            if run.status == .setup {
+                fitSetupStagingMapToVisibleMissionContent()
+            }
             syncSimBatteryDrainForRunStatus()
             if run.status == .setup {
                 pruneStaleRosterFleetAssignmentsIfNeeded()
@@ -2240,7 +2470,8 @@ struct MissionRunDetailView: View {
             syncGracefulStopPromptIfNeeded()
         }
         .onChange(of: setupMapBoundsSignature) { _ in
-            mapModel.recenter()
+            guard run.status == .setup else { return }
+            fitSetupStagingMapToVisibleMissionContent()
         }
         .onChange(of: sitlRosterPruneSignature) { _ in
             if run.status == .setup {
@@ -2804,12 +3035,29 @@ struct MissionRunDetailView: View {
     private let liveConsoleRosterCardHeight: CGFloat = 56
     /// Maximum roster cards stacked **vertically** per column (column-major). Strip height uses **actual** row count up to this cap.
     private let liveConsoleRosterGridRows: Int = 3
-    /// How many grid **rows** are populated for the current roster (1…``liveConsoleRosterGridRows``); empty roster uses **1** for the placeholder card.
+    /// How many grid **rows** are populated for the current roster strip (1…``liveConsoleRosterGridRows``); empty roster uses **1** for the placeholder card.
+    /// While **Swap in reserve** is picking a pool berth, or **browse reserves** is showing this task’s pool, counts **floating pool** rows instead of the normal roster so the strip height is not clipped (``missionLiveVehicleStatusRow`` + ``.clipped()``).
     private var liveConsoleRosterEffectiveRows: Int {
+        MissionRunPrepLayout.liveConsoleColumnMajorGridRowCount(
+            itemCount: liveConsoleRosterStripLayoutCardinality,
+            slotsPerColumn: liveConsoleRosterGridRows
+        )
+    }
+
+    /// Item count driving roster-strip **height** (normal roster assignments, or floating pool picks while ``liveReserveSwapPick`` is active).
+    private var liveConsoleRosterStripLayoutCardinality: Int {
+        if liveReserveSwapPick != nil,
+           run.status == .running || run.status == .paused || run.status == .recovery {
+            let pool = mcrLiveReserveSwapEligiblePoolSlotsOrdered
+            return pool.isEmpty ? 1 : pool.count
+        }
+        if let browseTid = liveReservePoolBrowseTaskID,
+           run.status == .running || run.status == .paused || run.status == .recovery {
+            let n = run.reservePool(forTaskID: browseTid).entries.count
+            return n == 0 ? 1 : n
+        }
         let n = filteredLiveRosterAssignments.count
-        if n == 0 { return 1 }
-        let maxRowIndex = (0 ..< n).map { $0 % liveConsoleRosterGridRows }.max() ?? 0
-        return min(liveConsoleRosterGridRows, maxRowIndex + 1)
+        return n == 0 ? 1 : n
     }
     /// Vertical space for the roster strip: card rows + gaps between them (remainder goes to the map + log flex).
     private var liveConsoleRosterStripHeight: CGFloat {
@@ -2886,7 +3134,7 @@ struct MissionRunDetailView: View {
         .spring(response: 0.42, dampingFraction: 0.86)
     }
 
-    /// Right column: ``GuardianCard`` with **Tasks** header; ``fullCardOverlay`` stacks **Task triage → Assignment (vehicle) → Map points** (bottom → top). ``zIndex`` must stay ordered so map points stay above in-flight triage/vehicle sheets.
+    /// Right column: ``GuardianCard`` with **Tasks** header; ``fullCardOverlay`` stacks **Task triage → Assignment (vehicle) → Reserve berth → Map points** (bottom → top). ``zIndex`` must stay ordered so map points stay above in-flight sheets.
     private var missionLiveTasksSideCard: some View {
         GuardianCard(
             configuration: mcSetupGroupCardConfiguration,
@@ -2899,6 +3147,7 @@ struct MissionRunDetailView: View {
                 ZStack(alignment: .top) {
                     missionLiveTaskTriageOverlay
                     missionLiveVehicleOverlay
+                    missionLiveReservePoolBerthOverlay
                     missionLiveRuntimeMissionPointsOverlay
                 }
             }
@@ -2914,13 +3163,22 @@ struct MissionRunDetailView: View {
         withAnimation(triageSheetSpring) {
             guard let id else {
                 focusedLiveTaskID = nil
+                liveReserveSwapPick = nil
+                liveReservePoolBrowseTaskID = nil
+                focusedLiveReservePoolBerth = nil
                 return
             }
             if focusedLiveTaskID == id {
                 focusedLiveTaskID = nil
+                liveReserveSwapPick = nil
+                liveReservePoolBrowseTaskID = nil
+                focusedLiveReservePoolBerth = nil
             } else {
                 focusedLiveTaskID = id
                 focusedLiveAssignmentID = nil
+                liveReserveSwapPick = nil
+                liveReservePoolBrowseTaskID = nil
+                focusedLiveReservePoolBerth = nil
             }
         }
     }
@@ -2931,12 +3189,40 @@ struct MissionRunDetailView: View {
         withAnimation(triageSheetSpring) {
             if let id, focusedLiveAssignmentID == id {
                 focusedLiveAssignmentID = nil
+                liveReserveSwapPick = nil
             } else {
+                if let pick = liveReserveSwapPick, pick.vacancyAssignmentID != id {
+                    liveReserveSwapPick = nil
+                }
                 focusedLiveAssignmentID = id
+                focusedLiveReservePoolBerth = nil
                 if id != nil {
                     focusedLiveTaskID = nil
                 }
             }
+        }
+    }
+
+    private func focusLiveReservePoolBerth(_ focus: LiveReservePoolBerthFocus?) {
+        withAnimation(triageSheetSpring) {
+            focusedLiveReservePoolBerth = focus
+            if focus != nil {
+                focusedLiveAssignmentID = nil
+                liveReserveSwapPick = nil
+            }
+        }
+    }
+
+    private func setLiveReservePoolBrowseForTask(_ taskID: UUID?, enabled: Bool) {
+        withAnimation(triageSheetSpring) {
+            guard enabled else {
+                liveReservePoolBrowseTaskID = nil
+                focusedLiveReservePoolBerth = nil
+                return
+            }
+            liveReserveSwapPick = nil
+            focusedLiveReservePoolBerth = nil
+            liveReservePoolBrowseTaskID = taskID
         }
     }
 
@@ -3076,6 +3362,18 @@ struct MissionRunDetailView: View {
         }
     }
 
+    /// MC-R: floating **reserve pool berth** detail (above roster vehicle overlay, below map points). Mutually exclusive with ``liveReserveSwapPick`` tap targets on the strip.
+    @ViewBuilder
+    private var missionLiveReservePoolBerthOverlay: some View {
+        if let berth = focusedLiveReservePoolBerth,
+           let slot = run.reservePool(forTaskID: berth.taskID).entries.first(where: { $0.id == berth.slotID }) {
+            missionLiveReservePoolBerthDetailSheet(taskID: berth.taskID, slot: slot)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .zIndex(2.5)
+        }
+    }
+
     /// In-card vehicle detail body: header (slot callsign + cog + close) and a placeholder content area
     /// reserved for richer per-vehicle telemetry. Kept intentionally lean so we can layer in details
     /// (battery / GPS / link / mission progress) iteratively without churning the overlay shell.
@@ -3112,6 +3410,43 @@ struct MissionRunDetailView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
+                    if run.status == .running || run.status == .paused || run.status == .recovery {
+                        let tid = assignment.taskId ?? focusedLiveTaskID
+                        let aff = floatingReserveSwapAffordance(assignment: assignment, mission: resolvedMission, taskID: tid)
+                        if let pick = liveReserveSwapPick, pick.vacancyAssignmentID == assignment.id {
+                            VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+                                Text("Pick a reserve")
+                                    .font(GuardianTypography.font(.denseCaption12Medium))
+                                    .foregroundStyle(theme.textPrimary)
+                                Text("Tap a pool aircraft in the roster strip below, then confirm.")
+                                    .font(GuardianTypography.font(.denseCaption12Regular))
+                                    .foregroundStyle(theme.textSecondary)
+                                GuardianThemedButton(
+                                    title: "Cancel reserve swap",
+                                    accent: .danger,
+                                    surface: .outline,
+                                    size: .small,
+                                    shape: .cornered,
+                                    action: { cancelMcrReserveSwapPick() }
+                                )
+                                .guardianPointerOnHover()
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        } else if aff.enabled, tid != nil {
+                            GuardianPrimaryProminentButton(title: "Swap in reserve") {
+                                beginMcrReserveSwapPick(for: assignment)
+                            }
+                            .disabled(mcrReserveSwapOperationInFlight())
+                            .guardianPointerOnHover()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        } else if aff.showBlockedControl, !aff.blockedReason.isEmpty {
+                            Text(aff.blockedReason)
+                                .font(GuardianTypography.font(.denseCaption12Regular))
+                                .foregroundStyle(theme.textTertiary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+
                     missionLiveAssignmentTriageBadgesCard(assignment: assignment, rosterDevice: rosterDevice)
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -3122,6 +3457,154 @@ struct MissionRunDetailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.backgroundRaised)
+    }
+
+    /// MC-R: floating reserve **berth** sheet (pool row). Distinct from swap-in pick: strip taps here open this overlay; swap pick opens confirm.
+    private func missionLiveReservePoolBerthDetailSheet(taskID: UUID, slot: MissionRunReservePoolSlot) -> some View {
+        let syn = MissionRunAssignment.syntheticForReservePool(slot: slot)
+        let taskName = resolvedMission?.routeMacro.tasks.first(where: { $0.id == taskID })?.name ?? "Task"
+        let taskEnabled = reservePoolBerthTaskEditingEnabled(taskID: taskID)
+        let poolMutationLocked = mcrReservePoolSlotMutationLocked(taskID: taskID, slotID: slot.id)
+        return VStack(alignment: .leading, spacing: 0) {
+            missionLiveOverlayHeader(
+                title: slot.label,
+                subtitle: "\(taskName) · Floating reserve",
+                titleMuted: !taskEnabled
+            ) {
+                HStack(spacing: GuardianSpacing.xs) {
+                    missionLiveOverlayHeaderGlyphButton(
+                        systemImage: "mappin.and.ellipse",
+                        help: "Center the map on this vehicle (keep zoom)"
+                    ) {
+                        focusLiveMapOnAssignmentVehicle(assignment: syn)
+                    }
+                    if telemetryVehicleID(for: syn) != nil {
+                        missionLiveSidebarStyleVehicleInspectorButton {
+                            presentRosterCalibrationSheet(for: syn)
+                        }
+                    }
+                    missionLiveSidebarStyleCloseButton {
+                        focusLiveReservePoolBerth(nil)
+                    }
+                }
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
+                    missionLiveAssignmentTriageBadgesCard(assignment: syn, rosterDevice: nil)
+
+                    if poolMutationLocked {
+                        Text("This berth is busy — reserve swap checks or arm preflight are still running. Wait for them to finish before changing the vehicle.")
+                            .font(GuardianTypography.font(.denseCaption12Regular))
+                            .foregroundStyle(theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if taskEnabled {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+                            GuardianPrimaryProminentButton(
+                                title: slot.hasFleetOrLegacyBinding ? "Change vehicle…" : "Choose vehicle…"
+                            ) {
+                                presentReservePoolVehiclePicker(taskID: taskID, slotID: slot.id)
+                            }
+                            .disabled(poolMutationLocked)
+                            .guardianPointerOnHover()
+                            if slot.hasFleetOrLegacyBinding {
+                                GuardianThemedButton(
+                                    title: "Remove vehicle from berth",
+                                    accent: .danger,
+                                    surface: .outline,
+                                    size: .small,
+                                    shape: .cornered,
+                                    action: {
+                                        clearReservePoolVehicleBinding(taskID: taskID, slotID: slot.id)
+                                    }
+                                )
+                                .disabled(poolMutationLocked)
+                                .guardianPointerOnHover()
+                                GuardianThemedButton(
+                                    title: reservePoolBerthPreflightBusy ? "Preflight running…" : "Run arm preflight",
+                                    accent: .primary,
+                                    surface: .outline,
+                                    size: .small,
+                                    shape: .cornered,
+                                    action: { runReservePoolBerthArmPreflight(taskID: taskID, slot: slot) }
+                                )
+                                .disabled(reservePoolBerthPreflightBusy || poolMutationLocked)
+                                .guardianPointerOnHover()
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        Text("This task is disabled — change the pool in Mission Control setup when editing is allowed.")
+                            .font(GuardianTypography.font(.denseCaption12Regular))
+                            .foregroundStyle(theme.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .padding(.top, GuardianSpacing.sm)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(.horizontal, GuardianCardLayout.defaultBodyPadding)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(theme.backgroundRaised)
+    }
+
+    private func reservePoolBerthTaskEditingEnabled(taskID: UUID) -> Bool {
+        guard let t = resolvedMission?.routeMacro.tasks.first(where: { $0.id == taskID }) else { return false }
+        return t.enabled
+    }
+
+    private var reservePoolBerthPreflightBusy: Bool { reservePoolBerthPreflightFocus != nil }
+
+    private func mcrReserveSwapOperationInFlight() -> Bool {
+        MissionControlReservePoolMutationGate.swapOperationInFlight(lock: mcrFloatingReserveSwapLock)
+    }
+
+    private func mcrReservePoolSlotMutationLocked(taskID: UUID, slotID: UUID) -> Bool {
+        MissionControlReservePoolMutationGate.reservePoolSlotMutationLocked(
+            swapLock: mcrFloatingReserveSwapLock,
+            berthPreflightTaskID: reservePoolBerthPreflightFocus?.taskID,
+            berthPreflightSlotID: reservePoolBerthPreflightFocus?.slotID,
+            taskID: taskID,
+            slotID: slotID
+        )
+    }
+
+    private func runReservePoolBerthArmPreflight(taskID: UUID, slot: MissionRunReservePoolSlot) {
+        guard reservePoolBerthPreflightFocus == nil else {
+            toastCenter.show("Arm preflight is already running on another berth.", style: .info)
+            return
+        }
+        guard !mcrReservePoolSlotMutationLocked(taskID: taskID, slotID: slot.id) else {
+            toastCenter.show("This berth is busy — wait for the reserve swap or preflight on it to finish.", style: .warning)
+            return
+        }
+        let syn = MissionRunAssignment.syntheticForReservePool(slot: slot)
+        guard let vehicleID = resolvedFleetStreamVehicleID(assignment: syn, fleetLink: fleetLink, sitl: sitl) else {
+            toastCenter.show("No live vehicle link for this berth.", style: .warning)
+            return
+        }
+        reservePoolBerthPreflightFocus = LiveReservePoolBerthFocus(taskID: taskID, slotID: slot.id)
+        Task { @MainActor in
+            defer { reservePoolBerthPreflightFocus = nil }
+            let r = await controlStore.runSingleVehiclePreflightProbe(
+                vehicleID: vehicleID,
+                fleetLink: fleetLink,
+                sitl: sitl,
+                leaveArmed: true,
+                allowDuringLiveMission: true,
+                preflightAuditSource: "missionControl.preflightProbe.reservePoolBerth",
+                telemetryGateMode: .none
+            )
+            if r.passed {
+                toastCenter.show(r.detail, style: .success)
+            } else {
+                toastCenter.show(r.detail, style: .error)
+            }
+        }
     }
 
     /// MC-R assignment triage: body-only ``GuardianCard`` with capsule badges (semantic slot, neutral role + vehicle id) and a live status row from ``FleetVehicleModel/liveStatusBadgeRow`` (or the same row built from bridge hub + operational model when no stamped model exists yet): arm / motion / mode, traffic-light battery, and neutral **AGL** (bridge relative altitude) beside battery.
@@ -3300,6 +3783,20 @@ struct MissionRunDetailView: View {
                     ) {
                         focusLiveMapOnTaskTriage(task: task)
                     }
+                    if !run.reservePool(forTaskID: task.id).entries.isEmpty,
+                       run.status == .running || run.status == .paused || run.status == .recovery
+                    {
+                        let browsingReserves = liveReservePoolBrowseTaskID == task.id
+                        missionLiveOverlayHeaderGlyphButton(
+                            systemImage: "arrow.left.arrow.right",
+                            help: browsingReserves
+                                ? "Show task roster in the strip below (floating reserve browse off)."
+                                : "Show this task’s floating reserve berths in the roster strip (tap a berth to manage).",
+                            foreground: browsingReserves ? GuardianSemanticColors.successForeground : nil
+                        ) {
+                            setLiveReservePoolBrowseForTask(task.id, enabled: !browsingReserves)
+                        }
+                    }
                     missionLiveSidebarStyleCogButton {
                         presentTaskSettingsSidebar(task: task)
                     }
@@ -3357,8 +3854,6 @@ struct MissionRunDetailView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
-                missionLiveFloatingReservePoolReadOnlyStrip(task: task)
-                    .padding(.top, GuardianSpacing.sm)
             }
             .padding(.horizontal, GuardianCardLayout.defaultBodyPadding)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -3375,6 +3870,13 @@ struct MissionRunDetailView: View {
         }
     }
 
+    /// Worst merged slot-state attention across this task’s roster rows (MC-R task list chip).
+    private func missionLiveTaskSlotAttention(for task: RoutePath, mission: Mission) -> (severity: GuardianFeedbackSeverity, title: String)? {
+        guard run.status == .running || run.status == .paused || run.status == .recovery else { return nil }
+        let rows = run.assignments.filter { run.missionControlAssignmentBelongsToTask($0, task: task, mission: mission) }
+        return MissionControlAssignmentSlotRosterAttention.worstAmong(assignments: rows)
+    }
+
     private func missionLiveTaskProgressRow(task: RoutePath, taskIndex: Int, mission: Mission, now: Date) -> some View {
         let d = missionLiveTaskProgressDerived(task: task, taskIndex: taskIndex, mission: mission, now: now)
         return VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
@@ -3385,6 +3887,13 @@ struct MissionRunDetailView: View {
                     HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.xsTight) {
                         missionLiveTaskStateBadge(run.taskStateByTaskID[task.id] ?? .ready)
                         missionLiveTaskTitleRow(task: task)
+                        Spacer(minLength: GuardianSpacing.xsTight)
+                        if let slotAttention = missionLiveTaskSlotAttention(for: task, mission: mission) {
+                            MissionControlRosterSlotAttentionCapsule(
+                                severity: slotAttention.severity,
+                                title: slotAttention.title
+                            )
+                        }
                         Spacer(minLength: GuardianSpacing.xsTight)
                         missionLiveTaskProgressCounterGroup(task: task, derived: d, now: now, hero: false)
                     }
@@ -3415,66 +3924,6 @@ struct MissionRunDetailView: View {
             }
         }
         .padding(.vertical, GuardianSpacing.xxs)
-    }
-
-    /// MC-R **task triage** overlay: read-only view of the task’s floating reserve **pool** (no edit actions).
-    @ViewBuilder
-    private func missionLiveFloatingReservePoolReadOnlyStrip(task: RoutePath) -> some View {
-        let pool = run.reservePool(forTaskID: task.id)
-        if pool.entries.isEmpty {
-            EmptyView()
-        } else {
-            VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
-                Text("Floating reserves")
-                    .font(GuardianTypography.font(.denseCaption12Medium))
-                    .foregroundStyle(theme.textSecondary)
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(alignment: .top, spacing: MissionRunPrepLayout.rosterGridSpacing) {
-                        ForEach(pool.entries) { slot in
-                            missionLiveReservePoolSlotChip(slot: slot, taskEnabled: task.enabled)
-                        }
-                    }
-                    .padding(.vertical, 2)
-                }
-            }
-            .opacity(task.enabled ? 1 : 0.55)
-        }
-    }
-
-    /// One pool berth in the MC-R strip: label + binding summary (fleet short id, legacy label, or **Empty**).
-    private func missionLiveReservePoolSlotChip(slot: MissionRunReservePoolSlot, taskEnabled: Bool) -> some View {
-        let syn = syntheticMissionRunAssignment(from: slot)
-        let filled = slot.hasFleetOrLegacyBinding
-        let fleetShort: String? = {
-            guard filled,
-                  let vid = resolvedFleetStreamVehicleID(assignment: syn, fleetLink: fleetLink, sitl: sitl),
-                  let raw = fleetLink.vehicleModel(forVehicleID: vid)?.displayShortID
-            else { return nil }
-            let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            return t.isEmpty ? nil : t
-        }()
-        let summary = slot.floatingReserveMcReadOnlyBindingDisplay(resolvedFleetDisplayShortID: fleetShort)
-        return VStack(alignment: .leading, spacing: GuardianSpacing.hairlineStack) {
-            Text(slot.label)
-                .font(GuardianTypography.font(.denseCaption10Semibold))
-                .foregroundStyle(theme.textPrimary)
-                .lineLimit(1)
-            Text(summary)
-                .font(GuardianTypography.font(.telemetryMono10Regular))
-                .foregroundStyle(filled ? theme.textSecondary : theme.textTertiary)
-                .lineLimit(1)
-        }
-        .padding(.horizontal, GuardianSpacing.denseGutter)
-        .padding(.vertical, GuardianSpacing.xsTight)
-        .frame(width: 148, alignment: .leading)
-        .background(theme.backgroundElevated)
-        .clipShape(RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous)
-                .strokeBorder(theme.borderSubtle, lineWidth: 1)
-        )
-        .allowsHitTesting(false)
-        .opacity(taskEnabled ? 1 : 0.85)
     }
 
     /// Live progress caption while a task awaits its initial MAVLink mission start (see ``MissionTaskStartDeferral``).
@@ -3556,6 +4005,11 @@ struct MissionRunDetailView: View {
             media: {
                 GuardianMapView(
                     model: mapModel,
+                    toolbar: GuardianMapToolbarOptions(
+                        mapResetAction: { _ in
+                            fitLiveOverviewMapToVisibleMissionContent()
+                        }
+                    ),
                     contextMenuPolicy: GuardianMapContextMenuPolicy(
                         vehicleActions: [.followVehicle, .stopFollowingVehicle, .centerMarker],
                         waypointActions: [],
@@ -3610,6 +4064,7 @@ struct MissionRunDetailView: View {
                 )
                 .task(id: liveOverviewMapStructureIdentity) {
                     pushLiveOverviewMapModelFromMission()
+                    fitLiveOverviewMapToVisibleMissionContent()
                 }
                 .onChange(of: liveOverviewMapMarkerCoordinateDigest) { _ in
                     pushLiveOverviewMapMarkersOnly()
@@ -3637,6 +4092,31 @@ struct MissionRunDetailView: View {
         return (tasks.map { $0.waypoints.map(\.coord) }, tasks.map(\.id))
     }
 
+    /// MC-R live map roster strip: **assignment ids only** so fleet token / bridge stream changes (e.g. reserve swap-in) do not invalidate ``liveOverviewMapStructureIdentity``.
+    private var liveOverviewRosterRowTopologySignature: String {
+        filteredLiveRosterAssignments
+            .map { $0.id.uuidString }
+            .sorted()
+            .joined(separator: ";")
+    }
+
+    /// MC-R live map floating reserve **berths** (`taskID|slotID` per row); omits fleet tokens and stream ids.
+    private var liveOverviewReservePoolSlotTopologySignature: String {
+        guard let mission = resolvedMission else { return "" }
+        let taskIDs: [UUID] = {
+            if let f = focusedLiveTaskID { return [f] }
+            return mission.routeMacro.tasks.filter(\.enabled).map(\.id)
+        }()
+        var rows: [String] = []
+        for tid in taskIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
+            let pool = run.reservePool(forTaskID: tid)
+            for slot in pool.entries.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
+                rows.append("\(tid.uuidString)|\(slot.id.uuidString)")
+            }
+        }
+        return rows.joined(separator: ";")
+    }
+
     /// Topology-only identity for the live overview map `.task(id:)` — excludes hub-driven lat/lon so
     /// telemetry does not rebuild Leaflet layers every tick (see ``liveOverviewMapMarkerCoordinateDigest``).
     private var liveOverviewMapStructureIdentity: LiveOverviewMapStructureIdentity {
@@ -3652,15 +4132,8 @@ struct MissionRunDetailView: View {
                 return "\(mp.id.uuidString)|\(mp.kind.rawValue)|\(mp.isClosed)|\(sel)"
             }
             .joined(separator: ";")
-        let rosterSig = filteredLiveRosterAssignments
-            .sorted { $0.id.uuidString < $1.id.uuidString }
-            .map { a -> String in
-                let stream = resolvedFleetStreamVehicleID(assignment: a, fleetLink: fleetLink, sitl: sitl) ?? ""
-                let tok = a.attachedFleetVehicleToken ?? "nil"
-                return "\(a.id.uuidString)|\(tok)|\(stream)"
-            }
-            .joined(separator: ";")
-        let poolSig = missionLiveReservePoolMapStructureSignature
+        let rosterTopo = liveOverviewRosterRowTopologySignature
+        let poolTopo = liveOverviewReservePoolSlotTopologySignature
         return LiveOverviewMapStructureIdentity(
             missionID: mission?.id,
             homeCoord: mission?.routeMacro.home?.coord,
@@ -3668,7 +4141,7 @@ struct MissionRunDetailView: View {
             taskPathIDs: pathPayload?.ids ?? [],
             focusedTaskID: focusedLiveTaskID,
             missionPointTopologySignature: topo,
-            rosterSlotBindingSignature: rosterSig + "§pool§" + poolSig
+            rosterSlotBindingSignature: rosterTopo + "§pool§" + poolTopo
         )
     }
 
@@ -3690,6 +4163,38 @@ struct MissionRunDetailView: View {
             }
             .joined(separator: "|")
         return pts + "§" + veh
+    }
+
+    /// Fits the MC-R live overview map to home, visible paths, runtime map points, and **current** vehicle markers (``mapModel/focusMapFitBounds`` — not ``recenterNonce`` / default world zoom).
+    private func fitLiveOverviewMapToVisibleMissionContent() {
+        guard let mission = resolvedMission else { return }
+        let pathPayload = liveOverviewMapTaskPathPayload(from: mission)
+        let vehicleLL = missionLiveVehicleMarkers.map { ($0.lat, $0.lon) }
+        let pts = MissionControlLiveMapFitCoordinates.liveOverviewMissionContentPoints(
+            homeCoordinate: mission.routeMacro.home?.coord,
+            taskPathCoordinates: pathPayload.coords,
+            runtimeMissionPoints: run.runtimeMissionPoints,
+            focusedTaskID: focusedLiveTaskID,
+            vehicleMarkerLatLon: vehicleLL
+        )
+        guard !pts.isEmpty else { return }
+        mapModel.focusMapFitBounds(points: pts)
+    }
+
+    /// Fits the MCS roster staging map to home, all task paths, template/runtime map points, and **current** roster vehicle markers (same bbox inputs as ``fitLiveOverviewMapToVisibleMissionContent()`` — not ``recenterNonce`` / default world zoom).
+    private func fitSetupStagingMapToVisibleMissionContent() {
+        guard let mission = resolvedMission else { return }
+        let taskPathCoordinates = mission.routeMacro.tasks.map { $0.waypoints.map(\.coord) }
+        let vehicleLL = setupVehicleMarkers.map { ($0.lat, $0.lon) }
+        let pts = MissionControlLiveMapFitCoordinates.liveOverviewMissionContentPoints(
+            homeCoordinate: mission.routeMacro.home?.coord,
+            taskPathCoordinates: taskPathCoordinates,
+            runtimeMissionPoints: setupStagingMissionPointRowsForMap,
+            focusedTaskID: nil,
+            vehicleMarkerLatLon: vehicleLL
+        )
+        guard !pts.isEmpty else { return }
+        mapModel.focusMapFitBounds(points: pts)
     }
 
     /// Full route + marker rebuild when mission topology, roster bindings, or map-point selection metadata changes.
@@ -3795,6 +4300,28 @@ struct MissionRunDetailView: View {
             else { return nil }
             let colorHex = fleetLink.mapColorHex(forVehicleID: vehicleID)
             let heading = hub.headingDeg ?? hub.yawDeg
+            let accessibilityTitle: String? = {
+                guard let pick = liveReserveSwapPick,
+                      let mission = resolvedMission,
+                      let tid = assignment.taskId ?? focusedLiveTaskID,
+                      tid == pick.taskID
+                else { return nil }
+                let taskName = mission.routeMacro.tasks.first { $0.id == tid }?.name ?? "Task"
+                if assignment.id == pick.vacancyAssignmentID {
+                    return MissionRunReserveSwapAccessibilityCopy.rosterVacancyDuringReserveSwapPick(
+                        taskName: taskName,
+                        slotName: assignment.slotName
+                    )
+                }
+                if let device = mission.rosterDevices.first(where: { $0.id == assignment.rosterDeviceId }),
+                   device.slot == .reserve {
+                    return MissionRunReserveSwapAccessibilityCopy.rosterBenchReserveDuringReserveSwapPick(
+                        taskName: taskName,
+                        slotName: assignment.slotName
+                    )
+                }
+                return nil
+            }()
             return MapVehicleMarker(
                 id: assignment.id.uuidString,
                 lat: lat,
@@ -3804,34 +4331,11 @@ struct MissionRunDetailView: View {
                 imageDataURL: missionControlRosterMapMarkerImageDataURL(for: assignment),
                 selected: focusedLiveAssignmentID == assignment.id,
                 draggable: false,
-                headingDeg: heading
+                headingDeg: heading,
+                accessibilityTitle: accessibilityTitle
             )
         }
         return roster + missionLiveFloatingReservePoolVehicleMarkers
-    }
-
-    /// Topology signature for floating reserve **pool** rows (task id, slot id, token, stream id) — not lat/lon.
-    private var missionLiveReservePoolMapStructureSignature: String {
-        guard let mission = resolvedMission else { return "" }
-        let taskIDs: [UUID] = {
-            if let f = focusedLiveTaskID { return [f] }
-            return mission.routeMacro.tasks.filter(\.enabled).map(\.id)
-        }()
-        var rows: [String] = []
-        for tid in taskIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
-            let pool = run.reservePool(forTaskID: tid)
-            for slot in pool.entries.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
-                guard slot.hasFleetOrLegacyBinding else {
-                    rows.append("\(tid.uuidString)|\(slot.id.uuidString)|-")
-                    continue
-                }
-                let syn = syntheticMissionRunAssignment(from: slot)
-                let tok = (slot.attachedFleetVehicleToken ?? "nil").trimmingCharacters(in: .whitespacesAndNewlines)
-                let stream = resolvedFleetStreamVehicleID(assignment: syn, fleetLink: fleetLink, sitl: sitl) ?? ""
-                rows.append("\(tid.uuidString)|\(slot.id.uuidString)|\(tok)|\(stream)")
-            }
-        }
-        return rows.joined(separator: ";")
     }
 
     /// MC-R live map: hub positions for **floating reserve** aircraft (fleet token + live telemetry only).
@@ -3857,6 +4361,20 @@ struct MissionRunDetailView: View {
                 else { continue }
                 let colorHex = fleetLink.mapColorHex(forVehicleID: vehicleID)
                 let heading = hub.headingDeg ?? hub.yawDeg
+                let taskName = mission.routeMacro.tasks.first { $0.id == tid }?.name ?? "Task"
+                let swapPickOnTask = liveReserveSwapPick?.taskID == tid
+                let markerEligible: Bool = {
+                    guard let pick = liveReserveSwapPick else { return false }
+                    return pick.taskID == tid && mcrLiveReserveSwapEligiblePoolSlotIDs.contains(slot.id)
+                }()
+                let browsingBerth = liveReservePoolBrowseTaskID == tid && focusedLiveReservePoolBerth?.slotID == slot.id
+                let poolA11y = MissionRunReserveSwapAccessibilityCopy.floatingPoolMapMarker(
+                    taskName: taskName,
+                    berthLabel: slot.label,
+                    swapPickActiveOnTask: swapPickOnTask,
+                    markerIsEligiblePickTarget: markerEligible,
+                    browsingThisBerthOnTask: browsingBerth
+                )
                 out.append(
                     MapVehicleMarker(
                         id: MissionControlReservePoolMapMarkerID.encode(taskID: tid, slotID: slot.id),
@@ -3865,9 +4383,13 @@ struct MissionRunDetailView: View {
                         label: "\(slot.label) · pool",
                         colorHex: colorHex,
                         imageDataURL: missionControlRosterMapMarkerImageDataURL(for: syn),
-                        selected: false,
+                        selected: (liveReserveSwapPick?.taskID == tid && mcrLiveReserveSwapEligiblePoolSlotIDs.contains(slot.id))
+                            || (liveReservePoolBrowseTaskID == tid && focusedLiveReservePoolBerth?.slotID == slot.id),
                         draggable: false,
-                        headingDeg: heading
+                        selectionAttentionPulse: (liveReserveSwapPick?.taskID == tid && mcrLiveReserveSwapEligiblePoolSlotIDs.contains(slot.id))
+                            || (liveReservePoolBrowseTaskID == tid && focusedLiveReservePoolBerth?.slotID == slot.id),
+                        headingDeg: heading,
+                        accessibilityTitle: poolA11y
                     )
                 )
             }
@@ -3876,6 +4398,123 @@ struct MissionRunDetailView: View {
     }
 
     private var missionLiveVehicleStatusRow: some View {
+        Group {
+            if let pick = liveReserveSwapPick,
+               run.status == .running || run.status == .paused || run.status == .recovery
+            {
+                let poolSlots = mcrLiveReserveSwapEligiblePoolSlotsOrdered
+                if poolSlots.isEmpty {
+                    let emptyCopy = run.floatingReservePoolPickStripEmptyOperatorCopy(
+                        vacancyAssignmentID: pick.vacancyAssignmentID,
+                        taskID: pick.taskID
+                    ) ?? ("No eligible reserves", "Add or bind a class-compatible floating reserve on this task.")
+                    MissionLiveVehicleHealthCard(
+                        slotTitle: emptyCopy.title,
+                        rosterSubtitle: emptyCopy.subtitle,
+                        bracketedVehicleShortID: "—",
+                        vehicleID: nil,
+                        simulationImageBasenames: nil,
+                        vehicleClassForBundledDeviceArt: .unknown,
+                        vehicleModel: fleetLink.primaryVehicleOperationalModel(),
+                        slotHeight: liveConsoleRosterCardHeight,
+                        onTap: nil,
+                        accessibilitySummary: MissionRunReserveSwapAccessibilityCopy.reserveSwapPickEmptyStrip(
+                            title: emptyCopy.title,
+                            subtitle: emptyCopy.subtitle
+                        )
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    let slotsPerColumn = liveConsoleRosterGridRows
+                    let columnCount = max(1, (poolSlots.count + slotsPerColumn - 1) / slotsPerColumn)
+                    let effectiveRows = MissionRunPrepLayout.liveConsoleColumnMajorGridRowCount(
+                        itemCount: poolSlots.count,
+                        slotsPerColumn: slotsPerColumn
+                    )
+                    Grid(
+                        alignment: .topLeading,
+                        horizontalSpacing: GuardianSpacing.denseGutter,
+                        verticalSpacing: GuardianSpacing.denseGutter
+                    ) {
+                        ForEach(0 ..< effectiveRows, id: \.self) { row in
+                            GridRow {
+                                ForEach(0 ..< columnCount, id: \.self) { col in
+                                    let index = col * slotsPerColumn + row
+                                    Group {
+                                        if index < poolSlots.count {
+                                            missionLiveReservePoolSwapPickHealthCard(
+                                                slot: poolSlots[index],
+                                                pick: pick
+                                            )
+                                        } else {
+                                            Color.clear
+                                                .frame(maxWidth: .infinity, minHeight: liveConsoleRosterCardHeight, maxHeight: liveConsoleRosterCardHeight)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+            } else if let browseTid = liveReservePoolBrowseTaskID,
+                      run.status == .running || run.status == .paused || run.status == .recovery
+            {
+                let poolSlots = run.reservePool(forTaskID: browseTid).entries
+                if poolSlots.isEmpty {
+                    MissionLiveVehicleHealthCard(
+                        slotTitle: "No reserve berths",
+                        rosterSubtitle: "Add floating reserve slots in Mission Control setup.",
+                        bracketedVehicleShortID: "—",
+                        vehicleID: nil,
+                        simulationImageBasenames: nil,
+                        vehicleClassForBundledDeviceArt: .unknown,
+                        vehicleModel: fleetLink.primaryVehicleOperationalModel(),
+                        slotHeight: liveConsoleRosterCardHeight,
+                        onTap: nil,
+                        accessibilitySummary: MissionRunReserveSwapAccessibilityCopy.floatingPoolBrowseEmptyStrip()
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    let slotsPerColumn = liveConsoleRosterGridRows
+                    let columnCount = max(1, (poolSlots.count + slotsPerColumn - 1) / slotsPerColumn)
+                    let effectiveRows = MissionRunPrepLayout.liveConsoleColumnMajorGridRowCount(
+                        itemCount: poolSlots.count,
+                        slotsPerColumn: slotsPerColumn
+                    )
+                    Grid(
+                        alignment: .topLeading,
+                        horizontalSpacing: GuardianSpacing.denseGutter,
+                        verticalSpacing: GuardianSpacing.denseGutter
+                    ) {
+                        ForEach(0 ..< effectiveRows, id: \.self) { row in
+                            GridRow {
+                                ForEach(0 ..< columnCount, id: \.self) { col in
+                                    let index = col * slotsPerColumn + row
+                                    Group {
+                                        if index < poolSlots.count {
+                                            missionLiveReservePoolBrowseHealthCard(
+                                                slot: poolSlots[index],
+                                                taskID: browseTid
+                                            )
+                                        } else {
+                                            Color.clear
+                                                .frame(maxWidth: .infinity, minHeight: liveConsoleRosterCardHeight, maxHeight: liveConsoleRosterCardHeight)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+            } else {
+                missionLiveVehicleStatusRowRosterGrid
+            }
+        }
+    }
+
+    private var missionLiveVehicleStatusRowRosterGrid: some View {
         let assignments = filteredLiveRosterAssignments
         return Group {
             if assignments.isEmpty {
@@ -3894,7 +4533,10 @@ struct MissionRunDetailView: View {
             } else {
                 let slotsPerColumn = liveConsoleRosterGridRows
                 let columnCount = max(1, (assignments.count + slotsPerColumn - 1) / slotsPerColumn)
-                let effectiveRows = min(slotsPerColumn, max(1, (0 ..< assignments.count).map { $0 % slotsPerColumn }.max()! + 1))
+                let effectiveRows = MissionRunPrepLayout.liveConsoleColumnMajorGridRowCount(
+                    itemCount: assignments.count,
+                    slotsPerColumn: slotsPerColumn
+                )
                 Grid(
                     alignment: .topLeading,
                     horizontalSpacing: GuardianSpacing.denseGutter,
@@ -3906,7 +4548,7 @@ struct MissionRunDetailView: View {
                                 let index = col * slotsPerColumn + row
                                 Group {
                                     if index < assignments.count {
-                                        missionLiveVehicleHealthCard(for: assignments[index])
+                                        missionLiveVehicleHealthCardWithOptionalStripSwapEntry(for: assignments[index])
                                     } else {
                                         Color.clear
                                             .frame(maxWidth: .infinity, minHeight: liveConsoleRosterCardHeight, maxHeight: liveConsoleRosterCardHeight)
@@ -3918,6 +4560,42 @@ struct MissionRunDetailView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func missionLiveVehicleHealthCardWithOptionalStripSwapEntry(for assignment: MissionRunAssignment) -> some View {
+        let mission = resolvedMission
+        let tid = assignment.taskId ?? focusedLiveTaskID
+        let showStripSwapMenu: Bool = {
+            guard liveReserveSwapPick == nil else { return false }
+            guard liveReservePoolBrowseTaskID == nil else { return false }
+            guard !mcrReserveSwapOperationInFlight() else { return false }
+            guard run.status == .running || run.status == .paused || run.status == .recovery else { return false }
+            guard let mission, let tid else { return false }
+            return floatingReserveSwapAffordance(assignment: assignment, mission: mission, taskID: tid).enabled
+        }()
+        if showStripSwapMenu {
+            ZStack(alignment: .topTrailing) {
+                missionLiveVehicleHealthCard(for: assignment)
+                Menu {
+                    Button("Swap in reserve…") {
+                        beginMcrReserveSwapPick(for: assignment)
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(GuardianTypography.font(.denseCaption10Semibold))
+                        .foregroundStyle(theme.textTertiary)
+                        .padding(6)
+                }
+                .buttonStyle(GuardianPointerPlainButtonStyle())
+                .menuStyle(.borderlessButton)
+                .guardianPointerOnHover()
+                .accessibilityLabel("Reserve swap actions for \(assignment.slotName)")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            missionLiveVehicleHealthCard(for: assignment)
         }
     }
 
@@ -3936,6 +4614,33 @@ struct MissionRunDetailView: View {
         }()
         let shortRaw = assignmentFleetDisplayShortID(assignment: assignment, rosterDevice: device)
         let bracketed = shortRaw.isEmpty ? "—" : "[\(shortRaw)]"
+        let missionLiveShowsSlotBadge = run.status == .running || run.status == .paused || run.status == .recovery
+        let mergedSlot = MissionRunAssignmentSlotLaneMerge.preferredDisplayState(lanes: assignment.effectiveSlotLifecycleLanes)
+        let slotAttention: (GuardianFeedbackSeverity, String)? = missionLiveShowsSlotBadge
+            ? mergedSlot.missionControlRosterBadgeSeverity.map { ($0, mergedSlot.displayTitle) }
+            : nil
+        let reserveSwapStripAccessibilitySummary: String? = {
+            guard let pick = liveReserveSwapPick,
+                  let mission = resolvedMission,
+                  let tid = assignment.taskId ?? focusedLiveTaskID,
+                  tid == pick.taskID
+            else { return nil }
+            let taskName = mission.routeMacro.tasks.first { $0.id == tid }?.name ?? "Task"
+            if assignment.id == pick.vacancyAssignmentID {
+                return MissionRunReserveSwapAccessibilityCopy.rosterVacancyDuringReserveSwapPick(
+                    taskName: taskName,
+                    slotName: assignment.slotName
+                )
+            }
+            if let device = mission.rosterDevices.first(where: { $0.id == assignment.rosterDeviceId }),
+               device.slot == .reserve {
+                return MissionRunReserveSwapAccessibilityCopy.rosterBenchReserveDuringReserveSwapPick(
+                    taskName: taskName,
+                    slotName: assignment.slotName
+                )
+            }
+            return nil
+        }()
         MissionLiveVehicleHealthCard(
             slotTitle: assignment.slotName,
             rosterSubtitle: rosterRoleSubtitle(device),
@@ -3948,9 +4653,485 @@ struct MissionRunDetailView: View {
             slotHeight: liveConsoleRosterCardHeight,
             onTap: {
                 focusLiveAssignment(assignment.id)
-            }
+            },
+            slotAttention: slotAttention,
+            accessibilitySummary: reserveSwapStripAccessibilitySummary
         )
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func missionLiveReservePoolBrowseHealthCard(slot: MissionRunReservePoolSlot, taskID: UUID) -> some View {
+        let syn = syntheticMissionRunAssignment(from: slot)
+        let vehicleID = telemetryVehicleID(for: syn)
+        let deviceArtVehicleClass: FleetVehicleType = {
+            if let vid = vehicleID, let model = fleetLink.vehicleModel(forVehicleID: vid) {
+                return model.data.vehicleType
+            }
+            return .unknown
+        }()
+        let shortRaw = assignmentFleetDisplayShortID(assignment: syn, rosterDevice: nil)
+        let bracketed = shortRaw.isEmpty ? "—" : "[\(shortRaw)]"
+        let taskName = resolvedMission?.routeMacro.tasks.first { $0.id == taskID }?.name ?? "Task"
+        MissionLiveVehicleHealthCard(
+            slotTitle: slot.label,
+            rosterSubtitle: "Floating reserve",
+            bracketedVehicleShortID: bracketed,
+            vehicleID: vehicleID,
+            simulationImageBasenames: simulationImageBasenamesForAssignment(syn, sitl: sitl),
+            vehicleClassForBundledDeviceArt: deviceArtVehicleClass,
+            vehicleModel: vehicleID.map { fleetLink.vehicleOperationalModel(forVehicleID: $0) }
+                ?? FleetVehicleOperationalModel(hub: nil, lifecycleStatus: nil),
+            slotHeight: liveConsoleRosterCardHeight,
+            onTap: {
+                focusLiveReservePoolBerth(LiveReservePoolBerthFocus(taskID: taskID, slotID: slot.id))
+            },
+            slotAttention: nil,
+            reservePoolPickerChrome: true,
+            tapHelp: "Open floating reserve berth",
+            accessibilitySummary: MissionRunReserveSwapAccessibilityCopy.floatingPoolStripBrowseCandidate(
+                taskName: taskName,
+                berthLabel: slot.label,
+                aircraftShortID: bracketed
+            )
+        )
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func missionLiveReservePoolSwapPickHealthCard(slot: MissionRunReservePoolSlot, pick: LiveReserveSwapPickContext) -> some View {
+        let syn = syntheticMissionRunAssignment(from: slot)
+        let vehicleID = telemetryVehicleID(for: syn)
+        let deviceArtVehicleClass: FleetVehicleType = {
+            if let vid = vehicleID, let model = fleetLink.vehicleModel(forVehicleID: vid) {
+                return model.data.vehicleType
+            }
+            return .unknown
+        }()
+        let shortRaw = assignmentFleetDisplayShortID(assignment: syn, rosterDevice: nil)
+        let bracketed = shortRaw.isEmpty ? "—" : "[\(shortRaw)]"
+        let taskName = resolvedMission?.routeMacro.tasks.first { $0.id == pick.taskID }?.name ?? "Task"
+        MissionLiveVehicleHealthCard(
+            slotTitle: slot.label,
+            rosterSubtitle: "Floating reserve",
+            bracketedVehicleShortID: bracketed,
+            vehicleID: vehicleID,
+            simulationImageBasenames: simulationImageBasenamesForAssignment(syn, sitl: sitl),
+            vehicleClassForBundledDeviceArt: deviceArtVehicleClass,
+            vehicleModel: vehicleID.map { fleetLink.vehicleOperationalModel(forVehicleID: $0) }
+                ?? FleetVehicleOperationalModel(hub: nil, lifecycleStatus: nil),
+            slotHeight: liveConsoleRosterCardHeight,
+            onTap: {
+                guard !mcrReserveSwapOperationInFlight() else {
+                    toastCenter.show(MissionRunReserveSwapOperatorCopy.toastReserveSwapChecksRunning, style: .info)
+                    return
+                }
+                guard !mcrReservePoolSlotMutationLocked(taskID: pick.taskID, slotID: slot.id) else {
+                    toastCenter.show(MissionRunReserveSwapOperatorCopy.toastBerthBusyWaitArmPreflightBeforeSwap, style: .warning)
+                    return
+                }
+                presentedRunConfirm = .reserveSwapPoolPick(
+                    vacancyAssignmentID: pick.vacancyAssignmentID,
+                    taskID: pick.taskID,
+                    poolSlotID: slot.id
+                )
+            },
+            slotAttention: nil,
+            reservePoolPickerChrome: true,
+            accessibilitySummary: MissionRunReserveSwapAccessibilityCopy.floatingPoolStripSwapPickCandidate(
+                taskName: taskName,
+                berthLabel: slot.label,
+                aircraftShortID: bracketed
+            ),
+            accessibilityHint: "Opens a confirmation; arm checks run before the roster changes."
+        )
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func beginMcrReserveSwapPick(for assignment: MissionRunAssignment) {
+        guard let mission = resolvedMission else {
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastMissionTemplateUnavailable, style: .warning)
+            return
+        }
+        let tid = assignment.taskId ?? focusedLiveTaskID
+        guard let tid else {
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastRosterSlotNotBoundToTask, style: .warning)
+            return
+        }
+        guard run.assignmentsBoundToMissionTask(taskID: tid).contains(where: { $0.id == assignment.id }) else {
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastSlotNotOnTaskRoster, style: .warning)
+            return
+        }
+        let aff = floatingReserveSwapAffordance(assignment: assignment, mission: mission, taskID: tid)
+        guard aff.enabled else {
+            toastCenter.show(aff.blockedReason.isEmpty ? MissionRunReserveSwapOperatorCopy.toastNoFloatingReserveForSlotFallback : aff.blockedReason, style: .warning)
+            return
+        }
+        guard !mcrReserveSwapOperationInFlight() else {
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastReserveSwapStillRunningWaitHub, style: .info)
+            return
+        }
+        bottomPromptCenter.dismiss()
+        liveReservePoolBrowseTaskID = nil
+        focusedLiveReservePoolBerth = nil
+        liveReserveSwapPick = LiveReserveSwapPickContext(vacancyAssignmentID: assignment.id, taskID: tid)
+    }
+
+    private func cancelMcrReserveSwapPick() {
+        if mcrReserveSwapOperationInFlight() {
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastReserveSwapInProgressWaitHub, style: .info)
+            return
+        }
+        bottomPromptCenter.dismiss()
+        liveReserveSwapPick = nil
+        presentedRunConfirm = nil
+    }
+
+    /// Body copy for the MC-R **bottom prompt** when reserve swap-in arm probe fails (not ``GuardianConfirm``).
+    private func reserveSwapPreflightFailurePromptMessage(
+        detail: String,
+        remediation: PreflightFailureRemediationAdvice?
+    ) -> String {
+        var s = "Reserve swap-in checks did not pass.\n\n" + MissionRunReserveSwapOperatorCopy.reserveSwapPreflightFailurePrologue + "\n\n" + detail
+        if let r = remediation {
+            s += "\n\n" + r.summary
+            if !r.steps.isEmpty {
+                s += "\n" + r.steps.map { "• \($0)" }.joined(separator: "\n")
+            }
+        }
+        s += "\n\nUse Cancel to leave the swap, Switch to pick another pool row, or Inspect to open Vehicle Inspector. Tap the same pool row again to retry after fixing the aircraft."
+        return s
+    }
+
+    private func presentReserveSwapPreflightFailureBottomPrompt(
+        taskID: UUID,
+        poolSlotID: UUID,
+        detail: String,
+        remediation: PreflightFailureRemediationAdvice?
+    ) {
+        let message = reserveSwapPreflightFailurePromptMessage(detail: detail, remediation: remediation)
+        bottomPromptCenter.presentTripleChoice(
+            message,
+            style: .warning,
+            cancelTitle: "Cancel",
+            switchTitle: "Switch",
+            inspectTitle: "Inspect",
+            onCancel: {
+                cancelMcrReserveSwapPick()
+            },
+            onSwitchPoolRow: {},
+            onOpenVehicleInspector: {
+                guard let slot = run.reservePool(forTaskID: taskID).entries.first(where: { $0.id == poolSlotID }) else {
+                    return
+                }
+                let syn = MissionRunAssignment.syntheticForReservePool(slot: slot)
+                presentRosterCalibrationSheet(for: syn)
+            }
+        )
+    }
+
+    @MainActor
+    private func runMcrFloatingReservePoolSwapAfterReservePreflight(
+        vacancyAssignmentID: UUID,
+        taskID: UUID,
+        poolSlotID: UUID,
+        triggerSource: String = "operator.missionControlRunning.reserveSwap"
+    ) async {
+        guard !mcrReserveSwapOperationInFlight() else {
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastReserveSwapAlreadyRunning, style: .info)
+            return
+        }
+        guard let slot = run.reservePool(forTaskID: taskID).entries.first(where: { $0.id == poolSlotID }) else {
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastPoolBerthNoLongerOnTask, style: .warning)
+            return
+        }
+        let synthetic = MissionRunAssignment.syntheticForReservePool(slot: slot)
+        guard let vehicleID = resolvedFleetStreamVehicleID(assignment: synthetic, fleetLink: fleetLink, sitl: sitl) else {
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastNoLiveReserveLink, style: .warning)
+            return
+        }
+        guard !MissionControlReservePoolMutationGate.reservePoolSlotMutationLocked(
+            swapLock: nil,
+            berthPreflightTaskID: reservePoolBerthPreflightFocus?.taskID,
+            berthPreflightSlotID: reservePoolBerthPreflightFocus?.slotID,
+            taskID: taskID,
+            slotID: poolSlotID
+        ) else {
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastBerthArmPreflightRunningBeforeSwap, style: .warning)
+            return
+        }
+        let poolCorrelation = MissionRunReserveRecipeRunnerCorrelation.floatingPoolReserve(
+            missionRunID: run.id,
+            missionTaskID: taskID,
+            vacancyAssignmentID: vacancyAssignmentID,
+            poolSlot: slot,
+            vehicleID: vehicleID
+        )
+        mcrFloatingReserveSwapLock = MissionControlReservePoolMutationGate.SwapOperationLock(
+            vacancyAssignmentID: vacancyAssignmentID,
+            taskID: taskID,
+            poolSlotID: poolSlotID
+        )
+        defer { mcrFloatingReserveSwapLock = nil }
+        run.appendReserveSwapPipelinePhaseLog(
+            phase: .pickReserve,
+            passed: true,
+            correlation: poolCorrelation,
+            detail: "Floating pool berth confirmed for swap-in."
+        )
+        let probe = await controlStore.runSingleVehiclePreflightProbe(
+            vehicleID: vehicleID,
+            fleetLink: fleetLink,
+            sitl: sitl,
+            leaveArmed: true,
+            allowDuringLiveMission: true,
+            preflightAuditSource: "missionControl.preflightProbe.reserveSwapIn",
+            telemetryGateMode: .reserveSwapIn
+        )
+        guard probe.passed else {
+            run.appendReserveSwapPipelinePhaseLog(
+                phase: .swapTimeChecks,
+                passed: false,
+                correlation: poolCorrelation,
+                detail: probe.detail
+            )
+            presentReserveSwapPreflightFailureBottomPrompt(
+                taskID: taskID,
+                poolSlotID: poolSlotID,
+                detail: probe.detail,
+                remediation: probe.remediationAdvice
+            )
+            return
+        }
+        run.appendReserveSwapPipelinePhaseLog(
+            phase: .swapTimeChecks,
+            passed: true,
+            correlation: poolCorrelation,
+            detail: "Telemetry gates and arm probe passed."
+        )
+
+        let outcome = run.swapRosterAssignmentWithFloatingReservePoolSlot(
+            assignmentID: vacancyAssignmentID,
+            taskID: taskID,
+            poolSlotID: poolSlotID,
+            triggerSource: triggerSource
+        )
+        liveReserveSwapPick = nil
+        switch outcome {
+        case .success:
+            if let mission = resolvedMission {
+                let fleet = buildMissionPickableVehicles(fleetLink: fleetLink, sitl: sitl)
+                controlStore.recompileMissionControlPlanAfterFloatingReserveSwap(
+                    run: run,
+                    mission: mission,
+                    fleetVehicles: fleet
+                )
+            }
+            onUpdate(run)
+            focusLiveAssignment(nil)
+            toastCenter.show(
+                triggerSource.contains("autoExecutor")
+                    ? MissionRunReserveSwapOperatorCopy.toastFloatingReserveAutoSwappedOntoRoster
+                    : MissionRunReserveSwapOperatorCopy.toastFloatingReserveSwappedOntoRoster,
+                style: .success
+            )
+        case .noEligiblePoolSlots:
+            run.appendReserveSwapPipelinePhaseLog(
+                phase: .rosterCommit,
+                passed: false,
+                correlation: poolCorrelation,
+                detail: MissionRunReserveSwapOperatorCopy.floatingPoolSwapRosterCommitFailureDetail(outcome)
+            )
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastNoEligibleFloatingReserveForTask, style: .warning)
+        case .assignmentNotFound:
+            run.appendReserveSwapPipelinePhaseLog(
+                phase: .rosterCommit,
+                passed: false,
+                correlation: poolCorrelation,
+                detail: MissionRunReserveSwapOperatorCopy.floatingPoolSwapRosterCommitFailureDetail(outcome)
+            )
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastRosterSlotNotFoundOnRun, style: .error)
+        case .assignmentNotBoundToTask:
+            run.appendReserveSwapPipelinePhaseLog(
+                phase: .rosterCommit,
+                passed: false,
+                correlation: poolCorrelation,
+                detail: MissionRunReserveSwapOperatorCopy.floatingPoolSwapRosterCommitFailureDetail(outcome)
+            )
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastRosterSlotNotOnSelectedTask, style: .warning)
+        case .identicalFleetBindingNoOp:
+            run.appendReserveSwapPipelinePhaseLog(
+                phase: .rosterCommit,
+                passed: false,
+                correlation: poolCorrelation,
+                detail: MissionRunReserveSwapOperatorCopy.floatingPoolSwapRosterCommitFailureDetail(outcome)
+            )
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastEveryPoolAircraftMatchesRosterBinding, style: .info)
+        case .noClassCompatiblePoolSlots:
+            run.appendReserveSwapPipelinePhaseLog(
+                phase: .rosterCommit,
+                passed: false,
+                correlation: poolCorrelation,
+                detail: MissionRunReserveSwapOperatorCopy.floatingPoolSwapRosterCommitFailureDetail(outcome)
+            )
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastNoPoolClassMatchForRosterSlot, style: .warning)
+        case .returnRejected(let r):
+            run.appendReserveSwapPipelinePhaseLog(
+                phase: .rosterCommit,
+                passed: false,
+                correlation: poolCorrelation,
+                detail: MissionRunReserveSwapOperatorCopy.floatingPoolSwapRosterCommitFailureDetail(outcome)
+            )
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastReserveSwapReturnRejected(r), style: .error)
+        case .poolClearFailed:
+            run.appendReserveSwapPipelinePhaseLog(
+                phase: .rosterCommit,
+                passed: false,
+                correlation: poolCorrelation,
+                detail: MissionRunReserveSwapOperatorCopy.floatingPoolSwapRosterCommitFailureDetail(outcome)
+            )
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastReserveSwapPoolClearFailed, style: .error)
+        case .pickRejectedDuplicateOrStaleBinding:
+            run.appendReserveSwapPipelinePhaseLog(
+                phase: .rosterCommit,
+                passed: false,
+                correlation: poolCorrelation,
+                detail: MissionRunReserveSwapOperatorCopy.floatingPoolSwapRosterCommitFailureDetail(outcome)
+            )
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastReserveSwapPickRejectedStale, style: .warning)
+        case .poolSlotNotEligible:
+            run.appendReserveSwapPipelinePhaseLog(
+                phase: .rosterCommit,
+                passed: false,
+                correlation: poolCorrelation,
+                detail: MissionRunReserveSwapOperatorCopy.floatingPoolSwapRosterCommitFailureDetail(outcome)
+            )
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastPoolBerthNotAvailableForRosterSlot, style: .warning)
+        }
+    }
+
+    /// MC-R **autonomous** fixed template reserve swap-in: arm probe on the **reserve** row, then ``MissionRunEnvironment/swapRosterVacancyWithFixedTemplateReserveAssignment``.
+    @MainActor
+    private func runMcrFixedTemplateReserveSwapAfterReservePreflight(
+        vacancyAssignmentID: UUID,
+        reserveAssignment: MissionRunAssignment,
+        taskID: UUID
+    ) async {
+        guard !mcrReserveSwapOperationInFlight() else {
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastReserveSwapAlreadyRunning, style: .info)
+            return
+        }
+        guard let vehicleID = resolvedFleetStreamVehicleID(assignment: reserveAssignment, fleetLink: fleetLink, sitl: sitl) else {
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastNoLiveReserveAutoSwapSkipped, style: .warning)
+            return
+        }
+        let fixedCorrelation = MissionRunReserveRecipeRunnerCorrelation.fixedRosterReserve(
+            missionRunID: run.id,
+            missionTaskID: taskID,
+            vacancyAssignmentID: vacancyAssignmentID,
+            reserveAssignment: reserveAssignment,
+            vehicleID: vehicleID
+        )
+        mcrFloatingReserveSwapLock = MissionControlReservePoolMutationGate.SwapOperationLock(
+            vacancyAssignmentID: vacancyAssignmentID,
+            taskID: taskID,
+            poolSlotID: nil
+        )
+        defer { mcrFloatingReserveSwapLock = nil }
+        run.appendReserveSwapPipelinePhaseLog(
+            phase: .pickReserve,
+            passed: true,
+            correlation: fixedCorrelation,
+            detail: "Fixed template reserve row confirmed for autonomous swap-in."
+        )
+        let probe = await controlStore.runSingleVehiclePreflightProbe(
+            vehicleID: vehicleID,
+            fleetLink: fleetLink,
+            sitl: sitl,
+            leaveArmed: true,
+            allowDuringLiveMission: true,
+            preflightAuditSource: "missionControl.preflightProbe.reserveSwapIn",
+            telemetryGateMode: .reserveSwapIn
+        )
+        guard probe.passed else {
+            run.appendReserveSwapPipelinePhaseLog(
+                phase: .swapTimeChecks,
+                passed: false,
+                correlation: fixedCorrelation,
+                detail: probe.detail
+            )
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastReserveAutoSwapSkippedPreflight, style: .info)
+            return
+        }
+        run.appendReserveSwapPipelinePhaseLog(
+            phase: .swapTimeChecks,
+            passed: true,
+            correlation: fixedCorrelation,
+            detail: "Telemetry gates and arm probe passed."
+        )
+
+        let outcome = run.swapRosterVacancyWithFixedTemplateReserveAssignment(
+            vacancyAssignmentID: vacancyAssignmentID,
+            reserveAssignmentID: reserveAssignment.id,
+            taskID: taskID,
+            triggerSource: "operator.missionControlRunning.reserveSwap.autoExecutor"
+        )
+        liveReserveSwapPick = nil
+        switch outcome {
+        case .success:
+            if let mission = resolvedMission {
+                let fleet = buildMissionPickableVehicles(fleetLink: fleetLink, sitl: sitl)
+                controlStore.recompileMissionControlPlanAfterFloatingReserveSwap(
+                    run: run,
+                    mission: mission,
+                    fleetVehicles: fleet,
+                    planCompileSource: MissionRunReserveSwapPlanRecompilationPolicy.fixedRosterReserveSwapPlanCompileSource
+                )
+            }
+            onUpdate(run)
+            focusLiveAssignment(nil)
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastFloatingReserveAutoSwappedOntoRoster, style: .success)
+        case .assignmentNotFound:
+            run.appendReserveSwapPipelinePhaseLog(
+                phase: .rosterCommit,
+                passed: false,
+                correlation: fixedCorrelation,
+                detail: MissionRunReserveSwapOperatorCopy.fixedRosterSwapRosterCommitFailureDetail(outcome)
+            )
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastRosterSlotNotFoundOnRun, style: .error)
+        case .assignmentNotBoundToTask:
+            run.appendReserveSwapPipelinePhaseLog(
+                phase: .rosterCommit,
+                passed: false,
+                correlation: fixedCorrelation,
+                detail: MissionRunReserveSwapOperatorCopy.fixedRosterSwapRosterCommitFailureDetail(outcome)
+            )
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastRosterSlotNotOnSelectedTask, style: .warning)
+        case .reserveNotEligibleForVacancy:
+            run.appendReserveSwapPipelinePhaseLog(
+                phase: .rosterCommit,
+                passed: false,
+                correlation: fixedCorrelation,
+                detail: MissionRunReserveSwapOperatorCopy.fixedRosterSwapRosterCommitFailureDetail(outcome)
+            )
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastFixedReserveNotAvailableForRosterSlot, style: .warning)
+        case .identicalFleetBindingNoOp:
+            run.appendReserveSwapPipelinePhaseLog(
+                phase: .rosterCommit,
+                passed: false,
+                correlation: fixedCorrelation,
+                detail: MissionRunReserveSwapOperatorCopy.fixedRosterSwapRosterCommitFailureDetail(outcome)
+            )
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastEveryReserveMatchesRosterBinding, style: .info)
+        case .pickRejectedDuplicateOrStaleBinding:
+            run.appendReserveSwapPipelinePhaseLog(
+                phase: .rosterCommit,
+                passed: false,
+                correlation: fixedCorrelation,
+                detail: MissionRunReserveSwapOperatorCopy.fixedRosterSwapRosterCommitFailureDetail(outcome)
+            )
+            toastCenter.show(MissionRunReserveSwapOperatorCopy.toastReserveAutoSwapAbortedPickRejected, style: .warning)
+        }
     }
 
     /// Live mission log: ``GuardianCard`` header (elevated strip) + body with ``ScrollView`` so header/body match Settings chrome.
@@ -4696,72 +5877,6 @@ struct MissionRunDetailView: View {
         }
     }
 
-    private func missionRunAssignmentBelongsToTask(
-        _ assignment: MissionRunAssignment,
-        task: MissionTask,
-        mission: Mission
-    ) -> Bool {
-        if assignment.taskId == task.id { return true }
-        if assignment.taskId == nil {
-            let enabled = mission.routeMacro.tasks.filter(\.enabled)
-            if enabled.count == 1, enabled.first?.id == task.id { return true }
-        }
-        return false
-    }
-
-    /// Same ordering as ``MissionsView/taskRosterDisplayRows``: primaries in roster order, then each primary’s wingmen and reserves.
-    private func missionRunTaskRosterOrderedSlots(task: MissionTask, mission: Mission) -> [(assignmentIndex: Int, indent: Int)] {
-        let ids = task.rosterDeviceIds
-        func device(for rosterId: UUID) -> RosterDevice? {
-            mission.rosterDevices.first { $0.id == rosterId }
-        }
-        func slot(for rosterId: UUID, indent: Int) -> (assignmentIndex: Int, indent: Int)? {
-            guard let idx = run.assignments.firstIndex(where: {
-                $0.rosterDeviceId == rosterId && missionRunAssignmentBelongsToTask($0, task: task, mission: mission)
-            }) else { return nil }
-            return (idx, indent)
-        }
-        var emitted = Set<UUID>()
-        var rows: [(assignmentIndex: Int, indent: Int)] = []
-        let primaryIds = ids.filter { device(for: $0)?.slot == .primary }
-        for pid in primaryIds {
-            guard device(for: pid)?.slot == .primary else { continue }
-            if let r = slot(for: pid, indent: 0) {
-                rows.append(r)
-                emitted.insert(pid)
-            }
-            let wingmanIds = ids.filter {
-                guard let d = device(for: $0), d.slot == .wingman, d.leaderRosterDeviceId == pid else { return false }
-                return true
-            }
-            let reserveIds = ids.filter {
-                guard let d = device(for: $0), d.slot == .reserve, d.leaderRosterDeviceId == pid else { return false }
-                return true
-            }
-            for wid in wingmanIds {
-                if let r = slot(for: wid, indent: 1) {
-                    rows.append(r)
-                    emitted.insert(wid)
-                }
-            }
-            for rid in reserveIds {
-                if let r = slot(for: rid, indent: 1) {
-                    rows.append(r)
-                    emitted.insert(rid)
-                }
-            }
-        }
-        for id in ids where !emitted.contains(id) {
-            let d = device(for: id)
-            let indent = (d?.slot == .wingman || d?.slot == .reserve) ? 1 : 0
-            if let r = slot(for: id, indent: indent) {
-                rows.append(r)
-                emitted.insert(id)
-            }
-        }
-        return rows
-    }
-
     private func missionRunLegacyRosterOrderedSlots(mission: Mission) -> [(assignmentIndex: Int, indent: Int)] {
         let indices = legacyUnassignedIndices
         let devicesById = Dictionary(uniqueKeysWithValues: mission.rosterDevices.map { ($0.id, $0) })
@@ -4819,10 +5934,10 @@ struct MissionRunDetailView: View {
     @ViewBuilder
     private func taskRosterAccordionSection(task: MissionTask, mission: Mission) -> some View {
         let expanded = rosterSetupExpandedTaskIDs.contains(task.id)
-        let indices = run.assignments.indices.filter { missionRunAssignmentBelongsToTask(run.assignments[$0], task: task, mission: mission) }
+        let indices = run.assignments.indices.filter { run.missionControlAssignmentBelongsToTask(run.assignments[$0], task: task, mission: mission) }
         let filled = indices.filter { run.assignments[$0].hasFleetOrLegacyAssignment }.count
         let emptyRosterSlotCount = indices.count - filled
-        let rows = missionRunTaskRosterOrderedSlots(task: task, mission: mission)
+        let rows = run.missionControlTaskRosterOrderedSlotAssignmentIndices(task: task, mission: mission)
         VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
             HStack(alignment: .center, spacing: GuardianSpacing.xs) {
                 Button {
@@ -4894,7 +6009,7 @@ struct MissionRunDetailView: View {
         } else {
             VStack(spacing: MissionRunPrepLayout.rosterGridSpacing) {
                 ForEach(rows, id: \.assignmentIndex) { row in
-                    rosterSlotCard(assignmentIndex: row.assignmentIndex, mission: mission, taskID: taskID)
+                    rosterSlotCard(assignmentIndex: row.assignmentIndex, mission: mission)
                         .padding(.leading, CGFloat(row.indent) * MissionRunPrepLayout.rosterSlotWingmanIndent)
                 }
             }
@@ -5251,6 +6366,11 @@ struct MissionRunDetailView: View {
             media: {
                 GuardianMapView(
                     model: mapModel,
+                    toolbar: GuardianMapToolbarOptions(
+                        mapResetAction: { _ in
+                            fitSetupStagingMapToVisibleMissionContent()
+                        }
+                    ),
                     contextMenuPolicy: GuardianMapContextMenuPolicy(
                         vehicleActions: [],
                         waypointActions: [],
@@ -5299,6 +6419,7 @@ struct MissionRunDetailView: View {
                 )
                 .task(id: setupStagingMapStructureIdentity) {
                     pushSetupStagingMapModelFromMissionTemplate()
+                    fitSetupStagingMapToVisibleMissionContent()
                 }
                 .onChange(of: setupStagingMapMarkerCoordinateDigest) { _ in
                     pushSetupStagingMapMarkersOnly()
@@ -5832,7 +6953,7 @@ struct MissionRunDetailView: View {
                 spacing: MissionRunPrepLayout.rosterGridSpacing
             ) {
                 ForEach(run.assignments.indices, id: \.self) { idx in
-                    rosterSlotCard(assignmentIndex: idx, mission: nil, taskID: nil)
+                    rosterSlotCard(assignmentIndex: idx, mission: nil)
                 }
             }
         }
@@ -5944,10 +7065,18 @@ struct MissionRunDetailView: View {
             onSelectForSetupMap: {},
             onChooseVehicle: {
                 guard taskEnabled else { return }
+                guard !mcrReservePoolSlotMutationLocked(taskID: taskID, slotID: slot.id) else {
+                    toastCenter.show("This berth is busy — wait for the reserve swap or preflight on it to finish.", style: .warning)
+                    return
+                }
                 presentReservePoolVehiclePicker(taskID: taskID, slotID: slot.id)
             },
             onRemoveVehicle: {
                 guard taskEnabled else { return }
+                guard !mcrReservePoolSlotMutationLocked(taskID: taskID, slotID: slot.id) else {
+                    toastCenter.show("This berth is busy — wait for the reserve swap or preflight on it to finish.", style: .warning)
+                    return
+                }
                 clearReservePoolVehicleBinding(taskID: taskID, slotID: slot.id)
             },
             onCalibration: infoVehicleID == nil
@@ -5957,6 +7086,7 @@ struct MissionRunDetailView: View {
                 },
             simulateSystemOn: fleetLink.isSimulateEnabled,
             onPickAndAssignSim: fleetLink.isSimulateEnabled && taskEnabled && !slotFilled
+                && !mcrReservePoolSlotMutationLocked(taskID: taskID, slotID: slot.id)
                 ? { presentReservePoolSimPicker(taskID: taskID, slotID: slot.id) }
                 : nil,
             showsWorkingOverlay: false,
@@ -5983,11 +7113,19 @@ struct MissionRunDetailView: View {
     }
 
     private func removeReservePoolSlotFromTask(taskID: UUID, slotID: UUID) {
+        guard !mcrReservePoolSlotMutationLocked(taskID: taskID, slotID: slotID) else {
+            toastCenter.show("This berth is busy — wait for the reserve swap or preflight on it to finish.", style: .warning)
+            return
+        }
         _ = run.removeReservePoolSlot(id: slotID, forTaskID: taskID)
         onUpdate(run)
     }
 
     private func clearReservePoolVehicleBinding(taskID: UUID, slotID: UUID) {
+        guard !mcrReservePoolSlotMutationLocked(taskID: taskID, slotID: slotID) else {
+            toastCenter.show("This berth is busy — wait for the reserve swap or preflight on it to finish.", style: .warning)
+            return
+        }
         guard let cur = run.reservePool(forTaskID: taskID).entries.first(where: { $0.id == slotID }) else { return }
         let cleared = MissionRunReservePoolSlot(
             id: slotID,
@@ -6004,6 +7142,10 @@ struct MissionRunDetailView: View {
         taskID: UUID,
         slotID: UUID
     ) {
+        guard !mcrReservePoolSlotMutationLocked(taskID: taskID, slotID: slotID) else {
+            toastCenter.show("This berth is busy — wait for the reserve swap or preflight on it to finish.", style: .warning)
+            return
+        }
         guard let cur = run.reservePool(forTaskID: taskID).entries.first(where: { $0.id == slotID }) else { return }
         let next = MissionRunReservePoolSlot(
             id: slotID,
@@ -6016,6 +7158,10 @@ struct MissionRunDetailView: View {
     }
 
     private func presentReservePoolVehiclePicker(taskID: UUID, slotID: UUID) {
+        guard !mcrReservePoolSlotMutationLocked(taskID: taskID, slotID: slotID) else {
+            toastCenter.show("This berth is busy — wait for the reserve swap or preflight on it to finish.", style: .warning)
+            return
+        }
         let anim = rosterPickerSpring
         appDrawer.present(
             title: nil,
@@ -6040,6 +7186,10 @@ struct MissionRunDetailView: View {
     }
 
     private func presentReservePoolSimPicker(taskID: UUID, slotID: UUID) {
+        guard !mcrReservePoolSlotMutationLocked(taskID: taskID, slotID: slotID) else {
+            toastCenter.show("This berth is busy — wait for the reserve swap or preflight on it to finish.", style: .warning)
+            return
+        }
         rosterSimSidebarSpawnPlatform = generalSettings.defaultSimulationPlatform
         let anim = rosterPickerSpring
         appDrawer.present(
@@ -6098,6 +7248,9 @@ struct MissionRunDetailView: View {
         taskID: UUID,
         slotID: UUID
     ) -> String? {
+        if mcrReservePoolSlotMutationLocked(taskID: taskID, slotID: slotID) {
+            return "This berth is busy (reserve swap or preflight in progress)"
+        }
         let key = vehicle.token.storageKey
         let pool = run.reservePool(forTaskID: taskID)
         if pool.entries.first(where: { $0.id == slotID })?.attachedFleetVehicleToken == key { return nil }
@@ -6132,18 +7285,13 @@ struct MissionRunDetailView: View {
         return nil
     }
 
-    private func rosterSlotCard(assignmentIndex: Int, mission: Mission?, taskID: UUID?) -> some View {
+    private func rosterSlotCard(assignmentIndex: Int, mission: Mission?) -> some View {
         let a = run.assignments[assignmentIndex]
         let device = mission.flatMap { m in m.rosterDevices.first { $0.id == a.rosterDeviceId } }
         let detailLine = resolvedRosterVehicleSecondaryLine(assignment: a, fleetLink: fleetLink, sitl: sitl)
         let basenames = simulationImageBasenamesForAssignment(a, sitl: sitl)
         let assignmentId = a.id
         let slotFilled = a.hasFleetOrLegacyAssignment
-        let effectiveTaskID = taskID ?? a.taskId
-        let swapEligible: Bool = {
-            guard slotFilled, mission != nil, let tid = effectiveTaskID else { return false }
-            return !run.availableReservePoolEntries(forTaskID: tid).isEmpty
-        }()
         let batterySummary: FleetVehicleOperationalModel.BatterySummary? = {
             guard let vid = telemetryVehicleID(for: a) else { return nil }
             return fleetLink.vehicleOperationalModel(forVehicleID: vid).battery
@@ -6161,6 +7309,8 @@ struct MissionRunDetailView: View {
             else { return rosterDeviceClass }
             return model.data.vehicleType
         }()
+        let missionLiveShowsSlotBadge = run.status == .running || run.status == .paused || run.status == .recovery
+        let mergedSlotDisplay = MissionRunAssignmentSlotLaneMerge.preferredDisplayState(lanes: a.effectiveSlotLifecycleLanes)
         return MissionControlRosterSlotCard(
             title: a.slotName,
             subtitle: rosterRoleSubtitle(device),
@@ -6201,62 +7351,40 @@ struct MissionRunDetailView: View {
             onOpenSettings: {
                 presentAssignmentSettingsSidebar(assignmentIndex: assignmentIndex)
             },
-            onSwapFromFloatingReserve: swapEligible && effectiveTaskID != nil
-                ? {
-                    performFloatingReserveSwapForRosterSlot(assignmentIndex: assignmentIndex, taskID: effectiveTaskID!)
-                }
-                : nil
+            missionControlShowsSlotStateBadge: missionLiveShowsSlotBadge,
+            missionControlMergedSlotDisplayState: mergedSlotDisplay
         )
     }
 
-    private func performFloatingReserveSwapForRosterSlot(assignmentIndex: Int, taskID: UUID) {
-        let aid = run.assignments[assignmentIndex].id
-        let outcome = run.swapRosterAssignmentWithRandomFloatingReserve(
-            assignmentID: aid,
-            taskID: taskID,
-            triggerSource: "operator.missionControlSetup"
+    /// Whether to show the floating-reserve swap control on an **attached** roster row, and operator copy when it is disabled.
+    private func floatingReserveSwapAffordance(
+        assignment: MissionRunAssignment,
+        mission: Mission?,
+        taskID: UUID?
+    ) -> (showBlockedControl: Bool, enabled: Bool, blockedReason: String) {
+        guard assignment.hasFleetOrLegacyAssignment,
+              mission != nil,
+              let tid = taskID ?? assignment.taskId
+        else {
+            return (false, false, "")
+        }
+        let classOK = run.availableReservePoolEntries(
+            forTaskID: tid,
+            classCompatibleWithAssignmentId: assignment.id
         )
-        switch outcome {
-        case .success:
-            if let mission = resolvedMission {
-                let fleet = buildMissionPickableVehicles(fleetLink: fleetLink, sitl: sitl)
-                controlStore.compileMissionControlPlan(run: run, mission: mission, fleetVehicles: fleet)
-            }
-            onUpdate(run)
-            switch run.status {
-            case .running, .paused, .recovery:
-                toastCenter.show("Floating reserve moved to a roster slot.", style: .info)
-            default:
-                toastCenter.show("Floating reserve assigned to this roster slot.", style: .success)
-            }
-        case .noEligiblePoolSlots:
-            toastCenter.show("No eligible floating reserve for this task.", style: .warning)
-        case .assignmentNotFound:
-            toastCenter.show("Roster slot not found on this run.", style: .error)
-        case .assignmentNotBoundToTask:
-            toastCenter.show("This roster slot is not on the selected task.", style: .warning)
-        case .identicalFleetBindingNoOp:
-            toastCenter.show("Every pool aircraft on this task already matches this roster fleet binding.", style: .info)
-        case .returnRejected(let r):
-            toastCenter.show(
-                "Could not return the current aircraft to the pool: \(floatingReserveReturnRejectionSummary(r)).",
-                style: .error
-            )
-        case .poolClearFailed:
-            toastCenter.show("Reserve swap could not clear the pool berth. Check the mission log for this run.", style: .error)
+        if !classOK.isEmpty {
+            return (false, true, "")
         }
-    }
-
-    private func floatingReserveReturnRejectionSummary(_ r: MissionRunReservePoolReturnAssignmentOutcome) -> String {
-        switch r {
-        case .rejectedNoBinding: return "no binding"
-        case .rejectedFleetVehicleWrittenOff: return "aircraft written off for this run’s pool"
-        case .rejectedFleetContextUnavailable: return "fleet link unavailable"
-        case .rejectedFleetVehicleUnresolved: return "vehicle not resolved"
-        case .rejectedVehicleNotOperational: return "aircraft not operational"
-        case .rejectedBatteryCritical: return "battery critical"
-        case .appended, .mergedExisting: return "unexpected"
+        let base = run.availableReservePoolEntries(forTaskID: tid, classCompatibleWithAssignmentId: nil)
+        if base.isEmpty {
+            return (true, false, "No eligible floating reserve on this task.")
         }
+        let expected = run.expectedFleetVehicleClassForRosterAssignment(assignment)
+        return (
+            true,
+            false,
+            "No floating reserve matches this slot's template class (\(expected.classCode) · \(expected.displayName))."
+        )
     }
 
     private func rosterRoleSubtitle(_ device: RosterDevice?) -> String {

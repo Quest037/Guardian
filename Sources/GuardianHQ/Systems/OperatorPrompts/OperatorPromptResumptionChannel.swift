@@ -10,15 +10,14 @@ import Foundation
 ///
 /// ## Architecture
 ///
-/// Publisher → emits ``OperatorPromptEvent`` → `OperatorPromptCenter` (next
-/// item) routes via ``OperatorPromptRouter`` → dispatches to live hosts → hosts
+/// Publisher → emits ``OperatorPromptEvent`` → ``OperatorPromptCenter`` routes via ``OperatorPromptRouter`` → dispatches to live hosts → hosts
 /// call ``submit(_:)`` here when the operator picks an option → channel resumes
 /// the publisher's suspended continuation.
 ///
 /// The publisher API is a single async call:
 ///
 /// ```swift
-/// let answer = await OperatorPromptResumptionChannel.shared.awaitAnswer(for: event)
+/// let answer = await OperatorPromptCenter.shared.awaitAnswer(for: event)
 /// ```
 ///
 /// `answer.verb` is the closed transport (``FleetRecipeResumptionVerb``) every

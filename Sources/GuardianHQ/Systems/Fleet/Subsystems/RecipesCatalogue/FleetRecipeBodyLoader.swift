@@ -79,11 +79,60 @@ enum FleetRecipeBodyLoader {
     private static func uniqueSearchBundles(primary: Bundle) -> [Bundle] {
         var out: [Bundle] = []
         var seen = Set<ObjectIdentifier>()
-        for candidate in [primary, Bundle.main] {
+        func append(_ candidate: Bundle) {
             let id = ObjectIdentifier(candidate)
-            guard !seen.contains(id) else { continue }
+            guard !seen.contains(id) else { return }
             seen.insert(id)
             out.append(candidate)
+        }
+
+        append(primary)
+        append(Bundle.main)
+
+        // XCTest / SwiftPM: the module resource bundle (`…_GuardianHQ.bundle`) is often nested under the
+        // `.xctest` bundle’s `Resources/`, or sits next to the test executable on disk — `Bundle.module`
+        // alone does not always surface those paths for `url(forResource:subdirectory:)`.
+        let moduleName = primary.bundleURL.lastPathComponent
+        if moduleName.hasSuffix(".bundle"),
+           let res = Bundle.main.resourceURL {
+            let nested = res.appendingPathComponent(moduleName, isDirectory: true)
+            if FileManager.default.fileExists(atPath: nested.path),
+               let b = Bundle(url: nested) {
+                append(b)
+            }
+        }
+        if let exec = Bundle.main.executableURL {
+            var dir = exec.deletingLastPathComponent()
+            for _ in 0..<16 {
+                let candidate = dir.appendingPathComponent("GuardianHQ_GuardianHQ.bundle", isDirectory: true)
+                if FileManager.default.fileExists(atPath: candidate.path),
+                   let b = Bundle(url: candidate) {
+                    append(b)
+                    break
+                }
+                let parent = dir.deletingLastPathComponent()
+                if parent.path == dir.path { break }
+                dir = parent
+            }
+        }
+
+        // `Bundle.module` may point at a build intermediate, not the SPM `…_GuardianHQ.bundle`
+        // root. Walk ancestors of the module bundle URL and of `Bundle.main` and attach any
+        // `GuardianHQ_GuardianHQ.bundle` sibling found next to those parents (matches `swift test` layout).
+        let marker = "GuardianHQ_GuardianHQ.bundle"
+        let fm = FileManager.default
+        for seed in [primary.bundleURL, Bundle.main.bundleURL] {
+            var dir = seed
+            for _ in 0..<24 {
+                let parent = dir.deletingLastPathComponent()
+                if parent.path == dir.path { break }
+                let sibling = parent.appendingPathComponent(marker, isDirectory: true)
+                if fm.fileExists(atPath: sibling.path),
+                   let b = Bundle(url: sibling) {
+                    append(b)
+                }
+                dir = parent
+            }
         }
         return out
     }
@@ -116,6 +165,57 @@ enum FleetRecipeBodyLoader {
             for u in pathCandidates where fm.fileExists(atPath: u.path) {
                 return u
             }
+        }
+
+        // Last resort: when `Bundle.module` / nested SPM bundles do not resolve on disk (some
+        // `swift test` / host layouts), read bodies from the checkout tree when it is present.
+        // Shipped app archives do not carry `Sources/GuardianHQ/...`; candidates are skipped.
+        if let checkout = Self.checkoutBodiesDirectoryIfPresent(subdirectory: subdirectory, fileName: fileName) {
+            return checkout
+        }
+        return nil
+    }
+
+    /// Resolves `<repo>/Sources/GuardianHQ/Systems/.../<subdirectory>/<fileName>` by walking
+    /// ancestors of this file. Supports both absolute `#filePath` and layouts where the final
+    /// directory is not literally named `GuardianHQ` (some toolchains emit relative paths).
+    private static func checkoutBodiesDirectoryIfPresent(subdirectory: String, fileName: String) -> URL? {
+        let relativeFromGuardianHQ: String
+        switch subdirectory {
+        case "ErrorBodies":
+            relativeFromGuardianHQ = "Systems/Fleet/Subsystems/Errors/ErrorBodies"
+        case "CalibrationBodies":
+            relativeFromGuardianHQ = "Systems/Fleet/Subsystems/Calibration/CalibrationBodies"
+        case "MissionBodies":
+            relativeFromGuardianHQ = "Systems/Fleet/Subsystems/Mission/MissionBodies"
+        default:
+            return nil
+        }
+        let fm = FileManager.default
+        let relSegments = relativeFromGuardianHQ.split(separator: "/").map(String.init)
+        func fileURL(repoOrModuleRoot: URL, includeSourcesPrefix: Bool) -> URL {
+            var u = repoOrModuleRoot
+            if includeSourcesPrefix {
+                u = u.appendingPathComponent("Sources", isDirectory: true)
+                u = u.appendingPathComponent("GuardianHQ", isDirectory: true)
+            }
+            for seg in relSegments {
+                u = u.appendingPathComponent(seg, isDirectory: true)
+            }
+            return u.appendingPathComponent(fileName)
+        }
+        var dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        for _ in 0..<48 {
+            let candidates = [
+                fileURL(repoOrModuleRoot: dir, includeSourcesPrefix: true),
+                fileURL(repoOrModuleRoot: dir, includeSourcesPrefix: false),
+            ]
+            for fileURL in candidates where fm.fileExists(atPath: fileURL.path) {
+                return fileURL
+            }
+            let parent = dir.deletingLastPathComponent()
+            if parent.path == dir.path { break }
+            dir = parent
         }
         return nil
     }

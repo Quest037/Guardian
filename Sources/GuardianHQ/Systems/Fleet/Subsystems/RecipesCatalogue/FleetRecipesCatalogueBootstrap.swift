@@ -14,8 +14,7 @@ import os
 /// 3. ``FleetMissionRecipeRegistrations/registerAll()``
 /// 4. ``FleetMovePointParkRecipeRegistrations/registerAll()``
 ///
-/// Both entry points are idempotent on their own and ship zero recipes today (Stage C
-/// authoring is content-only — no further bootstrap edits expected). The bootstrap
+/// **Subsystem `registerAll()` entry points** are each idempotent; the bootstrap
 /// continues to short-circuit on its own latch so calling `ensureRegistered()` twice
 /// in the same process is still cheap.
 enum FleetRecipesCatalogueBootstrap {

@@ -11,7 +11,7 @@ This file is the **step-by-step backlog**. Completed work should be removed per 
 | Layer | Meaning | Examples today / target |
 |-------|---------|-------------------------|
 | **Task state** | Operator + MRE view of a **mission task** within a run | `MissionTaskState` (`MissionControlModels.swift`) — derived + operator triage pin |
-| **Roster slot state** | Per-**assignment** (`MissionRunAssignment`) progress for that task’s row in the roster | **Missing as first-class enum** — today inferred only indirectly (dispatch logs, recipe outcomes, hub) |
+| **Roster slot state** | Per-**assignment** (`MissionRunAssignment`) progress for that task’s row in the roster | ``MissionRunAssignmentSlotState`` + optional ``slotLifecycleLanes`` (Codable); MRE **writers** + hub rollup still **TaskRosterAssignmentStatesToDo.md** §3–§4 |
 | **Vehicle state** | **Fleet** functional readiness (live, sim, written-off, battery gates, etc.) | `VehicleLifecycleStatus`, reserve draw/return rules, `writtenOffFleetVehicleStorageKeysForReservePool` on `MissionRunEnvironment` |
 
 **Rule:** Slot state answers “did **this slot’s** abort/complete/recipe/mission leg finish?” Vehicle state answers “is **this airframe** still usable / swappable?”
@@ -33,25 +33,13 @@ Today `MissionTaskState` largely reads as a **single** lane (`deriveMissionTaskS
 
 ## 1 — Inventory (what exists now)
 
-- [ ] **Document** (in this pass or README later) the full matrix: `MissionRunStatus` × `MissionRunSessionPhase` × `MissionTaskState` for each operator action (start, pause, abort now, abort after cycle, complete, run completed).
-- [ ] **Task derivation** — `MissionRunEnvironment.refreshDerivedTaskStates` / `deriveMissionTaskState` (`MissionRunEnvironment.swift`): combines `MissionRunStatus`, `sessionPhase`, cycle counts, deferrals, and **sets** `taskMissionEndAbortCompletedByTaskID` / `taskMissionEndRecoveryCompletedByTaskID` only via **`operatorMarkMissionTaskTriageState`** today (manual triage).
-- [ ] **Wind-down flags** — `missionTaskAbortWindDownIssuedTaskIDs`, `missionTaskCompleteWindDownIssuedTaskIDs`, `pendingMissionTaskGracefulWindDownKindByTaskID` — know how each is set/cleared when wiring auto-completion.
-- [ ] **Run session phase** — `MissionRunSessionPhase` (`MissionControlModels.swift`): `draft` … `executing`, `recovery`, `completed`, `aborting`, `aborted`; `promoteSessionPhaseToAbortedIfAllTasksAcknowledgedAbort()` depends on **task-level** ack sets — relate to future **per-slot** ack.
-- [ ] **Assignments** — `MissionRunAssignment` (`MissionControlModels.swift`): `taskId`, `slotName`, `attachedFleetVehicleToken`, `policies` (`MissionRunAssignmentPolicies`); **no** persisted slot lifecycle field.
-- [ ] **Floating reserve** — `MissionRunReservePoolSlot` / `MissionRunReservePool` (`MissionRunReservePool.swift`); see **README.md** → **Floating reserve pool (Mission Control run)**. Slot rows explicitly avoid duplicating fleet lifecycle today — **reconcile** when assignment-level policy state lands (either extend pool slot model or parallel `assignmentID → state` map on the run).
-- [ ] **Fleet outcomes** — `FleetRecipeRunner` outcomes, `FleetLinkService` command/recipe history, hub telemetry: candidate **evidence sources** for slot-level “policy satisfied”.
-- [ ] **Abort/complete dispatch** — `MissionRunExecutionSubsystem` / `MissionRunCommandSubsystem`: where policy recipes/commands are issued per assignment; list every exit path (success, escalation, timeout, no vehicle).
+Full **MissionRunStatus** × **MissionRunSessionPhase** × **MissionTaskState** reference (and operator-action summary) lives in **README.md** → **Mission run state model (run vs per-task)**. **Task attempting vs current** (`MissionTaskAttemptState`, ``MissionRunEnvironment/taskAttemptingByTaskID``) → same section → **Task attempting vs current (`MissionTaskAttemptState`)**. **Task derivation inventory** (inputs, who refreshes, who mutates ack / triage sets) lives in the same section → **Task derivation — inputs, refresh triggers, ack-set writers**. **Per-task wind-down flags** (pending after-cycle map, abort/complete **issued** sets, autostart suppression pairing, clears vs revoke) → **Task-scoped wind-down flags (pending map + issued sets)**. **Session phase lifecycle** (enum meanings, every ``setSessionPhase`` caller, ``aborting`` → ``aborted`` promotion vs ``markFailed``, disabled-task cardinality for promotion) → **MissionRunSessionPhase (enum + transitions + abort promotion)**. **Roster row model** (``MissionRunAssignment`` / ``MissionRunAssignmentPolicies``, resolution, ``assignmentsBoundToMissionTask``, Codable, optional ``slotLifecycleLanes`` + ``effectiveSlotLifecycleLanes``) → **MissionRunAssignment (roster row model)** + **Roster slot state storage (design tradeoffs)** (option **(a)** on-row **locked** in README; provisional ``MissionRunAssignmentSlotState`` + **commanded vs observed lanes** / ``MissionRunAssignmentSlotLaneMerge`` in `MissionControlModels.swift`; MRE writers for lanes **not** wired). **Floating reserve pool** (binding-only pool slots vs mission policy lifecycle; reconcile with §2 slot state) → **Floating reserve pool (Mission Control run)** — intro + **Mission / slot policy state (inventory)** paragraph. **Fleet-side evidence** (issued commands, run logs, recipe/catalogue outcomes, hub, FVM command ring vs `recipeRunHistory`) → **Fleet evidence sources (Mission Control inventory)**. **Task-scoped abort/complete dispatch** (environment → scheduling → executor, per-assignment commands, exit paths, fleet follow-on) → **Task-scoped abort / complete dispatch (entry + exit paths)**.
 
 ---
 
 ## 2 — Design phase A — Roster slot state model
 
-- [ ] **Task attempting vs current** — decide storage for §0 dual aspect (`attempting*` vs settled `MissionTaskState`); wire `refreshDerivedTaskStates` / Paladin hooks so **attempting** clears when all relevant slots reach terminal evidence (or operator cancels intent).
-- [ ] **Choose storage**: (a) new fields on `MissionRunAssignment` (+ optional synthetic row for reserve-pool probes), or (b) parallel `[UUID: MissionRunAssignmentSlotState]` on `MissionRunEnvironment` keyed by `assignment.id`, or (c) hybrid — document tradeoffs (persistence, Codable runs, UI diffing).
-- [ ] **Define enum** `MissionRunAssignmentSlotState` (name TBD): minimal v1 set — e.g. `idle`, `staging`, `executingMission`, `betweenCycles`, `policyAborting`, `policyCompleting`, `policySucceeded`, `policyFailed`, `blockedNoVehicle`, `notApplicableEmptySlot`, `supersededReassigned` — **adjust** after UX copy review (avoid “Loitering” unless it means FC mode).
-- [ ] **Separate commanded vs observed** (optional v2): internal split so stale telemetry does not overwrite “we already sent abort recipe”.
-- [ ] **Codable / migration** — new fields must decode old saved runs; default slot state from current derivation rules.
-- [ ] **UI contract** — MC-R roster row + task card: which states show badge, colour, blocking vs informational; align with `GuardianTheme` tokens.
+**Task attempting (v1) is shipped:** derived ``taskAttemptingByTaskID`` + ``MissionTaskAttemptState`` (README **Task attempting vs current**). **Slot lanes on assignment (Codable, on-row / option (a)):** optional ``MissionRunAssignment/slotLifecycleLanes`` + ``effectiveSlotLifecycleLanes`` — README **MissionRunAssignment** + **Roster slot state storage**; **v1** ``MissionRunAssignmentSlotState/displayTitle`` UX lock in `MissionControlModels.swift` + tests; **v1** MC-R/MCS roster slot chip contract (README **Roster slot state storage** → MC-R roster slot chip) in `MissionControlRosterSlotCard`, ``MissionLiveVehicleHealthCard``, task list; writers still TBD (§4). Per-**slot** runtime container + evidence paths remain below.
 
 ---
 
@@ -69,7 +57,7 @@ Today `MissionTaskState` largely reads as a **single** lane (`deriveMissionTaskS
 
 ## 4 — Implementation phase C — Core runtime
 
-- [ ] Publish **`taskAttemptingByTaskID`** (name TBD) next to `taskStateByTaskID`: set when abort/complete **wind-down is issued**; clear on rollup success, operator revoke, or run teardown; log transitions for Paladin/MC-R.
+- [ ] **Slot-evidence-driven attempting** — ``MissionRunEnvironment/taskAttemptingByTaskID`` exists (README **Task attempting vs current**); today it clears from orchestration flags + triage only. Re-derive (or clear early) from per-slot terminal evidence when §3 lands, without forking ``MissionTaskState`` until rollup rules say so.
 - [ ] Add slot state container + mutation API on `MissionRunEnvironment` (or assignment model) with **single writer** discipline (main actor / subsystem).
 - [ ] Wire **dispatch start**: when fleet commands/recipes leave MRE for an `assignmentID`, transition slot from `idle`/`staging` → `executing…` / `policyAborting` / `policyCompleting` as appropriate.
 - [ ] Wire **dispatch outcome** handlers (success / error / timeout / escalation resolved → retry or terminal).
@@ -92,7 +80,7 @@ Today `MissionTaskState` largely reads as a **single** lane (`deriveMissionTaskS
 ## 6 — Implementation phase E — Operator surfaces
 
 - [ ] Task header / chip: show **attempting** line when non-nil (e.g. “Abort in progress”) even if `MissionTaskState` still reads `aborting` vs `aborted`; avoid duplicating confusing labels — copy pass with operator review.
-- [ ] MC Setup **running** task roster: per-row slot state chip + tooltip (no “future version” copy).
+- [ ] **MC-R / MCS roster slot chip polish** — richer tooltips than v1 title-as-help, empty-slot cues, triage / map density (base chip + severity shipped in §2 README contract).
 - [ ] Triage sheet: show **which slots** block auto-complete; offer **manual triage** override (existing behaviour preserved).
 - [ ] Notifications: when auto-triage fires, single consolidated line in run log + optional toast.
 - [ ] **Theme** — use `GuardianTheme` / semantic colours for blocked vs succeeded (see `.cursor/rules/guardian-theme-tokens.mdc`).
@@ -120,10 +108,20 @@ Today `MissionTaskState` largely reads as a **single** lane (`deriveMissionTaskS
 
 ## Key file references (for implementers)
 
-- `Sources/GuardianHQ/Systems/MissionControl/Models/MissionControlModels.swift` — `MissionTaskState`, `MissionRunStatus`, `MissionRunSessionPhase`, `MissionRunAssignment`, policies
+- `Sources/GuardianHQ/Systems/MissionControl/Models/MissionControlModels.swift` — `MissionTaskState`, `MissionRunStatus`, `MissionRunSessionPhase`, `MissionRunAssignment` (+ optional `slotLifecycleLanes`), `MissionRunAssignmentSlotState` / lanes / merge, policies
 - `Sources/GuardianHQ/Systems/MissionControl/Services/MissionRun/MissionRunEnvironment.swift` — derived task state, triage sets, reserve pool, written-off keys
 - `Sources/GuardianHQ/Systems/MissionControl/Services/MissionRun/MissionRunExecutionSubsystem.swift` — abort/complete immediate + graceful delivery
 - `Sources/GuardianHQ/Systems/MissionControl/Services/MissionRun/MissionRunCommandSubsystem.swift` — catalogue/recipe dispatch, summaries
 - `Sources/GuardianHQ/Systems/MissionControl/Models/MissionRunReservePool.swift` — floating reserve slots
 - **README.md** — **Floating reserve pool (Mission Control run)** (shipped mechanics + tests); **NEXTVERSION.md** — **Floating reserve pool — deferred phases** (2026-05-12) for auto triggers / executor / audit / optional MC-R edits.
 - **`MissionRosterReservesToDo.md`** — **live reserve swap-in** pipeline (active ↔ reserve / pool): phases, UI, triggers, class matching (not started).
+
+---
+
+## 9 — Full task lifecycle upgrade (cross-cutting)
+
+Stretch goal: MRE + MC-R reflect the **entire** task journey—not only abort/complete wind-down and derived ``MissionTaskState``—including **cycle start intent** (e.g. ``operatorTriggered`` **Trigger**), planner / dispatch **failure** vs in-flight mission upload, **between-cycle** semantics, and convergence with **slot** + **vehicle** layers so auto-triage and Paladin share one truth.
+
+- [ ] **Confirm scope with operator (blocking)** — Before large enum or UI expansions, agree in writing (thread or doc) what “full lifecycle” **must** include vs **defer**: e.g. operator-triggered start **attempting** / **failed** vs log-only; whether ``MissionTaskAttemptState`` grows vs a separate ``MissionTaskStartOutcome``-style model; timeout / retry semantics; relationship to ``TaskRosterAssignmentStatesToDo.md`` §3 evidence catalogue and ``MissionRosterReservesToDo.md`` swap-in phases. **Do not** treat this bullet as complete until that confirmation exists.
+- [ ] **Implement agreed lifecycle model** — wire ``MissionRunEnvironment`` / executor / command paths + ``refreshDerivedTaskStates`` (or successors) + tests per confirmation above; align README **Mission run state model** and remove redundant bullets here via todo hygiene.
+- [ ] **Operator surfaces** — MC-R / triage / chips reflect the new states without “future version” copy; theme tokens per `.cursor/rules/guardian-theme-tokens.mdc`.

@@ -310,7 +310,7 @@ final class ProcessPromptPolicyTests: XCTestCase {
             runID: FleetRecipeRunID(),
             recipe: .literal("recipe.fleet.test.sample"),
             vehicleID: vehicleID,
-            stepID: .literal("step.sample"),
+            stepID: .literal("sampleStep"),
             reason: .operatorActionRequired(kind: .rotateDrone),
             allowedVerbs: [.acknowledge, .abort],
             lastResponse: .success()

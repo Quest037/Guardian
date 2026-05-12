@@ -87,7 +87,15 @@ final class MissionRunPlannerSubsystem {
         abortPlanCallbacksByKey.removeValue(forKey: key)
     }
 
-    /// Builds per-assignment abort commands from run default + per-slot overrides; runs ``MissionRunAbortPlanningAssistant`` hooks.
+    /// Builds per-assignment abort commands from ordered **abort preference chains** (assignment → task → mission).
+    ///
+    /// **Planner default:** for every slot with a valid fleet token, the first dispatch is always
+    /// ``FleetCommandName/fleetVehicleDoMissionClear`` so the onboard MAVLink mission is torn down before RTL,
+    /// move+park, loiter, or park tactics run (avoids mission auto-land fighting abort wind-down).
+    ///
+    /// After the core plan is built, ``registerAbortPlanCallback`` hooks run in **lexicographic key order**.
+    /// Plugins that should apply a **last-write** refinement (e.g. Paladin replacing entries) should register with a key
+    /// that sorts after built-in keys (e.g. `core.*` before `plugin.paladin.abortPlan`).
     func buildAbortPlan(trigger: MissionRunAbortTrigger) -> MissionRunAbortPlan {
         guard let environment else {
             let plan = MissionRunAbortPlan(builtAt: Date(), trigger: trigger, entries: [])
@@ -95,34 +103,41 @@ final class MissionRunPlannerSubsystem {
             return plan
         }
         var entries: [MissionRunAbortPlanEntry] = []
+        let mission = environment.template
         for assignment in environment.assignments {
-            let resolved = MissionRunPolicyResolution.resolvedAbortPolicy(
-                assignment: assignment,
-                mission: environment.template
-            )
-            let baseCommand = Self.fleetVehicleCommand(for: resolved)
-            let issued: MissionRunIssuedCommand?
-            if let baseCommand,
-               let tokenKey = assignment.attachedFleetVehicleToken,
-               FleetMissionVehicleToken(storageKey: tokenKey) != nil {
-                issued = MissionRunIssuedCommand(
-                    assignmentID: assignment.id,
-                    slotName: assignment.slotName,
-                    vehicleTokenKey: tokenKey,
-                    command: baseCommand,
-                    issuer: .missionControl,
-                    issuerKey: MissionRunCommandIssuerKey.plannerAbort,
-                    category: .missionControl
+            let resolvedChain: [MissionRunAbortTactic]
+            let chosen: MissionRunAbortTactic?
+            let tacticIssued: MissionRunIssuedCommand?
+            if let mission {
+                resolvedChain = MissionRunPolicyResolution.resolvedAbortPreferenceChain(
+                    assignment: assignment,
+                    mission: mission
+                )
+                (chosen, tacticIssued) = Self.optimisticAbortIssuedCommand(
+                    assignment: assignment,
+                    preferenceChain: resolvedChain,
+                    environment: environment,
+                    mission: mission
                 )
             } else {
-                issued = nil
+                resolvedChain = MissionRunAbortTactic.defaultMissionAbortPreferenceChain
+                chosen = nil
+                tacticIssued = nil
+            }
+            var issuedCommands: [MissionRunIssuedCommand] = []
+            if let clear = Self.abortPlanMissionClearCommand(assignment: assignment) {
+                issuedCommands.append(clear)
+            }
+            if let tacticIssued {
+                issuedCommands.append(tacticIssued)
             }
             entries.append(
                 MissionRunAbortPlanEntry(
                     assignmentID: assignment.id,
                     slotName: assignment.slotName,
-                    resolvedPolicy: resolved,
-                    issuedCommand: issued
+                    resolvedPreferenceChain: resolvedChain,
+                    chosenTactic: chosen,
+                    issuedCommands: issuedCommands
                 )
             )
         }
@@ -135,13 +150,89 @@ final class MissionRunPlannerSubsystem {
         return plan
     }
 
-    private static func fleetVehicleCommand(for policy: MissionRunAbortPolicy) -> FleetVehicleCommand? {
-        switch policy {
-        case .returnToLaunch: return .returnToLaunch
-        case .holdPosition: return .holdPosition
-        case .land: return .land
-        case .none: return nil
+    /// First tactic in ``preferenceChain`` the planner can bind to a fleet dispatch (optimistic).
+    private static func optimisticAbortIssuedCommand(
+        assignment: MissionRunAssignment,
+        preferenceChain: [MissionRunAbortTactic],
+        environment: MissionRunEnvironment,
+        mission: Mission
+    ) -> (chosen: MissionRunAbortTactic?, issued: MissionRunIssuedCommand?) {
+        guard let tokenKey = assignment.attachedFleetVehicleToken,
+              FleetMissionVehicleToken(storageKey: tokenKey) != nil
+        else {
+            return (nil, nil)
         }
+        let hub = environment.abortPlanningHubTelemetry(for: assignment)
+        let taskId = MissionRunPolicyResolution.resolvedTaskId(for: assignment, mission: mission)
+        let points = environment.runtimeMissionPoints
+
+        for tactic in preferenceChain {
+            switch tactic.kind {
+            case .nearestOpenMapPoint:
+                guard let tid = taskId else { continue }
+                let pointKind = tactic.mapPointKind ?? .rally
+                guard let hub,
+                      let lat = hub.latitudeDeg,
+                      let lon = hub.longitudeDeg
+                else { continue }
+                let relAlt = hub.guardianAbortPlanningRelativeAltitudeM
+                guard let params = try? MissionRunMovePointParkPlanner.buildMovePointParkRecipeParameters(
+                    kind: pointKind,
+                    parentTaskID: tid,
+                    missionPoints: points,
+                    vehicleLatitudeDeg: lat,
+                    vehicleLongitudeDeg: lon,
+                    currentRelativeAltitudeM: relAlt,
+                    yawDeg: hub.yawDeg ?? 0
+                ) else { continue }
+                let issued = MissionRunIssuedCommand(
+                    assignmentID: assignment.id,
+                    slotName: assignment.slotName,
+                    vehicleTokenKey: tokenKey,
+                    dispatch: .recipe(
+                        name: FleetMovePointParkRecipeRegistrations.movePointParkRecipeName,
+                        parameters: params
+                    ),
+                    issuer: .missionControl,
+                    issuerKey: MissionRunCommandIssuerKey.plannerAbort,
+                    category: .missionControl
+                )
+                return (tactic, issued)
+
+            case .returnToLaunch, .loiter, .park:
+                guard let dispatch = MissionRunFleetDispatch.preferentialAbortTacticDispatch(tactic.kind) else { continue }
+                let issued = MissionRunIssuedCommand(
+                    assignmentID: assignment.id,
+                    slotName: assignment.slotName,
+                    vehicleTokenKey: tokenKey,
+                    dispatch: dispatch,
+                    issuer: .missionControl,
+                    issuerKey: MissionRunCommandIssuerKey.plannerAbort,
+                    category: .missionControl
+                )
+                return (tactic, issued)
+            }
+        }
+        return (nil, nil)
+    }
+
+    /// Default first step for abort plans: clear the onboard MAVLink mission so later tactics are not
+    /// fighting an active mission / auto-land segment.
+    private static func abortPlanMissionClearCommand(assignment: MissionRunAssignment) -> MissionRunIssuedCommand? {
+        guard let tokenKey = assignment.attachedFleetVehicleToken,
+              FleetMissionVehicleToken(storageKey: tokenKey) != nil
+        else {
+            return nil
+        }
+        return MissionRunIssuedCommand(
+            assignmentID: assignment.id,
+            slotName: assignment.slotName,
+            vehicleTokenKey: tokenKey,
+            dispatch: .catalogue(name: .fleetVehicleDoMissionClear, parameters: .empty),
+            issuer: .missionControl,
+            issuerKey: MissionRunCommandIssuerKey.plannerAbort,
+            category: .missionControl
+        )
     }
 
     func buildPlan(
@@ -322,7 +413,37 @@ final class MissionRunPlannerSubsystem {
             guard let current = mutation else { break }
             mutation = mutationProposalCallbacksByKey[key]?(environment, mission, fleetVehicles, current)
         }
-        return mutation
+        guard let final = mutation else { return nil }
+        guard Self.mutationReservePoolInvariantHolds(final, environment: environment) else {
+            return nil
+        }
+        return final
+    }
+
+    /// Rejects roster mutations that would double-bind a fleet storage key already held in a floating reserve berth, or move a bound assignment into a task whose pool already holds that key.
+    private static func mutationReservePoolInvariantHolds(
+        _ mutation: MissionControlPlanMutation,
+        environment: MissionRunEnvironment
+    ) -> Bool {
+        switch mutation {
+        case let .replaceAssignmentVehicleToken(_, vehicleTokenKey):
+            guard let raw = vehicleTokenKey?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+                return true
+            }
+            return !environment.reservePoolContainsFleetVehicleStorageKey(raw)
+        case let .updateAssignmentTask(assignmentID, taskID):
+            guard let idx = environment.assignments.firstIndex(where: { $0.id == assignmentID }) else { return true }
+            let tok = environment.assignments[idx].attachedFleetVehicleToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !tok.isEmpty, let newTaskID = taskID else { return true }
+            let pool = environment.reservePool(forTaskID: newTaskID)
+            for slot in pool.entries {
+                let sk = (slot.attachedFleetVehicleToken ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if sk == tok { return false }
+            }
+            return true
+        case .upsertTaskStartDelay, .removeTaskStartDelay:
+            return true
+        }
     }
 
     private func apply(_ mutation: MissionControlPlanMutation, on environment: MissionRunEnvironment) -> Bool {
@@ -406,6 +527,13 @@ final class MissionRunPlannerSubsystem {
             changedAssignmentIDs: changed,
             changedTaskIDs: changedTaskIDs
         )
+    }
+}
+
+extension FleetHubVehicleTelemetry {
+    /// Shared by abort and complete optimistic planners (hub-relative height for move-point-park binding).
+    var guardianAbortPlanningRelativeAltitudeM: Double {
+        relativeAltM ?? altitudeRelativeM ?? altitudeLocalM ?? 0
     }
 }
 

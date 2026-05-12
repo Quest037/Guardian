@@ -23,7 +23,7 @@ struct MissionRunStartPreflightSheet: View {
     var body: some View {
         Modal(
             title: "Paladin preflight",
-            subtitle: "Checking all vehicles are ready to be armed.",
+            subtitle: "Checking roster and floating reserve bindings are ready to arm.",
             headerActions: {
                 GuardianThemedButton(
                     title: "Close",
@@ -56,7 +56,7 @@ struct MissionRunStartPreflightSheet: View {
                         if probeRunning {
                             ProgressView()
                                 .controlSize(.small)
-                            Text("Checking roster…")
+                            Text("Checking roster and floating reserves…")
                                 .font(GuardianTypography.font(.denseCaption12Regular))
                                 .foregroundStyle(theme.textTertiary)
                         } else if allSlotsPassed {
@@ -124,10 +124,10 @@ struct MissionRunStartPreflightSheet: View {
     }
 
     private func runProbe() async {
-        rows = run.assignments.map {
+        rows = run.orderedStartRunPreflightProbeTargets().map {
             MissionRunPreflightSlotRow(
-                assignmentID: $0.id,
-                slotName: $0.slotName,
+                identity: $0.identity,
+                slotName: $0.displayTitle,
                 phase: .pending,
                 detail: "Waiting…"
             )
@@ -138,7 +138,7 @@ struct MissionRunStartPreflightSheet: View {
             fleetLink: fleetLink,
             sitl: sitl,
             rowUpdated: { updated in
-                if let idx = rows.firstIndex(where: { $0.assignmentID == updated.assignmentID }) {
+                if let idx = rows.firstIndex(where: { $0.id == updated.id }) {
                     rows[idx] = updated
                 }
             }

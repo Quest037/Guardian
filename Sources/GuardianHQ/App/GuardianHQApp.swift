@@ -110,7 +110,6 @@ struct GuardianHQApp: App {
                         .withAppDrawer()
                         .withGuardianConfirmOverlayHost()
                         .withToasts()
-                        .environmentObject(toastCenter)
                         .environmentObject(appDrawer)
                         .environmentObject(osmRoutingService)
                         .onAppear {
@@ -119,6 +118,10 @@ struct GuardianHQApp: App {
                         }
                 }
             }
+            // Single injection point for the window scene: ``ToastHost`` (``View/withToasts()``) and every
+            // descendant must resolve the same ``ToastCenter`` instance — do not attach only inside the
+            // post-splash branch or modifier-order bugs can strand auto-dismiss behind a stale host binding.
+            .environmentObject(toastCenter)
             // Must be an ancestor of ``View/withGuardianConfirmOverlayHost()`` so ``GuardianConfirmOverlayRootModifier`` can resolve ``@EnvironmentObject`` (it wraps the drawer, not the other way around).
             .environmentObject(guardianConfirmOverlayHost)
             .onChange(of: showingSplash) { stillShowingSplash in

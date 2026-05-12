@@ -8,8 +8,9 @@ import Foundation
 /// ``FleetCommandResponse`` taxonomy.
 ///
 /// **Coverage in v1:**
-/// - `do.arm`, `do.disarm`, `do.land`, `do.return.home`, `do.loiter` — wired to the
+/// - `do.arm`, `do.disarm`, `do.land`, `do.return.home`, `do.loiter`, `do.park` — wired to the
 ///   existing `FleetVehicleCommand` cases through `FleetLinkService.executeVehicleCommand`.
+///   `do.park` maps to ``FleetVehicleCommand/park`` (class-aware orchestration in ``FleetLinkService``).
 /// - `do.mode` — wired for `hold | manual | rtl | landMode | brake`; other modes
 ///   surface `.error(.notImplemented)`.
 /// - `do.move.altitude` — wired via the shared converter. Computes the target absolute
@@ -24,9 +25,9 @@ import Foundation
 /// - `do.move.point` — wired for `pointKind = explicit | currentLatLon` via
 ///   `FleetVehicleCommand.gotoCoordinate(...)`. `home` / `rally` surface
 ///   `.notImplemented` (no autopilot-side readback exposed yet).
-/// - `do.mission.upload` — wired via `FleetVehicleCommand.uploadMission(items:)` after
-///   decoding the `missionItemsJSON` parameter. Sibling `do.mission.*` verbs (start,
-///   pause, clear, jumpTo, download, …) are tracked in `TODO.md` and land incrementally.
+/// - `do.mission.*` / `get.mission.*` / `cancel.mission.*` — same MAVSDK `Mission`
+///   surface as PX4 via
+///   ``FleetCommandStackConverterShared/translateFleetVehicleMissionIfNeeded(commandName:parameters:)``.
 /// - **Calibration:**
 ///   - Sensor procedures (`do.calibrate.{gyro, accelerometer, compass, compass.motor,
 ///     baro, baro.temperature, level, esc, rc, rc.trim}`) — wired through raw MAVLink
@@ -57,7 +58,8 @@ import Foundation
 /// - `get.telemetry.*` — wired via shared helpers reading `FleetHubVehicleTelemetry`.
 /// - `cancel.calibration` — wired to `MAV_CMD_DO_CANCEL_MAG_CAL` for interactive mag
 ///   calibration cancellation.
-/// - `cancel.mission` — `.notImplemented`.
+/// - Generic `cancel.mission` — `.notImplemented` (prefer `cancel.mission.upload` /
+///   `cancel.mission.download`).
 ///
 /// Unwired translations log via `OSLog` so it's clear when a recipe encountered a
 /// `.notImplemented` because of stack scope versus genuine bug.
@@ -87,6 +89,8 @@ struct FleetCommandStackConverterArduPilot: FleetCommandStackConverter {
             return .vehicleCommands([.returnToLaunch])
         case .fleetVehicleDoLoiter:
             return .vehicleCommands([.holdPosition])
+        case .fleetVehicleDoPark:
+            return .vehicleCommands([.park])
 
         case .fleetVehicleDoMode:
             guard let raw = parameters.string(named: "mode") else {
@@ -116,9 +120,9 @@ struct FleetCommandStackConverterArduPilot: FleetCommandStackConverter {
             )
 
         // MARK: do — mission verbs
-
-        case .fleetVehicleDoMissionUpload:
-            return FleetCommandStackConverterShared.translateMissionUpload(parameters: parameters)
+        //
+        // Resolved in `default` via
+        // ``FleetCommandStackConverterShared/translateFleetVehicleMissionIfNeeded``.
 
         // MARK: do — calibration: autopilot-driven sensor procedures
         //
@@ -320,11 +324,19 @@ struct FleetCommandStackConverterArduPilot: FleetCommandStackConverter {
         case .fleetVehicleCancelCalibration:
             return .vehicleCommands([.mavlinkCommandLong(.cancelMagCalibration(humanLabel: "ArduPilot cancel magnetometer calibration"))])
         case .fleetVehicleCancelMission:
-            return .notImplemented(detail: "ArduPilot \(commandName.rawValue) not yet wired (cancel pipeline deferred).")
+            return .notImplemented(
+                detail: "Generic `cancel.mission` is not wired — prefer `cancel.mission.upload` or `cancel.mission.download` for MAVSDK `Mission.cancelMissionUpload` / `cancelMissionDownload`."
+            )
 
         // MARK: Default
 
         default:
+            if let mission = FleetCommandStackConverterShared.translateFleetVehicleMissionIfNeeded(
+                commandName: commandName,
+                parameters: parameters
+            ) {
+                return mission
+            }
             return .notImplemented(detail: "ArduPilot has no translation registered for \(commandName.rawValue).")
         }
     }

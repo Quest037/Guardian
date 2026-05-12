@@ -10,7 +10,7 @@ import SwiftUI
 /// 2. ``View/withAppDrawer()`` — app-wide **trailing drawer** (scrim + panel). Not the main nav rail.
 /// 3. ``View/withGuardianConfirmOverlayHost()`` — **blocking** confirm scrim + panel over the drawer stack.
 /// 4. ``View/withToasts()`` — ephemeral toasts on top of that shell; placement follows ``GuardianToastShellAnchorPreferenceKey``
-///    from ``RootView`` so chips stay in the **content** column (off the nav rail).
+///    from ``RootView`` (top-trailing over the window top bar, aligned with Simulate / appearance controls).
 ///
 /// ```swift
 /// RootView(...)
@@ -19,13 +19,17 @@ import SwiftUI
 ///     .withToasts()
 /// ```
 ///
+/// **ToastCenter injection:** supply ``.environmentObject(toastCenter)`` on the **window scene** `Group` (or equivalent
+/// root) alongside ``GuardianConfirmOverlayHost`` — not only chained after ``View/withToasts()`` on a conditional
+/// branch — so ``ToastHost`` and every feature view resolve the same ``ToastCenter`` instance for auto-dismiss.
+///
 /// ## Back-to-front visual stack (single main window)
 ///
 /// 1. **Navigation chrome** — ``RootView`` sidebar + top bar + feature content (maps, tables, etc.).
 /// 2. **App drawer** — ``AppDrawerHostModifier`` draws a full-window scrim and trailing panel above ``RootView``.
 /// 3. **Blocking confirm** — ``GuardianConfirmOverlayRootModifier`` adds a dimmed scrim + panel above the drawer stack.
 /// 4. **Toasts** — ``ToastHost`` (window-level) draws above the confirm layer; ``RootView`` publishes shell insets so the chip
-///    aligns with the content column.
+///    sits **top-trailing** over the window top bar (Simulate + appearance), not over the nav rail.
 ///
 /// ## Trailing slide-in panels
 ///

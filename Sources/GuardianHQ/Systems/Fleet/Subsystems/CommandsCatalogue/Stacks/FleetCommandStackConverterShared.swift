@@ -276,6 +276,76 @@ enum FleetCommandStackConverterShared {
         }
     }
 
+    /// Mission plugin catalogue commands shared by PX4, ArduPilot, and stack-unknown
+    /// (all use the same MAVSDK `Mission` surface). Returns `nil` when `commandName` is
+    /// not part of the mission command family.
+    static func translateFleetVehicleMissionIfNeeded(
+        commandName: FleetCommandName,
+        parameters: FleetCommandParameters
+    ) -> FleetCommandStackTranslation? {
+
+        switch commandName {
+
+        case .fleetVehicleDoMissionUpload:
+            return translateMissionUpload(parameters: parameters)
+
+        case .fleetVehicleDoMissionClear:
+            return .vehicleCommands([.missionClear])
+
+        case .fleetVehicleDoMissionStart:
+            return .vehicleCommands([.missionStart])
+
+        case .fleetVehicleDoMissionPause:
+            return .vehicleCommands([.missionPause])
+
+        case .fleetVehicleDoMissionJumpTo:
+            let rawIndex = parameters.integer(named: "missionItemIndex") ?? parameters.integer(named: "index")
+            guard let rawIndex else {
+                return .notImplemented(
+                    detail: "do.mission.jump.to requires an integer `index` (or `missionItemIndex`) parameter."
+                )
+            }
+            let clamped = Int32(clamping: rawIndex)
+            return .vehicleCommands([.missionSetCurrentItem(index: clamped)])
+
+        case .fleetVehicleDoMissionDownload:
+            return .vehicleCommands([.missionDownloadPlanJSON])
+
+        case .fleetVehicleDoMissionUploadWithProgress:
+            return .notImplemented(
+                detail: "Mission upload with progress (`uploadMissionWithProgress`) is not wired in Guardian v1 — Observable streams are not folded into the Layer 0 Completable pipeline yet."
+            )
+
+        case .fleetVehicleDoMissionDownloadWithProgress:
+            return .notImplemented(
+                detail: "Mission download with progress (`downloadMissionWithProgress`) is not wired in Guardian v1 — Observable streams are not folded into the Layer 0 Completable pipeline yet."
+            )
+
+        case .fleetVehicleCancelMissionUpload:
+            return .vehicleCommands([.cancelMissionUpload])
+
+        case .fleetVehicleCancelMissionDownload:
+            return .vehicleCommands([.cancelMissionDownload])
+
+        case .fleetVehicleGetMissionFinished:
+            return .vehicleCommands([.missionIsFinishedQuery])
+
+        case .fleetVehicleGetMissionRtlAfter:
+            return .vehicleCommands([.missionGetRtlAfter])
+
+        case .fleetVehicleDoMissionRtlAfterSet:
+            guard let enable = parameters.bool(named: "enable") else {
+                return .notImplemented(
+                    detail: "do.mission.rtl.after.set requires a boolean `enable` parameter."
+                )
+            }
+            return .vehicleCommands([.missionSetRtlAfter(enable: enable)])
+
+        default:
+            return nil
+        }
+    }
+
     // MARK: - do.move.altitude — datum-aware climb/descend at current lat/lon
 
     /// Translate `command.fleet.vehicle.do.move.altitude` into a `[.gotoCoordinate(...)]`
@@ -441,6 +511,13 @@ enum FleetCommandStackConverterShared {
     /// * `home` / `rally` — `.notImplemented` until home / rally readback exists.
     ///
     /// Always requires `relativeAltitudeM`. `yawDeg` defaults to 0 when missing.
+    ///
+    /// **Ground / surface (UGV / USV):** when hub lat/lon is available and the explicit
+    /// target is not coincident with the hub, the emitted `gotoCoordinate` yaw is the
+    /// great-circle **bearing** hub → target. MAVSDK `gotoLocation` couples heading with
+    /// the horizontal setpoint on skid-steer rovers; reusing the vehicle's current yaw
+    /// while the position setpoint differs yields yaw-in-place. Callers may still pass
+    /// `yawDeg` for the coincident / no-telemetry fallback.
     static func translateMovePoint(
         parameters: FleetCommandParameters,
         context: FleetCommandStackConverterContext
@@ -467,11 +544,18 @@ enum FleetCommandStackConverterShared {
                     detail: "do.move.point pointKind=explicit requires latitudeDeg and longitudeDeg parameters."
                 )
             }
+            let effectiveYaw = Self.yawDegForMovePointGoto(
+                requestedYawDeg: yawDeg,
+                targetLat: lat,
+                targetLon: lon,
+                vehicleClass: context.vehicleType.universalClass,
+                hub: context.hubTelemetry
+            )
             return .vehicleCommands([
                 .gotoCoordinate(
                     RouteCoordinate(lat: lat, lon: lon),
                     relativeAltitudeM: relativeAltitudeM,
-                    yawDeg: yawDeg
+                    yawDeg: effectiveYaw
                 )
             ])
 
@@ -503,6 +587,37 @@ enum FleetCommandStackConverterShared {
         }
     }
 
+    /// Yaw sent with ``FleetVehicleCommand/gotoCoordinate`` for `do.move.point`.
+    private static func yawDegForMovePointGoto(
+        requestedYawDeg: Double,
+        targetLat: Double,
+        targetLon: Double,
+        vehicleClass: UniversalVehicleClass,
+        hub: FleetHubVehicleTelemetry?
+    ) -> Double {
+        switch vehicleClass {
+        case .ugv, .usv:
+            guard let hLat = hub?.latitudeDeg, let hLon = hub?.longitudeDeg else {
+                return requestedYawDeg
+            }
+            let separationM = MissionTelemetryGeo.horizontalDistanceM(
+                lat1: hLat,
+                lon1: hLon,
+                lat2: targetLat,
+                lon2: targetLon
+            )
+            guard separationM > 0.5 else { return requestedYawDeg }
+            return MissionTelemetryGeo.bearingDegrees(
+                lat1: hLat,
+                lon1: hLon,
+                lat2: targetLat,
+                lon2: targetLon
+            )
+        case .uav, .uuv, .unknown:
+            return requestedYawDeg
+        }
+    }
+
     // MARK: - Mode-string translation (do.mode)
 
     /// Maps the catalogue's stack-agnostic `mode` parameter value to a real
@@ -531,6 +646,9 @@ enum FleetCommandStackConverterShared {
         switch outcome {
         case .succeeded:
             return .success(detail: nil, payload: .empty, elapsed: elapsed)
+
+        case .succeededWithPayload(let payload):
+            return .success(detail: nil, payload: payload, elapsed: elapsed)
 
         case .failed(let raw):
             // Calibration commands have a typed cancellation path: the recipe layer
@@ -700,7 +818,62 @@ struct FleetVehicleCommandMissionItemPayload: Codable, Equatable, Sendable {
         case "stopVideo": return .stopVideo
         case "startPhotoDistance": return .startPhotoDistance
         case "stopPhotoDistance": return .stopPhotoDistance
-        default: return .none
+        default:
+            let unrecognizedPrefix = "unrecognized_"
+            if token.hasPrefix(unrecognizedPrefix) {
+                let suffix = String(token.dropFirst(unrecognizedPrefix.count))
+                if let code = Int(suffix) {
+                    return .UNRECOGNIZED(code)
+                }
+            }
+            return .none
         }
+    }
+
+    init(mavsdk item: Mavsdk.Mission.MissionItem) {
+        latitudeDeg = item.latitudeDeg
+        longitudeDeg = item.longitudeDeg
+        relativeAltitudeM = Double(item.relativeAltitudeM)
+        speedMS = Double(item.speedMS)
+        isFlyThrough = item.isFlyThrough
+        gimbalPitchDeg = Double(item.gimbalPitchDeg)
+        gimbalYawDeg = Double(item.gimbalYawDeg)
+        cameraAction = Self.cameraActionToken(item.cameraAction)
+        loiterTimeS = Double(item.loiterTimeS)
+        cameraPhotoIntervalS = item.cameraPhotoIntervalS
+        acceptanceRadiusM = Double(item.acceptanceRadiusM)
+        yawDeg = Double(item.yawDeg)
+        cameraPhotoDistanceM = Double(item.cameraPhotoDistanceM)
+    }
+
+    private static func cameraActionToken(_ action: Mavsdk.Mission.MissionItem.CameraAction) -> String {
+        switch action {
+        case .none: return "none"
+        case .takePhoto: return "takePhoto"
+        case .startPhotoInterval: return "startPhotoInterval"
+        case .stopPhotoInterval: return "stopPhotoInterval"
+        case .startVideo: return "startVideo"
+        case .stopVideo: return "stopVideo"
+        case .startPhotoDistance: return "startPhotoDistance"
+        case .stopPhotoDistance: return "stopPhotoDistance"
+        case .UNRECOGNIZED(let code):
+            return "unrecognized_\(code)"
+        }
+    }
+
+    /// Encode a downloaded MAVSDK plan into the same JSON array shape accepted by
+    /// ``decodeMissionItems(fromJSON:)`` / `do.mission.upload`.
+    static func encodeMissionPlanToJSON(plan: Mavsdk.Mission.MissionPlan) throws -> String {
+        let payloads = plan.missionItems.map { FleetVehicleCommandMissionItemPayload(mavsdk: $0) }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(payloads)
+        guard let string = String(data: data, encoding: .utf8) else {
+            throw EncodingError.invalidValue(
+                payloads,
+                .init(codingPath: [], debugDescription: "Encoded mission JSON is not valid UTF-8.")
+            )
+        }
+        return string
     }
 }

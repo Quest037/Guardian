@@ -692,4 +692,136 @@ final class FleetRecipeBodyParserTests: XCTestCase {
         )
         XCTAssertEqual(errors, [], "Got: \(errors)")
     }
+
+    // MARK: - Stage F plugin invoked-namespace claims
+
+    func test_validate_pluginOwnedBody_rejectsFleetCommandWithoutInvokeClaim() {
+        GuardianPluginBootstrap.ensureRegistered()
+        let body = minimalValidBody()
+        let descriptor = FleetRecipeDescriptor(
+            name: FleetRecipeName.literal("recipe.plugin.paladin.bodyclaims"),
+            humanLabel: "t",
+            humanDescription: "t",
+            riskTier: .groundOnly,
+            pluginID: .paladin,
+            body: body
+        )
+        let errors = FleetRecipeBodyParser.validate(
+            body,
+            against: descriptor,
+            recipes: FleetRecipesCatalogue.shared,
+            commands: FleetCommandsCatalogue.shared
+        )
+        XCTAssertTrue(
+            errors.contains(where: {
+                if case .invokedCommandOutsidePluginManifestClaims = $0 { return true }
+                return false
+            }),
+            "Expected invoked-namespace violation; got: \(errors)"
+        )
+    }
+
+    func test_validate_pluginOwnedBody_acceptsFleetCommandWhenInvokeClaimCovers() {
+        GuardianPluginBootstrap.ensureRegistered()
+        let restored = GuardianPluginManifest(
+            pluginID: .paladin,
+            displayName: "Paladin",
+            shortDescription: "Mission Control assistant: execution handoff, prompts, and Paladin-authored log lines."
+        )
+        GuardianPluginRegistry.shared.ingestBuiltInRegistration(
+            manifest: GuardianPluginManifest(
+                pluginID: .paladin,
+                displayName: "Paladin",
+                shortDescription: "Mission Control assistant: execution handoff, prompts, and Paladin-authored log lines.",
+                invokedCommandNamespaces: ["command.fleet.vehicle"]
+            ),
+            sidebarItems: []
+        )
+        defer {
+            GuardianPluginRegistry.shared.ingestBuiltInRegistration(manifest: restored, sidebarItems: [])
+        }
+
+        let body = minimalValidBody()
+        let descriptor = FleetRecipeDescriptor(
+            name: FleetRecipeName.literal("recipe.plugin.paladin.bodyclaimsok"),
+            humanLabel: "t",
+            humanDescription: "t",
+            riskTier: .groundOnly,
+            pluginID: .paladin,
+            body: body
+        )
+        let errors = FleetRecipeBodyParser.validate(
+            body,
+            against: descriptor,
+            recipes: FleetRecipesCatalogue.shared,
+            commands: FleetCommandsCatalogue.shared
+        )
+        XCTAssertEqual(errors, [], "Got: \(errors)")
+    }
+
+    // MARK: - Stage F plugin invoked-namespace claims
+
+    func test_validate_pluginOwnedBody_rejectsFleetCommandWithoutInvokeClaim() {
+        GuardianPluginBootstrap.ensureRegistered()
+        let body = minimalValidBody()
+        let descriptor = FleetRecipeDescriptor(
+            name: FleetRecipeName.literal("recipe.plugin.paladin.bodyclaims"),
+            humanLabel: "t",
+            humanDescription: "t",
+            riskTier: .groundOnly,
+            pluginID: .paladin,
+            body: body
+        )
+        let errors = FleetRecipeBodyParser.validate(
+            body,
+            against: descriptor,
+            recipes: FleetRecipesCatalogue.shared,
+            commands: FleetCommandsCatalogue.shared
+        )
+        XCTAssertTrue(
+            errors.contains(where: {
+                if case .invokedCommandOutsidePluginManifestClaims = $0 { return true }
+                return false
+            }),
+            "Expected invoked-namespace violation; got: \(errors)"
+        )
+    }
+
+    func test_validate_pluginOwnedBody_acceptsFleetCommandWhenInvokeClaimCovers() {
+        GuardianPluginBootstrap.ensureRegistered()
+        let restored = GuardianPluginManifest(
+            pluginID: .paladin,
+            displayName: "Paladin",
+            shortDescription: "Mission Control assistant: execution handoff, prompts, and Paladin-authored log lines."
+        )
+        GuardianPluginRegistry.shared.ingestBuiltInRegistration(
+            manifest: GuardianPluginManifest(
+                pluginID: .paladin,
+                displayName: "Paladin",
+                shortDescription: "Mission Control assistant: execution handoff, prompts, and Paladin-authored log lines.",
+                invokedCommandNamespaces: ["command.fleet.vehicle"]
+            ),
+            sidebarItems: []
+        )
+        defer {
+            GuardianPluginRegistry.shared.ingestBuiltInRegistration(manifest: restored, sidebarItems: [])
+        }
+
+        let body = minimalValidBody()
+        let descriptor = FleetRecipeDescriptor(
+            name: FleetRecipeName.literal("recipe.plugin.paladin.bodyclaimsok"),
+            humanLabel: "t",
+            humanDescription: "t",
+            riskTier: .groundOnly,
+            pluginID: .paladin,
+            body: body
+        )
+        let errors = FleetRecipeBodyParser.validate(
+            body,
+            against: descriptor,
+            recipes: FleetRecipesCatalogue.shared,
+            commands: FleetCommandsCatalogue.shared
+        )
+        XCTAssertEqual(errors, [], "Got: \(errors)")
+    }
 }

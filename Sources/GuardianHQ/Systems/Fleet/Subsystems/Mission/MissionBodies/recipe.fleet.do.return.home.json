@@ -1,0 +1,32 @@
+{
+  "_comment": "MRE / MC-R: return home via catalogue command.fleet.vehicle.do.return.home (RTL). Per-step retries; escalation uses MC-R operator prompts.",
+  "entryStepID": "returnHome",
+  "overallBudgetSeconds": 120,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "returnHome",
+      "command": "command.fleet.vehicle.do.return.home",
+      "retry": {
+        "maxAttempts": 3,
+        "delaySeconds": 0.5,
+        "retryableErrorKinds": ["autopilotBusy", "noSession", "notConnected"],
+        "retryOnTimeout": true
+      },
+      "matchers": [
+        { "when": { "kind": "success" }, "then": { "kind": "succeed" } },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "confirmation",
+              "confirmationKind": { "rawValue": "confirmInLiveMission" }
+            },
+            "allowedVerbs": ["abort", "acknowledge", "retry"]
+          }
+        }
+      ]
+    }
+  ]
+}

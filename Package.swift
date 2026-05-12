@@ -35,10 +35,16 @@ let package = Package(
                 .copy("Resources/FleetCalibrationAnchors.json"),
                 .copy("Systems/Fleet/Subsystems/Calibration/CalibrationBodies"),
                 .copy("Systems/Fleet/Subsystems/Errors/ErrorBodies"),
+                .copy("Systems/Fleet/Subsystems/Mission/MissionBodies"),
                 .copy("Resources/SitlDefaultParams/ArduPilotGuardianBattery.parm"),
                 .copy("Resources/sidebar_logo.png"),
                 .copy("Resources/Brand/GuardianMark.svg"),
                 .copy("Resources/Brand/GuardianWordmark.svg"),
+            ],
+            swiftSettings: [
+                // Xcode’s Debug configuration does not imply `DEBUG` for SwiftPM targets unless declared here,
+                // so `#if DEBUG` (e.g. MC‑R map tap tracing) is compiled out and `Logger` never runs.
+                .define("DEBUG", .when(configuration: .debug)),
             ],
             linkerSettings: [
                 // Embed a minimal Info.plist so NSBundle has a main bundle identifier

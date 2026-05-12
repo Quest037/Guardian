@@ -82,6 +82,18 @@ struct FleetCommandDeclaredResponseKinds: Equatable, Hashable, Sendable {
         canTimeout: true
     )
 
+    /// Like ``standardDo`` plus ``autopilotBusy`` and a success payload (mission JSON download).
+    static let standardDoMissionDownload: FleetCommandDeclaredResponseKinds = {
+        let base = standardDo.adding(.autopilotBusy)
+        return FleetCommandDeclaredResponseKinds(
+            canSucceed: base.canSucceed,
+            errorKinds: base.errorKinds,
+            producesPayloadOnSuccess: true,
+            isCancellable: base.isCancellable,
+            canTimeout: base.canTimeout
+        )
+    }()
+
     /// Strictly extends a base set with extra error kinds. Useful to keep registrations
     /// terse — `.standardDo.adding(.alreadyArmed, .calibrationDeclined)` etc.
     func adding(_ extras: FleetCommandErrorKind...) -> FleetCommandDeclaredResponseKinds {

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 /// Shared, UI-ready vehicle state for cards and badges across the app.
 /// This keeps lifecycle + telemetry summaries in one reusable model.
@@ -54,12 +55,61 @@ struct FleetVehicleOperationalModel: Equatable {
     struct MovementSummary: Equatable {
         let horizontalSpeedMS: Double?
 
+        /// Speed at or above which the **Moving** triage chip turns green and ``titleText`` leaves “Stationary”.
+        /// Kept low so slow ground vehicles (crawl / survey) still read as moving; streams are already **maxed**
+        /// across fusion / NED / GPS / odometry so we are not double-counting noise.
+        static let operatorMovingSpeedThresholdMS: Double = 0.12
+
+        /// Green **Moving** chip in triage / roster rows.
+        var isMovingForOperatorChip: Bool {
+            guard let speed = horizontalSpeedMS, speed.isFinite else { return false }
+            return speed >= Self.operatorMovingSpeedThresholdMS
+        }
+
         var titleText: String {
             guard let speed = horizontalSpeedMS, speed.isFinite else { return "Motion unknown" }
-            if speed < 0.5 { return "Stationary" }
-            if speed < 3.0 { return String(format: "Moving %.1f", speed) }
+            if speed < Self.operatorMovingSpeedThresholdMS { return "Stationary" }
+            if speed < 3.0 { return String(format: "Moving %.2f", speed) }
             return String(format: "Fast %.1f", speed)
         }
+    }
+}
+
+// MARK: - Battery traffic (shared with live cards, roster, triage)
+
+/// Traffic-light bucket for battery remaining (icon tint via ``FleetVehicleBatteryTrafficBand/trafficLightIconTint``).
+enum FleetVehicleBatteryTrafficBand: Equatable {
+    case unknown
+    case critical
+    case warn
+    case ok
+}
+
+extension FleetVehicleOperationalModel.BatterySummary {
+    /// Aligned with Mission Control roster chips and live run vehicle cards: red below 10%, yellow below 80%, green otherwise.
+    var trafficBand: FleetVehicleBatteryTrafficBand {
+        guard let p = percent0to100, p.isFinite else { return .unknown }
+        if p < 10 { return .critical }
+        if p < 80 { return .warn }
+        return .ok
+    }
+
+    var compactPercentLabel: String {
+        guard let p = percent0to100, p.isFinite else { return "—" }
+        return "\(Int(round(p)))%"
+    }
+
+    /// SF Symbol for compact battery rows (`battery.100` or bolt variant when charging).
+    var compactTelemetryBatterySymbolName: String {
+        isCharging ? "battery.100.bolt" : "battery.100"
+    }
+
+    /// Tooltip / help string for battery hover (percent, V, A, ETA line).
+    var compactHoverHelpSummary: String {
+        let pct = compactPercentLabel
+        let v = voltageV.map { String(format: "%.1f V", $0) } ?? "—"
+        let a = currentA.map { String(format: "%.1f A", $0) } ?? "—"
+        return "Battery \(pct), \(v), \(a), \(etaText)"
     }
 }
 
@@ -117,16 +167,70 @@ extension FleetVehicleOperationalModel {
         return GpsSummary(satellites: hub?.gpsNumSatellites, fixShort: fix)
     }
 
+    private static func appendPlanarSpeed(north vn: Double?, east ve: Double?, into horizontalCandidates: inout [Double]) {
+        switch (vn, ve) {
+        case let (a?, b?) where a.isFinite && b.isFinite:
+            let h = sqrt(a * a + b * b)
+            if h.isFinite { horizontalCandidates.append(h) }
+        case let (a?, nil) where a.isFinite:
+            horizontalCandidates.append(abs(a))
+        case let (nil, b?) where b.isFinite:
+            horizontalCandidates.append(abs(b))
+        default:
+            break
+        }
+    }
+
     private static func makeMovementSummary(hub: FleetHubVehicleTelemetry?) -> MovementSummary {
-        if let vn = hub?.positionVelVnMS, let ve = hub?.positionVelVeMS, vn.isFinite, ve.isFinite {
-            return MovementSummary(horizontalSpeedMS: sqrt((vn * vn) + (ve * ve)))
+        guard let hub else { return MovementSummary(horizontalSpeedMS: nil) }
+        /// MAVSDK can emit **position_velocity_ned** with a fused velocity that stays at 0 while **velocity_ned**
+        /// still tracks motion. **Max** across independent streams picks the best signal.
+        ///
+        /// Slow **UGV** / crawl speeds are included: single-axis NED samples, body-forward odometry when only `vx`
+        /// is published, and a 3‑vector odometry norm when all components exist (some stacks use mixed frames).
+        var horizontalCandidates: [Double] = []
+        appendPlanarSpeed(north: hub.positionVelVnMS, east: hub.positionVelVeMS, into: &horizontalCandidates)
+        appendPlanarSpeed(north: hub.velocityNorthMS, east: hub.velocityEastMS, into: &horizontalCandidates)
+        if let v = hub.rawGpsVelocityMS, v.isFinite, v >= 0 {
+            horizontalCandidates.append(v)
         }
-        if let vn = hub?.velocityNorthMS, let ve = hub?.velocityEastMS, vn.isFinite, ve.isFinite {
-            return MovementSummary(horizontalSpeedMS: sqrt((vn * vn) + (ve * ve)))
+        if let v = hub.fixedWingGroundspeedMS, v.isFinite, v >= 0 {
+            horizontalCandidates.append(v)
         }
-        if let v = hub?.rawGpsVelocityMS, v.isFinite {
-            return MovementSummary(horizontalSpeedMS: v)
+        let ox = hub.odometryVelXMS
+        let oy = hub.odometryVelYMS
+        let oz = hub.odometryVelZMS
+        if let vx = ox, let vy = oy, let vz = oz, vx.isFinite, vy.isFinite, vz.isFinite {
+            let xy = sqrt(vx * vx + vy * vy)
+            if xy.isFinite { horizontalCandidates.append(xy) }
+            let xyz = sqrt(vx * vx + vy * vy + vz * vz)
+            if xyz.isFinite { horizontalCandidates.append(xyz) }
+        } else if let vx = ox, let vy = oy, vx.isFinite, vy.isFinite {
+            let h = sqrt(vx * vx + vy * vy)
+            if h.isFinite { horizontalCandidates.append(h) }
+        } else if let vx = ox, let vz = oz, oy == nil, vx.isFinite, vz.isFinite {
+            let h = sqrt(vx * vx + vz * vz)
+            if h.isFinite { horizontalCandidates.append(h) }
+        } else if let vx = ox, oy == nil, oz == nil, vx.isFinite {
+            horizontalCandidates.append(abs(vx))
         }
-        return MovementSummary(horizontalSpeedMS: nil)
+        guard !horizontalCandidates.isEmpty else { return MovementSummary(horizontalSpeedMS: nil) }
+        return MovementSummary(horizontalSpeedMS: horizontalCandidates.max())
+    }
+}
+
+extension FleetVehicleBatteryTrafficBand {
+    /// Battery SF Symbol tint (roster, live run cards, assignment triage).
+    var trafficLightIconTint: Color {
+        switch self {
+        case .unknown:
+            return Color.gray.opacity(0.55)
+        case .critical:
+            return Color.red.opacity(0.92)
+        case .warn:
+            return Color.yellow.opacity(0.95)
+        case .ok:
+            return GuardianSemanticColors.successForeground
+        }
     }
 }

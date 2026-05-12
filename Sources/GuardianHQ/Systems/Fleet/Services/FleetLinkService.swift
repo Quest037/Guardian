@@ -2,7 +2,18 @@ import AppKit
 import Combine
 import Foundation
 import Mavsdk
-import RxSwift
+@preconcurrency import RxSwift
+
+/// Shared Rx scheduler for MAVSDK generated plugins that call blocking `wait()` inside `subscribe`.
+/// RxSwift does not mark schedulers `Sendable`; the box is immutable after init and only used for `subscribe(on:)`.
+private final class FleetLinkMavsdkBlockingRpcSchedulerBox: @unchecked Sendable {
+    let scheduler: SchedulerType
+    init() {
+        scheduler = ConcurrentDispatchQueueScheduler(qos: .userInitiated)
+    }
+}
+
+private let fleetLinkMavsdkBlockingRpcBox = FleetLinkMavsdkBlockingRpcSchedulerBox()
 
 /// Phase of the Python MAVSDK bridge relative to the vehicle on the wire.
 enum TelemetryBridgePhase: Equatable {
@@ -169,6 +180,7 @@ final class FleetLinkService: ObservableObject {
             return
         }
         session.drone.param.getParamInt(name: name)
+            .subscribe(on: fleetLinkMavsdkBlockingRpcBox.scheduler)
             .observe(on: MainScheduler.asyncInstance)
             .subscribe(
                 onSuccess: { [weak self] value in
@@ -206,6 +218,7 @@ final class FleetLinkService: ObservableObject {
             return
         }
         session.drone.param.getParamFloat(name: name)
+            .subscribe(on: fleetLinkMavsdkBlockingRpcBox.scheduler)
             .observe(on: MainScheduler.asyncInstance)
             .subscribe(
                 onSuccess: { [weak self] value in
@@ -244,6 +257,7 @@ final class FleetLinkService: ObservableObject {
             return
         }
         session.drone.param.setParamInt(name: name, value: value)
+            .subscribe(on: fleetLinkMavsdkBlockingRpcBox.scheduler)
             .observe(on: MainScheduler.asyncInstance)
             .subscribe(
                 onCompleted: { [weak self] in
@@ -282,6 +296,7 @@ final class FleetLinkService: ObservableObject {
             return
         }
         session.drone.param.setParamFloat(name: name, value: value)
+            .subscribe(on: fleetLinkMavsdkBlockingRpcBox.scheduler)
             .observe(on: MainScheduler.asyncInstance)
             .subscribe(
                 onCompleted: { [weak self] in
@@ -551,6 +566,7 @@ final class FleetLinkService: ObservableObject {
         guard let session = sessionsByVehicleID[vehicleID] else { return }
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             session.drone.param.setParamFloat(name: name, value: value)
+                .subscribe(on: fleetLinkMavsdkBlockingRpcBox.scheduler)
                 .observe(on: MainScheduler.asyncInstance)
                 .subscribe(
                     onCompleted: { [weak self] in
@@ -815,15 +831,24 @@ final class FleetLinkService: ObservableObject {
             return commandID
         }
 
-        if case .uploadAndStartMission(let items) = command {
-            runUploadArmStartMissionPipeline(
+        if case .park = command {
+            runParkPipeline(
                 session: session,
                 vehicleID: vehicleID,
                 commandID: commandID,
                 command: command,
-                items: items,
                 onCommandOutcome: onCommandOutcome
             )
+            return commandID
+        }
+
+        if subscribeMissionSingleIfNeeded(
+            vehicleID: vehicleID,
+            commandID: commandID,
+            command: command,
+            session: session,
+            onCommandOutcome: onCommandOutcome
+        ) {
             return commandID
         }
 
@@ -839,25 +864,40 @@ final class FleetLinkService: ObservableObject {
             completion = session.drone.action.returnToLaunch()
         case .land:
             completion = session.drone.action.land()
+        case .park:
+            preconditionFailure("park must use runParkPipeline")
         case .idle:
             completion = completionForIdleManualMode(vehicleID: vehicleID, session: session)
         case .gotoCoordinate(let coord, let relativeAltitudeM, let yawDeg):
-            let fallbackBaseAlt = hubTelemetryByVehicleID[vehicleID]?.absoluteAltM ?? 0
-            let targetAbsoluteAlt = fallbackBaseAlt + relativeAltitudeM
-            completion = session.drone.action.gotoLocation(
-                latitudeDeg: coord.lat,
-                longitudeDeg: coord.lon,
-                absoluteAltitudeM: targetAbsoluteAlt,
-                yawDeg: yawDeg
+            completion = completionForGotoCoordinate(
+                coord: coord,
+                relativeAltitudeM: relativeAltitudeM,
+                yawDeg: yawDeg,
+                vehicleID: vehicleID,
+                session: session
             )
-        case .uploadAndStartMission:
-            preconditionFailure("uploadAndStartMission must use runUploadArmStartMissionPipeline")
         case .uploadMission(let items):
             completion = completionForUploadMissionOnly(
                 items: items,
                 vehicleID: vehicleID,
                 session: session
             )
+        case .missionClear:
+            completion = session.drone.mission.clearMission()
+        case .missionStart:
+            completion = session.drone.mission.startMission()
+        case .missionPause:
+            completion = session.drone.mission.pauseMission()
+        case .missionSetCurrentItem(let index):
+            completion = session.drone.mission.setCurrentMissionItem(index: index)
+        case .missionSetRtlAfter(let enable):
+            completion = session.drone.mission.setReturnToLaunchAfterMission(enable: enable)
+        case .cancelMissionUpload:
+            completion = session.drone.mission.cancelMissionUpload()
+        case .cancelMissionDownload:
+            completion = session.drone.mission.cancelMissionDownload()
+        case .missionDownloadPlanJSON, .missionIsFinishedQuery, .missionGetRtlAfter:
+            preconditionFailure("Mission Single-backed commands must use subscribeMissionSingleIfNeeded")
         case .manualControl(let manual):
             completion = completionForManualControl(
                 manual,
@@ -1284,113 +1324,225 @@ final class FleetLinkService: ObservableObject {
         return "\(detail) — Context: \(prefix)…"
     }
 
-    /// Upload, arm, and start mission as separate steps so logs show **which** step failed.
-    private func runUploadArmStartMissionPipeline(
+    /// Class-aware park: stop streaming, then land/surface/hold+disarm per ``UniversalVehicleClass``,
+    /// ending in ``Action/hold()`` so the autopilot is in a parked hold/loiter-style mode where supported.
+    private func runParkPipeline(
         session: VehicleSession,
         vehicleID: String,
         commandID: UUID,
         command: FleetVehicleCommand,
-        items: [Mavsdk.Mission.MissionItem],
         onCommandOutcome: (@MainActor (FleetCommandAsyncOutcome) -> Void)?
     ) {
-        let plan = Mavsdk.Mission.MissionPlan(missionItems: items)
-        let drone = session.drone
+        let vehicleType = vehicleModelsByVehicleID[vehicleID]?.data.vehicleType ?? .unknown
+        let universal = vehicleType.universalClass
+        appendVehicleLog(
+            "Park pipeline starting (vehicleType=\(vehicleType.rawValue) universal=\(universal.rawValue)).",
+            vehicleID: vehicleID
+        )
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.runParkSequence(
+                    vehicleID: vehicleID,
+                    session: session,
+                    universalClass: universal
+                )
+                self.markVehicleCommand(vehicleID: vehicleID, commandID: commandID, status: .succeeded)
+                self.appendVehicleLog(
+                    "Command succeeded: \(self.describe(command: command))",
+                    vehicleID: vehicleID
+                )
+                onCommandOutcome?(.succeeded)
+            } catch {
+                let detail = (error as NSError).localizedDescription
+                let augmented = self.augmentCommandFailureDetail(vehicleID: vehicleID, detail: detail)
+                self.markVehicleCommand(
+                    vehicleID: vehicleID,
+                    commandID: commandID,
+                    status: .failed(augmented)
+                )
+                self.appendVehicleLog("Command error: \(augmented)", vehicleID: vehicleID)
+                onCommandOutcome?(.failed(augmented))
+            }
+        }
+    }
 
-        // After a run finishes, PX4 often keeps the mission “current index” at the last item. A fresh
-        // `uploadMission` + `startMission()` can still resume from that index (e.g. item 8 of 9),
-        // which looks like the mission “jumps” near the end and then fails or loiters. Reset to the
-        // first waypoint before arm/start (MAVSDK: setCurrentMissionItem(0) restarts from the beginning).
-        drone.mission.uploadMission(missionPlan: plan)
-            .andThen(drone.mission.setCurrentMissionItem(index: 0))
-            .observe(on: MainScheduler.asyncInstance)
-            .subscribe(
-                onCompleted: { [weak self] in
-                    Task { @MainActor [weak self] in
-                        self?.appendVehicleLog(
-                            "Mission plan uploaded; current waypoint set to first; requesting arm…",
-                            vehicleID: vehicleID
-                        )
-                    }
-                    drone.action.arm()
-                        .observe(on: MainScheduler.asyncInstance)
-                        .subscribe(
-                            onCompleted: { [weak self] in
-                                Task { @MainActor [weak self] in
-                                    self?.appendVehicleLog("Arm acknowledged; starting mission…", vehicleID: vehicleID)
-                                }
-                                drone.mission.startMission()
-                                    .observe(on: MainScheduler.asyncInstance)
-                                    .subscribe(
-                                        onCompleted: { [weak self] in
-                                            Task { @MainActor [weak self] in
-                                                guard let self else { return }
-                                                self.markVehicleCommand(vehicleID: vehicleID, commandID: commandID, status: .succeeded)
-                                                self.appendVehicleLog(
-                                                    "Command succeeded: \(self.describe(command: command))",
-                                                    vehicleID: vehicleID
-                                                )
-                                                onCommandOutcome?(.succeeded)
-                                            }
-                                        },
-                                        onError: { [weak self] error in
-                                            Task { @MainActor [weak self] in
-                                                guard let self else { return }
-                                                let msg = self.mavsdkPublicErrorDescription(error)
-                                                let detail = self.augmentCommandFailureDetail(
-                                                    vehicleID: vehicleID,
-                                                    detail: "after arm, start mission failed: \(msg)"
-                                                )
-                                                self.markVehicleCommand(
-                                                    vehicleID: vehicleID,
-                                                    commandID: commandID,
-                                                    status: .failed(detail)
-                                                )
-                                                self.appendVehicleLog("Command error: \(detail)", vehicleID: vehicleID)
-                                                onCommandOutcome?(.failed(detail))
-                                            }
-                                        }
-                                    )
-                                    .disposed(by: session.bag)
-                            },
-                            onError: { [weak self] error in
-                                Task { @MainActor [weak self] in
-                                    guard let self else { return }
-                                    let msg = self.mavsdkPublicErrorDescription(error)
-                                    let detail = self.augmentCommandFailureDetail(
-                                        vehicleID: vehicleID,
-                                        detail: "after upload, arm failed: \(msg)"
-                                    )
-                                    self.markVehicleCommand(
-                                        vehicleID: vehicleID,
-                                        commandID: commandID,
-                                        status: .failed(detail)
-                                    )
-                                    self.appendVehicleLog("Command error: \(detail)", vehicleID: vehicleID)
-                                    onCommandOutcome?(.failed(detail))
-                                }
-                            }
-                        )
-                        .disposed(by: session.bag)
-                },
-                onError: { [weak self] error in
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        let msg = self.mavsdkPublicErrorDescription(error)
-                        let detail = self.augmentCommandFailureDetail(
-                            vehicleID: vehicleID,
-                            detail: "mission prepare failed (upload or set first waypoint): \(msg)"
-                        )
-                        self.markVehicleCommand(
-                            vehicleID: vehicleID,
-                            commandID: commandID,
-                            status: .failed(detail)
-                        )
-                        self.appendVehicleLog("Command error: \(detail)", vehicleID: vehicleID)
-                        onCommandOutcome?(.failed(detail))
-                    }
-                }
+    private func runParkSequence(
+        vehicleID: String,
+        session: VehicleSession,
+        universalClass: UniversalVehicleClass
+    ) async throws {
+        await stopManualControlStream(vehicleID: vehicleID)
+        switch universalClass {
+        case .uuv:
+            try await parkSequenceUUV(vehicleID: vehicleID, session: session)
+        case .ugv, .usv:
+            try await parkSequenceSurfaceGround(vehicleID: vehicleID, session: session)
+        case .uav, .unknown:
+            try await parkSequenceUAVOrUnknown(vehicleID: vehicleID, session: session)
+        }
+    }
+
+    private func parkHub(_ vehicleID: String) -> FleetHubVehicleTelemetry? {
+        hubTelemetryByVehicleID[vehicleID]
+    }
+
+    /// UGV / USV: stop motion (hold), disarm, then hold again for a clear parked mode.
+    ///
+    /// **Always issues `Action.disarm()` after hold** — PX4 / MAVSDK rovers often stay armed in
+    /// HOLD, and hub ``FleetHubVehicleTelemetry/isArmed`` can lag or remain at the default `false`
+    /// until the next telemetry tick. Gating disarm on `isArmed == true` skipped the real disarm
+    /// while the vehicle was still armed on the wire (same rationale as
+    /// ``awaitLiveDriveSurfaceParkHoldAndDisarm(vehicleID:)``).
+    private func parkSequenceSurfaceGround(vehicleID: String, session: VehicleSession) async throws {
+        do {
+            try await awaitCompletableForManualStream(session.drone.action.hold())
+            appendVehicleLog("Park: hold acknowledged (stop motion).", vehicleID: vehicleID)
+        } catch {
+            appendVehicleLog(
+                "Park: hold failed (\(mavsdkPublicErrorDescription(error))); continuing to disarm.",
+                vehicleID: vehicleID
             )
-            .disposed(by: session.bag)
+        }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        let hubArmed = parkHub(vehicleID)?.isArmed
+        appendVehicleLog(
+            "Park: issuing disarm after hold (hub isArmed snapshot=\(String(describing: hubArmed))).",
+            vehicleID: vehicleID
+        )
+        try await awaitCompletableForManualStream(session.drone.action.disarm())
+        appendVehicleLog("Park: disarm acknowledged.", vehicleID: vehicleID)
+        try await Task.sleep(nanoseconds: 250_000_000)
+        try await awaitCompletableForManualStream(session.drone.action.hold())
+        appendVehicleLog("Park: final hold acknowledged (parked).", vehicleID: vehicleID)
+    }
+
+    /// UAV (and unknown class): land if telemetry suggests airborne, wait for deck/ground, disarm, hold.
+    private func parkSequenceUAVOrUnknown(vehicleID: String, session: VehicleSession) async throws {
+        let h = parkHub(vehicleID)
+        let airborne = (h?.inAir == true) || ((h?.relativeAltM ?? 0) > 2.0)
+        if airborne {
+            do {
+                try await awaitCompletableForManualStream(session.drone.action.land())
+                appendVehicleLog("Park: land command acknowledged; waiting for touchdown…", vehicleID: vehicleID)
+            } catch {
+                appendVehicleLog(
+                    "Park: land failed (\(mavsdkPublicErrorDescription(error))); attempting disarm/hold anyway.",
+                    vehicleID: vehicleID
+                )
+            }
+            try await waitParkUntilUAVOnGround(vehicleID: vehicleID, timeoutMs: 120_000)
+        } else {
+            appendVehicleLog(
+                "Park: not airborne (inAir=\(String(describing: h?.inAir)) relAlt=\(String(describing: h?.relativeAltM))); skipping land.",
+                vehicleID: vehicleID
+            )
+        }
+        if airborne {
+            if parkHub(vehicleID)?.isArmed == true {
+                try await awaitCompletableForManualStream(session.drone.action.disarm())
+                appendVehicleLog("Park: disarm acknowledged.", vehicleID: vehicleID)
+            }
+        } else {
+            let snap = parkHub(vehicleID)?.isArmed
+            appendVehicleLog(
+                "Park: issuing disarm after non-airborne path (hub isArmed snapshot=\(String(describing: snap))).",
+                vehicleID: vehicleID
+            )
+            try await awaitCompletableForManualStream(session.drone.action.disarm())
+            appendVehicleLog("Park: disarm acknowledged.", vehicleID: vehicleID)
+        }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        try await awaitCompletableForManualStream(session.drone.action.hold())
+        appendVehicleLog("Park: hold acknowledged.", vehicleID: vehicleID)
+    }
+
+    private func waitParkUntilUAVOnGround(vehicleID: String, timeoutMs: Int) async throws {
+        let pollMs = 250
+        var elapsed = 0
+        while elapsed < timeoutMs {
+            let h = parkHub(vehicleID)
+            if hubShowsUAVOnDeckForPark(h) {
+                appendVehicleLog("Park: ground/on-deck signal after \(elapsed) ms.", vehicleID: vehicleID)
+                return
+            }
+            try await Task.sleep(nanoseconds: UInt64(pollMs) * 1_000_000)
+            elapsed += pollMs
+        }
+        throw NSError(
+            domain: "FleetLinkService",
+            code: 31,
+            userInfo: [NSLocalizedDescriptionKey: "Park: timeout waiting for landed or disarmed state after land."]
+        )
+    }
+
+    /// Treats MAVSDK / bridge `landed_state` strings (e.g. `ON_GROUND`) as authoritative on-deck, in
+    /// addition to armed / in-air / relative-altitude heuristics used before landed-state telemetry existed.
+    private func hubShowsUAVOnDeckForPark(_ hub: FleetHubVehicleTelemetry?) -> Bool {
+        guard let h = hub else { return false }
+        if let landed = h.landedState {
+            let norm = landed.lowercased().replacingOccurrences(of: " ", with: "")
+            if norm.contains("on_ground") || norm.contains("onground") {
+                return true
+            }
+        }
+        return (h.inAir == false)
+            || (h.isArmed == false)
+            || ((h.relativeAltM ?? 999) < 1.5 && (h.relativeAltM != nil))
+    }
+
+    /// UUV: surface when deep or in-air, wait shallow, disarm, hold.
+    private func parkSequenceUUV(vehicleID: String, session: VehicleSession) async throws {
+        let h = parkHub(vehicleID)
+        let needsSurface = (h?.inAir == true) || ((h?.relativeAltM ?? 0) < -0.45)
+        if needsSurface, h?.isArmed == true {
+            do {
+                try await awaitCompletableForManualStream(
+                    completionForSetMode(mode: .surface, vehicleID: vehicleID, session: session)
+                )
+                appendVehicleLog("Park (UUV): surface mode acknowledged; waiting to shallow…", vehicleID: vehicleID)
+            } catch {
+                appendVehicleLog(
+                    "Park (UUV): surface mode failed (\(mavsdkPublicErrorDescription(error))); continuing.",
+                    vehicleID: vehicleID
+                )
+            }
+            try await waitParkUntilUUVShallow(vehicleID: vehicleID, timeoutMs: 120_000)
+        } else {
+            appendVehicleLog(
+                "Park (UUV): skipping surface (inAir=\(String(describing: h?.inAir)) relAlt=\(String(describing: h?.relativeAltM)) armed=\(String(describing: h?.isArmed))).",
+                vehicleID: vehicleID
+            )
+        }
+        if parkHub(vehicleID)?.isArmed == true {
+            try await awaitCompletableForManualStream(session.drone.action.disarm())
+            appendVehicleLog("Park (UUV): disarm acknowledged.", vehicleID: vehicleID)
+        }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        try await awaitCompletableForManualStream(session.drone.action.hold())
+        appendVehicleLog("Park (UUV): hold acknowledged.", vehicleID: vehicleID)
+    }
+
+    private func waitParkUntilUUVShallow(vehicleID: String, timeoutMs: Int) async throws {
+        let pollMs = 250
+        var elapsed = 0
+        while elapsed < timeoutMs {
+            let h = parkHub(vehicleID)
+            let shallow = (h?.inAir == false)
+                || ((h?.relativeAltM ?? -999) > -0.35)
+                || (h?.isArmed == false)
+            if shallow {
+                appendVehicleLog("Park (UUV): shallow / surfaced after \(elapsed) ms.", vehicleID: vehicleID)
+                return
+            }
+            try await Task.sleep(nanoseconds: UInt64(pollMs) * 1_000_000)
+            elapsed += pollMs
+        }
+        throw NSError(
+            domain: "FleetLinkService",
+            code: 32,
+            userInfo: [NSLocalizedDescriptionKey: "Park (UUV): timeout waiting to reach shallow state after surface."]
+        )
     }
 
     func updateSimulationLifecycleFromSitlLog(systemID: Int, line: String) {
@@ -1888,6 +2040,7 @@ final class FleetLinkService: ObservableObject {
         // logged but non-fatal — the subscription still works at whatever default rate the
         // autopilot publishes.
         session.drone.telemetry.setRateAttitude(rateHz: 10.0)
+            .subscribe(on: fleetLinkMavsdkBlockingRpcBox.scheduler)
             .observe(on: MainScheduler.asyncInstance)
             .subscribe(
                 onCompleted: { [weak self] in
@@ -1907,6 +2060,7 @@ final class FleetLinkService: ObservableObject {
             .disposed(by: session.bag)
 
         session.drone.telemetry.setRateBattery(rateHz: 5.0)
+            .subscribe(on: fleetLinkMavsdkBlockingRpcBox.scheduler)
             .observe(on: MainScheduler.asyncInstance)
             .subscribe(
                 onCompleted: { [weak self] in
@@ -1930,6 +2084,7 @@ final class FleetLinkService: ObservableObject {
         guard stack == .px4 else { return }
 
         session.drone.param.setParamInt(name: "BAT1_CAPACITY", value: 5000)
+            .subscribe(on: fleetLinkMavsdkBlockingRpcBox.scheduler)
             .observe(on: MainScheduler.asyncInstance)
             .subscribe(
                 onCompleted: { [weak self] in
@@ -1964,6 +2119,7 @@ final class FleetLinkService: ObservableObject {
         // Safe for non-rover PX4 SITLs too: the parameter just changes the input
         // priority; UAVs that aren't using MANUAL_CONTROL aren't affected.
         session.drone.param.setParamInt(name: "COM_RC_IN_MODE", value: 1)
+            .subscribe(on: fleetLinkMavsdkBlockingRpcBox.scheduler)
             .observe(on: MainScheduler.asyncInstance)
             .subscribe(
                 onCompleted: { [weak self] in
@@ -2026,14 +2182,34 @@ final class FleetLinkService: ObservableObject {
                 relativeAltitudeM,
                 yawDeg
             )
-        case .uploadAndStartMission(let items):
-            return "uploadAndStartMission(\(items.count) items)"
         case .uploadMission(let items):
             return "uploadMission(\(items.count) items)"
+        case .missionClear:
+            return "missionClear"
+        case .missionStart:
+            return "missionStart"
+        case .missionPause:
+            return "missionPause"
+        case .missionSetCurrentItem(let index):
+            return "missionSetCurrentItem(index=\(index))"
+        case .missionDownloadPlanJSON:
+            return "missionDownloadPlanJSON"
+        case .missionIsFinishedQuery:
+            return "missionIsFinishedQuery"
+        case .missionGetRtlAfter:
+            return "missionGetRtlAfter"
+        case .missionSetRtlAfter(let enable):
+            return "missionSetRtlAfter(enable=\(enable))"
+        case .cancelMissionUpload:
+            return "cancelMissionUpload"
+        case .cancelMissionDownload:
+            return "cancelMissionDownload"
         case .returnToLaunch:
             return "returnToLaunch"
         case .land:
             return "land"
+        case .park:
+            return "park"
         case .idle:
             return "idle(manualMode)"
         case .manualControl(let manual):
@@ -2057,11 +2233,10 @@ final class FleetLinkService: ObservableObject {
 
     /// Upload-only mission dispatch.
     ///
-    /// Mirrors the **upload prelude** of ``runUploadArmStartMissionPipeline`` (upload the
-    /// plan, then reset the autopilot's current waypoint to 0 so a re-uploaded plan
-    /// always starts from the first item) — but **stops there**. Arm and start are
-    /// caller / recipe responsibilities. Powers `command.fleet.vehicle.do.mission.upload`
-    /// via ``FleetVehicleCommand/uploadMission(items:)``.
+    /// Uploads the plan, then resets the autopilot's current waypoint to 0 so a re-uploaded plan
+    /// always starts from the first item — **stops there**. Arm and start are caller / recipe
+    /// responsibilities. Powers `command.fleet.vehicle.do.mission.upload` via
+    /// ``FleetVehicleCommand/uploadMission(items:)``.
     private func completionForUploadMissionOnly(
         items: [Mavsdk.Mission.MissionItem],
         vehicleID: String,
@@ -2075,6 +2250,136 @@ final class FleetLinkService: ObservableObject {
         )
         return drone.mission.uploadMission(missionPlan: plan)
             .andThen(drone.mission.setCurrentMissionItem(index: 0))
+    }
+
+    /// MAVSDK `Mission` plugin calls that return `Single` (download / readbacks) — bridged
+    /// into ``FleetCommandAsyncOutcome/succeededWithPayload(_:)`` for Layer 0 normalisers.
+    ///
+    /// - Returns: `true` when this command was handled (subscription installed); `false`
+    ///   when the caller should fall through to the `Completable` pipeline.
+    private func subscribeMissionSingleIfNeeded(
+        vehicleID: String,
+        commandID: UUID,
+        command: FleetVehicleCommand,
+        session: VehicleSession,
+        onCommandOutcome: (@MainActor (FleetCommandAsyncOutcome) -> Void)?
+    ) -> Bool {
+        let drone = session.drone
+        switch command {
+        case .missionDownloadPlanJSON:
+            drone.mission.downloadMission()
+                .observe(on: MainScheduler.asyncInstance)
+                .subscribe(
+                    onSuccess: { [weak self] plan in
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            do {
+                                let json = try FleetVehicleCommandMissionItemPayload.encodeMissionPlanToJSON(plan: plan)
+                                self.markVehicleCommand(vehicleID: vehicleID, commandID: commandID, status: .succeeded)
+                                self.appendVehicleLog(
+                                    "Command succeeded: \(self.describe(command: command))",
+                                    vehicleID: vehicleID
+                                )
+                                onCommandOutcome?(.succeededWithPayload(.string(json)))
+                            } catch {
+                                let detail = "mission download succeeded but JSON encoding failed: \(error.localizedDescription)"
+                                self.markVehicleCommand(
+                                    vehicleID: vehicleID,
+                                    commandID: commandID,
+                                    status: .failed(detail)
+                                )
+                                self.appendVehicleLog("Command error: \(detail)", vehicleID: vehicleID)
+                                onCommandOutcome?(.failed(detail))
+                            }
+                        }
+                    },
+                    onFailure: { [weak self] error in
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            let raw = self.mavsdkPublicErrorDescription(error)
+                            let detail = self.augmentCommandFailureDetail(vehicleID: vehicleID, detail: raw)
+                            self.markVehicleCommand(
+                                vehicleID: vehicleID,
+                                commandID: commandID,
+                                status: .failed(detail)
+                            )
+                            self.appendVehicleLog("Command error: \(detail)", vehicleID: vehicleID)
+                            onCommandOutcome?(.failed(detail))
+                        }
+                    }
+                )
+                .disposed(by: session.bag)
+            return true
+
+        case .missionIsFinishedQuery:
+            drone.mission.isMissionFinished()
+                .observe(on: MainScheduler.asyncInstance)
+                .subscribe(
+                    onSuccess: { [weak self] finished in
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            self.markVehicleCommand(vehicleID: vehicleID, commandID: commandID, status: .succeeded)
+                            self.appendVehicleLog(
+                                "Command succeeded: \(self.describe(command: command)) → \(finished)",
+                                vehicleID: vehicleID
+                            )
+                            onCommandOutcome?(.succeededWithPayload(.bool(finished)))
+                        }
+                    },
+                    onFailure: { [weak self] error in
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            let raw = self.mavsdkPublicErrorDescription(error)
+                            let detail = self.augmentCommandFailureDetail(vehicleID: vehicleID, detail: raw)
+                            self.markVehicleCommand(
+                                vehicleID: vehicleID,
+                                commandID: commandID,
+                                status: .failed(detail)
+                            )
+                            self.appendVehicleLog("Command error: \(detail)", vehicleID: vehicleID)
+                            onCommandOutcome?(.failed(detail))
+                        }
+                    }
+                )
+                .disposed(by: session.bag)
+            return true
+
+        case .missionGetRtlAfter:
+            drone.mission.getReturnToLaunchAfterMission()
+                .observe(on: MainScheduler.asyncInstance)
+                .subscribe(
+                    onSuccess: { [weak self] enabled in
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            self.markVehicleCommand(vehicleID: vehicleID, commandID: commandID, status: .succeeded)
+                            self.appendVehicleLog(
+                                "Command succeeded: \(self.describe(command: command)) → \(enabled)",
+                                vehicleID: vehicleID
+                            )
+                            onCommandOutcome?(.succeededWithPayload(.bool(enabled)))
+                        }
+                    },
+                    onFailure: { [weak self] error in
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            let raw = self.mavsdkPublicErrorDescription(error)
+                            let detail = self.augmentCommandFailureDetail(vehicleID: vehicleID, detail: raw)
+                            self.markVehicleCommand(
+                                vehicleID: vehicleID,
+                                commandID: commandID,
+                                status: .failed(detail)
+                            )
+                            self.appendVehicleLog("Command error: \(detail)", vehicleID: vehicleID)
+                            onCommandOutcome?(.failed(detail))
+                        }
+                    }
+                )
+                .disposed(by: session.bag)
+            return true
+
+        default:
+            return false
+        }
     }
 
     /// Bridge a MAVSDK Calibration plugin `Observable<ProgressData>` into the existing
@@ -2199,6 +2504,47 @@ final class FleetLinkService: ObservableObject {
             return true
         }
         return false
+    }
+
+    /// ArduPilot only honours ``Action/gotoLocation`` as external navigation when the
+    /// vehicle is in **Guided**. Prepend `mode guided` for UAV / UGV / USV so move-point
+    /// and similar gotos are not dropped while the stack is still in Hold / Loiter.
+    private func completionForGotoCoordinate(
+        coord: RouteCoordinate,
+        relativeAltitudeM: Double,
+        yawDeg: Double,
+        vehicleID: String,
+        session: VehicleSession
+    ) -> Completable {
+        let hub = hubTelemetryByVehicleID[vehicleID]
+        let stack = vehicleModelsByVehicleID[vehicleID]?.data.telemetry?.autopilotStack
+            ?? hub?.autopilotStack
+            ?? .unknown
+        let universalClass = vehicleModelsByVehicleID[vehicleID]?.data.vehicleType.universalClass
+            ?? .unknown
+
+        let fallbackBaseAlt = hub?.absoluteAltM ?? 0
+        let targetAbsoluteAlt = fallbackBaseAlt + relativeAltitudeM
+        let gotoRx = session.drone.action.gotoLocation(
+            latitudeDeg: coord.lat,
+            longitudeDeg: coord.lon,
+            absoluteAltitudeM: targetAbsoluteAlt,
+            yawDeg: yawDeg
+        )
+
+        guard stack == .ardupilot else { return gotoRx }
+
+        switch universalClass {
+        case .uav, .ugv, .usv:
+            return ardupilotSetModeCompletable(
+                mode: .guided,
+                vehicleID: vehicleID,
+                session: session,
+                vehicleClass: universalClass
+            ).andThen(gotoRx)
+        case .uuv, .unknown:
+            return gotoRx
+        }
     }
 
     private func completionForManualControl(
@@ -2602,7 +2948,9 @@ final class FleetLinkService: ObservableObject {
     ) -> Completable {
         let logVehicleID = vehicleID
         let set = session.drone.param.setParamFloat(name: name, value: value)
+            .subscribe(on: fleetLinkMavsdkBlockingRpcBox.scheduler)
         let verify: Completable = session.drone.param.getParamFloat(name: name)
+            .subscribe(on: fleetLinkMavsdkBlockingRpcBox.scheduler)
             .observe(on: MainScheduler.asyncInstance)
             .flatMapCompletable { [weak self] actual -> Completable in
                 let tolerance = max(Float(1e-4), abs(value) * Float(5e-4))
@@ -2644,7 +2992,9 @@ final class FleetLinkService: ObservableObject {
     ) -> Completable {
         let logVehicleID = vehicleID
         let set = session.drone.param.setParamInt(name: name, value: value)
+            .subscribe(on: fleetLinkMavsdkBlockingRpcBox.scheduler)
         let verify: Completable = session.drone.param.getParamInt(name: name)
+            .subscribe(on: fleetLinkMavsdkBlockingRpcBox.scheduler)
             .observe(on: MainScheduler.asyncInstance)
             .flatMapCompletable { [weak self] actual -> Completable in
                 if actual == value {

@@ -29,13 +29,13 @@
   - **Calibration commands + recipes:** Layer 0 `do.calibrate.*` catalogue + Layer 1
     `recipe.fleet.calibrate.*` / diagnose / error-fix recipes ship in-tree; see
     `README.md` (Fleet Commands & Recipes) and `CommandsCatalogueDoc.md` §6. **Vehicle
-    Inspector wizard + inline escalation** — `CommandsRecipesToDo.md` → **Stage E**.
+    Inspector wizard + inline escalation** — `NEXTVERSION.md` → **Vehicle Inspector recipe wizard (Stage E)**.
   - Manual Calibration Process (live + sim): **Stage E** wizard in
-    `CommandsRecipesToDo.md` (replaces one-off hardcoded flows).
+    `NEXTVERSION.md` Stage E capture (replaces one-off hardcoded flows).
   
 - **Vehicle Preflight:**
   - Wire arm / calibration-help UX to catalogue recipes (`recipe.fleet.diagnose.armprobe`,
-    `recipe.fleet.errors.fix.*`) — **Stage E** in `CommandsRecipesToDo.md` (recipes already
+    `recipe.fleet.errors.fix.*`) — **Stage E** in `NEXTVERSION.md` (recipes already
     registered).
   - **Live-mission recipe / preflight override surfaces.** The default-deny gate now lives in
     `MissionControlStore.runSingleVehiclePreflightProbe` (parameter
@@ -53,6 +53,9 @@
     recipe-run history (`source` field) so post-mission review can see exactly which
     operator / plugin overrode the gate and why.
 
+- Finish vehicle inspector wizard to be done properly.
+  - do the layout, speed, explanation, walk-through and messaging properly.
+  - The purpose of the wizard is to make it as easy as possible for the user, not make it difficult.
 
 ### Commands Catalogue
 
@@ -110,9 +113,6 @@ Missions are the templates created by users that involve telling one or more veh
   - Add a blacklist for hexcode ranges (no black on black)
 
 ### Mission Mechanics
-- **Points:** - Add a points system for Tasks/Missions. Implementation backlog: **[`MissionPointsTodo.md`](MissionPointsTodo.md)** (typed map points, catchment, MRE/MCR, logging).
-  - **Rally Points:** - Extend points with rally points for Tasks/Missions.
-  - **Extraction Points:** - Extend points with extraction points for Tasks/Missions.
 - **Mission Task.staggerDelay:** - Add a field (or fields) to control a tasks stagger delay between drone groups when method is staggered. (duration + time style e.g. 30+seconds, 10+mins, 1+hour)
 - **Mission Task.geofence:** - Add a geofence limit around a MissionTask to say drones cannot exit it.
 - **Mission Task.betweenCycles:** - Add a between cycles param to tell squads what to do between task cycles. These are actions.
@@ -131,9 +131,8 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 ### Policies
 - **Structure:**
   - Drive policies from **FleetCommandsCatalogue / recipes** where a mission verb maps
-    to a catalogue entry (design with `CommandsRecipesToDo.md` MRE executor track).
-  - Allow chaining
-  - Allow priority attempts + count (Try this policy first, then try that)
+    to a catalogue entry (preferential abort/complete + between-cycles dispatch: README
+    **Fleet Commands & Recipes** → Mission / MRE policy dispatch).
 
 ### Rules of Engagement
 - **Rules:**
@@ -141,13 +140,23 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
   - RosterRelease
   - Abort
 
+### Settings
+- An object of settings for MCR to work with
+  - Map display
+    - On task select, hide other tasks (bool)
+- App level defaults on their own tab
+
 ### Mission Control: Simulate Mode (Paladin Only)
 - **Mission Control Simulate mode:** add a simulation mode where live vehicle(s) test-run mission paths and feed results back into route refinement via trial-and-error updates. This is run by Paladin, but with operator standing by so that they can take over if a vehicle gets stuck and reroute so that the mission paths can be updated to account for it. This is basically mission testflighting.
 - **Failure injection:** - build in intentional failure injections so that MissionControl/Paladin can react.
 
 ### Mission Control: Setup
 - **Rosters:** 
-  - Allow user to add a pool of reserves to Task rosters by default.
+  - Allow user to add a pool of reserves to Task rosters by default. — **Shipped:** run-envelope pool + MCS/MCR/MRE v1 (**`README.md`** → **Floating reserve pool (Mission Control run)**). **Still open:** template-default pool rows per task + automation backlog → **`NEXTVERSION.md`** → **Floating reserve pool — deferred phases** (2026-05-12).
+  - **Live reserve swap-in** (replace active primary/wingman with reserve from **pool or fixed `.reserve` slot**): arm/calibrate, mission upload/resume, reposition, roster commit, disposition of replaced aircraft, map UX, class matching, escalation + manual + auto triggers — **`MissionRosterReservesToDo.md`**.
+
+- **Settings:**
+  - Add a tab for user to control MCR settings
 
 ### Mission Control: Running
 
@@ -158,17 +167,18 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 - **Task Controls (Sidebar):**
 
 - **Map:** 
-  - context-menu for task paths, vehicles, points markers
-    - left click triggers Stack overlay
   - Integrate CesiumJS system to offer 3D map version as well as Leaflet 2D map.
 
 - **Mission Controls (Sidebar):**
 
 - **Vehicles:**
   
-
 - **Vehicles (Sidebar):**
 
+- **Settings:**
+  - Add button in sub-bar using toggles icon
+  - open drawer
+  - allow user to manage MCR settings
 
 #### Squads
 - **Formations:** 
@@ -178,10 +188,12 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 
 #### Executor
 
-- **MRE → `FleetCommandsCatalogue` + `FleetRecipeRunner`:** canonical backlog lives in
-  `CommandsRecipesToDo.md` → **Next — MRE recipe executor** (subsystem forward-port,
-  upload+arm+start composite, retire `FleetVehicleCommand.uploadAndStartMission`, prompts
-  via escalation / operator prompt channel).
+- **MRE → `FleetCommandsCatalogue` + `FleetRecipeRunner`:** preferential abort/complete
+  tactics (non–map-point) and between-cycles shaping route through catalogue + runner
+  (README **Fleet Commands & Recipes** → Mission / MRE policy dispatch;
+  `MissionRunRecipeOperatorPromptBridge` for in-run recipe escalations). Mission
+  upload→arm→start runs through `recipe.fleet.do.mission.upload.start`. Further
+  operator-prompt unification: `NEXTVERSION.md` (**Vehicle Inspector recipe wizard** — Revisit + Stage E).
 
 #### Commander
 
@@ -262,25 +274,7 @@ Paladin is Guardian's mission running brain. It takes a mission template into mi
 
 ### FleetCommands
 
-Mission atoms still to add under `command.fleet.vehicle.do.mission.*` (already wired:
-`do.mission.upload`):
-
-- clear mission (`do.mission.clear` — MAVSDK `Mission.clearMission()`)
-- start mission (`do.mission.start` — MAVSDK `Mission.startMission()`)
-- pause mission (`do.mission.pause` — MAVSDK `Mission.pauseMission()`)
-- jump to mission item (`do.mission.jumpTo` — MAVSDK `Mission.setCurrentMissionItem(index:)`)
-- download mission (`do.mission.download` — MAVSDK `Mission.downloadMission()`)
-- upload mission with progress stream (variant of `do.mission.upload` — MAVSDK `Mission.uploadMissionWithProgress`)
-- download mission with progress stream (variant of `do.mission.download` — MAVSDK `Mission.downloadMissionWithProgress`)
-- cancel an in-flight mission upload (`cancel.mission.upload` — MAVSDK `Mission.cancelMissionUpload`)
-- cancel an in-flight mission download (`cancel.mission.download` — MAVSDK `Mission.cancelMissionDownload`)
-- check whether mission has finished (`get.mission.finished` — MAVSDK `Mission.isMissionFinished()`)
-- read / write the "RTL after mission completes" flag (`get.mission.rtlAfter`, `do.mission.rtlAfter.set` — MAVSDK `Mission.getReturnToLaunchAfterMission` / `setReturnToLaunchAfterMission`)
-- subscribe to mission progress stream (deferred — `subscribe` verb is post-Stage-A; MAVSDK `Mission.subscribeMissionProgress`)
-
-Composite commands (command-contains-commands, 1 level deep):
-
-- `do.mission.upload.start` — items: `[do.mission.upload, do.mission.start]`
+- Mission **progress streaming** remains deferred: Layer 0 has no `subscribe` verb yet, so MAVSDK `Mission.subscribeMissionProgress` is not exposed as a catalogue command.
 
 ## App Errors
 

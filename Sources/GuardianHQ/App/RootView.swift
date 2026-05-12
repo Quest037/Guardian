@@ -58,7 +58,7 @@ struct RootView: View {
         }
         .preference(
             key: GuardianToastShellAnchorPreferenceKey.self,
-            value: GuardianToastShellAnchor(sidebarWidth: sidebarWidth, topBarHeight: 52)
+            value: GuardianToastShellAnchor(topBarHeight: 52, topBarTrailingInset: GuardianSpacing.md)
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.backgroundBase)

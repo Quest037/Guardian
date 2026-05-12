@@ -95,10 +95,9 @@ enum MissionRunMissionTaskGracefulPendingKind: String, Codable, Equatable {
 // MARK: - Abort (scheduling → planner → fleet commands)
 
 /// Autopilot-facing action when a run aborts (resolved **assignment → task → mission** via ``MissionRunPolicyResolution``).
-enum MissionRunAbortPolicy: String, Codable, Equatable, CaseIterable, Identifiable {
+enum MissionRunAbortPolicy: String, Equatable, CaseIterable, Identifiable, Codable {
     case returnToLaunch
-    case holdPosition
-    case land
+    case loiter
     /// Do not issue an autopilot command from policy alone (run teardown may still occur elsewhere).
     case none
 
@@ -108,38 +107,259 @@ enum MissionRunAbortPolicy: String, Codable, Equatable, CaseIterable, Identifiab
     var setupMenuLabel: String {
         switch self {
         case .returnToLaunch: return "Return to Launch"
-        case .holdPosition: return "Hold Position"
-        case .land: return "Land"
+        case .loiter: return "Loiter"
         case .none: return "None"
         }
     }
 
     /// MC Setup **Rules** abort dropdown ordering (**Return to Launch** first; includes all planner-backed values).
     static var setupPickerCases: [MissionRunAbortPolicy] {
-        [.returnToLaunch, .holdPosition, .land, .none]
+        [.returnToLaunch, .loiter, .none]
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        let raw = try c.decode(String.self)
+        switch raw {
+        case "holdPosition": self = .loiter
+        case "land": self = .returnToLaunch
+        default:
+            guard let v = Self(rawValue: raw) else {
+                throw DecodingError.dataCorruptedError(
+                    in: c,
+                    debugDescription: "Unknown MissionRunAbortPolicy raw value: \(raw)"
+                )
+            }
+            self = v
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(rawValue)
     }
 }
 
-/// Autopilot-facing action when a run completes for recovery (resolved **assignment → task → mission** via ``MissionRunPolicyResolution``).
-enum MissionRunCompletePolicy: String, Codable, Equatable, CaseIterable, Identifiable {
-    case returnToLaunch
-    case holdPosition
-    case land
-    case none
+// MARK: - Abort preference chain (ordered tactics)
 
-    var id: String { rawValue }
+/// One step in an **ordered** abort preference chain. Mission Control walks the chain **optimistically**
+/// (first tactic that can be planned wins). Chains should **end with** ``Kind/park`` so a vehicle that
+/// cannot satisfy earlier tactics still receives a safe park / rescue posture.
+struct MissionRunAbortTactic: Identifiable, Codable, Equatable, Hashable, Sendable {
+    enum Kind: String, Codable, CaseIterable, Sendable {
+        case returnToLaunch
+        /// Autopilot hold / loiter (``FleetVehicleCommand/holdPosition``).
+        case loiter
+        case park
+        /// Nearest **open** ``MissionPoint`` of ``mapPointKind`` (task-scoped or mission-wide), then park via the move-point-park recipe.
+        case nearestOpenMapPoint
+    }
+
+    var id: UUID
+    var kind: Kind
+    /// Meaningful when ``kind == nearestOpenMapPoint`` (defaults to ``MissionPointKind/rally`` when absent).
+    var mapPointKind: MissionPointKind?
+
+    init(id: UUID = UUID(), kind: Kind, mapPointKind: MissionPointKind? = nil) {
+        self.id = id
+        self.kind = kind
+        self.mapPointKind = mapPointKind
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, mapPointKind
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        let rawKind = try c.decode(String.self, forKey: .kind)
+        kind = Kind(migratedFromStoredRaw: rawKind)
+        mapPointKind = try c.decodeIfPresent(MissionPointKind.self, forKey: .mapPointKind)
+        if kind == .nearestOpenMapPoint, mapPointKind == nil {
+            mapPointKind = .rally
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(kind, forKey: .kind)
+        if kind == .nearestOpenMapPoint {
+            try c.encode(mapPointKind ?? .rally, forKey: .mapPointKind)
+        } else {
+            try c.encodeIfPresent(mapPointKind, forKey: .mapPointKind)
+        }
+    }
+
+    /// Row labels for tactic pickers and policy editors.
+    var setupMenuLabel: String {
+        switch kind {
+        case .returnToLaunch: return "Return to Launch"
+        case .loiter: return "Loiter"
+        case .park: return "Park"
+        case .nearestOpenMapPoint:
+            return "Nearest open mission point"
+        }
+    }
+
+    /// Default mission-wide chain: try a rally move+parking pass, then RTL, then class-aware park.
+    static let defaultMissionAbortPreferenceChain: [MissionRunAbortTactic] = [
+        MissionRunAbortTactic(kind: .nearestOpenMapPoint, mapPointKind: .rally),
+        MissionRunAbortTactic(kind: .returnToLaunch),
+        MissionRunAbortTactic(kind: .park),
+    ]
+
+    /// Stable ordering for “Add tactic” menus (park intentionally last in the menu; operators may reorder after adding).
+    static var addMenuKindOrdering: [Kind] {
+        [.nearestOpenMapPoint, .returnToLaunch, .loiter, .park]
+    }
+
+    /// Ensures ``mapPointKind`` is set for map-point tactics and that a non-empty chain **ends** with ``Kind/park``.
+    static func normalizedPreferenceChain(_ tactics: [MissionRunAbortTactic]) -> [MissionRunAbortTactic] {
+        var rows = tactics
+        for i in rows.indices {
+            if rows[i].kind == .nearestOpenMapPoint, rows[i].mapPointKind == nil {
+                rows[i].mapPointKind = .rally
+            }
+        }
+        if rows.isEmpty {
+            return defaultMissionAbortPreferenceChain
+        }
+        if rows.last?.kind != .park {
+            rows.append(MissionRunAbortTactic(kind: .park))
+        }
+        return rows
+    }
+
+    /// Fresh row ids so template edits do not share identities with inherited snapshots.
+    static func copyingForIndependentEdit(_ tactics: [MissionRunAbortTactic]) -> [MissionRunAbortTactic] {
+        tactics.map { MissionRunAbortTactic(id: UUID(), kind: $0.kind, mapPointKind: $0.mapPointKind) }
+    }
+
+    static func summarizedForLogging(_ tactics: [MissionRunAbortTactic]) -> String {
+        tactics.map(\.setupMenuLabel).joined(separator: " → ")
+    }
+}
+
+private extension MissionRunAbortTactic.Kind {
+    /// Older JSON used ``holdPosition`` / ``land``; map to current kinds on decode.
+    init(migratedFromStoredRaw raw: String) {
+        switch raw {
+        case "holdPosition": self = .loiter
+        case "land": self = .returnToLaunch
+        default: self = Self(rawValue: raw) ?? .returnToLaunch
+        }
+    }
+}
+
+// MARK: - Complete preference chain (ordered tactics)
+
+/// One step in an **ordered** complete (recovery) preference chain. Mission Control walks the chain **optimistically**
+/// (first tactic that can be planned wins). Chains normally **end with** ``Kind/park``; a lone ``Kind/none`` means no
+/// automatic wind-down command is issued.
+struct MissionRunCompleteTactic: Identifiable, Codable, Equatable, Hashable, Sendable {
+    enum Kind: String, Codable, CaseIterable, Sendable {
+        case returnToLaunch
+        /// Autopilot hold / loiter (``FleetVehicleCommand/holdPosition``).
+        case loiter
+        case park
+        case nearestOpenMapPoint
+        /// Skip without issuing; if it is the only tactic, no wind-down command is sent.
+        case none
+    }
+
+    var id: UUID
+    var kind: Kind
+    var mapPointKind: MissionPointKind?
+
+    init(id: UUID = UUID(), kind: Kind, mapPointKind: MissionPointKind? = nil) {
+        self.id = id
+        self.kind = kind
+        self.mapPointKind = mapPointKind
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, mapPointKind
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        let rawKind = try c.decode(String.self, forKey: .kind)
+        kind = Kind(migratedFromStoredRaw: rawKind)
+        mapPointKind = try c.decodeIfPresent(MissionPointKind.self, forKey: .mapPointKind)
+        if kind == .nearestOpenMapPoint, mapPointKind == nil {
+            mapPointKind = .rally
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(kind, forKey: .kind)
+        if kind == .nearestOpenMapPoint {
+            try c.encode(mapPointKind ?? .rally, forKey: .mapPointKind)
+        } else {
+            try c.encodeIfPresent(mapPointKind, forKey: .mapPointKind)
+        }
+    }
 
     var setupMenuLabel: String {
-        switch self {
+        switch kind {
         case .returnToLaunch: return "Return to Launch"
-        case .holdPosition: return "Hold Position"
-        case .land: return "Land"
+        case .loiter: return "Loiter"
+        case .park: return "Park"
+        case .nearestOpenMapPoint: return "Nearest open mission point"
         case .none: return "None"
         }
     }
 
-    static var setupPickerCases: [MissionRunCompletePolicy] {
-        [.returnToLaunch, .holdPosition, .land, .none]
+    static let defaultMissionCompletePreferenceChain: [MissionRunCompleteTactic] = [
+        MissionRunCompleteTactic(kind: .returnToLaunch),
+        MissionRunCompleteTactic(kind: .park),
+    ]
+
+    static var addMenuKindOrdering: [Kind] {
+        [.nearestOpenMapPoint, .returnToLaunch, .loiter, .none, .park]
+    }
+
+    static func normalizedPreferenceChain(_ tactics: [MissionRunCompleteTactic]) -> [MissionRunCompleteTactic] {
+        var rows = tactics
+        for i in rows.indices {
+            if rows[i].kind == .nearestOpenMapPoint, rows[i].mapPointKind == nil {
+                rows[i].mapPointKind = .rally
+            }
+        }
+        if rows.isEmpty {
+            return defaultMissionCompletePreferenceChain
+        }
+        if rows.count == 1, rows[0].kind == .none {
+            return rows
+        }
+        if rows.last?.kind != .park {
+            rows.append(MissionRunCompleteTactic(kind: .park))
+        }
+        return rows
+    }
+
+    static func copyingForIndependentEdit(_ tactics: [MissionRunCompleteTactic]) -> [MissionRunCompleteTactic] {
+        tactics.map { MissionRunCompleteTactic(id: UUID(), kind: $0.kind, mapPointKind: $0.mapPointKind) }
+    }
+
+    static func summarizedForLogging(_ tactics: [MissionRunCompleteTactic]) -> String {
+        tactics.map(\.setupMenuLabel).joined(separator: " → ")
+    }
+}
+
+private extension MissionRunCompleteTactic.Kind {
+    /// Older JSON used ``holdPosition`` / ``land``; map to current kinds on decode.
+    init(migratedFromStoredRaw raw: String) {
+        switch raw {
+        case "holdPosition": self = .loiter
+        case "land": self = .returnToLaunch
+        default: self = Self(rawValue: raw) ?? .returnToLaunch
+        }
     }
 }
 
@@ -203,12 +423,14 @@ struct MissionRunPolicies: Equatable {
 
 /// Per-assignment policy overrides. Non-`nil` values override the owning task’s policy, which overrides the mission default.
 struct MissionRunAssignmentPolicies: Codable, Equatable {
-    var abort: MissionRunAbortPolicy?
-    var complete: MissionRunCompletePolicy?
+    /// When non-empty, replaces the resolved **abort preference chain** for this slot (see ``MissionRunPolicyResolution``).
+    var abortPreferenceChain: [MissionRunAbortTactic]?
+    /// When non-empty, replaces the resolved **complete (recovery) preference chain** for this slot.
+    var completePreferenceChain: [MissionRunCompleteTactic]?
 
-    init(abort: MissionRunAbortPolicy? = nil, complete: MissionRunCompletePolicy? = nil) {
-        self.abort = abort
-        self.complete = complete
+    init(abortPreferenceChain: [MissionRunAbortTactic]? = nil, completePreferenceChain: [MissionRunCompleteTactic]? = nil) {
+        self.abortPreferenceChain = abortPreferenceChain
+        self.completePreferenceChain = completePreferenceChain
     }
 }
 
@@ -223,26 +445,56 @@ enum MissionRunPolicyResolution {
         return nil
     }
 
-    static func resolvedAbortPolicy(assignment: MissionRunAssignment, mission: Mission?) -> MissionRunAbortPolicy {
-        if let slot = assignment.policies.abort { return slot }
+    /// Effective ordered abort tactics: **assignment → task → mission** (first non-empty wins), then normalized.
+    static func resolvedAbortPreferenceChain(assignment: MissionRunAssignment, mission: Mission?) -> [MissionRunAbortTactic] {
+        if let slot = assignment.policies.abortPreferenceChain, !slot.isEmpty {
+            return MissionRunAbortTactic.normalizedPreferenceChain(slot)
+        }
         if let mission,
            let tid = resolvedTaskId(for: assignment, mission: mission),
            let task = mission.routeMacro.tasks.first(where: { $0.id == tid }),
-           let override = task.abortPolicyOverride {
-            return override
+           let override = task.abortPreferenceChainOverride,
+           !override.isEmpty {
+            return MissionRunAbortTactic.normalizedPreferenceChain(override)
         }
-        return mission?.routeMacro.rules.missionAbortPolicy ?? .returnToLaunch
+        return MissionRunAbortTactic.normalizedPreferenceChain(mission?.routeMacro.rules.missionAbortPreferenceChain ?? [])
     }
 
-    static func resolvedCompletePolicy(assignment: MissionRunAssignment, mission: Mission?) -> MissionRunCompletePolicy {
-        if let slot = assignment.policies.complete { return slot }
+    /// Mission template default only (ignores task and assignment overrides) — for “inherited” hints in editors.
+    static func missionTemplateAbortPreferenceChain(mission: Mission?) -> [MissionRunAbortTactic] {
+        MissionRunAbortTactic.normalizedPreferenceChain(mission?.routeMacro.rules.missionAbortPreferenceChain ?? [])
+    }
+
+    /// Chain this slot would use if its assignment-level abort override were cleared.
+    static func inheritedAbortPreferenceChainForSlot(assignment: MissionRunAssignment, mission: Mission?) -> [MissionRunAbortTactic] {
+        var copy = assignment
+        copy.policies.abortPreferenceChain = nil
+        return resolvedAbortPreferenceChain(assignment: copy, mission: mission)
+    }
+
+    /// Effective ordered complete tactics: **assignment → task → mission** (first non-empty wins), then normalized.
+    static func resolvedCompletePreferenceChain(assignment: MissionRunAssignment, mission: Mission?) -> [MissionRunCompleteTactic] {
+        if let slot = assignment.policies.completePreferenceChain, !slot.isEmpty {
+            return MissionRunCompleteTactic.normalizedPreferenceChain(slot)
+        }
         if let mission,
            let tid = resolvedTaskId(for: assignment, mission: mission),
            let task = mission.routeMacro.tasks.first(where: { $0.id == tid }),
-           let override = task.completePolicyOverride {
-            return override
+           let override = task.completePreferenceChainOverride,
+           !override.isEmpty {
+            return MissionRunCompleteTactic.normalizedPreferenceChain(override)
         }
-        return mission?.routeMacro.rules.missionCompletePolicy ?? .returnToLaunch
+        return MissionRunCompleteTactic.normalizedPreferenceChain(mission?.routeMacro.rules.missionCompletePreferenceChain ?? [])
+    }
+
+    static func missionTemplateCompletePreferenceChain(mission: Mission?) -> [MissionRunCompleteTactic] {
+        MissionRunCompleteTactic.normalizedPreferenceChain(mission?.routeMacro.rules.missionCompletePreferenceChain ?? [])
+    }
+
+    static func inheritedCompletePreferenceChainForSlot(assignment: MissionRunAssignment, mission: Mission?) -> [MissionRunCompleteTactic] {
+        var copy = assignment
+        copy.policies.completePreferenceChain = nil
+        return resolvedCompletePreferenceChain(assignment: copy, mission: mission)
     }
 }
 
@@ -355,7 +607,6 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, taskId, legacyAssignmentTaskUUID = "pathId", rosterDeviceId, slotName, attachedDevice, attachedFleetVehicleToken
         case policies
-        case abortPolicy
     }
 
     init(from decoder: Decoder) throws {
@@ -367,13 +618,7 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         slotName = try c.decode(String.self, forKey: .slotName)
         attachedDevice = try c.decodeIfPresent(String.self, forKey: .attachedDevice) ?? ""
         attachedFleetVehicleToken = try c.decodeIfPresent(String.self, forKey: .attachedFleetVehicleToken)
-        if let decodedPolicies = try c.decodeIfPresent(MissionRunAssignmentPolicies.self, forKey: .policies) {
-            policies = decodedPolicies
-        } else if let legacyAbort = try c.decodeIfPresent(MissionRunAbortPolicy.self, forKey: .abortPolicy) {
-            policies = MissionRunAssignmentPolicies(abort: legacyAbort)
-        } else {
-            policies = MissionRunAssignmentPolicies()
-        }
+        policies = try c.decodeIfPresent(MissionRunAssignmentPolicies.self, forKey: .policies) ?? MissionRunAssignmentPolicies()
     }
 
     func encode(to encoder: Encoder) throws {
@@ -384,7 +629,9 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         try c.encode(slotName, forKey: .slotName)
         try c.encode(attachedDevice, forKey: .attachedDevice)
         try c.encodeIfPresent(attachedFleetVehicleToken, forKey: .attachedFleetVehicleToken)
-        if policies.abort != nil || policies.complete != nil {
+        let hasAbort = policies.abortPreferenceChain != nil && !(policies.abortPreferenceChain?.isEmpty ?? true)
+        let hasComplete = policies.completePreferenceChain != nil && !(policies.completePreferenceChain?.isEmpty ?? true)
+        if hasAbort || hasComplete {
             try c.encode(policies, forKey: .policies)
         }
     }
@@ -393,6 +640,19 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
     var hasFleetOrLegacyAssignment: Bool {
         if let t = attachedFleetVehicleToken, !t.isEmpty { return true }
         return !attachedDevice.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+extension MissionRunAssignment {
+    /// Synthetic assignment for fleet resolution / Paladin preflight on a floating reserve **pool** slot (`rosterDeviceId` is a stable filler).
+    static func syntheticForReservePool(slot: MissionRunReservePoolSlot) -> MissionRunAssignment {
+        MissionRunAssignment(
+            id: slot.id,
+            rosterDeviceId: slot.id,
+            slotName: slot.label,
+            attachedDevice: slot.attachedDevice,
+            attachedFleetVehicleToken: slot.attachedFleetVehicleToken
+        )
     }
 }
 
@@ -405,15 +665,26 @@ enum MissionRunPreflightSlotPhase: String, Equatable {
     case failed
 }
 
+/// Which binding Paladin start preflight is probing (roster vs floating reserve pool).
+enum MissionRunPreflightSlotIdentity: Equatable, Hashable, Sendable {
+    case rosterAssignment(UUID)
+    case floatingReservePool(taskID: UUID, slotID: UUID)
+}
+
 struct MissionRunPreflightSlotRow: Identifiable, Equatable {
-    let assignmentID: UUID
+    let identity: MissionRunPreflightSlotIdentity
     let slotName: String
     var phase: MissionRunPreflightSlotPhase
     var detail: String
     /// Set when **`phase == .failed`** — operator hints from `PreflightFailureAdvisor` (pattern-matched; extend in `PreflightFailureAdvisor.swift`).
     var remediationAdvice: PreflightFailureRemediationAdvice? = nil
 
-    var id: UUID { assignmentID }
+    var id: UUID {
+        switch identity {
+        case .rosterAssignment(let id): return id
+        case .floatingReservePool(_, let slotID): return slotID
+        }
+    }
 }
 
 /// Result of a **single-vehicle** preflight probe (Vehicles preflight modal).
@@ -632,12 +903,77 @@ enum MissionRunCommandIssuerKey {
     static let missionExecute = "mission.execute"
 }
 
+/// How a mission-run slot reaches Layer 0: ``FleetVehicleCommand`` queue, a
+/// catalogue ``FleetCommandsCatalogue/invoke`` (atom or composite), or a Layer 1
+/// ``FleetRecipeRunner/run`` recipe (MRE mission start uses the upload→arm→start recipe).
+enum MissionRunFleetDispatch: Equatable {
+    case vehicleCommand(FleetVehicleCommand)
+    case catalogue(name: FleetCommandName, parameters: FleetCommandParameters)
+    case recipe(name: FleetRecipeName, parameters: FleetRecipeParameters)
+}
+
+extension MissionRunFleetDispatch {
+    /// Preferential **abort** tactics (non–map-point): RTL uses the Layer‑1 return-home recipe; loiter / park use catalogue atoms.
+    @MainActor
+    static func preferentialAbortTacticDispatch(_ kind: MissionRunAbortTactic.Kind) -> MissionRunFleetDispatch? {
+        switch kind {
+        case .returnToLaunch:
+            return .recipe(
+                name: FleetMissionRecipeRegistrations.doReturnHomeRecipeName,
+                parameters: .empty
+            )
+        case .loiter:
+            return .catalogue(name: .fleetVehicleDoLoiter, parameters: .empty)
+        case .park:
+            return .catalogue(name: .fleetVehicleDoPark, parameters: .empty)
+        case .nearestOpenMapPoint:
+            return nil
+        }
+    }
+
+    /// Preferential **complete** tactics (non–map-point, non–``MissionRunCompleteTactic/Kind/none``).
+    @MainActor
+    static func preferentialCompleteTacticDispatch(_ kind: MissionRunCompleteTactic.Kind) -> MissionRunFleetDispatch? {
+        switch kind {
+        case .returnToLaunch:
+            return .recipe(
+                name: FleetMissionRecipeRegistrations.doReturnHomeRecipeName,
+                parameters: .empty
+            )
+        case .loiter:
+            return .catalogue(name: .fleetVehicleDoLoiter, parameters: .empty)
+        case .park:
+            return .catalogue(name: .fleetVehicleDoPark, parameters: .empty)
+        case .nearestOpenMapPoint, .none:
+            return nil
+        }
+    }
+
+    /// Between-cycle shaping for continuous tasks: same catalogue / recipe stack as preferential policies.
+    @MainActor
+    static func betweenCyclesTaskDispatch(_ action: MissionTaskBetweenCyclesAction) -> MissionRunFleetDispatch? {
+        switch action {
+        case .returnToLaunch:
+            return .recipe(
+                name: FleetMissionRecipeRegistrations.doReturnHomeRecipeName,
+                parameters: .empty
+            )
+        case .holdPosition:
+            return .catalogue(name: .fleetVehicleDoLoiter, parameters: .empty)
+        case .land:
+            return .catalogue(name: .fleetVehicleDoLand, parameters: .empty)
+        case .none:
+            return nil
+        }
+    }
+}
+
 struct MissionRunIssuedCommand: Identifiable, Equatable {
     let id: UUID
     let assignmentID: UUID
     let slotName: String
     let vehicleTokenKey: String
-    let command: FleetVehicleCommand
+    let dispatch: MissionRunFleetDispatch
     let issuer: MissionRunCommandIssuer
     /// Stable id for the issuer (e.g. operator uuid, or ``MissionRunCommandIssuerKey/paladin`` for Paladin).
     let issuerKey: String
@@ -651,7 +987,7 @@ struct MissionRunIssuedCommand: Identifiable, Equatable {
         assignmentID: UUID,
         slotName: String,
         vehicleTokenKey: String,
-        command: FleetVehicleCommand,
+        dispatch: MissionRunFleetDispatch,
         issuer: MissionRunCommandIssuer,
         issuerKey: String,
         category: FleetVehicleCommandCategory = .missionControl
@@ -660,10 +996,33 @@ struct MissionRunIssuedCommand: Identifiable, Equatable {
         self.assignmentID = assignmentID
         self.slotName = slotName
         self.vehicleTokenKey = vehicleTokenKey
-        self.command = command
+        self.dispatch = dispatch
         self.issuer = issuer
         self.issuerKey = issuerKey
         self.category = category
+    }
+
+    /// Convenience for call sites that still issue a raw MAVSDK-shaped command.
+    init(
+        id: UUID = UUID(),
+        assignmentID: UUID,
+        slotName: String,
+        vehicleTokenKey: String,
+        command: FleetVehicleCommand,
+        issuer: MissionRunCommandIssuer,
+        issuerKey: String,
+        category: FleetVehicleCommandCategory = .missionControl
+    ) {
+        self.init(
+            id: id,
+            assignmentID: assignmentID,
+            slotName: slotName,
+            vehicleTokenKey: vehicleTokenKey,
+            dispatch: .vehicleCommand(command),
+            issuer: issuer,
+            issuerKey: issuerKey,
+            category: category
+        )
     }
 
     func reattributed(issuer: MissionRunCommandIssuer, issuerKey: String) -> MissionRunIssuedCommand {
@@ -672,7 +1031,7 @@ struct MissionRunIssuedCommand: Identifiable, Equatable {
             assignmentID: assignmentID,
             slotName: slotName,
             vehicleTokenKey: vehicleTokenKey,
-            command: command,
+            dispatch: dispatch,
             issuer: issuer,
             issuerKey: issuerKey,
             category: category
@@ -683,9 +1042,15 @@ struct MissionRunIssuedCommand: Identifiable, Equatable {
 struct MissionRunAbortPlanEntry: Equatable, Identifiable {
     let assignmentID: UUID
     let slotName: String
-    let resolvedPolicy: MissionRunAbortPolicy
-    /// Present when a fleet token exists, policy maps to a command, and the token validates.
-    let issuedCommand: MissionRunIssuedCommand?
+    /// Resolved ordered tactics for this slot (after assignment → task → mission merge).
+    let resolvedPreferenceChain: [MissionRunAbortTactic]
+    /// First tactic the core planner successfully bound to a dispatch (optimistic walk).
+    let chosenTactic: MissionRunAbortTactic?
+    /// Ordered fleet dispatches for this slot’s abort wind-down.
+    ///
+    /// The planner always prefixes ``FleetCommandName/fleetVehicleDoMissionClear`` when a fleet token
+    /// is present so the autopilot mission is torn down before RTL / move+park / loiter / park tactics run.
+    let issuedCommands: [MissionRunIssuedCommand]
 
     var id: UUID { assignmentID }
 }
@@ -701,7 +1066,7 @@ struct MissionRunAbortPlan: Equatable {
 /// Queue bucket; **when** is ``MissionRunQueuedCommandDispatch`` on each batch.
 enum MissionRunCommandQueueTag: String, CaseIterable, Hashable {
     case abort = "missionControl.queue.abort"
-    /// Recovery wind-down after the current mission cycle (``MissionRunCompletePolicy``), distinct from abort policy.
+    /// Recovery wind-down after the current mission cycle (``MissionRunCompleteTactic`` preference chain), distinct from abort policy.
     case complete = "missionControl.queue.complete"
     case missionStart = "missionControl.queue.missionStart"
 }

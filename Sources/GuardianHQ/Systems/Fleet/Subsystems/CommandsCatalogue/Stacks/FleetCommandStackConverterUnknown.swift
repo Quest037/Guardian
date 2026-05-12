@@ -25,6 +25,12 @@ struct FleetCommandStackConverterUnknown: FleetCommandStackConverter {
         ) {
             return immediate
         }
+        if let mission = FleetCommandStackConverterShared.translateFleetVehicleMissionIfNeeded(
+            commandName: commandName,
+            parameters: parameters
+        ) {
+            return mission
+        }
         return .notImplemented(detail: "Autopilot stack is unknown — no translation available for \(commandName.rawValue) until MAVLink stack identification completes.")
     }
 

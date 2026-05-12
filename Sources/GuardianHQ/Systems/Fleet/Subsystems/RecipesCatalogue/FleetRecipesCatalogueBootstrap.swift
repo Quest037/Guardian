@@ -11,6 +11,8 @@ import os
 /// **Subsystem entry points** are invoked here, in the order Stage C documents:
 /// 1. ``FleetCalibrationRecipeRegistrations/registerAll()``
 /// 2. ``FleetErrorRecipeRegistrations/registerAll()``
+/// 3. ``FleetMissionRecipeRegistrations/registerAll()``
+/// 4. ``FleetMovePointParkRecipeRegistrations/registerAll()``
 ///
 /// Both entry points are idempotent on their own and ship zero recipes today (Stage C
 /// authoring is content-only — no further bootstrap edits expected). The bootstrap
@@ -37,6 +39,8 @@ enum FleetRecipesCatalogueBootstrap {
 
         FleetCalibrationRecipeRegistrations.registerAll()
         FleetErrorRecipeRegistrations.registerAll()
+        FleetMissionRecipeRegistrations.registerAll()
+        FleetMovePointParkRecipeRegistrations.registerAll()
 
         // Telemetry directory references recipes by name; validate after every
         // subsystem has registered so an authoring typo (citation added without

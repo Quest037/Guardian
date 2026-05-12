@@ -159,9 +159,10 @@ extension ProcessPromptPolicy {
     /// uses these unless an injected `policyProvider` returns a process-specific
     /// override.
     ///
-    /// - `recipeEscalation` — wizard → MCR → LiveDrive → toast → banner.
-    ///   Wizard first because if a recipe wizard is running, that's where the
-    ///   operator is focused.
+    /// - `recipeEscalation` — MCR → wizard → LiveDrive → toast → banner.
+    ///   MCR first when the event carries a ``OperatorPromptTarget/missionRunID``
+    ///   (MRE headless recipes); entries that cannot bind (no run id) are skipped
+    ///   so Vehicle Inspector still wins for inspector-started runs.
     /// - `mreEngagementAsk` — MCR → LiveDrive → toast → mcrCriticalReturn.
     ///   MRE asking permission for `rtl` / `land` / `forceDisarm` /
     ///   `swapInReserve` needs operator attention back at MCR; the OOA variant
@@ -175,8 +176,8 @@ extension ProcessPromptPolicy {
         switch origin {
         case .recipeEscalation:
             return ProcessPromptPolicy(entries: [
-                .vehicleInspectorWizard,
                 .mcrPanel,
+                .vehicleInspectorWizard,
                 .liveDrivePanel,
                 .persistentToast,
                 .userNotification(style: .banner),

@@ -31,8 +31,8 @@ final class FleetRecipesCatalogueBootstrapTests: XCTestCase {
         )
     }
 
-    func test_ensureRegistered_invokesBothSubsystemEntryPoints() {
-        // The bootstrap is the only call site for the subsystem entry points; if either
+    func test_ensureRegistered_invokesSubsystemEntryPoints() {
+        // The bootstrap is the only call site for the subsystem entry points; if any
         // gets accidentally unwired the per-subsystem suites still pass on their own
         // but the wiring through the bootstrap regresses. This test exercises the
         // full path and checks the namespace partitions are all addressable.
@@ -49,6 +49,10 @@ final class FleetRecipesCatalogueBootstrapTests: XCTestCase {
             .descriptors(underNamespacePrefix: ["fleet", "diagnose"])
         let errors = FleetRecipesCatalogue.shared
             .descriptors(underNamespacePrefix: ["fleet", "errors"])
+        let mission = FleetRecipesCatalogue.shared
+            .descriptors(underNamespacePrefix: ["fleet", "do", "mission"])
+        let returnHomeNav = FleetRecipesCatalogue.shared
+            .descriptors(underNamespacePrefix: ["fleet", "do", "return"])
 
         XCTAssertEqual(
             calibration.count,
@@ -66,6 +70,16 @@ final class FleetRecipesCatalogueBootstrapTests: XCTestCase {
             errors.count,
             1,
             "Errors subsystem ships 1 recipe: calibrationrequired (composite cal sweep + arm-probe verify). Update when new error-fix recipes land."
+        )
+        XCTAssertEqual(
+            mission.count,
+            1,
+            "Mission subsystem ships 1 recipe under fleet.do.mission.*: recipe.fleet.do.mission.upload.start for MRE. Update when new mission recipes land."
+        )
+        XCTAssertEqual(
+            returnHomeNav.count,
+            1,
+            "Mission registrations also ship recipe.fleet.do.return.home under fleet.do.return.* (RTL via catalogue). Update when new return-home recipes land."
         )
     }
 }

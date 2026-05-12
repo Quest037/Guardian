@@ -35,21 +35,43 @@ enum FleetVehicleCommand: Equatable {
     /// UGV/USV/UUV — same underlying autopilot action, class-specific UI label.
     case holdPosition
     case gotoCoordinate(RouteCoordinate, relativeAltitudeM: Double, yawDeg: Double)
-    /// Upload items to the autopilot, arm, then start mission execution (MAVSDK Mission plugin).
-    case uploadAndStartMission(items: [Mavsdk.Mission.MissionItem])
     /// Upload a mission plan to the autopilot — atomic upload step only.
     ///
     /// Routes to `Drone.mission.uploadMission(missionPlan:)` followed by
     /// `Drone.mission.setCurrentMissionItem(index: 0)` (resetting the current waypoint
-    /// matches the multi-step `uploadAndStartMission` pipeline so a re-uploaded plan
-    /// always starts from item 0). Does **not** arm and does **not** start the mission;
+    /// so a re-uploaded plan always starts from item 0). Does **not** arm and does **not** start the mission;
     /// callers compose those as separate commands (`.arm`, plus a future "start mission"
     /// atom). This atom is what `command.fleet.vehicle.do.mission.upload` dispatches.
     case uploadMission(items: [Mavsdk.Mission.MissionItem])
+    /// Clear the mission plan on the autopilot (`Mission.clearMission()`).
+    case missionClear
+    /// Start mission execution (`Mission.startMission()`).
+    case missionStart
+    /// Pause mission execution (`Mission.pauseMission()`).
+    case missionPause
+    /// Set the current mission item index (`Mission.setCurrentMissionItem(index:)`).
+    case missionSetCurrentItem(index: Int32)
+    /// Download the mission plan and surface it as JSON (same shape as `missionItemsJSON`).
+    case missionDownloadPlanJSON
+    /// One-shot read: whether the mission has finished (`Mission.isMissionFinished()`).
+    case missionIsFinishedQuery
+    /// One-shot read: RTL-after-mission flag (`Mission.getReturnToLaunchAfterMission()`).
+    case missionGetRtlAfter
+    /// Set RTL-after-mission (`Mission.setReturnToLaunchAfterMission(enable:)`).
+    case missionSetRtlAfter(enable: Bool)
+    /// Cancel an in-flight mission upload (`Mission.cancelMissionUpload()`).
+    case cancelMissionUpload
+    /// Cancel an in-flight mission download (`Mission.cancelMissionDownload()`).
+    case cancelMissionDownload
     /// Command the autopilot to return to launch / home (MAVSDK Action plugin).
     case returnToLaunch
     /// Command the autopilot to land now (where supported).
     case land
+    /// Class-aware **park**: stop safely, disarm, end in hold / loiter (UAV: land if airborne
+    /// then disarm then hold; UGV/USV: hold then disarm then hold; UUV: surface if deep
+    /// then disarm then hold). Dispatched only via ``FleetLinkService/runParkPipeline`` —
+    /// not decomposed into separate catalogue steps so timeouts and telemetry waits stay coherent.
+    case park
     /// Stop streaming and switch the autopilot to its "MANUAL" stick-passthrough mode so
     /// the vehicle stops moving but remains immediately controllable. Issued from the
     /// LiveDrive end-session menu for non-flying classes (UGV/USV/UUV) — handy when
@@ -337,6 +359,8 @@ enum FleetVehicleCommandStatus: Equatable {
 /// MAVSDK Completable result surfaced to Mission Control and other callers (upload, arm, goto, etc.).
 enum FleetCommandAsyncOutcome: Equatable {
     case succeeded
+    /// Terminal success with a structured payload (e.g. MAVSDK `Single` mission reads).
+    case succeededWithPayload(FleetCommandResponsePayload)
     case failed(String)
 }
 

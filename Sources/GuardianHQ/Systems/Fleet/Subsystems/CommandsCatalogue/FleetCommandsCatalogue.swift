@@ -334,12 +334,12 @@ final class FleetCommandsCatalogue: ObservableObject {
     ) async -> FleetCommandResponse {
 
         for childName in descriptor.containsCommands {
-            // Composite parents do not forward their parameters to children in v1 —
-            // recipe authors should compose parameter-free atomics into composites,
-            // and use Layer 1 recipes for parameterised orchestration.
+            // Forward the parent's validated parameters so composites like
+            // `do.mission.upload.start` can pass `missionItemsJSON` through to upload/start;
+            // children with no matching declarations ignore extras (e.g. `do.arm`).
             let childResponse = await invoke(
                 childName,
-                parameters: .empty,
+                parameters: parameters,
                 vehicleID: vehicleID,
                 source: source,
                 fleetLink: fleetLink,

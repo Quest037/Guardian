@@ -1,8 +1,8 @@
 # Fleet Commands Catalogue — Reference (Layer 0)
 
 Authoritative reference for the Layer 0 universal command catalogue. Companion to
-`CommandsRecipesToDo.md` (the build tracker) and the architectural decisions captured
-there. Read this when authoring a new command, a new stack converter, a new recipe
+`README.md` (**Fleet Commands & Recipes architecture**) and deferred product notes in
+`NEXTVERSION.md` where relevant. Read this when authoring a new command, a new stack converter, a new recipe
 that consumes commands, or a plugin that contributes commands.
 
 > **Layer reminder.** Commands are atomic, stack-translated, and stateless. Anything
@@ -51,8 +51,8 @@ validator aligned.
 
 - **Core** owns the addressing prefix `fleet.*` (and any future `mc.*`).
 - **Plugins** own `plugin.<plugin-id-tail>.*`. v1 enforces this only by convention;
-  Stage F adds machine-checked manifest namespace claims (see
-  `CommandsRecipesToDo.md` Stage F).
+  Stage F adds machine-checked manifest namespace claims (see `NEXTVERSION.md`
+  **Vehicle Inspector recipe wizard** capture — open design / Stage F plugins).
 - The catalogue's `register(_:)` is **last-write-wins per name**. Idempotent. A plugin
   cannot silently shadow a core command — they must use a different name (e.g.
   `command.fleet.vehicle.do.calibrate.compass.paladin`).
@@ -226,7 +226,8 @@ recipe-level guard in Stage B.
 | `command.fleet.vehicle.do.move.altitude`           | `confirmInLiveMission`   | ✓ via shared converter → `FleetVehicleCommand.gotoCoordinate(...)`. `datum = asl|msl` target meters AMSL; `datum = agl` target meters above launch (ground AMSL derived from hub `absoluteAltM − relativeAltM`). Yaw preserved at current heading. Missing telemetry → `.notConnected` so recipes can branch. |
 | `command.fleet.vehicle.do.move.heading`            | `confirmInLiveMission`   | ✓ via shared converter → `FleetVehicleCommand.gotoCoordinate(...)`. Offsets current lat/lon by `distanceM` along `headingDegrees` (spherical great-circle), keeps altitude (`relativeAltitudeM = 0`), and sets `yawDeg = headingDegrees` so the vehicle faces the direction of travel. Missing telemetry → `.notConnected`. |
 | `command.fleet.vehicle.do.move.point`              | `confirmInLiveMission`   | ✓ for `pointKind = explicit` (lat/lon/relAlt/yaw → `Action.gotoLocation`) and `pointKind = currentLatLon` (re-target current lat/lon at new alt/yaw, lat/lon sourced from hub telemetry). `home` / `rally` not yet wired (no autopilot home / rally readback bridged into hub telemetry). |
-| `command.fleet.vehicle.do.mission.upload`          | `confirmInLiveMission`   | ✓ via `FleetVehicleCommand.uploadMission(items:)` (atomic upload + reset current item to 0). Items pass through as JSON array under the `missionItemsJSON` parameter; the converter decodes via `FleetVehicleCommandMissionItemPayload`. Sibling `do.mission.*` verbs (start / pause / clear / jumpTo / download) are tracked in `TODO.md` and land incrementally. Arming and starting the mission are caller / recipe responsibilities. |
+| `command.fleet.vehicle.do.mission.upload`          | `confirmInLiveMission`   | ✓ via `FleetVehicleCommand.uploadMission(items:)` (atomic upload + reset current item to 0). Items pass through as JSON array under the `missionItemsJSON` parameter; the converter decodes via `FleetVehicleCommandMissionItemPayload`. Sibling `do.mission.*` verbs (start / pause / clear / jumpTo / download) are tracked in `TODO.md` and land incrementally. For upload + arm + start in one catalogue invoke, use composite `do.mission.upload.start` below. |
+| `command.fleet.vehicle.do.mission.upload.start`    | `confirmInLiveMission`   | ✓ **Composite** (depth 1): `do.mission.upload` → `do.arm` → `do.mission.start`. Requires `missionItemsJSON` (passed to upload/start; ignored by arm). |
 | `command.fleet.vehicle.do.calibrate.gyro`              | `groundOnly`           | PX4 ✓ via MAVSDK Calibration / AP ✓ via raw `COMMAND_LONG` (`MAV_CMD_PREFLIGHT_CALIBRATION`, param1=1) |
 | `command.fleet.vehicle.do.calibrate.accelerometer`     | `groundOnly`           | PX4 ✓ via MAVSDK Calibration / AP ✓ via raw `COMMAND_LONG` (`MAV_CMD_PREFLIGHT_CALIBRATION`, param5=1) |
 | `command.fleet.vehicle.do.calibrate.compass`           | `groundOnly`           | PX4 ✓ via MAVSDK Calibration / AP ✓ via raw `COMMAND_LONG` (`MAV_CMD_DO_START_MAG_CAL`) |

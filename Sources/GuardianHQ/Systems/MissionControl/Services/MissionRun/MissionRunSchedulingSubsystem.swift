@@ -12,7 +12,7 @@ final class MissionRunSchedulingSubsystem {
         revokeGracefulAfterCycleStop()
         _ = environment.systems.planner.buildAbortPlan(trigger: .afterCycle)
         let commands = (environment.systems.planner.lastBuiltAbortPlan?.entries ?? [])
-            .compactMap(\.issuedCommand)
+            .flatMap(\.issuedCommands)
             .map { $0.reattributed(issuer: .operator, issuerKey: MissionRunCommandIssuerKey.localOperator) }
         if let ctx = environment.lastExecutionContext {
             let batch = MissionRunQueuedCommandBatch(
@@ -74,7 +74,7 @@ final class MissionRunSchedulingSubsystem {
         revokeGracefulAfterCycleStop()
         _ = environment.systems.planner.buildAbortPlan(trigger: .now)
         let commands = (environment.systems.planner.lastBuiltAbortPlan?.entries ?? [])
-            .compactMap(\.issuedCommand)
+            .flatMap(\.issuedCommands)
             .map { $0.reattributed(issuer: .operator, issuerKey: MissionRunCommandIssuerKey.localOperator) }
         guard let ctx = environment.lastExecutionContext else {
             environment.systems.logging.appendLogEvent(

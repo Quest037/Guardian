@@ -43,9 +43,9 @@ struct MissionRunPolicyEditCredential: Equatable {
 
 /// Categories for MRE policy / Rules-of-Engagement writes that the authority subsystem permissions on.
 enum MissionRunPolicyEditScopeCategory: String, CaseIterable, Hashable {
-    /// Mission-wide ``RouteRules/missionAbortPolicy`` and per-task ``MissionTask/abortPolicyOverride``.
+    /// Mission-wide ``RouteRules/missionAbortPreferenceChain`` and per-task ``MissionTask/abortPreferenceChainOverride``.
     case abortPolicy
-    /// Mission-wide ``RouteRules/missionCompletePolicy`` and per-task ``MissionTask/completePolicyOverride``.
+    /// Mission-wide ``RouteRules/missionCompletePreferenceChain`` and per-task ``MissionTask/completePreferenceChainOverride``.
     case completePolicy
     /// Per-assignment ``MissionRunAssignmentPolicies`` (abort / complete).
     case assignmentPolicy

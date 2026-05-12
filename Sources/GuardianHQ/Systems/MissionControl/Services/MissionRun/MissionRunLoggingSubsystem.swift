@@ -248,6 +248,7 @@ final class MissionRunLoggingSubsystem {
                 }
             }
             if let mission,
+               Self.hubFlightModeSupportsMissionWaypointProgressNarrative(flightMode: hub.flightMode),
                let wp = Self.firstMissionWaypoint(for: assignment, mission: mission),
                let lat = hub.latitudeDeg,
                let lon = hub.longitudeDeg,
@@ -307,6 +308,16 @@ final class MissionRunLoggingSubsystem {
                 announcedApproachWP1: announcedWP
             )
         }
+    }
+
+    /// Template WP1 progress narrative (approach / turning / moving) compares hub position to
+    /// ``firstMissionWaypoint`` from the **Guardian mission document** — not extraction/rally targets.
+    /// Emit those lines only when the autopilot mode string indicates MAVLink **mission** execution
+    /// so Hold/Land/RTL/move+park do not read as "navigating to WP1".
+    internal static func hubFlightModeSupportsMissionWaypointProgressNarrative(flightMode: String) -> Bool {
+        let m = flightMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if m.isEmpty { return false }
+        return m.contains("mission")
     }
 
     private static func firstMissionWaypoint(for assignment: MissionRunAssignment, mission: Mission) -> RouteCoordinate? {

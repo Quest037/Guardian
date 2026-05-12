@@ -128,6 +128,32 @@ struct GuardianRouteMapGeometry: Equatable {
     )
 }
 
+/// One-shot viewport adjustment for ``OSMMapView`` (pan without zoom change, or fit bounds).
+struct GuardianMapViewportNudge: Equatable {
+    enum Kind: Equatable {
+        /// Leaflet `panTo` — keeps the current zoom level.
+        case panRetainZoom(lat: Double, lon: Double)
+        /// Fit the map to the given WGS84 points (Leaflet ``fitBounds`` via ``guardianFitBoundsForPoints``).
+        case fitBounds(points: [(Double, Double)])
+
+        static func == (lhs: Kind, rhs: Kind) -> Bool {
+            switch (lhs, rhs) {
+            case (.panRetainZoom(let la, let lo), .panRetainZoom(let ra, let ro)):
+                return la == ra && lo == ro
+            case (.fitBounds(let lp), .fitBounds(let rp)):
+                guard lp.count == rp.count else { return false }
+                return zip(lp, rp).allSatisfy { $0.0 == $1.0 && $0.1 == $1.1 }
+            default:
+                return false
+            }
+        }
+    }
+
+    /// Monotonic per-request id so repeating the same coordinate still re-fires JS.
+    var sequence: UInt64
+    var kind: Kind
+}
+
 /// Shared, observable state for a Leaflet-backed `OSMMapView`. One source of truth
 /// for tile style, content (home / paths / waypoints / vehicle markers / previews),
 /// and recenter requests, so call sites can `pull in` a single model instead of
@@ -143,6 +169,10 @@ final class GuardianMapModel: ObservableObject {
     /// next render even when `preserveView` is `true`.
     @Published private(set) var recenterNonce: Int = 0
 
+    /// Optional viewport nudge evaluated in ``OSMMapView`` (does not change ``recenterNonce`` / mission payload).
+    @Published private(set) var viewportNudge: GuardianMapViewportNudge?
+    private var viewportNudgeSequence: UInt64 = 0
+
     init(
         mapStyle: MapTileStyle = .standard,
         routeGeometry: GuardianRouteMapGeometry = .empty,
@@ -153,6 +183,7 @@ final class GuardianMapModel: ObservableObject {
         self.routeGeometry = routeGeometry
         self.vehicleMarkers = vehicleMarkers
         self.followedVehicleMarkerID = followedVehicleMarkerID
+        self.viewportNudge = nil
     }
 
     /// Convenience for call sites that only need to set ``GuardianRouteMapGeometry/preserveView``.
@@ -165,6 +196,19 @@ final class GuardianMapModel: ObservableObject {
     /// Force the next map update to re-fit bounds / recenter (used by the toolbar
     /// reset button and by callers that change selection, etc.).
     func recenter() { recenterNonce &+= 1 }
+
+    /// Pan the map centre to ``lat``/``lon`` without changing zoom (MC-R triage shortcuts).
+    func focusMapPanRetainZoom(lat: Double, lon: Double) {
+        viewportNudgeSequence &+= 1
+        viewportNudge = GuardianMapViewportNudge(sequence: viewportNudgeSequence, kind: .panRetainZoom(lat: lat, lon: lon))
+    }
+
+    /// Fit the map viewport to the bounding box of ``points`` (empty → no-op).
+    func focusMapFitBounds(points: [(Double, Double)]) {
+        guard !points.isEmpty else { return }
+        viewportNudgeSequence &+= 1
+        viewportNudge = GuardianMapViewportNudge(sequence: viewportNudgeSequence, kind: .fitBounds(points: points))
+    }
 
     /// Toggle between OSM standard and Esri satellite tiles.
     func toggleStyle() {
@@ -306,6 +350,7 @@ struct GuardianMapView: View {
                 vehicleMarkers: model.vehicleMarkers,
                 mapStyle: model.mapStyle,
                 recenterNonce: model.recenterNonce,
+                viewportNudge: model.viewportNudge,
                 headingPreview: model.routeGeometry.headingPreview,
                 cameraPreview: model.routeGeometry.cameraPreview,
                 followedVehicleMarkerID: model.followedVehicleMarkerID,

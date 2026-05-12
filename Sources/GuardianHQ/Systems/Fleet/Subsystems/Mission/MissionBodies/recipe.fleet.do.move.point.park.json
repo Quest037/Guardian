@@ -1,0 +1,112 @@
+{
+  "_comment": "recipe.fleet.do.move.point.park: arm-probe (verify arm path then disarm), arm for navigation, move.point, then do.park. Caller supplies lat/lon/relAlt/yaw + procedureLogSummary (MC-R copy only). Child recipe recipe.fleet.diagnose.armprobe must be registered (calibration bootstrap before mission recipes).",
+  "entryStepID": "armProbe",
+  "overallBudgetSeconds": 600,
+  "steps": [
+    {
+      "kind": "invokeRecipe",
+      "id": "armProbe",
+      "recipe": "recipe.fleet.diagnose.armprobe",
+      "matchers": [
+        { "when": { "kind": "success" }, "then": { "kind": "continueToNextStep" } },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "confirmation",
+              "confirmationKind": { "rawValue": "confirmInLiveMission" }
+            },
+            "allowedVerbs": ["abort", "acknowledge", "retry"]
+          }
+        }
+      ]
+    },
+    {
+      "kind": "invokeCommand",
+      "id": "reArm",
+      "command": "command.fleet.vehicle.do.arm",
+      "retry": {
+        "maxAttempts": 3,
+        "delaySeconds": 0.5,
+        "retryableErrorKinds": ["autopilotBusy", "noSession", "notConnected"],
+        "retryOnTimeout": true
+      },
+      "matchers": [
+        { "when": { "kind": "success" }, "then": { "kind": "continueToNextStep" } },
+        {
+          "when": { "kind": "error", "errorKind": "alreadyArmed" },
+          "then": { "kind": "continueToNextStep" }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "confirmation",
+              "confirmationKind": { "rawValue": "confirmInLiveMission" }
+            },
+            "allowedVerbs": ["abort", "acknowledge", "retry"]
+          }
+        }
+      ]
+    },
+    {
+      "kind": "invokeCommand",
+      "id": "move",
+      "command": "command.fleet.vehicle.do.move.point",
+      "parameters": {
+        "pointKind": { "kind": "reference", "value": "pointKind" },
+        "latitudeDeg": { "kind": "reference", "value": "latitudeDeg" },
+        "longitudeDeg": { "kind": "reference", "value": "longitudeDeg" },
+        "relativeAltitudeM": { "kind": "reference", "value": "relativeAltitudeM" },
+        "yawDeg": { "kind": "reference", "value": "yawDeg" }
+      },
+      "retry": {
+        "maxAttempts": 3,
+        "delaySeconds": 0.5,
+        "retryableErrorKinds": ["autopilotBusy", "noSession", "notConnected"],
+        "retryOnTimeout": true
+      },
+      "matchers": [
+        { "when": { "kind": "success" }, "then": { "kind": "continueToNextStep" } },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "confirmation",
+              "confirmationKind": { "rawValue": "confirmInLiveMission" }
+            },
+            "allowedVerbs": ["abort", "acknowledge", "retry"]
+          }
+        }
+      ]
+    },
+    {
+      "kind": "invokeCommand",
+      "id": "park",
+      "command": "command.fleet.vehicle.do.park",
+      "retry": {
+        "maxAttempts": 2,
+        "delaySeconds": 0.5,
+        "retryableErrorKinds": ["autopilotBusy", "noSession", "notConnected"],
+        "retryOnTimeout": true
+      },
+      "matchers": [
+        { "when": { "kind": "success" }, "then": { "kind": "succeed" } },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "confirmation",
+              "confirmationKind": { "rawValue": "confirmInLiveMission" }
+            },
+            "allowedVerbs": ["abort", "acknowledge", "retry"]
+          }
+        }
+      ]
+    }
+  ]
+}

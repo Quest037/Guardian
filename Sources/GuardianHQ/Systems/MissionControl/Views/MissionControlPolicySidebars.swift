@@ -37,8 +37,20 @@ struct MissionRunTaskPolicyOverridesSidebarView: View {
                     .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                MissionRunPolicyOptionalAbortRow(label: "Abort policy", selection: abortBinding)
-                MissionRunPolicyOptionalCompleteRow(label: "Complete policy", selection: completeBinding)
+                Text("Abort preference chain")
+                    .font(GuardianTypography.font(.disclosureRowTitle))
+                    .foregroundStyle(theme.textPrimary)
+                MissionRunOptionalPreferentialAbortPolicyEditor(
+                    overrideChain: abortBinding,
+                    inheritedChain: inheritedTaskAbortChain
+                )
+                Text("Complete preference chain")
+                    .font(GuardianTypography.font(.disclosureRowTitle))
+                    .foregroundStyle(theme.textPrimary)
+                MissionRunOptionalPreferentialCompletePolicyEditor(
+                    overrideChain: completeBinding,
+                    inheritedChain: inheritedTaskCompleteChain
+                )
             }
             .padding(.horizontal, GuardianSpacing.md)
             .padding(.vertical, GuardianSpacing.cardBodyInset)
@@ -47,25 +59,37 @@ struct MissionRunTaskPolicyOverridesSidebarView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private var abortBinding: Binding<MissionRunAbortPolicy?> {
+    private var missionSnapshot: Mission? {
+        run.template ?? missionStore.missions.first(where: { $0.id == run.missionId })
+    }
+
+    private var inheritedTaskAbortChain: [MissionRunAbortTactic] {
+        MissionRunPolicyResolution.missionTemplateAbortPreferenceChain(mission: missionSnapshot)
+    }
+
+    private var inheritedTaskCompleteChain: [MissionRunCompleteTactic] {
+        MissionRunPolicyResolution.missionTemplateCompletePreferenceChain(mission: missionSnapshot)
+    }
+
+    private var abortBinding: Binding<[MissionRunAbortTactic]?> {
         Binding(
             get: {
-                resolvedTask()?.abortPolicyOverride
+                resolvedTask()?.abortPreferenceChainOverride
             },
             set: { newValue in
-                _ = run.updateTaskAbortPolicyOverride(taskID: taskId, newValue, credential: credential)
+                _ = run.updateTaskAbortPreferenceChainOverride(taskID: taskId, newValue, credential: credential)
                 onChange()
             }
         )
     }
 
-    private var completeBinding: Binding<MissionRunCompletePolicy?> {
+    private var completeBinding: Binding<[MissionRunCompleteTactic]?> {
         Binding(
             get: {
-                resolvedTask()?.completePolicyOverride
+                resolvedTask()?.completePreferenceChainOverride
             },
             set: { newValue in
-                _ = run.updateTaskCompletePolicyOverride(taskID: taskId, newValue, credential: credential)
+                _ = run.updateTaskCompletePreferenceChainOverride(taskID: taskId, newValue, credential: credential)
                 onChange()
             }
         )
@@ -89,6 +113,7 @@ struct MissionRunTaskPolicyOverridesSidebarView: View {
 /// ``MissionRunTaskPolicyOverridesSidebarView`` so MC-S slot edits log + permission-check identically.
 struct MissionRunAssignmentPolicyOverridesSidebarView: View {
     @ObservedObject var run: MissionRunEnvironment
+    @ObservedObject var missionStore: MissionStore
     @ObservedObject var generalSettings: GeneralSettingsStore
     let assignmentId: UUID
     let slotTitle: String
@@ -113,8 +138,20 @@ struct MissionRunAssignmentPolicyOverridesSidebarView: View {
                     .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                MissionRunPolicyOptionalAbortRow(label: "Abort policy", selection: abortBinding)
-                MissionRunPolicyOptionalCompleteRow(label: "Complete policy", selection: completeBinding)
+                Text("Abort preference chain")
+                    .font(GuardianTypography.font(.disclosureRowTitle))
+                    .foregroundStyle(theme.textPrimary)
+                MissionRunOptionalPreferentialAbortPolicyEditor(
+                    overrideChain: abortBinding,
+                    inheritedChain: inheritedSlotAbortChain
+                )
+                Text("Complete preference chain")
+                    .font(GuardianTypography.font(.disclosureRowTitle))
+                    .foregroundStyle(theme.textPrimary)
+                MissionRunOptionalPreferentialCompletePolicyEditor(
+                    overrideChain: completeBinding,
+                    inheritedChain: inheritedSlotCompleteChain
+                )
             }
             .padding(.horizontal, GuardianSpacing.md)
             .padding(.vertical, GuardianSpacing.cardBodyInset)
@@ -123,83 +160,49 @@ struct MissionRunAssignmentPolicyOverridesSidebarView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private var abortBinding: Binding<MissionRunAbortPolicy?> {
+    private var missionSnapshot: Mission? {
+        run.template ?? missionStore.missions.first(where: { $0.id == run.missionId })
+    }
+
+    private var inheritedSlotAbortChain: [MissionRunAbortTactic] {
+        guard let mission = missionSnapshot,
+              let assignment = run.assignments.first(where: { $0.id == assignmentId })
+        else {
+            return MissionRunAbortTactic.defaultMissionAbortPreferenceChain
+        }
+        return MissionRunPolicyResolution.inheritedAbortPreferenceChainForSlot(assignment: assignment, mission: mission)
+    }
+
+    private var inheritedSlotCompleteChain: [MissionRunCompleteTactic] {
+        guard let mission = missionSnapshot,
+              let assignment = run.assignments.first(where: { $0.id == assignmentId })
+        else {
+            return MissionRunCompleteTactic.defaultMissionCompletePreferenceChain
+        }
+        return MissionRunPolicyResolution.inheritedCompletePreferenceChainForSlot(assignment: assignment, mission: mission)
+    }
+
+    private var abortBinding: Binding<[MissionRunAbortTactic]?> {
         Binding(
             get: {
-                run.assignments.first(where: { $0.id == assignmentId })?.policies.abort
+                run.assignments.first(where: { $0.id == assignmentId })?.policies.abortPreferenceChain
             },
             set: { newValue in
-                _ = run.updateAssignmentAbortPolicy(assignmentID: assignmentId, newValue, credential: credential)
+                _ = run.updateAssignmentAbortPreferenceChain(assignmentID: assignmentId, newValue, credential: credential)
                 onChange()
             }
         )
     }
 
-    private var completeBinding: Binding<MissionRunCompletePolicy?> {
+    private var completeBinding: Binding<[MissionRunCompleteTactic]?> {
         Binding(
             get: {
-                run.assignments.first(where: { $0.id == assignmentId })?.policies.complete
+                run.assignments.first(where: { $0.id == assignmentId })?.policies.completePreferenceChain
             },
             set: { newValue in
-                _ = run.updateAssignmentCompletePolicy(assignmentID: assignmentId, newValue, credential: credential)
+                _ = run.updateAssignmentCompletePreferenceChain(assignmentID: assignmentId, newValue, credential: credential)
                 onChange()
             }
         )
-    }
-}
-
-// MARK: - Shared policy picker rows
-
-private struct MissionRunPolicyOptionalAbortRow: View {
-    let label: String
-    @Binding var selection: MissionRunAbortPolicy?
-
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
-
-    var body: some View {
-        HStack(alignment: .center, spacing: GuardianSpacing.cardBodyInset) {
-            Text(label)
-                .font(GuardianTypography.font(.disclosureRowTitle))
-                .foregroundStyle(theme.textPrimary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Picker("", selection: $selection) {
-                Text("Inherited").tag(nil as MissionRunAbortPolicy?)
-                ForEach(MissionRunAbortPolicy.setupPickerCases, id: \.self) { policy in
-                    Text(policy.setupMenuLabel).tag(Optional(policy))
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .frame(width: 200, alignment: .trailing)
-        }
-    }
-}
-
-private struct MissionRunPolicyOptionalCompleteRow: View {
-    let label: String
-    @Binding var selection: MissionRunCompletePolicy?
-
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
-
-    var body: some View {
-        HStack(alignment: .center, spacing: GuardianSpacing.cardBodyInset) {
-            Text(label)
-                .font(GuardianTypography.font(.disclosureRowTitle))
-                .foregroundStyle(theme.textPrimary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Picker("", selection: $selection) {
-                Text("Inherited").tag(nil as MissionRunCompletePolicy?)
-                ForEach(MissionRunCompletePolicy.setupPickerCases, id: \.self) { policy in
-                    Text(policy.setupMenuLabel).tag(Optional(policy))
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .frame(width: 200, alignment: .trailing)
-        }
     }
 }

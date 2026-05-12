@@ -46,6 +46,7 @@ final class GuardianHQSitlSmokeTests: XCTestCase {
             sitl.attachFleetLink(fleetLink)
             FleetCommandsCatalogueBootstrap.ensureRegistered()
             FleetRecipesCatalogueBootstrap.ensureRegistered()
+            FleetRecipesCatalogueBootstrap.ensureRegistered()
         }
 
         func stop() {
@@ -54,9 +55,9 @@ final class GuardianHQSitlSmokeTests: XCTestCase {
     }
 
     private static let smokeEnvKey = "GUARDIAN_RUN_SITL_SMOKE"
-
     private static let compassDoCommand = FleetCommandName.literal("command.fleet.vehicle.do.calibrate.compass")
     private static let cancelCalibrationCommand = FleetCommandName.literal("command.fleet.vehicle.cancel.calibration")
+
 
     private var bootTimeout: TimeInterval {
         envDouble("GUARDIAN_SITL_SMOKE_BOOT_TIMEOUT", default: 180)
@@ -92,7 +93,6 @@ final class GuardianHQSitlSmokeTests: XCTestCase {
             try await ensureDisarmedIfNeeded(vehicle: vehicle, harness: harness)
         }
     }
-
     /// Layer 1: ``FleetRecipeRunner`` + ``recipe.fleet.calibrate.compass`` against the same
     /// live SITL links as the command matrix. Uses ``assertPatternAInteractiveCalRecipeSmokeAcceptable``
     /// (shared with accelerometer and other single-step Pattern-A cals).
@@ -322,6 +322,7 @@ final class GuardianHQSitlSmokeTests: XCTestCase {
         }
     }
 
+
     // MARK: - Boot
 
     private func bootSharedSITLSessions(harness: Harness) async throws -> [SmokeVehicle] {
@@ -545,7 +546,6 @@ final class GuardianHQSitlSmokeTests: XCTestCase {
             line: line
         )
     }
-
     /// Pattern-A interactive cal recipes (single ``invokeCommand`` step, success / escalate /
     /// `any`-fail). SITL may succeed, hit procedure-class errors (escalation + default abort),
     /// or **timeout** at the Layer 0 per-step cap (``FleetCommandsCatalogue/defaultDispatchTimeoutSeconds``).
@@ -776,6 +776,8 @@ final class GuardianHQSitlSmokeTests: XCTestCase {
         case .timeout: return "timeout"
         }
     }
+
+
 
     private func ensureDisarmedIfNeeded(vehicle: SmokeVehicle, harness: Harness) async throws {
         guard harness.fleetLink.hubTelemetry(forVehicleID: vehicle.vehicleID)?.isArmed == true else {

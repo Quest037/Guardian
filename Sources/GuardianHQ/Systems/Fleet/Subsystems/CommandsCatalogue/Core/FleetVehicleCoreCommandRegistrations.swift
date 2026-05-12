@@ -20,6 +20,8 @@ extension FleetCommandName {
         FleetCommandName.literal("command.fleet.vehicle.do.mode")
     static let fleetVehicleDoLoiter =
         FleetCommandName.literal("command.fleet.vehicle.do.loiter")
+    static let fleetVehicleDoPark =
+        FleetCommandName.literal("command.fleet.vehicle.do.park")
     static let fleetVehicleDoLand =
         FleetCommandName.literal("command.fleet.vehicle.do.land")
     static let fleetVehicleDoSurface =
@@ -37,9 +39,38 @@ extension FleetCommandName {
 
     /// Atomic upload of a mission plan. Sibling mission verbs (`do.mission.start`,
     /// `do.mission.pause`, `do.mission.clear`, `do.mission.jumpTo`, `do.mission.download`)
-    /// are tracked in `TODO.md` under "FleetCommands" and land incrementally.
+    /// share the MAVSDK `Mission` plugin surface via
+    /// ``FleetCommandStackConverterShared/translateFleetVehicleMissionIfNeeded(commandName:parameters:)``.
     static let fleetVehicleDoMissionUpload =
         FleetCommandName.literal("command.fleet.vehicle.do.mission.upload")
+    static let fleetVehicleDoMissionClear =
+        FleetCommandName.literal("command.fleet.vehicle.do.mission.clear")
+    static let fleetVehicleDoMissionStart =
+        FleetCommandName.literal("command.fleet.vehicle.do.mission.start")
+    static let fleetVehicleDoMissionPause =
+        FleetCommandName.literal("command.fleet.vehicle.do.mission.pause")
+    static let fleetVehicleDoMissionJumpTo =
+        FleetCommandName.literal("command.fleet.vehicle.do.mission.jump.to")
+    static let fleetVehicleDoMissionDownload =
+        FleetCommandName.literal("command.fleet.vehicle.do.mission.download")
+    static let fleetVehicleDoMissionUploadWithProgress =
+        FleetCommandName.literal("command.fleet.vehicle.do.mission.upload.with.progress")
+    static let fleetVehicleDoMissionDownloadWithProgress =
+        FleetCommandName.literal("command.fleet.vehicle.do.mission.download.with.progress")
+    static let fleetVehicleDoMissionRtlAfterSet =
+        FleetCommandName.literal("command.fleet.vehicle.do.mission.rtl.after.set")
+    static let fleetVehicleDoMissionUploadStart =
+        FleetCommandName.literal("command.fleet.vehicle.do.mission.upload.start")
+
+    static let fleetVehicleGetMissionFinished =
+        FleetCommandName.literal("command.fleet.vehicle.get.mission.finished")
+    static let fleetVehicleGetMissionRtlAfter =
+        FleetCommandName.literal("command.fleet.vehicle.get.mission.rtl.after")
+
+    static let fleetVehicleCancelMissionUpload =
+        FleetCommandName.literal("command.fleet.vehicle.cancel.mission.upload")
+    static let fleetVehicleCancelMissionDownload =
+        FleetCommandName.literal("command.fleet.vehicle.cancel.mission.download")
 
     // MARK: do — calibration atomics
 
@@ -205,6 +236,7 @@ enum FleetVehicleCoreCommandRegistrations {
     @MainActor
     static func registerAll() {
         registerNavCommands()
+        registerMissionCatalogueCommands()
         registerCalibrationCommands()
         registerLifecycleCommands()
         registerTelemetryGetCommands()
@@ -271,6 +303,21 @@ enum FleetVehicleCoreCommandRegistrations {
             ),
             retryHints: .conservative,
             riskTier: .safeInLiveMission
+        ))
+
+        // do.park — class-aware land/surface, disarm, hold (single orchestrated vehicle command).
+        FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
+            name: .fleetVehicleDoPark,
+            humanLabel: "Park",
+            humanDescription:
+                "Bring the vehicle to a safe parked state: UAV and unknown-class targets land if airborne, then disarm and enter hold/loiter; " +
+                "UGV/USV hold to stop motion, disarm, then hold again; UUV surfaces if below the surface threshold (ArduSub `mode surface`), then disarm and hold. " +
+                "Implemented as one `FleetVehicleCommand.park` pipeline in FleetLink — not a multi-step catalogue composite.",
+            declaredResponseKinds: FleetCommandDeclaredResponseKinds.standardDo.adding(
+                .modeNotSupported, .autopilotBusy
+            ),
+            retryHints: .conservative,
+            riskTier: .confirmInLiveMission
         ))
 
         // do.land — command the autopilot to land now.
@@ -427,12 +474,9 @@ enum FleetVehicleCoreCommandRegistrations {
         // and the stack converters produce `[.uploadMission(items:)]`.
         //
         // Scope: this command is the **upload step only** (mirrors MAVSDK
-        // `Mission.uploadMission` + `setCurrentMissionItem(0)`). Arming and starting the
-        // mission are separate atoms (`do.arm`, plus a forthcoming `do.mission.start`)
-        // and belong in a Stage B recipe — or, in the meantime, the planned composite
-        // command `do.mission.upload.start` (`[do.mission.upload, do.mission.start]`).
-        // MRE's existing `runUploadArmStartMissionPipeline` keeps doing upload+arm+start
-        // directly until that recipe / composite lands.
+        // `Mission.uploadMission` + `setCurrentMissionItem(0)`). The composite
+        // `do.mission.upload.start` chains upload, `do.arm`, then `do.mission.start`
+        // (see registration below).
         FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
             name: .fleetVehicleDoMissionUpload,
             humanLabel: "Upload mission",
@@ -450,6 +494,167 @@ enum FleetVehicleCoreCommandRegistrations {
             ),
             retryHints: .conservative,
             riskTier: .confirmInLiveMission
+        ))
+    }
+
+    // MARK: do / get / cancel — mission plugin (MAVSDK Mission)
+
+    @MainActor
+    private static func registerMissionCatalogueCommands() {
+
+        let missionDoKinds = FleetCommandDeclaredResponseKinds.standardDo.adding(.autopilotBusy)
+        let missionGetKinds = FleetCommandDeclaredResponseKinds.standardGet
+
+        FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
+            name: .fleetVehicleDoMissionClear,
+            humanLabel: "Clear mission",
+            humanDescription: "Clear the mission plan stored on the autopilot (`Mission.clearMission`).",
+            declaredResponseKinds: missionDoKinds,
+            retryHints: .conservative,
+            riskTier: .confirmInLiveMission
+        ))
+
+        FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
+            name: .fleetVehicleDoMissionStart,
+            humanLabel: "Start mission",
+            humanDescription: "Start mission execution (`Mission.startMission`). Vehicle must already be in a mission-capable mode where the stack supports it.",
+            declaredResponseKinds: missionDoKinds,
+            retryHints: .conservative,
+            riskTier: .confirmInLiveMission
+        ))
+
+        FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
+            name: .fleetVehicleDoMissionPause,
+            humanLabel: "Pause mission",
+            humanDescription: "Pause mission execution (`Mission.pauseMission`).",
+            declaredResponseKinds: missionDoKinds,
+            retryHints: .conservative,
+            riskTier: .confirmInLiveMission
+        ))
+
+        FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
+            name: .fleetVehicleDoMissionJumpTo,
+            humanLabel: "Jump to mission item",
+            humanDescription: "Set the current mission item index (`Mission.setCurrentMissionItem`). Supply integer `index` (preferred) or `missionItemIndex`.",
+            parameters: [
+                FleetCommandParameterDeclaration(
+                    name: "index",
+                    type: .integer,
+                    required: true,
+                    humanLabel: "Mission item index"
+                )
+            ],
+            declaredResponseKinds: missionDoKinds,
+            retryHints: .conservative,
+            riskTier: .confirmInLiveMission
+        ))
+
+        FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
+            name: .fleetVehicleDoMissionDownload,
+            humanLabel: "Download mission",
+            humanDescription: "Download the mission plan from the autopilot (`Mission.downloadMission`). On success the response payload is a JSON array string in the same shape as `do.mission.upload`'s `missionItemsJSON` parameter.",
+            declaredResponseKinds: FleetCommandDeclaredResponseKinds.standardDoMissionDownload,
+            retryHints: .conservative,
+            riskTier: .safeInLiveMission
+        ))
+
+        FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
+            name: .fleetVehicleDoMissionUploadWithProgress,
+            humanLabel: "Upload mission (with progress)",
+            humanDescription: "Catalogue placeholder for MAVSDK `uploadMissionWithProgress` (Observable). Not wired in Guardian v1 — invoke returns `.notImplemented` until streaming Layer 0 support lands.",
+            parameters: [
+                FleetCommandParameterDeclaration(
+                    name: "missionItemsJSON",
+                    type: .string,
+                    required: true,
+                    humanLabel: "Mission items (JSON array)"
+                )
+            ],
+            declaredResponseKinds: missionDoKinds,
+            retryHints: .conservative,
+            riskTier: .confirmInLiveMission
+        ))
+
+        FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
+            name: .fleetVehicleDoMissionDownloadWithProgress,
+            humanLabel: "Download mission (with progress)",
+            humanDescription: "Catalogue placeholder for MAVSDK `downloadMissionWithProgress` (Observable). Not wired in Guardian v1 — invoke returns `.notImplemented` until streaming Layer 0 support lands.",
+            declaredResponseKinds: missionDoKinds,
+            retryHints: .conservative,
+            riskTier: .safeInLiveMission
+        ))
+
+        FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
+            name: .fleetVehicleGetMissionFinished,
+            humanLabel: "Mission finished?",
+            humanDescription: "Read whether the mission has finished (`Mission.isMissionFinished`). Success payload is a boolean.",
+            declaredResponseKinds: missionGetKinds,
+            retryHints: .none,
+            riskTier: .safeInLiveMission
+        ))
+
+        FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
+            name: .fleetVehicleGetMissionRtlAfter,
+            humanLabel: "RTL after mission?",
+            humanDescription: "Read whether the vehicle will RTL after the mission completes (`Mission.getReturnToLaunchAfterMission`). Success payload is a boolean.",
+            declaredResponseKinds: missionGetKinds,
+            retryHints: .none,
+            riskTier: .safeInLiveMission
+        ))
+
+        FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
+            name: .fleetVehicleDoMissionRtlAfterSet,
+            humanLabel: "Set RTL after mission",
+            humanDescription: "Enable or disable return-to-launch after the mission completes (`Mission.setReturnToLaunchAfterMission`).",
+            parameters: [
+                FleetCommandParameterDeclaration(
+                    name: "enable",
+                    type: .bool,
+                    required: true,
+                    humanLabel: "Enable RTL after mission"
+                )
+            ],
+            declaredResponseKinds: missionDoKinds,
+            retryHints: .conservative,
+            riskTier: .confirmInLiveMission
+        ))
+
+        let cancelKinds = FleetCommandDeclaredResponseKinds.standardCancel.adding(.autopilotBusy)
+
+        FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
+            name: .fleetVehicleCancelMissionUpload,
+            humanLabel: "Cancel mission upload",
+            humanDescription: "Cancel an in-flight mission upload (`Mission.cancelMissionUpload`).",
+            declaredResponseKinds: cancelKinds,
+            retryHints: .conservative,
+            riskTier: .confirmInLiveMission
+        ))
+
+        FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
+            name: .fleetVehicleCancelMissionDownload,
+            humanLabel: "Cancel mission download",
+            humanDescription: "Cancel an in-flight mission download (`Mission.cancelMissionDownload`).",
+            declaredResponseKinds: cancelKinds,
+            retryHints: .conservative,
+            riskTier: .safeInLiveMission
+        ))
+
+        FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
+            name: .fleetVehicleDoMissionUploadStart,
+            humanLabel: "Upload, arm, then start mission",
+            humanDescription: "Composite: uploads `missionItemsJSON`, arms (`do.arm`), then starts mission execution (`do.mission.start`). Same parameters as upload — extra keys are ignored by the arm step.",
+            parameters: [
+                FleetCommandParameterDeclaration(
+                    name: "missionItemsJSON",
+                    type: .string,
+                    required: true,
+                    humanLabel: "Mission items (JSON array)"
+                )
+            ],
+            declaredResponseKinds: missionDoKinds,
+            retryHints: .conservative,
+            riskTier: .confirmInLiveMission,
+            containsCommands: [.fleetVehicleDoMissionUpload, .fleetVehicleDoArm, .fleetVehicleDoMissionStart]
         ))
     }
 

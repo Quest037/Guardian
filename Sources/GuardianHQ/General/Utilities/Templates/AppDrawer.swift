@@ -25,7 +25,7 @@ struct PresentedAppDrawer: Identifiable {
 ///
 /// Ephemeral app toasts use ``View/withToasts()`` **after** ``withGuardianConfirmOverlayHost()`` on the window root so
 /// they paint **above** the drawer and blocking confirms; ``RootView`` publishes ``GuardianToastShellAnchorPreferenceKey``
-/// so chips stay aligned to the main **content** column (off the nav rail) — see ``GuardianLayoutPatterns``.
+/// for top-bar alignment (top-trailing over the Simulate + appearance cluster) — see ``GuardianLayoutPatterns``.
 @MainActor
 final class AppDrawer: ObservableObject {
     @Published private(set) var presented: PresentedAppDrawer?

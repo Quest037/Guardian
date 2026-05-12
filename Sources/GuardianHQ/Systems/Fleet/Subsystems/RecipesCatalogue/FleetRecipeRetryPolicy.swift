@@ -74,7 +74,7 @@ struct FleetRecipeRetryPolicy: Equatable, Hashable, Sendable {
     /// Used by the runner when a step omits its own policy and the recipe declares
     /// no recipe-level default.
     ///
-    /// Rationale (see `CommandsRecipesToDo.md` open-questions resolution): retries
+    /// Rationale (deferred UX / open questions — see `NEXTVERSION.md` Stage E capture): retries
     /// are a transient-flake tool, not a flaky-transport tool. Authority and
     /// validation failures are deterministic — retrying them just wastes the
     /// recipe budget. Fixed delay (rather than exponential) keeps unit tests

@@ -1045,7 +1045,7 @@ struct LiveDriveView: View {
             category: .manualTakeover,
             onCommandOutcome: { outcome in
                 switch outcome {
-                case .succeeded:
+                case .succeeded, .succeededWithPayload:
                     lastKeyboardCommandText = "Keyboard: \(action.title)"
                     lastKeyboardCommandFailed = false
                 case .failed(let detail):

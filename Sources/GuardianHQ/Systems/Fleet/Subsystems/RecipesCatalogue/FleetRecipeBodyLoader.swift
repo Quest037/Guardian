@@ -62,6 +62,12 @@ enum FleetRecipeBodyLoadError: Error, Equatable, CustomStringConvertible {
 /// recommended behaviour — body-less descriptors are still legal but the runner
 /// refuses them at entry, so loud failure at app boot is strictly better than
 /// silent body-less registration).
+///
+/// **Bundle resolution:** ``load(recipeName:inSubdirectory:bundle:)`` searches the
+/// caller’s bundle **and** ``Bundle.main`` (deduped), tries `Bundle.url` with and
+/// without `subdirectory`, then a few on-disk paths under `bundleURL` /
+/// `resourceURL` / `Resources/` so bodies still resolve when SwiftPM / host app
+/// packaging differs (MC-R mission recipe bodies must not depend on a single layout).
 @MainActor
 enum FleetRecipeBodyLoader {
 
@@ -69,6 +75,50 @@ enum FleetRecipeBodyLoader {
         subsystem: "guardian.fleet.recipesCatalogue",
         category: "bodyLoader"
     )
+
+    private static func uniqueSearchBundles(primary: Bundle) -> [Bundle] {
+        var out: [Bundle] = []
+        var seen = Set<ObjectIdentifier>()
+        for candidate in [primary, Bundle.main] {
+            let id = ObjectIdentifier(candidate)
+            guard !seen.contains(id) else { continue }
+            seen.insert(id)
+            out.append(candidate)
+        }
+        return out
+    }
+
+    /// Returns a readable JSON file URL for `recipeName` if present in any known layout.
+    private static func resolveRecipeBodyFileURL(
+        recipeName: FleetRecipeName,
+        subdirectory: String,
+        primaryBundle: Bundle
+    ) -> URL? {
+        let base = recipeName.rawValue
+        let fileName = "\(base).json"
+        let fm = FileManager.default
+
+        for bundle in uniqueSearchBundles(primary: primaryBundle) {
+            if let u = bundle.url(forResource: base, withExtension: "json", subdirectory: subdirectory) {
+                return u
+            }
+            if let u = bundle.url(forResource: base, withExtension: "json") {
+                return u
+            }
+
+            var pathCandidates: [URL] = [
+                bundle.bundleURL.appendingPathComponent(subdirectory).appendingPathComponent(fileName),
+                bundle.bundleURL.appendingPathComponent("Resources").appendingPathComponent(subdirectory).appendingPathComponent(fileName),
+            ]
+            if let res = bundle.resourceURL {
+                pathCandidates.append(res.appendingPathComponent(subdirectory).appendingPathComponent(fileName))
+            }
+            for u in pathCandidates where fm.fileExists(atPath: u.path) {
+                return u
+            }
+        }
+        return nil
+    }
 
     /// Load and decode a recipe body from a bundle resource.
     ///
@@ -92,15 +142,15 @@ enum FleetRecipeBodyLoader {
         bundle: Bundle
     ) -> Result<FleetRecipeBody, FleetRecipeBodyLoadError> {
 
-        guard let url = bundle.url(
-            forResource: recipeName.rawValue,
-            withExtension: "json",
-            subdirectory: subdirectory
+        guard let url = resolveRecipeBodyFileURL(
+            recipeName: recipeName,
+            subdirectory: subdirectory,
+            primaryBundle: bundle
         ) else {
             os_log(
                 .error,
                 log: log,
-                "Recipe body not found: %{public}@.json in %{public}@",
+                "Recipe body not found: %{public}@.json in %{public}@ (searched module + main bundles)",
                 recipeName.rawValue,
                 subdirectory
             )

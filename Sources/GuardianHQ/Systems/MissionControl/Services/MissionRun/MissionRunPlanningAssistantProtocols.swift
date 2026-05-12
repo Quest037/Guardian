@@ -28,5 +28,7 @@ protocol MissionRunPlanningMutationAssistant: AnyObject {
 
 @MainActor
 protocol MissionRunAbortPlanningAssistant: AnyObject {
+    /// Adjust a freshly built abort plan. Callbacks are invoked in **lexicographic registration key order**;
+    /// register with a key that sorts **last** (e.g. `plugin.paladin.abortPlan`) to win a last-write refinement pass.
     func missionRun(_ run: MissionRunEnvironment, adjustingAbortPlan plan: MissionRunAbortPlan) -> MissionRunAbortPlan
 }

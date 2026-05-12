@@ -39,19 +39,23 @@ struct MissionRunControlsSidebarView: View {
 
     private var policySection: some View {
         VStack(alignment: .leading, spacing: 0) {
-            policyRow(
-                title: "Abort Policy",
-                binding: missionAbortPolicyBinding,
-                cases: MissionRunAbortPolicy.setupPickerCases
-            ) { $0.setupMenuLabel }
+            VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+                Text("Abort preference chain")
+                    .font(GuardianTypography.font(.disclosureRowTitle))
+                    .foregroundStyle(theme.textPrimary)
+                MissionRunPreferentialAbortPolicyEditor(chain: missionAbortPreferenceChainBinding, showFootnote: true)
+            }
+            .padding(.vertical, GuardianSpacing.xs)
 
             Divider().overlay(theme.borderSubtle)
 
-            policyRow(
-                title: "Complete Policy",
-                binding: missionCompletePolicyBinding,
-                cases: MissionRunCompletePolicy.setupPickerCases
-            ) { $0.setupMenuLabel }
+            VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+                Text("Complete preference chain")
+                    .font(GuardianTypography.font(.disclosureRowTitle))
+                    .foregroundStyle(theme.textPrimary)
+                MissionRunPreferentialCompletePolicyEditor(chain: missionCompletePreferenceChainBinding, showFootnote: true)
+            }
+            .padding(.vertical, GuardianSpacing.xs)
         }
         .padding(GuardianSpacing.cardBodyInset)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -125,29 +129,29 @@ struct MissionRunControlsSidebarView: View {
 
     // MARK: - Bindings (route every set through MRE policy APIs as the local operator)
 
-    private var missionAbortPolicyBinding: Binding<MissionRunAbortPolicy> {
+    private var missionAbortPreferenceChainBinding: Binding<[MissionRunAbortTactic]> {
         Binding(
             get: {
-                run.template?.routeMacro.rules.missionAbortPolicy
-                    ?? missionStore.missions.first(where: { $0.id == run.missionId })?.routeMacro.rules.missionAbortPolicy
-                    ?? .returnToLaunch
+                let mission = run.template ?? missionStore.missions.first(where: { $0.id == run.missionId })
+                let chain = mission?.routeMacro.rules.missionAbortPreferenceChain ?? []
+                return MissionRunAbortTactic.normalizedPreferenceChain(chain)
             },
             set: { newValue in
-                _ = run.updateMissionAbortPolicy(newValue, credential: credential)
+                _ = run.updateMissionAbortPreferenceChain(newValue, credential: credential)
                 onChange()
             }
         )
     }
 
-    private var missionCompletePolicyBinding: Binding<MissionRunCompletePolicy> {
+    private var missionCompletePreferenceChainBinding: Binding<[MissionRunCompleteTactic]> {
         Binding(
             get: {
-                run.template?.routeMacro.rules.missionCompletePolicy
-                    ?? missionStore.missions.first(where: { $0.id == run.missionId })?.routeMacro.rules.missionCompletePolicy
-                    ?? .returnToLaunch
+                let mission = run.template ?? missionStore.missions.first(where: { $0.id == run.missionId })
+                let chain = mission?.routeMacro.rules.missionCompletePreferenceChain ?? []
+                return MissionRunCompleteTactic.normalizedPreferenceChain(chain)
             },
             set: { newValue in
-                _ = run.updateMissionCompletePolicy(newValue, credential: credential)
+                _ = run.updateMissionCompletePreferenceChain(newValue, credential: credential)
                 onChange()
             }
         )

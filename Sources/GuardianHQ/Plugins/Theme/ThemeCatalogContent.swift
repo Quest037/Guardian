@@ -375,7 +375,7 @@ struct ThemeCatalogContent: View {
             VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
                 Text(
                     "App-wide drawers use AppDrawer and View.withAppDrawer() on the window root above the entire RootView "
-                        + "(sidebar, top bar, and content-column toasts). This is not the main navigation sidebar in RootView. "
+                        + "(sidebar, top bar, and feature content). Ephemeral toasts use View.withToasts() after the confirm host and sit top-trailing over the top bar (Simulate + appearance). This is not the main navigation sidebar in RootView. "
                         + "Do not hand-roll ZStack scrims and transition(.move(edge:)) for the same trailing-panel pattern. "
                         + "When present(title:) supplies a title, the host uses AppDrawerChrome (below); use title: nil only when your content already includes a full custom header."
                 )
@@ -455,8 +455,8 @@ struct ThemeCatalogContent: View {
             GuardianPanelSectionTitle(title: "Window chrome stack (Theme 12.1)")
             VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
                 Text(
-                    "Modifier order on the window root matches GuardianHQApp: RootView, then withAppDrawer(), then withGuardianConfirmOverlayHost(). "
-                        + "Toasts attach inside RootView on the main content column only."
+                    "Modifier order on the window root matches GuardianHQApp: RootView, then withAppDrawer(), then withGuardianConfirmOverlayHost(), then withToasts(). "
+                        + "ToastHost overlays the full window top-trailing (aligned with the top-bar controls), above the drawer and blocking confirms."
                 )
                 .font(GuardianTypography.font(.denseCaption12Regular))
                 .foregroundStyle(theme.textSecondary)
@@ -468,9 +468,9 @@ struct ThemeCatalogContent: View {
 
                 VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
                     chromeStackRow(depth: "1", label: "RootView — nav rail, top bar, feature content")
-                    chromeStackRow(depth: "2", label: "Toasts — content column only (ToastHost)")
-                    chromeStackRow(depth: "3", label: "AppDrawer — full-window scrim + trailing panel")
-                    chromeStackRow(depth: "4", label: "Blocking confirm — GuardianConfirmOverlayHost over everything")
+                    chromeStackRow(depth: "2", label: "AppDrawer — full-window scrim + trailing panel")
+                    chromeStackRow(depth: "3", label: "Blocking confirm — GuardianConfirmOverlayHost")
+                    chromeStackRow(depth: "4", label: "Toasts — ToastHost (top-trailing over top bar)")
                 }
                 .padding(GuardianSpacing.sm)
                 .frame(maxWidth: .infinity, alignment: .leading)

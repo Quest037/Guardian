@@ -187,14 +187,14 @@ final class ProcessPromptPolicyTests: XCTestCase {
 
     // MARK: - Default policies per origin
 
-    func test_default_recipeEscalation_prefersWizardThenMCRThenLiveDrive() {
+    func test_default_recipeEscalation_prefersMCRThenWizardThenLiveDrive() {
         let escalation = sampleEscalationEvent()
         let origin = OperatorPromptOrigin.recipeEscalation(event: escalation)
         let policy = ProcessPromptPolicy.default(for: origin)
 
         XCTAssertEqual(policy.entries, [
-            .vehicleInspectorWizard,
             .mcrPanel,
+            .vehicleInspectorWizard,
             .liveDrivePanel,
             .persistentToast,
             .userNotification(style: .banner),
@@ -249,7 +249,7 @@ final class ProcessPromptPolicyTests: XCTestCase {
 
     // MARK: - Integration with default(for:) + resolveTargets
 
-    func test_default_recipeEscalation_resolvesWizardFirstWhenVehicleKnown() {
+    func test_default_recipeEscalation_resolvesWizardFirstWhenOnlyVehicleKnown() {
         let escalation = sampleEscalationEvent(vehicleID: "ALPHA-1")
         let origin = OperatorPromptOrigin.recipeEscalation(event: escalation)
         let policy = ProcessPromptPolicy.default(for: origin)
@@ -268,6 +268,27 @@ final class ProcessPromptPolicyTests: XCTestCase {
         XCTAssertEqual(resolved.last, .inAppInbox)
         // No mission run id → MCR panel skipped.
         XCTAssertFalse(resolved.contains { if case .mcrPromptPanel = $0 { return true } else { return false } })
+    }
+
+    func test_default_recipeEscalation_resolvesMCRFirstWhenMissionRunKnown() {
+        let runID = UUID()
+        let escalation = sampleEscalationEvent(vehicleID: "ALPHA-1")
+        let origin = OperatorPromptOrigin.recipeEscalation(event: escalation)
+        let policy = ProcessPromptPolicy.default(for: origin)
+
+        let target = OperatorPromptTarget(
+            missionRunID: runID,
+            affectedVehicleID: "ALPHA-1",
+            recipeRunID: escalation.runID
+        )
+        let resolved = policy.resolveTargets(for: event(origin: origin, target: target))
+
+        XCTAssertEqual(resolved.first, .mcrPromptPanel(missionRunID: runID))
+        XCTAssertTrue(resolved.contains(.vehicleInspectorWizardPanel(
+            vehicleID: "ALPHA-1",
+            recipeRunID: escalation.runID
+        )))
+        XCTAssertEqual(resolved.last, .inAppInbox)
     }
 
     func test_default_mreEngagementAsk_resolvesMCRFirstWhenRunKnown() {

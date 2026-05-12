@@ -194,6 +194,11 @@ enum StructuredLogTemplateCatalog: Sendable {
             mcr: "Point closed · {{pointId}} · {{closed}} · {{source}}"
         )
         put(
+            MissionRunLogTemplateKey.floatingReserveSwapEngaged,
+            "Floating reserve swap — roster @{{slotID}} ({{slot}}) took pool berth {{poolSlotID}} (source {{source}}).",
+            mcr: "Reserve in · @{{slotID}} · pool {{poolSlotID}} · {{source}}"
+        )
+        put(
             MissionRunLogTemplateKey.executionMissionMissing,
             "Mission template missing from store; cannot upload MAVLink mission.",
             mcr: "No mission template in store · cannot upload MAVLink"
@@ -260,6 +265,11 @@ enum StructuredLogTemplateCatalog: Sendable {
             MissionRunLogTemplateKey.missionNotStartedNoPrimaries,
             "MAVLink mission not started (task has no assigned primaries).",
             mcr: "MAVLink not started · no primaries"
+        )
+        put(
+            MissionRunLogTemplateKey.missionPlanItemsEncodeFailed,
+            "Could not encode MAVLink mission items for @{{slotID}} ({{reason}}).",
+            mcr: "Plan encode failed · @{{slotID}} · {{reason}}"
         )
         put(
             MissionRunLogTemplateKey.missionExecuting,

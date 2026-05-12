@@ -62,6 +62,10 @@ final class MissionControlStore: ObservableObject {
             missionName: mission.name,
             assignments: assignments
         )
+        /// The convenience initializer seeds a **placeholder** ``MissionRunEnvironment/template`` (empty tasks).
+        /// Hydrate from the source ``Mission`` so task-scoped policy APIs (abort / complete chain overrides) can
+        /// resolve ``taskID`` in ``MissionRunEnvironment/updateTaskAbortPreferenceChainOverride`` and peers.
+        run.updateTemplate(mission)
         runs.insert(run, at: 0)
         run.refreshDerivedTaskStates()
         notifyRunCreated(run)
@@ -371,7 +375,7 @@ final class MissionControlStore: ObservableObject {
         )
     }
 
-    /// Attempts to **arm** every roster slot that has a fleet token + resolvable vehicle ID. Rows are reported via `rowUpdated` as each step completes.
+    /// Attempts to **arm** every roster assignment and every **filled** floating reserve pool slot that has a fleet token + resolvable vehicle id (see ``MissionRunEnvironment/orderedStartRunPreflightProbeTargets()``). Rows are reported via `rowUpdated` as each step completes.
     /// - Returns: whether every slot passed, and vehicle IDs that **became armed** during this probe (for optional disarm on abandon).
     func runSingleVehiclePreflightProbeForStartRun(
         run: MissionRunEnvironment,
@@ -382,10 +386,11 @@ final class MissionControlStore: ObservableObject {
         var armedDuringProbe: [String] = []
         var allPassed = true
 
-        for assignment in run.assignments {
+        for target in run.orderedStartRunPreflightProbeTargets() {
+            let assignment = target.assignment
             var row = MissionRunPreflightSlotRow(
-                assignmentID: assignment.id,
-                slotName: assignment.slotName,
+                identity: target.identity,
+                slotName: target.displayTitle,
                 phase: .testing,
                 detail: "Requesting arm…"
             )
@@ -396,7 +401,7 @@ final class MissionControlStore: ObservableObject {
             else {
                 row.phase = .failed
                 row.detail =
-                    "No fleet vehicle on this roster slot — pick a vehicle from the fleet list so Paladin can verify arming."
+                    "No fleet vehicle on this slot — pick a vehicle from the fleet list so Paladin can verify arming."
                 rowUpdated(row)
                 allPassed = false
                 continue

@@ -11,8 +11,8 @@ extension MissionRunEnvironment {
     // MARK: - Mission-level
 
     @discardableResult
-    func updateMissionAbortPolicy(
-        _ policy: MissionRunAbortPolicy,
+    func updateMissionAbortPreferenceChain(
+        _ chain: [MissionRunAbortTactic],
         credential: MissionRunPolicyEditCredential
     ) -> MissionRunPolicyEditDecision {
         let scope = MissionRunPolicyEditScope.missionAbortPolicy
@@ -25,15 +25,20 @@ extension MissionRunEnvironment {
             logPolicyEditDenied(scope: scope, credential: credential, reason: .missionUnavailable)
             return .denied(.missionUnavailable)
         }
-        mission.routeMacro.rules.missionAbortPolicy = policy
+        let normalized = MissionRunAbortTactic.normalizedPreferenceChain(chain)
+        mission.routeMacro.rules.missionAbortPreferenceChain = normalized
         applyMissionTemplateMutation(mission)
-        logPolicyEditApplied(scope: scope, credential: credential, value: policy.setupMenuLabel)
+        logPolicyEditApplied(
+            scope: scope,
+            credential: credential,
+            value: MissionRunAbortTactic.summarizedForLogging(normalized)
+        )
         return .allowed
     }
 
     @discardableResult
-    func updateMissionCompletePolicy(
-        _ policy: MissionRunCompletePolicy,
+    func updateMissionCompletePreferenceChain(
+        _ chain: [MissionRunCompleteTactic],
         credential: MissionRunPolicyEditCredential
     ) -> MissionRunPolicyEditDecision {
         let scope = MissionRunPolicyEditScope.missionCompletePolicy
@@ -46,9 +51,14 @@ extension MissionRunEnvironment {
             logPolicyEditDenied(scope: scope, credential: credential, reason: .missionUnavailable)
             return .denied(.missionUnavailable)
         }
-        mission.routeMacro.rules.missionCompletePolicy = policy
+        let normalized = MissionRunCompleteTactic.normalizedPreferenceChain(chain)
+        mission.routeMacro.rules.missionCompletePreferenceChain = normalized
         applyMissionTemplateMutation(mission)
-        logPolicyEditApplied(scope: scope, credential: credential, value: policy.setupMenuLabel)
+        logPolicyEditApplied(
+            scope: scope,
+            credential: credential,
+            value: MissionRunCompleteTactic.summarizedForLogging(normalized)
+        )
         return .allowed
     }
 
@@ -104,9 +114,9 @@ extension MissionRunEnvironment {
     // MARK: - Task-level
 
     @discardableResult
-    func updateTaskAbortPolicyOverride(
+    func updateTaskAbortPreferenceChainOverride(
         taskID: UUID,
-        _ policy: MissionRunAbortPolicy?,
+        _ chain: [MissionRunAbortTactic]?,
         credential: MissionRunPolicyEditCredential
     ) -> MissionRunPolicyEditDecision {
         let scope = MissionRunPolicyEditScope.taskAbortPolicyOverride(taskID: taskID)
@@ -123,20 +133,28 @@ extension MissionRunEnvironment {
             logPolicyEditDenied(scope: scope, credential: credential, reason: .taskNotFound)
             return .denied(.taskNotFound)
         }
-        mission.routeMacro.tasks[idx].abortPolicyOverride = policy
+        let logValue: String
+        if let chain, !chain.isEmpty {
+            let normalized = MissionRunAbortTactic.normalizedPreferenceChain(chain)
+            mission.routeMacro.tasks[idx].abortPreferenceChainOverride = normalized
+            logValue = MissionRunAbortTactic.summarizedForLogging(normalized)
+        } else {
+            mission.routeMacro.tasks[idx].abortPreferenceChainOverride = nil
+            logValue = "Inherit"
+        }
         applyMissionTemplateMutation(mission)
         logPolicyEditApplied(
             scope: scope,
             credential: credential,
-            value: policy?.setupMenuLabel ?? "Inherit"
+            value: logValue
         )
         return .allowed
     }
 
     @discardableResult
-    func updateTaskCompletePolicyOverride(
+    func updateTaskCompletePreferenceChainOverride(
         taskID: UUID,
-        _ policy: MissionRunCompletePolicy?,
+        _ chain: [MissionRunCompleteTactic]?,
         credential: MissionRunPolicyEditCredential
     ) -> MissionRunPolicyEditDecision {
         let scope = MissionRunPolicyEditScope.taskCompletePolicyOverride(taskID: taskID)
@@ -153,12 +171,20 @@ extension MissionRunEnvironment {
             logPolicyEditDenied(scope: scope, credential: credential, reason: .taskNotFound)
             return .denied(.taskNotFound)
         }
-        mission.routeMacro.tasks[idx].completePolicyOverride = policy
+        let logValue: String
+        if let chain, !chain.isEmpty {
+            let normalized = MissionRunCompleteTactic.normalizedPreferenceChain(chain)
+            mission.routeMacro.tasks[idx].completePreferenceChainOverride = normalized
+            logValue = MissionRunCompleteTactic.summarizedForLogging(normalized)
+        } else {
+            mission.routeMacro.tasks[idx].completePreferenceChainOverride = nil
+            logValue = "Inherit"
+        }
         applyMissionTemplateMutation(mission)
         logPolicyEditApplied(
             scope: scope,
             credential: credential,
-            value: policy?.setupMenuLabel ?? "Inherit"
+            value: logValue
         )
         return .allowed
     }
@@ -166,9 +192,9 @@ extension MissionRunEnvironment {
     // MARK: - Assignment-level
 
     @discardableResult
-    func updateAssignmentAbortPolicy(
+    func updateAssignmentAbortPreferenceChain(
         assignmentID: UUID,
-        _ policy: MissionRunAbortPolicy?,
+        _ chain: [MissionRunAbortTactic]?,
         credential: MissionRunPolicyEditCredential
     ) -> MissionRunPolicyEditDecision {
         let scope = MissionRunPolicyEditScope.assignmentAbortPolicy(assignmentID: assignmentID)
@@ -181,19 +207,27 @@ extension MissionRunEnvironment {
             logPolicyEditDenied(scope: scope, credential: credential, reason: .assignmentNotFound)
             return .denied(.assignmentNotFound)
         }
-        assignments[idx].policies.abort = policy
+        let logValue: String
+        if let chain, !chain.isEmpty {
+            let normalized = MissionRunAbortTactic.normalizedPreferenceChain(chain)
+            assignments[idx].policies.abortPreferenceChain = normalized
+            logValue = MissionRunAbortTactic.summarizedForLogging(normalized)
+        } else {
+            assignments[idx].policies.abortPreferenceChain = nil
+            logValue = "Inherit"
+        }
         logPolicyEditApplied(
             scope: scope,
             credential: credential,
-            value: policy?.setupMenuLabel ?? "Inherit"
+            value: logValue
         )
         return .allowed
     }
 
     @discardableResult
-    func updateAssignmentCompletePolicy(
+    func updateAssignmentCompletePreferenceChain(
         assignmentID: UUID,
-        _ policy: MissionRunCompletePolicy?,
+        _ chain: [MissionRunCompleteTactic]?,
         credential: MissionRunPolicyEditCredential
     ) -> MissionRunPolicyEditDecision {
         let scope = MissionRunPolicyEditScope.assignmentCompletePolicy(assignmentID: assignmentID)
@@ -206,11 +240,19 @@ extension MissionRunEnvironment {
             logPolicyEditDenied(scope: scope, credential: credential, reason: .assignmentNotFound)
             return .denied(.assignmentNotFound)
         }
-        assignments[idx].policies.complete = policy
+        let logValue: String
+        if let chain, !chain.isEmpty {
+            let normalized = MissionRunCompleteTactic.normalizedPreferenceChain(chain)
+            assignments[idx].policies.completePreferenceChain = normalized
+            logValue = MissionRunCompleteTactic.summarizedForLogging(normalized)
+        } else {
+            assignments[idx].policies.completePreferenceChain = nil
+            logValue = "Inherit"
+        }
         logPolicyEditApplied(
             scope: scope,
             credential: credential,
-            value: policy?.setupMenuLabel ?? "Inherit"
+            value: logValue
         )
         return .allowed
     }
@@ -323,8 +365,8 @@ extension MissionRunEnvironment {
     /// addressee is now structural (see ``target(for:)``) so the body no longer embeds a mention.
     private func scopeDisplayLabel(_ scope: MissionRunPolicyEditScope) -> String {
         switch scope {
-        case .missionAbortPolicy: return "Mission abort policy"
-        case .missionCompletePolicy: return "Mission complete policy"
+        case .missionAbortPolicy: return "Mission abort preference chain"
+        case .missionCompletePolicy: return "Mission complete preference chain"
         case .missionEngagementRules: return "Rules of engagement"
         case .taskAbortPolicyOverride: return "Task abort policy override"
         case .taskCompletePolicyOverride: return "Task complete policy override"

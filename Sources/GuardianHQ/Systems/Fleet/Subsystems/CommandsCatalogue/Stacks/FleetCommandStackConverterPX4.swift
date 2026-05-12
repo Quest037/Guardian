@@ -3,7 +3,8 @@ import Foundation
 /// PX4 adapter for the universal command catalogue.
 ///
 /// Mirrors ``FleetCommandStackConverterArduPilot`` for nav atomics (PX4 and AP share
-/// the same `FleetVehicleCommand` enum and MAVSDK Action plumbing today). PX4-specific
+/// the same `FleetVehicleCommand` enum and MAVSDK Action plumbing today), including
+/// ``FleetCommandName/fleetVehicleDoPark`` → ``FleetVehicleCommand/park``. PX4-specific
 /// overrides live in ``normaliseOutcome(_:commandName:elapsed:)`` where the autopilot
 /// error phrasing diverges (PX4 surfaces `MAV_RESULT_DENIED`, `MAV_RESULT_FAILED`,
 /// `MAV_RESULT_TEMPORARILY_REJECTED` from MAVSDK; ArduPilot tends to add `PreArm:`
@@ -22,9 +23,9 @@ import Foundation
 /// - `do.move.point` — wired for `pointKind = explicit | currentLatLon` via
 ///   `FleetVehicleCommand.gotoCoordinate(...)`. `home` / `rally` surface
 ///   `.notImplemented` (no autopilot-side readback exposed yet).
-/// - `do.mission.upload` — wired via `FleetVehicleCommand.uploadMission(items:)` after
-///   decoding the `missionItemsJSON` parameter. Sibling `do.mission.*` verbs (start,
-///   pause, clear, jumpTo, download, …) are tracked in `TODO.md` and land incrementally.
+/// - `do.mission.*` / `get.mission.*` / `cancel.mission.*` — wired via
+///   ``FleetCommandStackConverterShared/translateFleetVehicleMissionIfNeeded(commandName:parameters:)``
+///   into MAVSDK `Mission` plugin calls on ``FleetVehicleCommand``.
 ///
 /// **Calibration coverage in v1:**
 /// - `do.calibrate.gyro / .accelerometer / .compass / .level / .gimbal` — wired through
@@ -85,6 +86,8 @@ struct FleetCommandStackConverterPX4: FleetCommandStackConverter {
             return .vehicleCommands([.returnToLaunch])
         case .fleetVehicleDoLoiter:
             return .vehicleCommands([.holdPosition])
+        case .fleetVehicleDoPark:
+            return .vehicleCommands([.park])
 
         case .fleetVehicleDoMode:
             guard let raw = parameters.string(named: "mode") else {
@@ -114,9 +117,9 @@ struct FleetCommandStackConverterPX4: FleetCommandStackConverter {
             )
 
         // MARK: do — mission verbs
-
-        case .fleetVehicleDoMissionUpload:
-            return FleetCommandStackConverterShared.translateMissionUpload(parameters: parameters)
+        //
+        // Resolved in `default` via
+        // ``FleetCommandStackConverterShared/translateFleetVehicleMissionIfNeeded``.
 
         // MARK: do — calibration: autopilot-driven sensor procedures (MAVSDK Calibration plugin)
         //
@@ -308,9 +311,17 @@ struct FleetCommandStackConverterPX4: FleetCommandStackConverter {
         case .fleetVehicleCancelCalibration:
             return .vehicleCommands([.cancelCalibration])
         case .fleetVehicleCancelMission:
-            return .notImplemented(detail: "PX4 cancel.mission not yet wired (no MAVSDK pause-mission helper).")
+            return .notImplemented(
+                detail: "Generic `cancel.mission` is not wired — prefer `cancel.mission.upload` or `cancel.mission.download` for MAVSDK `Mission.cancelMissionUpload` / `cancelMissionDownload`."
+            )
 
         default:
+            if let mission = FleetCommandStackConverterShared.translateFleetVehicleMissionIfNeeded(
+                commandName: commandName,
+                parameters: parameters
+            ) {
+                return mission
+            }
             return .notImplemented(detail: "PX4 has no translation registered for \(commandName.rawValue).")
         }
     }

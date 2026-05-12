@@ -99,20 +99,6 @@ final class MissionRunEnvironmentMissionPointsTests: XCTestCase {
         XCTAssertEqual(run.events.last?.templateKey, MissionRunLogTemplateKey.missionPointRuntimeUpdated)
     }
 
-    func test_applyRuntimeMissionPointUpdate_mutatesRowAndLogs() {
-        var mission = Mission(name: "M", description: "", type: .mobile)
-        let pid = UUID()
-        mission.missionPoints = [
-            MissionPoint(id: pid, pointId: "x", label: "X", kind: .rally, coordinate: RouteCoordinate(), isClosed: false),
-        ]
-        let run = MissionRunEnvironment(mission: mission)
-        XCTAssertTrue(
-            run.applyRuntimeMissionPointUpdate(id: pid, source: "mre") { $0.label = "Y" }
-        )
-        XCTAssertEqual(run.runtimeMissionPoints.first?.label, "Y")
-        XCTAssertEqual(run.events.last?.templateKey, MissionRunLogTemplateKey.missionPointRuntimeUpdated)
-    }
-
     func test_applyRuntimeMissionPointSetClosed_logsAndUpdates() {
         var mission = Mission(name: "M", description: "", type: .mobile)
         let pid = UUID()

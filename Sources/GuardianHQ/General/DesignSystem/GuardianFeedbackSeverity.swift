@@ -8,7 +8,7 @@ import SwiftUI
 ///
 /// | Channel | Scope | Blocks interaction? | Typical persistence | Notes |
 /// | --- | --- | --- | --- | --- |
-/// | **Toast** (`ToastCenter` / `View/withToasts()`) | Window · **top-leading** over the main **content** column (hosted above the app drawer) | No | Auto-dismiss (default ≈2.2s) | Single slot; does not cover the sidebar rail. |
+/// | **Toast** (`ToastCenter` / `View/withToasts()`) | Window · **top-trailing** over the main **top bar** (Simulate + appearance; hosted above the app drawer) | No | Auto-dismiss (default ≈2.2s) | Single slot; does not cover the sidebar rail. |
 /// | **Bottom prompt** (`GuardianBottomPromptCenter` / `GuardianBottomPromptBanner`) | **Screen-local** (host owns the center, e.g. Mission Control run, Live Drive) | Optional two-button flows gate the next step | Until dismissed or confirmed | Solid bottom banner; heavier than a toast. |
 /// | **Inline notice** (`GuardianInlineNotice`) | **Screen-local** (embedded in a layout) | No | Until your state removes it | Raised surface + border; use for contextual callouts. |
 /// | **Confirm** (`guardianConfirmOverlay` + `GuardianConfirmOverlayHost`) | **Whole window** | **Yes** (dimmed scrim) | Until action or Escape | Below window-level toasts — see z-order below. |

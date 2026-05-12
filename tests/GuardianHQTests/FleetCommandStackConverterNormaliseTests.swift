@@ -33,6 +33,17 @@ final class FleetCommandStackConverterNormaliseTests: XCTestCase {
         XCTAssertNil(response.errorKind)
     }
 
+    func test_succeededWithPayload_surfacesPayload() {
+        let converter = FleetCommandStackConverterPX4()
+        let response = converter.normaliseOutcome(
+            .succeededWithPayload(.bool(true)),
+            commandName: .fleetVehicleGetMissionFinished,
+            elapsed: 0.2
+        )
+        XCTAssertTrue(response.isSuccess)
+        XCTAssertEqual(response.payload, .bool(true))
+    }
+
     // MARK: - Arm / disarm contextual mapping
 
     func test_alreadyArmed_isContextSensitive() {

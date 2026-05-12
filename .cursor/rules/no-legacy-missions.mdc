@@ -9,6 +9,7 @@ This project **does not ship or load legacy missions**. There are no old mission
 
 When working on missions, Mission Control runs, persistence, or fleet policy:
 
+- **Preferential / template policy fields** (e.g. ordered abort tactics on ``RouteRules`` / ``MissionTask`` / run assignments): ship **one** `Codable` shape and current keys only. Do **not** reintroduce superseded scalar keys (such as older single-value abort fields) or dual decode paths “so old JSON still loads.”
 - **Do not** add branches, fallbacks, migrations, dual decode paths, or comments framed as “legacy / old runs / backward compatibility” for mission data unless the **user explicitly** asks for that work.
 - **Do not** spend review or implementation budget on “what if an old mission appears”—assume **current models and enums only**.
 - Prefer **removing** dead compatibility code when you touch it, rather than extending it.

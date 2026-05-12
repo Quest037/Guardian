@@ -1,4 +1,5 @@
 import Foundation
+import Mavsdk
 
 /// Whether a wind-down ends in **recovery** (success protocol) or **abort** (``MissionRunSessionPhase/aborting``).
 private enum MissionRunOperatorWindDown {
@@ -249,7 +250,13 @@ final class MissionRunExecutionSubsystem {
 
         switch batch.dispatch {
         case .immediate:
-            dispatchCommands(batch.commands, context: context)
+            if Self.commandsContainCatalogueMissionClear(batch.commands) {
+                Task { @MainActor [weak self] in
+                    await self?.dispatchCommandsRespectingMissionClearBarrier(batch.commands, context: context)
+                }
+            } else {
+                dispatchCommands(batch.commands, context: context)
+            }
         case .at(let fireDate):
             pendingCommandBatches.append(batch)
             armWallClockBatch(batchID: batch.id, fireDate: fireDate, context: context)
@@ -258,23 +265,18 @@ final class MissionRunExecutionSubsystem {
         }
     }
 
-    /// Dispatches every `.afterMissionCycle` pending batch. Returns whether any fleet commands were sent.
-    @discardableResult
-    func dispatchAfterMissionCycleBatchesIfPending(context: MissionRunExecutionContext) -> Bool {
+    /// Removes and returns every pending `.afterMissionCycle` batch (caller dispatches).
+    private func extractAfterMissionCycleBatchesFromQueue() -> [MissionRunQueuedCommandBatch] {
         let toDeliver = pendingCommandBatches.filter {
             if case .afterMissionCycle = $0.dispatch { return true }
             return false
         }
-        guard !toDeliver.isEmpty else { return false }
-        let commandCount = toDeliver.reduce(0) { $0 + $1.commands.count }
+        guard !toDeliver.isEmpty else { return [] }
         pendingCommandBatches.removeAll { batch in
             if case .afterMissionCycle = batch.dispatch { return true }
             return false
         }
-        for batch in toDeliver {
-            dispatchCommands(batch.commands, context: context)
-        }
-        return commandCount > 0
+        return toDeliver
     }
 
     /// Immediate abort: clear queue, cancel scheduling tasks, dispatch commands, complete run.
@@ -283,6 +285,20 @@ final class MissionRunExecutionSubsystem {
         clearCommandQueue()
         environment.captureExecutionContext(context)
         environment.systems.scheduling.cancelAllScheduledTasks()
+        if Self.commandsContainCatalogueMissionClear(commands) {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.dispatchCommandsRespectingMissionClearBarrier(commands, context: context)
+                self.completeRun(
+                    context: context,
+                    templateKey: MissionRunLogTemplateKey.runStoppedImmediate,
+                    kind: .operatorStoppedImmediate,
+                    skipImplicitReturnToLaunch: !commands.isEmpty,
+                    operatorWindDown: .abortProtocolPhase
+                )
+            }
+            return
+        }
         dispatchCommands(commands, context: context)
         completeRun(
             context: context,
@@ -332,6 +348,46 @@ final class MissionRunExecutionSubsystem {
         }
     }
 
+    /// Catalogue mission clear must finish before later commands in the same batch (e.g. move+park) are dispatched;
+    /// otherwise the recipe’s move step races an active MAVLink mission.
+    private static func isCatalogueMissionClearCommand(_ issued: MissionRunIssuedCommand) -> Bool {
+        if case .catalogue(let name, _) = issued.dispatch {
+            return name == .fleetVehicleDoMissionClear
+        }
+        return false
+    }
+
+    /// Exposed for unit tests (`@testable import`).
+    internal static func commandsContainCatalogueMissionClear(_ commands: [MissionRunIssuedCommand]) -> Bool {
+        commands.contains(where: isCatalogueMissionClearCommand)
+    }
+
+    private func dispatchCommandsRespectingMissionClearBarrier(
+        _ commands: [MissionRunIssuedCommand],
+        context: MissionRunExecutionContext
+    ) async {
+        guard let environment else { return }
+        for issued in commands {
+            if Self.isCatalogueMissionClearCommand(issued) {
+                await environment.systems.commands.awaitCatalogueMissionClearDispatchAndAckLogs(
+                    issued: issued,
+                    fleetLink: context.fleetLink,
+                    sitl: context.sitl
+                )
+            } else if case .recipe = issued.dispatch {
+                await environment.systems.commands.awaitRecipeDispatchAppendingDispatchedThenAckLogs(
+                    issued: issued,
+                    fleetLink: context.fleetLink,
+                    sitl: context.sitl
+                )
+            } else {
+                environment.appendEvent(
+                    environment.systems.commands.dispatchCommand(issued, fleetLink: context.fleetLink, sitl: context.sitl)
+                )
+            }
+        }
+    }
+
     func issueReturnToLaunchForAllAssignments() {
         guard let environment, let fleetLink = environment.fleetLink, let sitl = environment.sitl else { return }
         for assignment in environment.assignments {
@@ -351,43 +407,95 @@ final class MissionRunExecutionSubsystem {
         }
     }
 
-    /// Per-assignment fleet commands for orderly recovery wind-down from ``MissionRunCompletePolicy`` (run default + per-slot overrides).
+    /// Per-assignment fleet commands for orderly recovery wind-down from the resolved **complete preference chain**
+    /// (assignment → task → mission), using the same optimistic dispatch rules as abort planning for map-point tactics.
     /// - Parameter limitedToAssignmentIDs: When non-nil, only these assignment rows are included (task / future squad scoping).
     func buildCompletePolicyWindDownCommands(limitedToAssignmentIDs: Set<UUID>? = nil) -> [MissionRunIssuedCommand] {
         guard let environment else { return [] }
         var out: [MissionRunIssuedCommand] = []
         for assignment in environment.assignments {
             if let limitedToAssignmentIDs, !limitedToAssignmentIDs.contains(assignment.id) { continue }
-            let resolved = MissionRunPolicyResolution.resolvedCompletePolicy(
+            guard let mission = environment.template else { continue }
+            let chain = MissionRunPolicyResolution.resolvedCompletePreferenceChain(
                 assignment: assignment,
-                mission: environment.template
+                mission: mission
             )
-            guard let baseCommand = Self.fleetVehicleCommand(forCompletePolicy: resolved),
-                  let key = assignment.attachedFleetVehicleToken,
-                  FleetMissionVehicleToken(storageKey: key) != nil
-            else { continue }
+            guard let issued = Self.optimisticCompleteIssuedCommand(
+                assignment: assignment,
+                preferenceChain: chain,
+                environment: environment,
+                mission: mission
+            ) else { continue }
             out.append(
-                MissionRunIssuedCommand(
-                    assignmentID: assignment.id,
-                    slotName: assignment.slotName,
-                    vehicleTokenKey: key,
-                    command: baseCommand,
-                    issuer: .operator,
-                    issuerKey: MissionRunCommandIssuerKey.localOperator,
-                    category: .missionControl
-                )
+                issued.reattributed(issuer: .operator, issuerKey: MissionRunCommandIssuerKey.localOperator)
             )
         }
         return out
     }
 
-    private static func fleetVehicleCommand(forCompletePolicy policy: MissionRunCompletePolicy) -> FleetVehicleCommand? {
-        switch policy {
-        case .returnToLaunch: return .returnToLaunch
-        case .holdPosition: return .holdPosition
-        case .land: return .land
-        case .none: return nil
+    private static func optimisticCompleteIssuedCommand(
+        assignment: MissionRunAssignment,
+        preferenceChain: [MissionRunCompleteTactic],
+        environment: MissionRunEnvironment,
+        mission: Mission
+    ) -> MissionRunIssuedCommand? {
+        guard let tokenKey = assignment.attachedFleetVehicleToken,
+              FleetMissionVehicleToken(storageKey: tokenKey) != nil
+        else {
+            return nil
         }
+        let hub = environment.abortPlanningHubTelemetry(for: assignment)
+        let taskId = MissionRunPolicyResolution.resolvedTaskId(for: assignment, mission: mission)
+        let points = environment.runtimeMissionPoints
+
+        for tactic in preferenceChain {
+            switch tactic.kind {
+            case .none:
+                continue
+            case .nearestOpenMapPoint:
+                guard let tid = taskId else { continue }
+                let pointKind = tactic.mapPointKind ?? .rally
+                guard let hub,
+                      let lat = hub.latitudeDeg,
+                      let lon = hub.longitudeDeg
+                else { continue }
+                let relAlt = hub.guardianAbortPlanningRelativeAltitudeM
+                guard let params = try? MissionRunMovePointParkPlanner.buildMovePointParkRecipeParameters(
+                    kind: pointKind,
+                    parentTaskID: tid,
+                    missionPoints: points,
+                    vehicleLatitudeDeg: lat,
+                    vehicleLongitudeDeg: lon,
+                    currentRelativeAltitudeM: relAlt,
+                    yawDeg: hub.yawDeg ?? 0
+                ) else { continue }
+                return MissionRunIssuedCommand(
+                    assignmentID: assignment.id,
+                    slotName: assignment.slotName,
+                    vehicleTokenKey: tokenKey,
+                    dispatch: .recipe(
+                        name: FleetMovePointParkRecipeRegistrations.movePointParkRecipeName,
+                        parameters: params
+                    ),
+                    issuer: .operator,
+                    issuerKey: MissionRunCommandIssuerKey.localOperator,
+                    category: .missionControl
+                )
+
+            case .returnToLaunch, .loiter, .park:
+                guard let dispatch = MissionRunFleetDispatch.preferentialCompleteTacticDispatch(tactic.kind) else { continue }
+                return MissionRunIssuedCommand(
+                    assignmentID: assignment.id,
+                    slotName: assignment.slotName,
+                    vehicleTokenKey: tokenKey,
+                    dispatch: dispatch,
+                    issuer: .operator,
+                    issuerKey: MissionRunCommandIssuerKey.localOperator,
+                    category: .missionControl
+                )
+            }
+        }
+        return nil
     }
 
     /// Immediate recovery wind-down from complete policy, then run enters recovery phase.
@@ -428,7 +536,7 @@ final class MissionRunExecutionSubsystem {
         _ = environment.systems.planner.buildAbortPlan(trigger: .now)
         let commands = (environment.systems.planner.lastBuiltAbortPlan?.entries ?? [])
             .filter { ids.contains($0.assignmentID) }
-            .compactMap(\.issuedCommand)
+            .flatMap(\.issuedCommands)
             .map { $0.reattributed(issuer: .operator, issuerKey: MissionRunCommandIssuerKey.localOperator) }
         guard !commands.isEmpty else {
             environment.systems.logging.appendLogEvent(
@@ -441,14 +549,32 @@ final class MissionRunExecutionSubsystem {
             return false
         }
         environment.captureExecutionContext(context)
+        let taskLabel = environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name ?? taskID.uuidString
+        let taskLabelForLog = environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name
+        if Self.commandsContainCatalogueMissionClear(commands) {
+            Task { @MainActor [weak self] in
+                guard let self, let environment = self.environment else { return }
+                await self.dispatchCommandsRespectingMissionClearBarrier(commands, context: context)
+                environment.markMissionTaskAbortWindDownIssued(forTaskID: taskID)
+                environment.systems.scheduling.cancelScheduledTaskMissionStarts(forTaskID: taskID)
+                environment.systems.logging.appendLogEvent(
+                    level: .info,
+                    taskID: taskID,
+                    taskLabel: taskLabelForLog,
+                    speaker: .missionControl,
+                    templateKey: MissionRunLogTemplateKey.missionTaskAbortNowDispatched,
+                    templateParams: ["task": taskLabel]
+                )
+            }
+            return true
+        }
         dispatchCommands(commands, context: context)
         environment.markMissionTaskAbortWindDownIssued(forTaskID: taskID)
         environment.systems.scheduling.cancelScheduledTaskMissionStarts(forTaskID: taskID)
-        let taskLabel = environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name ?? taskID.uuidString
         environment.systems.logging.appendLogEvent(
             level: .info,
             taskID: taskID,
-            taskLabel: environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name,
+            taskLabel: taskLabelForLog,
             speaker: .missionControl,
             templateKey: MissionRunLogTemplateKey.missionTaskAbortNowDispatched,
             templateParams: ["task": taskLabel]
@@ -515,7 +641,7 @@ final class MissionRunExecutionSubsystem {
                 _ = environment.systems.planner.buildAbortPlan(trigger: .afterCycle)
                 let commands = (environment.systems.planner.lastBuiltAbortPlan?.entries ?? [])
                     .filter { ids.contains($0.assignmentID) }
-                    .compactMap(\.issuedCommand)
+                    .flatMap(\.issuedCommands)
                     .map { $0.reattributed(issuer: .operator, issuerKey: MissionRunCommandIssuerKey.localOperator) }
                 guard !commands.isEmpty else {
                     environment.systems.logging.appendLogEvent(
@@ -527,14 +653,32 @@ final class MissionRunExecutionSubsystem {
                     )
                     continue
                 }
+                let label = environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name ?? taskID.uuidString
+                let taskLabelForLog = environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name
+                if Self.commandsContainCatalogueMissionClear(commands) {
+                    Task { @MainActor [weak self] in
+                        guard let self, let environment = self.environment else { return }
+                        await self.dispatchCommandsRespectingMissionClearBarrier(commands, context: context)
+                        environment.markMissionTaskAbortWindDownIssued(forTaskID: taskID)
+                        environment.systems.scheduling.cancelScheduledTaskMissionStarts(forTaskID: taskID)
+                        environment.systems.logging.appendLogEvent(
+                            level: .info,
+                            taskID: taskID,
+                            taskLabel: taskLabelForLog,
+                            speaker: .missionControl,
+                            templateKey: MissionRunLogTemplateKey.missionTaskAbortGracefulDispatched,
+                            templateParams: ["task": label]
+                        )
+                    }
+                    continue
+                }
                 dispatchCommands(commands, context: context)
                 environment.markMissionTaskAbortWindDownIssued(forTaskID: taskID)
                 environment.systems.scheduling.cancelScheduledTaskMissionStarts(forTaskID: taskID)
-                let label = environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name ?? taskID.uuidString
                 environment.systems.logging.appendLogEvent(
                     level: .info,
                     taskID: taskID,
-                    taskLabel: environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name,
+                    taskLabel: taskLabelForLog,
                     speaker: .missionControl,
                     templateKey: MissionRunLogTemplateKey.missionTaskAbortGracefulDispatched,
                     templateParams: ["task": label]
@@ -591,8 +735,40 @@ final class MissionRunExecutionSubsystem {
         environment.recordTaskCycleCompletions(forTaskIDs: completedCycleTaskIDs)
 
         if environment.gracefulStopKind != .none {
-            let hadQueuedWindDownCommands = environment.systems.executor.dispatchAfterMissionCycleBatchesIfPending(context: context)
+            let toDeliver = extractAfterMissionCycleBatchesFromQueue()
+            let commandCount = toDeliver.reduce(0) { $0 + $1.commands.count }
+            let hadQueuedWindDownCommands = commandCount > 0
             let stopKind = environment.gracefulStopKind
+            let needsClearBarrier = toDeliver.contains { Self.commandsContainCatalogueMissionClear($0.commands) }
+            if needsClearBarrier {
+                Task { @MainActor [weak self] in
+                    guard let self, self.environment != nil else { return }
+                    for batch in toDeliver {
+                        await self.dispatchCommandsRespectingMissionClearBarrier(batch.commands, context: context)
+                    }
+                    if stopKind == .abortAfterCycle {
+                        self.completeRun(
+                            context: context,
+                            templateKey: MissionRunLogTemplateKey.runGracefulAfterCycle,
+                            kind: .operatorStoppedAfterCycle,
+                            skipImplicitReturnToLaunch: hadQueuedWindDownCommands,
+                            operatorWindDown: .abortProtocolPhase
+                        )
+                    } else {
+                        self.completeRun(
+                            context: context,
+                            templateKey: MissionRunLogTemplateKey.runCompleteWindDownAfterCycle,
+                            kind: .operatorCompletedAfterCycle,
+                            skipImplicitReturnToLaunch: hadQueuedWindDownCommands,
+                            operatorWindDown: .recoveryPhase
+                        )
+                    }
+                }
+                return .progressed
+            }
+            for batch in toDeliver {
+                dispatchCommands(batch.commands, context: context)
+            }
             let resultKind: MissionRunCompletionKind
             if stopKind == .abortAfterCycle {
                 completeRun(
@@ -749,18 +925,7 @@ final class MissionRunExecutionSubsystem {
 
     private func betweenCyclesCommands(for task: MissionTask, mission: Mission) -> [MissionRunIssuedCommand] {
         guard let environment else { return [] }
-        let command: FleetVehicleCommand?
-        switch task.betweenCycles {
-        case .returnToLaunch:
-            command = .returnToLaunch
-        case .holdPosition:
-            command = .holdPosition
-        case .land:
-            command = .land
-        case .none:
-            command = nil
-        }
-        guard let command else { return [] }
+        guard let dispatch = MissionRunFleetDispatch.betweenCyclesTaskDispatch(task.betweenCycles) else { return [] }
         let squads = environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: task.id)
         return squads.compactMap { squad in
             guard let tokenKey = squad.squad.primaryAssignment.attachedFleetVehicleToken else { return nil }
@@ -768,7 +933,7 @@ final class MissionRunExecutionSubsystem {
                 assignmentID: squad.squad.primaryAssignment.id,
                 slotName: squad.squad.primaryAssignment.slotName,
                 vehicleTokenKey: tokenKey,
-                command: command,
+                dispatch: dispatch,
                 issuer: .missionControl,
                 issuerKey: MissionRunCommandIssuerKey.missionExecute,
                 category: .missionControl
@@ -990,11 +1155,36 @@ final class MissionRunExecutionSubsystem {
 
         for squad in squads {
             guard let tokenKey = squad.squad.primaryAssignment.attachedFleetVehicleToken else { continue }
+            let plan = Mavsdk.Mission.MissionPlan(missionItems: squad.missionItems)
+            let missionItemsJSON: String
+            do {
+                missionItemsJSON = try FleetVehicleCommandMissionItemPayload.encodeMissionPlanToJSON(plan: plan)
+            } catch {
+                let pc = MissionControlTaskTagName.taskContext(for: squad.squad.primaryAssignment, mission: mission)
+                events.append(
+                    MissionRunEvent(
+                        level: .error,
+                        taskID: pc?.id,
+                        taskLabel: pc?.label,
+                        speaker: .missionControl,
+                        templateKey: MissionRunLogTemplateKey.missionPlanItemsEncodeFailed,
+                        templateParams: [
+                            "slot": squad.squad.primaryAssignment.slotName,
+                            "slotID": squad.squad.primaryAssignment.id.uuidString,
+                            "reason": error.localizedDescription,
+                        ]
+                    )
+                )
+                continue
+            }
             let issued = MissionRunIssuedCommand(
                 assignmentID: squad.squad.primaryAssignment.id,
                 slotName: squad.squad.primaryAssignment.slotName,
                 vehicleTokenKey: tokenKey,
-                command: .uploadAndStartMission(items: squad.missionItems),
+                dispatch: .recipe(
+                    name: FleetMissionRecipeRegistrations.doMissionUploadStartRecipeName,
+                    parameters: FleetRecipeParameters(values: ["missionItemsJSON": .string(missionItemsJSON)])
+                ),
                 issuer: .missionControl,
                 issuerKey: MissionRunCommandIssuerKey.missionExecute,
                 category: .missionControl
@@ -1123,6 +1313,7 @@ extension MissionRunLogTemplateKey {
     static let stagingLiveReadonly = "missioncontrol.mre.staging.live_readonly"
     static let missionNotStartedNeedsPath = "missioncontrol.mre.mission.not_started_needs_path"
     static let missionNotStartedNoPrimaries = "missioncontrol.mre.mission.not_started_no_primaries"
+    static let missionPlanItemsEncodeFailed = "missioncontrol.mre.mission.plan_items_encode_failed"
     static let missionExecuting = "missioncontrol.mre.mission.executing"
     static let startMissionTaskSkippedPhase = "missioncontrol.mre.mission.start_skipped_phase"
     static let startMissionTaskNoDispatchContext = "missioncontrol.mre.mission.start_no_dispatch_context"

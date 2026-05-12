@@ -14,6 +14,8 @@ struct VehiclesView: View {
     @State private var sidebarSpawnPlatform: SimulationPlatform = .ardupilot
     @State private var pendingSimStop: PendingSimStop?
     @State private var calibrationSheetContext: VehicleCalibrationSheetContext?
+    /// Suppresses duplicate `sitl.lastError` surfaces so `ToastCenter` is not reset on every identical republish.
+    @State private var lastSitlErrorSurfacedForToast: String?
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
@@ -67,7 +69,11 @@ struct VehiclesView: View {
                 }
                 .onChange(of: sitl.lastError) { newValue in
                     if let newValue {
+                        guard newValue != lastSitlErrorSurfacedForToast else { return }
+                        lastSitlErrorSurfacedForToast = newValue
                         toastCenter.show(newValue, style: .error, duration: 4.5)
+                    } else {
+                        lastSitlErrorSurfacedForToast = nil
                     }
                 }
 

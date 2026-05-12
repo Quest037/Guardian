@@ -605,10 +605,10 @@ struct MissionTask: Identifiable, Codable, Equatable {
     /// Defer this task’s MAVLink mission upload/start after execution begins (``MissionDelayPolicy``); MC Setup can override per run (``TaskStartDelay``).
     var startDelayValue: Double
     var startDelayUnit: DelayUnit
-    /// When set, overrides ``RouteRules/missionAbortPolicy`` for this task’s roster slots (unless a slot sets ``MissionRunAssignmentPolicies/abort``).
-    var abortPolicyOverride: MissionRunAbortPolicy?
-    /// When set, overrides ``RouteRules/missionCompletePolicy`` for this task’s roster slots (unless a slot sets ``MissionRunAssignmentPolicies/complete``).
-    var completePolicyOverride: MissionRunCompletePolicy?
+    /// When non-empty, overrides ``RouteRules/missionAbortPreferenceChain`` for this task’s roster slots (unless a slot sets its own ``MissionRunAssignmentPolicies/abortPreferenceChain``).
+    var abortPreferenceChainOverride: [MissionRunAbortTactic]?
+    /// When non-empty, overrides ``RouteRules/missionCompletePreferenceChain`` for this task’s roster slots (unless a slot sets ``MissionRunAssignmentPolicies/completePreferenceChain``).
+    var completePreferenceChainOverride: [MissionRunCompleteTactic]?
 
     enum CodingKeys: String, CodingKey {
         case id, name, enabled, waypoints, loopMode, cycles
@@ -619,7 +619,7 @@ struct MissionTask: Identifiable, Codable, Equatable {
         case legacyStartDelayInt = "startDelay"
         case rosterDeviceIds = "spaceBindings"
         case legacyScheduleRefs = "scheduleRefs"
-        case abortPolicyOverride, completePolicyOverride
+        case abortPreferenceChainOverride, completePreferenceChainOverride
     }
 
     /// Effective start deferral duration for execution (seconds).
@@ -654,8 +654,8 @@ struct MissionTask: Identifiable, Codable, Equatable {
         rosterDeviceIds: [UUID] = [],
         startDelayValue: Double = 0,
         startDelayUnit: DelayUnit = .secs,
-        abortPolicyOverride: MissionRunAbortPolicy? = nil,
-        completePolicyOverride: MissionRunCompletePolicy? = nil
+        abortPreferenceChainOverride: [MissionRunAbortTactic]? = nil,
+        completePreferenceChainOverride: [MissionRunCompleteTactic]? = nil
     ) {
         self.id = id
         self.name = name
@@ -672,8 +672,8 @@ struct MissionTask: Identifiable, Codable, Equatable {
         self.rosterDeviceIds = rosterDeviceIds
         self.startDelayValue = startDelayValue
         self.startDelayUnit = startDelayUnit
-        self.abortPolicyOverride = abortPolicyOverride
-        self.completePolicyOverride = completePolicyOverride
+        self.abortPreferenceChainOverride = abortPreferenceChainOverride
+        self.completePreferenceChainOverride = completePreferenceChainOverride
         normalizeDelayFields()
     }
 
@@ -732,8 +732,8 @@ struct MissionTask: Identifiable, Codable, Equatable {
             startDelayUnit = .mins
         }
 
-        abortPolicyOverride = try c.decodeIfPresent(MissionRunAbortPolicy.self, forKey: .abortPolicyOverride)
-        completePolicyOverride = try c.decodeIfPresent(MissionRunCompletePolicy.self, forKey: .completePolicyOverride)
+        abortPreferenceChainOverride = try c.decodeIfPresent([MissionRunAbortTactic].self, forKey: .abortPreferenceChainOverride)
+        completePreferenceChainOverride = try c.decodeIfPresent([MissionRunCompleteTactic].self, forKey: .completePreferenceChainOverride)
 
         waypoints = Self.migratePathMetadataIfNeeded(waypoints)
         normalizeDelayFields()
@@ -783,8 +783,8 @@ struct MissionTask: Identifiable, Codable, Equatable {
         try c.encode(rosterDeviceIds, forKey: .rosterDeviceIds)
         try c.encode(startDelayValue, forKey: .startDelayValue)
         try c.encode(startDelayUnit, forKey: .startDelayUnit)
-        try c.encodeIfPresent(abortPolicyOverride, forKey: .abortPolicyOverride)
-        try c.encodeIfPresent(completePolicyOverride, forKey: .completePolicyOverride)
+        try c.encodeIfPresent(abortPreferenceChainOverride, forKey: .abortPreferenceChainOverride)
+        try c.encodeIfPresent(completePreferenceChainOverride, forKey: .completePreferenceChainOverride)
     }
 }
 
@@ -794,41 +794,51 @@ typealias RoutePath = MissionTask
 struct RouteRules: Codable, Equatable {
     var defaultSpeed: Double
     var defaultHeadingHold: Bool
-    /// Default abort policy for all tasks unless overridden per task or per roster assignment.
-    var missionAbortPolicy: MissionRunAbortPolicy
-    /// Default complete-policy for recovery wind-down unless overridden per task or per roster assignment.
-    var missionCompletePolicy: MissionRunCompletePolicy
+    /// Default **ordered** abort tactics for all tasks unless overridden per task or per roster assignment.
+    var missionAbortPreferenceChain: [MissionRunAbortTactic]
+    /// Default **ordered** complete (recovery) tactics unless overridden per task or per roster assignment.
+    var missionCompletePreferenceChain: [MissionRunCompleteTactic]
 
     init(
         defaultSpeed: Double = 5,
         defaultHeadingHold: Bool = true,
-        missionAbortPolicy: MissionRunAbortPolicy = .returnToLaunch,
-        missionCompletePolicy: MissionRunCompletePolicy = .returnToLaunch
+        missionAbortPreferenceChain: [MissionRunAbortTactic] = MissionRunAbortTactic.defaultMissionAbortPreferenceChain,
+        missionCompletePreferenceChain: [MissionRunCompleteTactic] = MissionRunCompleteTactic.defaultMissionCompletePreferenceChain
     ) {
         self.defaultSpeed = defaultSpeed
         self.defaultHeadingHold = defaultHeadingHold
-        self.missionAbortPolicy = missionAbortPolicy
-        self.missionCompletePolicy = missionCompletePolicy
+        self.missionAbortPreferenceChain = MissionRunAbortTactic.normalizedPreferenceChain(missionAbortPreferenceChain)
+        self.missionCompletePreferenceChain = MissionRunCompleteTactic.normalizedPreferenceChain(missionCompletePreferenceChain)
     }
 
     enum CodingKeys: String, CodingKey {
-        case defaultSpeed, defaultHeadingHold, missionAbortPolicy, missionCompletePolicy
+        case defaultSpeed, defaultHeadingHold, missionAbortPreferenceChain, missionCompletePreferenceChain
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         defaultSpeed = try c.decodeIfPresent(Double.self, forKey: .defaultSpeed) ?? 5
         defaultHeadingHold = try c.decodeIfPresent(Bool.self, forKey: .defaultHeadingHold) ?? true
-        missionAbortPolicy = try c.decodeIfPresent(MissionRunAbortPolicy.self, forKey: .missionAbortPolicy) ?? .returnToLaunch
-        missionCompletePolicy = try c.decodeIfPresent(MissionRunCompletePolicy.self, forKey: .missionCompletePolicy) ?? .returnToLaunch
+        if let decoded = try c.decodeIfPresent([MissionRunAbortTactic].self, forKey: .missionAbortPreferenceChain),
+           !decoded.isEmpty {
+            missionAbortPreferenceChain = MissionRunAbortTactic.normalizedPreferenceChain(decoded)
+        } else {
+            missionAbortPreferenceChain = MissionRunAbortTactic.defaultMissionAbortPreferenceChain
+        }
+        if let decoded = try c.decodeIfPresent([MissionRunCompleteTactic].self, forKey: .missionCompletePreferenceChain),
+           !decoded.isEmpty {
+            missionCompletePreferenceChain = MissionRunCompleteTactic.normalizedPreferenceChain(decoded)
+        } else {
+            missionCompletePreferenceChain = MissionRunCompleteTactic.defaultMissionCompletePreferenceChain
+        }
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(defaultSpeed, forKey: .defaultSpeed)
         try c.encode(defaultHeadingHold, forKey: .defaultHeadingHold)
-        try c.encode(missionAbortPolicy, forKey: .missionAbortPolicy)
-        try c.encode(missionCompletePolicy, forKey: .missionCompletePolicy)
+        try c.encode(missionAbortPreferenceChain, forKey: .missionAbortPreferenceChain)
+        try c.encode(missionCompletePreferenceChain, forKey: .missionCompletePreferenceChain)
     }
 }
 
@@ -918,7 +928,7 @@ enum MissionPointKind: String, Codable, CaseIterable, Identifiable, Sendable {
 }
 
 /// A mission-scoped map point (rally / extraction / …), orthogonal to task route waypoints.
-/// See ``Mission/missionPoints`` and `MissionPointsTodo.md`.
+/// See ``Mission/missionPoints`` and README **Mission template points**.
 struct MissionPoint: Identifiable, Codable, Equatable, Sendable {
     /// Row identity in the mission document (distinct from ``pointId`` slug for MRE).
     let id: UUID
@@ -1026,7 +1036,7 @@ struct MissionPoint: Identifiable, Codable, Equatable, Sendable {
 }
 
 extension MissionPoint {
-    /// Mission Control run **live overview** map — see `MissionPointsTodo.md` §4.2 / §9.
+    /// Mission Control run **live overview** map — see README **Mission template points** and `MissionPoint.filteredForMissionControlLiveMap`.
     /// When `focusedTaskID` is `nil`, returns all points. Otherwise returns mission-wide (`taskID == nil`) plus rows scoped to that task.
     static func filteredForMissionControlLiveMap(_ points: [MissionPoint], focusedTaskID: UUID?) -> [MissionPoint] {
         guard let tid = focusedTaskID else { return points }

@@ -8,6 +8,8 @@ import SwiftUI
 /// Spring animation matches Mission Control live Tasks triage. Preflight banner stays above the stack.
 struct VehicleCalibrationView: View {
     let vehicle: FleetVehicleModel
+    /// Inert embeds pass a dedicated instance (never started); the Vehicle Inspector modal passes a shared controller for **Start / Stop** in the modal header and inter-step **Wait / Continue** in the active panel.
+    @ObservedObject private var guidedWizard: VehicleInspectorGuidedWizardController
     /// When set (e.g. from ``VehicleCalibrationModal`` / ``LiveVehicleCalibrationView``), the calibration
     /// tab resolves directory recipes per selected system and shows one **Run** launcher per recipe,
     /// wired to ``FleetRecipeRunner``.
@@ -38,11 +40,13 @@ struct VehicleCalibrationView: View {
 
     init(
         vehicle: FleetVehicleModel,
+        guidedWizard: VehicleInspectorGuidedWizardController,
         recipeFleetLink: FleetLinkService? = nil,
         isLiveMissionRecipeLocked: Bool = false,
         @ViewBuilder preflightBanner: @escaping () -> AnyView = { AnyView(EmptyView()) }
     ) {
         self.vehicle = vehicle
+        self._guidedWizard = ObservedObject(wrappedValue: guidedWizard)
         self.recipeFleetLink = recipeFleetLink
         self.isLiveMissionRecipeLocked = isLiveMissionRecipeLocked
         self.preflightBanner = preflightBanner
@@ -113,7 +117,8 @@ struct VehicleCalibrationView: View {
 
     /// When the sheet is fully expanded with a selection, the map sits underneath and should not steal taps.
     private var calibrationDiagramAllowsHitTesting: Bool {
-        !(calibrationInspectorSheetExpanded && selectedSystemID != nil)
+        let sheetExpandedLike = calibrationInspectorSheetExpanded || guidedWizard.isActive
+        return !(sheetExpandedLike && selectedSystemID != nil)
     }
 
     var body: some View {
@@ -126,7 +131,8 @@ struct VehicleCalibrationView: View {
                 /// Breathing room between diagram and action panel when collapsed (`GuardianSpacing.denseGutter` = 10pt).
                 let diagramSheetGutter = GuardianSpacing.denseGutter
                 let collapsedSheetH = max(totalH * 0.5 - diagramSheetGutter, 140)
-                let sheetH = calibrationInspectorSheetExpanded ? totalH : collapsedSheetH
+                let sheetExpandedLike = calibrationInspectorSheetExpanded || guidedWizard.isActive
+                let sheetH = sheetExpandedLike ? totalH : collapsedSheetH
                 ZStack(alignment: .bottom) {
                     VStack(spacing: 0) {
                         calibrationDiagramContent(size: CGSize(width: totalW, height: diagramBandH))
@@ -140,6 +146,7 @@ struct VehicleCalibrationView: View {
                     calibrationInspectorBottomSheet(totalWidth: totalW, sheetHeight: sheetH)
                 }
                 .animation(calibrationInspectorSheetSpring, value: calibrationInspectorSheetExpanded)
+                .animation(calibrationInspectorSheetSpring, value: guidedWizard.isActive)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -147,6 +154,24 @@ struct VehicleCalibrationView: View {
         .onAppear {
             if calibrationRecipeProcedureActive {
                 calibrationInspectorSheetExpanded = true
+            }
+        }
+        .onChange(of: guidedWizard.currentSystemID) { newID in
+            if let newID {
+                selectedSystemID = newID
+                withAnimation(calibrationInspectorSheetSpring) {
+                    calibrationInspectorSheetExpanded = true
+                }
+            }
+        }
+        .onChange(of: guidedWizard.isActive) { active in
+            if active {
+                if let id = guidedWizard.currentSystemID {
+                    selectedSystemID = id
+                }
+                withAnimation(calibrationInspectorSheetSpring) {
+                    calibrationInspectorSheetExpanded = true
+                }
             }
         }
         .onChange(of: selectedSystemID) { newValue in
@@ -170,6 +195,7 @@ struct VehicleCalibrationView: View {
 
     private func collapseCalibrationInspectorSheetIfAllowed() {
         guard !calibrationRecipeProcedureActive else { return }
+        guard !guidedWizard.isActive else { return }
         withAnimation(calibrationInspectorSheetSpring) {
             calibrationInspectorSheetExpanded = false
         }
@@ -299,7 +325,7 @@ struct VehicleCalibrationView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            if calibrationInspectorSheetExpanded {
+            if calibrationInspectorSheetExpanded || guidedWizard.isActive {
                 Button {
                     collapseCalibrationInspectorSheetIfAllowed()
                 } label: {
@@ -311,9 +337,13 @@ struct VehicleCalibrationView: View {
                 }
                 .buttonStyle(GuardianPointerPlainButtonStyle())
                 .guardianPointerOnHover()
-                .disabled(calibrationRecipeProcedureActive)
-                .opacity(calibrationRecipeProcedureActive ? 0.38 : 1)
-                .help(calibrationRecipeProcedureActive ? "Finish or cancel the procedure before hiding the panel" : "Show calibration map")
+                .disabled(calibrationRecipeProcedureActive || guidedWizard.isActive)
+                .opacity((calibrationRecipeProcedureActive || guidedWizard.isActive) ? 0.38 : 1)
+                .help({
+                    if guidedWizard.isActive { return "Stop the guided wizard in the header to hide the panel" }
+                    if calibrationRecipeProcedureActive { return "Finish or cancel the procedure before hiding the panel" }
+                    return "Show calibration map"
+                }())
                 .accessibilityLabel("Show calibration map")
             } else if selectedSystemID != nil {
                 Button {
@@ -469,6 +499,20 @@ struct VehicleCalibrationView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
+    private func wizardGuidedPanelCrossfadeApplies(for item: FleetCalibrationItem) -> Bool {
+        guidedWizard.isActive && guidedWizard.currentSystemID == item.id
+    }
+
+    private func wizardInspectorStepOpacity(for item: FleetCalibrationItem) -> CGFloat {
+        guard wizardGuidedPanelCrossfadeApplies(for: item) else { return 1 }
+        return guidedWizard.wizardStepPanelOpacity
+    }
+
+    private func wizardInspectorEmptyOpacity(for item: FleetCalibrationItem) -> CGFloat {
+        guard wizardGuidedPanelCrossfadeApplies(for: item) else { return 0 }
+        return guidedWizard.wizardEmptyPanelOpacity
+    }
+
     private func selectedInspectorScrollContent(for item: FleetCalibrationItem) -> some View {
         let vid = vehicle.data.vehicleID
         let wizardProgress = fleetRecipeRunner.wizardProgressByVehicleID[vid]
@@ -480,72 +524,102 @@ struct VehicleCalibrationView: View {
             against: FleetRecipesCatalogue.shared
         )
 
-        return ScrollView {
-            VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
-                if let detail = item.technicalDetail, !detail.isEmpty {
-                    Text(detail)
-                        .font(GuardianTypography.font(.telemetryMono11Regular))
-                        .foregroundStyle(theme.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+        return ZStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+                    if let detail = item.technicalDetail, !detail.isEmpty {
+                        Text(detail)
+                            .font(GuardianTypography.font(.telemetryMono11Regular))
+                            .foregroundStyle(theme.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
 
-                if let progress = debouncedWizardProcedureBanner {
-                    VehicleInspectorProcedureProgressBanner(
-                        snapshot: progress,
-                        showsAwaitingPromptPlaceholder: wizardEscalation == nil,
-                        onCancel: {
-                            _ = fleetRecipeRunner.cancel(runID: progress.runID)
+                    if let progress = debouncedWizardProcedureBanner {
+                        VehicleInspectorProcedureProgressBanner(
+                            snapshot: progress,
+                            showsAwaitingPromptPlaceholder: wizardEscalation == nil,
+                            onCancel: {
+                                _ = fleetRecipeRunner.cancel(runID: progress.runID)
+                            }
+                        )
+                    }
+
+                    if let escalation = wizardEscalation {
+                        VehicleInspectorProcedureEscalationBanner(
+                            snapshot: escalation,
+                            vehicleID: vid
+                        )
+                    }
+
+                    VehicleInspectorGuidedWizardInterStepChrome(
+                        guidedWizard: guidedWizard,
+                        activeSystemID: item.id,
+                        vehicle: vehicle,
+                        recipeFleetLink: recipeFleetLink,
+                        isLiveMissionRecipeLocked: isLiveMissionRecipeLocked
+                    )
+
+                    SystemRecipeWizardLaunchers(
+                        systemID: item.id,
+                        vehicle: vehicle,
+                        recipeFleetLink: recipeFleetLink,
+                        isLiveMissionRecipeLocked: isLiveMissionRecipeLocked,
+                        wizardLocksCatalogueRuns: guidedWizard.isActive
+                    )
+                    .id(item.id)
+
+                    HStack(alignment: .top, spacing: GuardianSpacing.md) {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
+                            if let advice = item.remediationAdvice {
+                                PreflightProbeRemediationBlock(advice: advice)
+                            } else {
+                                Text("No remediation needed.")
+                                    .font(GuardianTypography.font(.denseFootnoteRegular))
+                                    .foregroundStyle(theme.textTertiary)
+                            }
                         }
-                    )
-                }
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
 
-                if let escalation = wizardEscalation {
-                    VehicleInspectorProcedureEscalationBanner(
-                        snapshot: escalation,
-                        vehicleID: vid
-                    )
-                }
+                        SystemTelemetryColumn(
+                            fields: telemetryFields,
+                            hub: vehicle.data.telemetry
+                        )
+                        .frame(width: 260, alignment: .topLeading)
+                    }
 
-                SystemRecipeWizardLaunchers(
-                    systemID: item.id,
-                    vehicle: vehicle,
-                    recipeFleetLink: recipeFleetLink,
-                    isLiveMissionRecipeLocked: isLiveMissionRecipeLocked
+                    if resolvedRecipes.isEmpty, !controls.isEmpty {
+                        HStack(spacing: GuardianSpacing.xs) {
+                            ForEach(Array(controls.enumerated()), id: \.offset) { _, control in
+                                control
+                            }
+                        }
+                        .padding(.top, GuardianSpacing.micro)
+                    }
+                }
+                .padding(GuardianSpacing.cardBodyInset)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .id(guidedWizard.isActive ? "\(item.id.rawValue)|\(guidedWizard.contentTransitionEpoch)" : item.id.rawValue)
+                .transition(
+                    .asymmetric(
+                        insertion: .move(edge: .trailing).combined(with: .opacity),
+                        removal: .move(edge: .leading).combined(with: .opacity)
+                    )
                 )
-                .id(item.id)
-
-                HStack(alignment: .top, spacing: GuardianSpacing.md) {
-                    VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
-                        if let advice = item.remediationAdvice {
-                            PreflightProbeRemediationBlock(advice: advice)
-                        } else {
-                            Text("No remediation needed.")
-                                .font(GuardianTypography.font(.denseFootnoteRegular))
-                                .foregroundStyle(theme.textTertiary)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-
-                    SystemTelemetryColumn(
-                        fields: telemetryFields,
-                        hub: vehicle.data.telemetry
-                    )
-                    .frame(width: 260, alignment: .topLeading)
-                }
-
-                if resolvedRecipes.isEmpty, !controls.isEmpty {
-                    HStack(spacing: GuardianSpacing.xs) {
-                        ForEach(Array(controls.enumerated()), id: \.offset) { _, control in
-                            control
-                        }
-                    }
-                    .padding(.top, GuardianSpacing.micro)
-                }
             }
-            .padding(GuardianSpacing.cardBodyInset)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .opacity(Double(wizardInspectorStepOpacity(for: item)))
+
+            if wizardGuidedPanelCrossfadeApplies(for: item) {
+                WizardGuidedCalibrationEmptyState(
+                    headline: guidedWizard.wizardEmptyStateHeadline,
+                    subtitle: guidedWizard.wizardEmptyStateSubtitle
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .opacity(Double(wizardInspectorEmptyOpacity(for: item)))
+                .allowsHitTesting(guidedWizard.wizardEmptyPanelOpacity > 0.02)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .animation(.spring(response: 0.38, dampingFraction: 0.88), value: guidedWizard.contentTransitionEpoch)
         .onAppear {
             syncDebouncedWizardProcedureBanner(vehicleID: vid, latest: wizardProgress)
         }
@@ -629,6 +703,215 @@ private struct SystemTelemetryColumn: View {
     }
 }
 
+// MARK: - Guided calibration wizard (Vehicle Inspector modal)
+
+/// Full-panel empty state: large spinner, headline, supporting line — used while the guided wizard crossfades the inspector before each catalogue run.
+@MainActor
+private struct WizardGuidedCalibrationEmptyState: View {
+    let headline: String
+    let subtitle: String
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
+    var body: some View {
+        VStack(spacing: GuardianSpacing.lg) {
+            Spacer(minLength: 0)
+            ProgressView()
+                .controlSize(.large)
+                .scaleEffect(1.85)
+            Text(headline.isEmpty ? " " : headline)
+                .font(GuardianTypography.font(.subsectionTitleSemibold))
+                .foregroundStyle(theme.textPrimary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, GuardianSpacing.cardBodyInset)
+            Text(subtitle.isEmpty ? " " : subtitle)
+                .font(GuardianTypography.font(.denseFootnoteRegular))
+                .foregroundStyle(theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, GuardianSpacing.sectionStack)
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.backgroundBase.opacity(colorScheme == .dark ? 0.92 : 0.98))
+    }
+}
+
+/// Countdown, **Wait** → manual **Continue**, and copy while the guided wizard pauses between steps.
+@MainActor
+private struct VehicleInspectorGuidedWizardInterStepChrome: View {
+    @ObservedObject var guidedWizard: VehicleInspectorGuidedWizardController
+    let activeSystemID: FleetCalibrationSystemID
+    let vehicle: FleetVehicleModel
+    let recipeFleetLink: FleetLinkService?
+    let isLiveMissionRecipeLocked: Bool
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
+    private var appliesHere: Bool {
+        guidedWizard.isActive
+            && guidedWizard.interStepGateActive
+            && guidedWizard.currentSystemID == activeSystemID
+    }
+
+    var body: some View {
+        if appliesHere {
+            VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+                HStack(spacing: GuardianSpacing.xsTight) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(GuardianTypography.font(.denseCaption10Semibold))
+                        .foregroundStyle(theme.textTertiary)
+                    Text("Guided wizard")
+                        .font(GuardianTypography.font(.formFieldLabel))
+                        .foregroundStyle(theme.textTertiary)
+                        .textCase(.uppercase)
+                }
+
+                if guidedWizard.requiresManualContinue {
+                    Text("Continue when you are ready for the next guided step.")
+                        .font(GuardianTypography.font(.denseFootnoteRegular))
+                        .foregroundStyle(theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    GeometryReader { geo in
+                        let denom = max(guidedWizard.countdownTotal, 0.001)
+                        let fraction = CGFloat(guidedWizard.countdownRemaining / denom)
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(theme.backgroundElevated)
+                            Capsule()
+                                .fill(GuardianSemanticColors.successStroke.opacity(0.9))
+                                .frame(width: max(4, geo.size.width * fraction))
+                        }
+                    }
+                    .frame(height: 6)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Time until next guided step")
+                    .accessibilityValue("\(max(0, Int(ceil(guidedWizard.countdownRemaining)))) seconds")
+
+                    Text("Next step in \(max(0, Int(ceil(guidedWizard.countdownRemaining))))s — tap Wait if you need more time.")
+                        .font(GuardianTypography.font(.denseCaption10Semibold))
+                        .foregroundStyle(theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack(spacing: GuardianSpacing.sm) {
+                    if !guidedWizard.requiresManualContinue {
+                        GuardianThemedButton(
+                            title: "Wait",
+                            accent: .primary,
+                            surface: .outline,
+                            size: .small,
+                            shape: .cornered,
+                            action: { guidedWizard.tapWait() }
+                        )
+                        .guardianPointerOnHover()
+                    }
+
+                    if guidedWizard.requiresManualContinue, let link = recipeFleetLink {
+                        GuardianPrimaryProminentButton(title: "Continue") {
+                            guidedWizard.tapContinueToNext(
+                                vehicle: vehicle,
+                                fleetLink: link,
+                                isLiveMissionRecipeLocked: isLiveMissionRecipeLocked
+                            )
+                        }
+                        .guardianPointerOnHover()
+                    }
+                }
+            }
+            .padding(GuardianSpacing.sm)
+            .background(theme.backgroundRaised, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(theme.borderSubtle.opacity(0.65), lineWidth: 1)
+            )
+        }
+    }
+}
+
+/// Modal header control: **Start** (progress stripe in header) becomes **Stop** while the wizard runs.
+@MainActor
+private struct VehicleInspectorGuidedWizardStartStopHeader: View {
+    @ObservedObject var controller: VehicleInspectorGuidedWizardController
+    @ObservedObject private var fleetRecipeRunner = FleetRecipeRunner.shared
+    let vehicle: FleetVehicleModel
+    let calibrationItems: [FleetCalibrationItem]
+    let recipeFleetLink: FleetLinkService?
+    let isLiveMissionRecipeLocked: Bool
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
+    private var vid: String { vehicle.data.vehicleID }
+
+    private var startDisabled: Bool {
+        if controller.isActive { return false }
+        if recipeFleetLink == nil { return true }
+        return fleetRecipeRunner.hasActiveRun(forVehicleID: vid)
+    }
+
+    var body: some View {
+        if controller.isActive {
+            GuardianThemedButton(
+                title: "Stop",
+                accent: .danger,
+                surface: .solid,
+                size: .small,
+                shape: .cornered,
+                action: {
+                    controller.stop(vehicleID: vid, fleetLink: recipeFleetLink, silent: false)
+                }
+            )
+            .guardianPointerOnHover()
+            .help("End the guided wizard and cancel any running catalogue procedure for this vehicle.")
+        } else {
+            Button {
+                controller.start(
+                    vehicle: vehicle,
+                    calibrationItems: calibrationItems,
+                    recipeFleetLink: recipeFleetLink,
+                    isLiveMissionRecipeLocked: isLiveMissionRecipeLocked
+                )
+            } label: {
+                let stripeWidth = 112 * CGFloat(controller.headerProgress)
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(theme.backgroundRaised)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(GuardianSemanticColors.successStroke.opacity(0.88))
+                        .frame(width: max(0, stripeWidth))
+                        .frame(maxHeight: .infinity)
+                    Text("Start")
+                        .font(GuardianTypography.font(.denseCaption10Semibold))
+                        .foregroundStyle(GuardianSemanticColors.infoForeground)
+                        .frame(maxWidth: .infinity)
+                }
+                .frame(width: 112, height: GuardianChromeSize.small.controlOuterHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(GuardianSemanticColors.infoForeground.opacity(0.45), lineWidth: 1)
+                )
+            }
+            .buttonStyle(GuardianPointerPlainButtonStyle())
+            .guardianPointerOnHover()
+            .disabled(startDisabled)
+            .opacity(startDisabled ? 0.45 : 1)
+            .fixedSize(horizontal: true, vertical: false)
+            .help(
+                startDisabled
+                    ? "Connect the fleet link and ensure no other procedure is running."
+                    : "Start guided calibration for every non-green system that has a parameter-free Calibrate recipe."
+            )
+        }
+    }
+}
+
 // MARK: - System recipe wizard launchers (Stage E)
 
 /// One **Run** control per directory-listed recipe for the selected calibration system. Drives
@@ -639,6 +922,8 @@ private struct SystemRecipeWizardLaunchers: View {
     let vehicle: FleetVehicleModel
     let recipeFleetLink: FleetLinkService?
     let isLiveMissionRecipeLocked: Bool
+    /// When the Vehicle Inspector **guided wizard** is active, manual **Run** rows stay disabled so the wizard owns sequencing.
+    var wizardLocksCatalogueRuns: Bool = false
 
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var toastCenter: ToastCenter
@@ -742,7 +1027,8 @@ private struct SystemRecipeWizardLaunchers: View {
         let needsParams = !descriptor.parameters.isEmpty
         let liveLocked = descriptor.vehicleInspectorLaunchBlockedDuringLiveMission(isVehicleInLiveMission: isLiveMissionRecipeLocked)
         let noLink = recipeFleetLink == nil
-        let disabled = (busy && !isThisRun) || needsParams || liveLocked || noLink
+        let wizardLock = wizardLocksCatalogueRuns && !isThisRun
+        let disabled = (busy && !isThisRun) || needsParams || liveLocked || noLink || wizardLock
 
         return HStack(alignment: .top, spacing: GuardianSpacing.sm) {
             RoundedRectangle(cornerRadius: 4, style: .continuous)
@@ -768,6 +1054,11 @@ private struct SystemRecipeWizardLaunchers: View {
                     Text("Locked — this vehicle’s stream is in an active Mission Control run (matches the Recipe locked header).")
                         .font(GuardianTypography.font(.denseCaption10Semibold))
                         .foregroundStyle(GuardianSemanticColors.warningStroke)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if wizardLock {
+                    Text("The guided calibration wizard is running. Use Wait and Continue in the panel above, or tap Stop in the header.")
+                        .font(GuardianTypography.font(.denseCaption10Semibold))
+                        .foregroundStyle(GuardianSemanticColors.infoForeground)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -1498,9 +1789,12 @@ struct LiveVehicleCalibrationView: View {
     let fallback: FleetVehicleModel?
     var isLiveMissionRecipeLocked: Bool = false
 
+    @StateObject private var guidedWizardEmbedStub = VehicleInspectorGuidedWizardController()
+
     var body: some View {
         VehicleCalibrationView(
             vehicle: resolvedVehicle,
+            guidedWizard: guidedWizardEmbedStub,
             recipeFleetLink: fleetLink,
             isLiveMissionRecipeLocked: isLiveMissionRecipeLocked
         )
@@ -1550,6 +1844,8 @@ struct VehicleCalibrationModal: View {
     private let onClose: (() -> Void)?
 
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var toastCenter: ToastCenter
+    @StateObject private var vehicleInspectorGuidedWizard = VehicleInspectorGuidedWizardController()
     @State private var isRunningPreflight = false
     @State private var activeTab: InspectorTab = .calibration
 
@@ -1620,6 +1916,13 @@ struct VehicleCalibrationModal: View {
                 .frame(width: 220)
 
                 if activeTab == .calibration {
+                    VehicleInspectorGuidedWizardStartStopHeader(
+                        controller: vehicleInspectorGuidedWizard,
+                        vehicle: resolvedVehicle,
+                        calibrationItems: resolvedVehicle.collections.calibration.items,
+                        recipeFleetLink: fleetLink,
+                        isLiveMissionRecipeLocked: isVehicleInLiveMission
+                    )
                     preflightHeaderButton
                 }
 
@@ -1639,6 +1942,7 @@ struct VehicleCalibrationModal: View {
                     case .calibration:
                         VehicleCalibrationView(
                             vehicle: resolvedVehicle,
+                            guidedWizard: vehicleInspectorGuidedWizard,
                             recipeFleetLink: fleetLink,
                             isLiveMissionRecipeLocked: isVehicleInLiveMission,
                             preflightBanner: {
@@ -1660,6 +1964,12 @@ struct VehicleCalibrationModal: View {
             }
         )
         .frame(minWidth: 880, idealWidth: 900, maxWidth: 920, minHeight: 620, idealHeight: 680, maxHeight: 720)
+        .onAppear {
+            vehicleInspectorGuidedWizard.attachToastCenter(toastCenter)
+        }
+        .onDisappear {
+            vehicleInspectorGuidedWizard.stop(vehicleID: vehicleID, fleetLink: fleetLink, silent: true)
+        }
     }
 
     @ViewBuilder

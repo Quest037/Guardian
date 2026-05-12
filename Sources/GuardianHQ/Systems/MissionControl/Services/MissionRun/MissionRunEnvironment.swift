@@ -36,7 +36,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     private(set) var rosterRoleResolutionsByDeviceID: [UUID: ResolvedRosterRole] = [:]
 
     /// Live **mission points** envelope for this run (rally / extraction / …): seeded from the mission template,
-    /// then mutated by operator / MRE / plugins without rewriting the saved ``Mission`` document (see ``MissionPointsTodo.md`` §1.2).
+    /// then mutated by operator / MRE / plugins without rewriting the saved ``Mission`` document (see README **Mission template points**).
     ///
     /// While ``status`` is ``MissionRunStatus/setup``, ``updateTemplate(_:)`` re-syncs from ``Mission/missionPoints`` so
     /// authoring changes flow in. After the run leaves setup, this array is **not** replaced from the template—only
@@ -72,6 +72,13 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
 
     /// Operator triage terminal state for a task (``.aborted`` / ``.completed``). ``deriveMissionTaskState`` returns this verbatim so refresh cannot override the operator’s choice.
     @Published private(set) var operatorTriageMarkedMissionTaskStateByTaskID: [UUID: MissionTaskState] = [:]
+
+    /// Optional **floating** reserve **slots** per task (MCS-only run envelope; not persisted on ``Mission`` templates).
+    /// See **README.md** → **Floating reserve pool (Mission Control run)**.
+    @Published private(set) var reservePoolByTaskID: [UUID: MissionRunReservePool] = [:]
+
+    /// Fleet vehicles (``FleetMissionVehicleToken/storageKey``) the operator has **written off** for reserve-pool selection for this run — **airframe** state, not slot state.
+    @Published private(set) var writtenOffFleetVehicleStorageKeysForReservePool: Set<String> = []
 
     /// Task-scoped graceful wind-down scheduled for the next shared autopilot cycle boundary (see scheduling APIs).
     @Published private(set) var pendingMissionTaskGracefulWindDownKindByTaskID: [UUID: MissionRunMissionTaskGracefulPendingKind] = [:]
@@ -499,11 +506,293 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             missionName = mission.name
             syncRosterRoleResolutions(from: mission)
             syncRuntimeMissionPointsFromTemplate(mission, reason: .templateRefresh)
+            pruneReservePoolsToMatchTasks(in: mission)
         } else {
             rosterRoleResolutionsByDeviceID = [:]
             runtimeMissionPoints = []
+            reservePoolByTaskID = [:]
+            writtenOffFleetVehicleStorageKeysForReservePool = []
         }
         refreshDerivedTaskStates()
+    }
+
+    // MARK: - Floating reserve pool (MCS / MRE)
+
+    func setReservePool(_ pool: MissionRunReservePool, forTaskID taskID: UUID) {
+        var next = reservePoolByTaskID
+        next[taskID] = pool
+        reservePoolByTaskID = next
+    }
+
+    func clearReservePool(forTaskID taskID: UUID) {
+        var next = reservePoolByTaskID
+        next.removeValue(forKey: taskID)
+        reservePoolByTaskID = next
+    }
+
+    /// Appends one **slot** to the task’s pool without rewriting unrelated slots. Returns the slot’s stable ``MissionRunReservePoolSlot/id``.
+    @discardableResult
+    func appendReservePoolSlot(_ slot: MissionRunReservePoolSlot, forTaskID taskID: UUID) -> UUID {
+        var pool = reservePool(forTaskID: taskID)
+        pool.entries.append(slot)
+        var next = reservePoolByTaskID
+        next[taskID] = pool
+        reservePoolByTaskID = next
+        return slot.id
+    }
+
+    /// Removes the slot with ``slotID`` from the task’s pool. Drops the task key when the pool becomes empty.
+    @discardableResult
+    func removeReservePoolSlot(id slotID: UUID, forTaskID taskID: UUID) -> Bool {
+        var pool = reservePool(forTaskID: taskID)
+        let before = pool.entries.count
+        pool.entries.removeAll { $0.id == slotID }
+        guard pool.entries.count != before else { return false }
+        var next = reservePoolByTaskID
+        if pool.entries.isEmpty {
+            next.removeValue(forKey: taskID)
+        } else {
+            next[taskID] = pool
+        }
+        reservePoolByTaskID = next
+        return true
+    }
+
+    /// Replaces the slot keyed by ``slotID`` in place (stable id). Payload is taken from ``replacement`` except **id**, which stays ``slotID``.
+    @discardableResult
+    func replaceReservePoolSlot(id slotID: UUID, forTaskID taskID: UUID, with replacement: MissionRunReservePoolSlot) -> Bool {
+        var pool = reservePool(forTaskID: taskID)
+        guard let idx = pool.entries.firstIndex(where: { $0.id == slotID }) else { return false }
+        pool.entries[idx] = MissionRunReservePoolSlot(
+            id: slotID,
+            label: replacement.label,
+            attachedFleetVehicleToken: replacement.attachedFleetVehicleToken,
+            attachedDevice: replacement.attachedDevice
+        )
+        var next = reservePoolByTaskID
+        next[taskID] = pool
+        reservePoolByTaskID = next
+        return true
+    }
+
+    func reservePool(forTaskID taskID: UUID) -> MissionRunReservePool {
+        reservePoolByTaskID[taskID] ?? MissionRunReservePool()
+    }
+
+    /// `true` when any floating reserve pool berth on this run holds this fleet vehicle storage key (trimmed; empty / whitespace-only is never held).
+    func reservePoolContainsFleetVehicleStorageKey(_ storageKey: String) -> Bool {
+        let key = storageKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return false }
+        for (_, pool) in reservePoolByTaskID {
+            for slot in pool.entries {
+                let tok = (slot.attachedFleetVehicleToken ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if tok == key { return true }
+            }
+        }
+        return false
+    }
+
+    /// Filled reserve **slots** MRE may choose from on ``taskID``: has binding, fleet token not run-written-off, and when
+    /// ``fleetLink`` + ``sitl`` are attached, the bound vehicle must resolve and pass the same **lifecycle + battery** gate
+    /// as ``returnAssignmentToReservePool`` (``FleetVehicleOperationalModel/qualifiesForMissionRunReservePoolOperationalDraw``).
+    /// Legacy text-only slots stay eligible whenever they have a non-empty device string. If services are not attached yet,
+    /// only binding + written-off rules apply (MCS setup before link).
+    func availableReservePoolEntries(forTaskID taskID: UUID) -> [MissionRunReservePoolEntry] {
+        reservePool(forTaskID: taskID).entries.filter { slot in
+            isReservePoolSlotEligibleForRandomPick(slot) && passesReservePoolSlotOperationalDrawGate(slot)
+        }
+    }
+
+    /// Marks a **vehicle** (fleet storage key) as unusable for reserve-pool draws until cleared.
+    func markFleetVehicleWrittenOffForReservePool(storageKey: String) {
+        let key = storageKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+        var next = writtenOffFleetVehicleStorageKeysForReservePool
+        next.insert(key)
+        writtenOffFleetVehicleStorageKeysForReservePool = next
+    }
+
+    /// Clears run-level reserve-pool written-off for a fleet storage key (e.g. after mistaken mark).
+    func clearFleetVehicleWrittenOffForReservePool(storageKey: String) {
+        let key = storageKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+        var next = writtenOffFleetVehicleStorageKeysForReservePool
+        next.remove(key)
+        writtenOffFleetVehicleStorageKeysForReservePool = next
+    }
+
+    func isFleetVehicleWrittenOffForReservePool(storageKey: String) -> Bool {
+        writtenOffFleetVehicleStorageKeysForReservePool.contains(storageKey.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// Copies a squad ``MissionRunAssignment`` binding into the task’s floating reserve **pool** when policy allows.
+    ///
+    /// **Legacy** text-only assignments skip fleet hub checks. **Fleet** assignments require ``FleetLinkService`` and ``SitlService``,
+    /// a resolved stream id, ``VehicleLifecycleStage/live``, and non-critical battery band (see ``FleetVehicleOperationalModel/BatterySummary/trafficBand``).
+    /// If the pool already holds a slot with the same ``attachedFleetVehicleToken``, that row is **updated** instead of appending.
+    @discardableResult
+    func returnAssignmentToReservePool(
+        _ assignment: MissionRunAssignment,
+        forTaskID taskID: UUID
+    ) -> MissionRunReservePoolReturnAssignmentOutcome {
+        guard assignment.hasFleetOrLegacyAssignment else { return .rejectedNoBinding }
+        let payload = missionRunReservePoolSlot(from: assignment)
+        guard let fleetKey = assignment.attachedFleetVehicleToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !fleetKey.isEmpty
+        else {
+            return commitReservePoolSlotFromAssignment(payload, mergeFleetStorageKey: nil, taskID: taskID)
+        }
+        if isFleetVehicleWrittenOffForReservePool(storageKey: fleetKey) {
+            return .rejectedFleetVehicleWrittenOff(storageKey: fleetKey)
+        }
+        guard let fleetLink, let sitl else { return .rejectedFleetContextUnavailable }
+        guard let token = FleetMissionVehicleToken(storageKey: fleetKey) else { return .rejectedFleetVehicleUnresolved }
+        guard let vehicleID = resolvedFleetStreamVehicleID(token: token, fleetLink: fleetLink, sitl: sitl) else {
+            return .rejectedFleetVehicleUnresolved
+        }
+        let operational = operationalTelemetrySummaryForReservePool(vehicleID: vehicleID, fleetLink: fleetLink)
+        if let rejection = operational.reservePoolReturnFromAssignmentRejection() {
+            return rejection
+        }
+        return commitReservePoolSlotFromAssignment(payload, mergeFleetStorageKey: fleetKey, taskID: taskID)
+    }
+
+    /// Moves a **uniformly random** eligible floating reserve **pool** binding onto the roster slot ``assignmentID`` for ``taskID``,
+    /// then returns the prior roster binding to the pool when present and ``returnAssignmentToReservePool`` accepts it.
+    ///
+    /// Eligibility matches ``availableReservePoolEntries(forTaskID:)``. Emits ``MissionRunLogTemplateKey/floatingReserveSwapEngaged`` on success.
+    @discardableResult
+    func swapRosterAssignmentWithRandomFloatingReserve(
+        assignmentID: UUID,
+        taskID: UUID,
+        triggerSource: String = "operator.missionControlSetup"
+    ) -> MissionRunFloatingReserveSwapOutcome {
+        guard let idx = assignments.firstIndex(where: { $0.id == assignmentID }) else {
+            return .assignmentNotFound
+        }
+        guard assignmentsBoundToMissionTask(taskID: taskID).contains(where: { $0.id == assignmentID }) else {
+            return .assignmentNotBoundToTask
+        }
+
+        let current = assignments[idx]
+        let baseEligible = availableReservePoolEntries(forTaskID: taskID)
+        var eligible = baseEligible
+        if let t = current.attachedFleetVehicleToken?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {
+            eligible = eligible.filter {
+                ($0.attachedFleetVehicleToken ?? "").trimmingCharacters(in: .whitespacesAndNewlines) != t
+            }
+        }
+        guard let pick = eligible.randomElement() else {
+            if baseEligible.isEmpty { return .noEligiblePoolSlots }
+            return .identicalFleetBindingNoOp
+        }
+
+        let pickSnap = pick
+        let poolSlotID = pickSnap.id
+        let oldAssignment = current
+
+        var returnOutcome: MissionRunReservePoolReturnAssignmentOutcome?
+        if oldAssignment.hasFleetOrLegacyAssignment {
+            let out = returnAssignmentToReservePool(oldAssignment, forTaskID: taskID)
+            switch out {
+            case .appended, .mergedExisting:
+                returnOutcome = out
+            default:
+                return .returnRejected(out)
+            }
+        }
+
+        let cleared = MissionRunReservePoolSlot(
+            id: poolSlotID,
+            label: pickSnap.label,
+            attachedFleetVehicleToken: nil,
+            attachedDevice: ""
+        )
+        guard replaceReservePoolSlot(id: poolSlotID, forTaskID: taskID, with: cleared) else {
+            return .poolClearFailed
+        }
+
+        var nextAssignments = assignments
+        nextAssignments[idx].attachedFleetVehicleToken = pickSnap.attachedFleetVehicleToken
+        nextAssignments[idx].attachedDevice = pickSnap.attachedDevice
+        assignments = nextAssignments
+
+        let taskLabel = template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name
+        systems.logging.appendLogEvent(
+            level: .info,
+            taskID: taskID,
+            taskLabel: taskLabel,
+            speaker: .operator(displayName: nil),
+            templateKey: MissionRunLogTemplateKey.floatingReserveSwapEngaged,
+            templateParams: [
+                "slot": oldAssignment.slotName,
+                "slotID": assignmentID.uuidString,
+                "poolSlotID": poolSlotID.uuidString,
+                "source": triggerSource,
+            ]
+        )
+
+        refreshDerivedTaskStates()
+        return .success(usedPoolSlotID: poolSlotID, returnedPriorBindingToPool: returnOutcome)
+    }
+
+    private func missionRunReservePoolSlot(from assignment: MissionRunAssignment) -> MissionRunReservePoolSlot {
+        MissionRunReservePoolSlot(
+            label: assignment.slotName,
+            attachedFleetVehicleToken: assignment.attachedFleetVehicleToken,
+            attachedDevice: assignment.attachedDevice
+        )
+    }
+
+    private func operationalTelemetrySummaryForReservePool(
+        vehicleID: String,
+        fleetLink: FleetLinkService
+    ) -> FleetVehicleOperationalModel {
+        if let model = fleetLink.vehicleModel(forVehicleID: vehicleID) {
+            return model.collections.operational
+        }
+        let lifecycle = fleetLink.vehicleStatus(forVehicleID: vehicleID) ?? VehicleLifecycleStatus(stage: .awaitingTelemetry)
+        let hub = fleetLink.hubTelemetryByVehicleID[vehicleID]
+        return FleetVehicleOperationalModel(hub: hub, lifecycleStatus: lifecycle)
+    }
+
+    private func commitReservePoolSlotFromAssignment(
+        _ payload: MissionRunReservePoolSlot,
+        mergeFleetStorageKey: String?,
+        taskID: UUID
+    ) -> MissionRunReservePoolReturnAssignmentOutcome {
+        var pool = reservePool(forTaskID: taskID)
+        let outcome = pool.applyReservePoolReturnPayload(payload, mergeFleetStorageKey: mergeFleetStorageKey)
+        var next = reservePoolByTaskID
+        next[taskID] = pool
+        reservePoolByTaskID = next
+        return outcome
+    }
+
+    private func passesReservePoolSlotOperationalDrawGate(_ slot: MissionRunReservePoolSlot) -> Bool {
+        guard let key = slot.attachedFleetVehicleToken?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else {
+            return true
+        }
+        guard let fleetLink, let sitl else { return true }
+        guard let token = FleetMissionVehicleToken(storageKey: key) else { return false }
+        guard let vehicleID = resolvedFleetStreamVehicleID(token: token, fleetLink: fleetLink, sitl: sitl) else {
+            return false
+        }
+        let operational = operationalTelemetrySummaryForReservePool(vehicleID: vehicleID, fleetLink: fleetLink)
+        return operational.qualifiesForMissionRunReservePoolOperationalDraw
+    }
+
+    private func isReservePoolSlotEligibleForRandomPick(_ slot: MissionRunReservePoolSlot) -> Bool {
+        guard slot.hasFleetOrLegacyBinding else { return false }
+        if let tok = slot.attachedFleetVehicleToken, !tok.isEmpty {
+            return !writtenOffFleetVehicleStorageKeysForReservePool.contains(tok)
+        }
+        return true
+    }
+
+    private func pruneReservePoolsToMatchTasks(in mission: Mission) {
+        let valid = Set(mission.routeMacro.tasks.map(\.id))
+        reservePoolByTaskID = reservePoolByTaskID.filter { valid.contains($0.key) }
     }
 
     private enum RuntimeMissionPointsSyncReason {
@@ -892,6 +1181,42 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         cyclesCompleted = max(0, count)
     }
 
+    /// Latest hub snapshot for abort-time move-to-point planning (nil without link services or a resolved stream id).
+    func abortPlanningHubTelemetry(for assignment: MissionRunAssignment) -> FleetHubVehicleTelemetry? {
+        guard let fleetLink, let sitl else { return nil }
+        guard let vehicleID = resolvedFleetStreamVehicleID(
+            assignment: assignment,
+            fleetLink: fleetLink,
+            sitl: sitl
+        ) else { return nil }
+        return fleetLink.hubTelemetry(forVehicleID: vehicleID)
+    }
+
+}
+
+// MARK: - Paladin start preflight (roster + floating reserve pool)
+
+extension MissionRunEnvironment {
+    /// Deterministic Paladin start preflight order: **all** roster assignments (same order as ``assignments``), then **filled** floating reserve pool slots (task id ascending, then pool entry order).
+    ///
+    /// Empty pool slots are omitted — they are not probed. Roster rows without a binding still appear so the sheet can show the same **no fleet vehicle** failure as before.
+    func orderedStartRunPreflightProbeTargets() -> [(identity: MissionRunPreflightSlotIdentity, displayTitle: String, assignment: MissionRunAssignment)] {
+        var rows: [(identity: MissionRunPreflightSlotIdentity, displayTitle: String, assignment: MissionRunAssignment)] = []
+        for assignment in assignments {
+            rows.append((.rosterAssignment(assignment.id), assignment.slotName, assignment))
+        }
+        let taskNameByID = Dictionary(uniqueKeysWithValues: (template?.routeMacro.tasks ?? []).map { ($0.id, $0.name) })
+        for taskID in reservePoolByTaskID.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
+            guard let pool = reservePoolByTaskID[taskID] else { continue }
+            let taskHeading = taskNameByID[taskID] ?? "Task"
+            for slot in pool.entries where slot.hasFleetOrLegacyBinding {
+                let synthetic = MissionRunAssignment.syntheticForReservePool(slot: slot)
+                let title = "\(taskHeading) reserve · \(slot.label)"
+                rows.append((.floatingReservePool(taskID: taskID, slotID: slot.id), title, synthetic))
+            }
+        }
+        return rows
+    }
 }
 
 // MARK: - Log template keys (task-force state)
@@ -905,5 +1230,7 @@ extension MissionRunLogTemplateKey {
     static let missionPointRuntimeCreated = "missioncontrol.mre.point.runtime_created"
     static let missionPointRuntimeUpdated = "missioncontrol.mre.point.runtime_updated"
     static let missionPointRuntimeClosedChanged = "missioncontrol.mre.point.runtime_closed_changed"
+    /// Floating reserve drawn into a roster slot (operator or automation); ``templateParams``: `slot`, `slotID`, `poolSlotID`, `source`.
+    static let floatingReserveSwapEngaged = "missioncontrol.mre.reserve.swap_engaged"
 }
 

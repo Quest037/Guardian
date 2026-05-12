@@ -47,7 +47,9 @@ enum MissionRunPolicyEditScopeCategory: String, CaseIterable, Hashable {
     case abortPolicy
     /// Mission-wide ``RouteRules/missionCompletePreferenceChain`` and per-task ``MissionTask/completePreferenceChainOverride``.
     case completePolicy
-    /// Per-assignment ``MissionRunAssignmentPolicies`` (abort / complete).
+    /// Mission-wide ``RouteRules/missionReserveSwapPreferenceChain`` and per-task ``MissionTask/reserveSwapPreferenceChainOverride``.
+    case reserveSwapPolicy
+    /// Per-assignment ``MissionRunAssignmentPolicies`` (abort / complete / reserve swap).
     case assignmentPolicy
     /// Run-level ``MissionRunEngagementRules``.
     case engagementRules
@@ -57,11 +59,14 @@ enum MissionRunPolicyEditScopeCategory: String, CaseIterable, Hashable {
 enum MissionRunPolicyEditScope: Equatable, Hashable {
     case missionAbortPolicy
     case missionCompletePolicy
+    case missionReserveSwapPolicy
     case missionEngagementRules
     case taskAbortPolicyOverride(taskID: UUID)
     case taskCompletePolicyOverride(taskID: UUID)
+    case taskReserveSwapPolicyOverride(taskID: UUID)
     case assignmentAbortPolicy(assignmentID: UUID)
     case assignmentCompletePolicy(assignmentID: UUID)
+    case assignmentReserveSwapPolicy(assignmentID: UUID)
 
     var category: MissionRunPolicyEditScopeCategory {
         switch self {
@@ -69,7 +74,9 @@ enum MissionRunPolicyEditScope: Equatable, Hashable {
             return .abortPolicy
         case .missionCompletePolicy, .taskCompletePolicyOverride:
             return .completePolicy
-        case .assignmentAbortPolicy, .assignmentCompletePolicy:
+        case .missionReserveSwapPolicy, .taskReserveSwapPolicyOverride:
+            return .reserveSwapPolicy
+        case .assignmentAbortPolicy, .assignmentCompletePolicy, .assignmentReserveSwapPolicy:
             return .assignmentPolicy
         case .missionEngagementRules:
             return .engagementRules

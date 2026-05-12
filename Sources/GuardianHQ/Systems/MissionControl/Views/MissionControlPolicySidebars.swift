@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - Task settings sidebar (MC-S task card cog + MC-R triage cog)
 
-/// Per-task **Abort** / **Complete** policy overrides. All edits route through
+/// Per-task **Abort** / **Complete** / **Reserve swap** policy overrides. All edits route through
 /// ``MissionRunEnvironment`` policy APIs as the local operator so log lines render
 /// `[Operator][<callsign>]` and persist via ``MissionRunEnvironment/missionTemplatePersister``.
 ///
@@ -51,6 +51,13 @@ struct MissionRunTaskPolicyOverridesSidebarView: View {
                     overrideChain: completeBinding,
                     inheritedChain: inheritedTaskCompleteChain
                 )
+                Text("Reserve swap preference chain")
+                    .font(GuardianTypography.font(.disclosureRowTitle))
+                    .foregroundStyle(theme.textPrimary)
+                MissionRunOptionalPreferentialReserveSwapPolicyEditor(
+                    overrideChain: reserveSwapBinding,
+                    inheritedChain: inheritedTaskReserveSwapChain
+                )
             }
             .padding(.horizontal, GuardianSpacing.md)
             .padding(.vertical, GuardianSpacing.cardBodyInset)
@@ -69,6 +76,10 @@ struct MissionRunTaskPolicyOverridesSidebarView: View {
 
     private var inheritedTaskCompleteChain: [MissionRunCompleteTactic] {
         MissionRunPolicyResolution.missionTemplateCompletePreferenceChain(mission: missionSnapshot)
+    }
+
+    private var inheritedTaskReserveSwapChain: [MissionRunReserveSwapTactic] {
+        MissionRunPolicyResolution.missionTemplateReserveSwapPreferenceChain(mission: missionSnapshot)
     }
 
     private var abortBinding: Binding<[MissionRunAbortTactic]?> {
@@ -95,6 +106,18 @@ struct MissionRunTaskPolicyOverridesSidebarView: View {
         )
     }
 
+    private var reserveSwapBinding: Binding<[MissionRunReserveSwapTactic]?> {
+        Binding(
+            get: {
+                resolvedTask()?.reserveSwapPreferenceChainOverride
+            },
+            set: { newValue in
+                _ = run.updateTaskReserveSwapPreferenceChainOverride(taskID: taskId, newValue, credential: credential)
+                onChange()
+            }
+        )
+    }
+
     /// Prefer the live MRE template (kept in sync via ``MissionRunEnvironment/missionTemplatePersister``);
     /// fall back to the store snapshot when the run hasn't loaded its template yet.
     private func resolvedTask() -> MissionTask? {
@@ -109,7 +132,7 @@ struct MissionRunTaskPolicyOverridesSidebarView: View {
 
 // MARK: - Slot settings sidebar (MC-S roster card cog)
 
-/// Per-assignment **Abort** / **Complete** policy overrides. Same operator-credentialed routing as
+/// Per-assignment **Abort** / **Complete** / **Reserve swap** policy overrides. Same operator-credentialed routing as
 /// ``MissionRunTaskPolicyOverridesSidebarView`` so MC-S slot edits log + permission-check identically.
 struct MissionRunAssignmentPolicyOverridesSidebarView: View {
     @ObservedObject var run: MissionRunEnvironment
@@ -152,6 +175,13 @@ struct MissionRunAssignmentPolicyOverridesSidebarView: View {
                     overrideChain: completeBinding,
                     inheritedChain: inheritedSlotCompleteChain
                 )
+                Text("Reserve swap preference chain")
+                    .font(GuardianTypography.font(.disclosureRowTitle))
+                    .foregroundStyle(theme.textPrimary)
+                MissionRunOptionalPreferentialReserveSwapPolicyEditor(
+                    overrideChain: reserveSwapBinding,
+                    inheritedChain: inheritedSlotReserveSwapChain
+                )
             }
             .padding(.horizontal, GuardianSpacing.md)
             .padding(.vertical, GuardianSpacing.cardBodyInset)
@@ -182,6 +212,15 @@ struct MissionRunAssignmentPolicyOverridesSidebarView: View {
         return MissionRunPolicyResolution.inheritedCompletePreferenceChainForSlot(assignment: assignment, mission: mission)
     }
 
+    private var inheritedSlotReserveSwapChain: [MissionRunReserveSwapTactic] {
+        guard let mission = missionSnapshot,
+              let assignment = run.assignments.first(where: { $0.id == assignmentId })
+        else {
+            return MissionRunReserveSwapTactic.defaultMissionReserveSwapPreferenceChain
+        }
+        return MissionRunPolicyResolution.inheritedReserveSwapPreferenceChainForSlot(assignment: assignment, mission: mission)
+    }
+
     private var abortBinding: Binding<[MissionRunAbortTactic]?> {
         Binding(
             get: {
@@ -201,6 +240,18 @@ struct MissionRunAssignmentPolicyOverridesSidebarView: View {
             },
             set: { newValue in
                 _ = run.updateAssignmentCompletePreferenceChain(assignmentID: assignmentId, newValue, credential: credential)
+                onChange()
+            }
+        )
+    }
+
+    private var reserveSwapBinding: Binding<[MissionRunReserveSwapTactic]?> {
+        Binding(
+            get: {
+                run.assignments.first(where: { $0.id == assignmentId })?.policies.reserveSwapPreferenceChain
+            },
+            set: { newValue in
+                _ = run.updateAssignmentReserveSwapPreferenceChain(assignmentID: assignmentId, newValue, credential: credential)
                 onChange()
             }
         )

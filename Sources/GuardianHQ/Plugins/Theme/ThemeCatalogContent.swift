@@ -375,7 +375,7 @@ struct ThemeCatalogContent: View {
             VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
                 Text(
                     "App-wide drawers use AppDrawer and View.withAppDrawer() on the window root above the entire RootView "
-                        + "(sidebar, top bar, and feature content). Ephemeral toasts use View.withToasts() after the confirm host and sit top-trailing over the top bar (Simulate + appearance). This is not the main navigation sidebar in RootView. "
+                        + "(sidebar, top bar, and feature content). Sticky operator prompt chips use View.withOperatorPromptPersistentToasts() after the confirm host (top-leading in the content column, below the top bar). Ephemeral toasts use View.withToasts() after that and sit top-trailing over the top bar (Simulate + appearance). This is not the main navigation sidebar in RootView. "
                         + "Do not hand-roll ZStack scrims and transition(.move(edge:)) for the same trailing-panel pattern. "
                         + "When present(title:) supplies a title, the host uses AppDrawerChrome (below); use title: nil only when your content already includes a full custom header."
                 )
@@ -455,12 +455,35 @@ struct ThemeCatalogContent: View {
             GuardianPanelSectionTitle(title: "Window chrome stack (Theme 12.1)")
             VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
                 Text(
-                    "Modifier order on the window root matches GuardianHQApp: RootView, then withAppDrawer(), then withGuardianConfirmOverlayHost(), then withToasts(). "
-                        + "ToastHost overlays the full window top-trailing (aligned with the top-bar controls), above the drawer and blocking confirms."
+                    "Modifier order on the window root matches GuardianHQApp: RootView, then withAppDrawer(), then withGuardianConfirmOverlayHost(), then withOperatorPromptPersistentToasts(), then withToasts(). "
+                        + "OperatorPromptPersistentToastHost draws top-leading sticky operator prompt chips in the content column above blocking confirms; ToastHost overlays top-trailing over the top bar, above the persistent operator layer."
                 )
                 .font(GuardianTypography.font(.denseCaption12Regular))
                 .foregroundStyle(theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+                HStack(alignment: .center, spacing: GuardianSpacing.sm) {
+                    Text("Mission run / MC stack operator prompt card fill (``OperatorPromptChrome``)")
+                        .font(GuardianTypography.font(.denseCaption10Semibold))
+                        .foregroundStyle(theme.textTertiary)
+                    if let (r, g, b) = OperatorPromptHexRGB.rgbUInt8Components(
+                        hex6: OperatorPromptChrome.missionRunStackPromptCardBackgroundHex6
+                    ) {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(
+                                Color(
+                                    red: Double(r) / 255.0,
+                                    green: Double(g) / 255.0,
+                                    blue: Double(b) / 255.0
+                                )
+                            )
+                            .frame(width: 56, height: 32)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .strokeBorder(theme.borderSubtle, lineWidth: 1)
+                            )
+                    }
+                }
 
                 Text("Back → front (same window)")
                     .font(GuardianTypography.font(.formFieldLabel))
@@ -470,7 +493,8 @@ struct ThemeCatalogContent: View {
                     chromeStackRow(depth: "1", label: "RootView — nav rail, top bar, feature content")
                     chromeStackRow(depth: "2", label: "AppDrawer — full-window scrim + trailing panel")
                     chromeStackRow(depth: "3", label: "Blocking confirm — GuardianConfirmOverlayHost")
-                    chromeStackRow(depth: "4", label: "Toasts — ToastHost (top-trailing over top bar)")
+                    chromeStackRow(depth: "4", label: "Persistent operator toasts — top-leading sticky chips (content column)")
+                    chromeStackRow(depth: "5", label: "Ephemeral toasts — ToastHost (top-trailing over top bar)")
                 }
                 .padding(GuardianSpacing.sm)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -502,7 +526,7 @@ struct ThemeCatalogContent: View {
             }
             .guardianInsetCard()
 
-            ThemeAPICaption("GuardianLayoutPatterns · GuardianFeedbackSeverity")
+            ThemeAPICaption("GuardianLayoutPatterns · GuardianFeedbackSeverity · OperatorPromptChrome · OperatorPromptHexRGB · OperatorPromptDisplaySource")
         }
     }
 
@@ -1602,7 +1626,7 @@ struct ThemeCatalogContent: View {
             }
             .guardianInsetCard()
 
-            ThemeAPICaption("ToastCenter · GuardianFeedbackSeverity (ToastStyle) · ToastHost")
+            ThemeAPICaption("ToastCenter · GuardianFeedbackSeverity (ToastStyle) · ToastHost · OperatorPromptPersistentToastHost")
         }
     }
 

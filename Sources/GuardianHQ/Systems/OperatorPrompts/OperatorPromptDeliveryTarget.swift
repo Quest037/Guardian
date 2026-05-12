@@ -63,7 +63,7 @@ enum OperatorPromptDeliveryTarget: Equatable, Hashable, Sendable {
     /// escalations don't leak into the wizard chrome).
     case vehicleInspectorWizardPanel(vehicleID: String, recipeRunID: FleetRecipeRunID? = nil)
 
-    /// Sticky corner toast that does not auto-dismiss. Distinct from
+    /// Sticky in-app toast (top-leading in the primary content column) that does not auto-dismiss. Distinct from
     /// ``ToastCenter`` (ephemeral). The toast carries title + severity; clicking
     /// it opens the prompt in the inbox so the operator can resolve it without
     /// fishing through the drawer.

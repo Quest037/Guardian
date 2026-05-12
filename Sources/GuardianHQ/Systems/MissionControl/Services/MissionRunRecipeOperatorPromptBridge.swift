@@ -1,19 +1,16 @@
 import Foundation
 
 /// Presents MRE-driven recipe escalations on the Mission Control Run (MC-R) surface using
-/// ``OperatorPromptEvent`` + ``OperatorPromptCenter`` (routing + universal inbox) — **not** the Vehicle Inspector
+/// ``OperatorPromptEvent`` + ``OperatorPromptCenter`` — **not** the Vehicle Inspector
 /// wizard mirror on ``FleetRecipeRunner`` (that UI assumes an open inspector).
 @MainActor
-final class MissionRunRecipeOperatorPromptBridge: ObservableObject {
+final class MissionRunRecipeOperatorPromptBridge {
 
     static let shared = MissionRunRecipeOperatorPromptBridge()
 
-    /// Active operator prompts for a run (multiple slots can escalate in parallel).
-    @Published private(set) var activePromptsByMissionRunID: [UUID: [OperatorPromptEvent]] = [:]
-
     private init() {}
 
-    /// Suspend until the operator answers (or timeout / cancellation resolves via the channel).
+    /// Suspend until the operator answers (or timeout / cancellation resolves via the center).
     func awaitMissionRecipeEscalationAnswer(
         missionRunID: UUID,
         assignmentID: UUID,
@@ -52,10 +49,9 @@ final class MissionRunRecipeOperatorPromptBridge: ObservableObject {
             title: nil,
             body: mergedBody,
             severity: nil,
-            contextFacts: slotFacts + aug.extraFacts
+            contextFacts: slotFacts + aug.extraFacts,
+            displaySource: .mre
         )
-        register(event, missionRunID: missionRunID)
-        defer { unregister(promptID: event.id, missionRunID: missionRunID) }
         let answer = await OperatorPromptCenter.shared.awaitAnswer(for: event)
         return answer.verb
     }
@@ -68,20 +64,18 @@ final class MissionRunRecipeOperatorPromptBridge: ObservableObject {
         _ = OperatorPromptCenter.shared.resolveExpiry(for: event)
     }
 
-    func activePrompts(forMissionRunID runID: UUID) -> [OperatorPromptEvent] {
-        activePromptsByMissionRunID[runID] ?? []
-    }
-
     /// Fixed **template reserve** roster row → active primary/wingman swap: Mission Control registers an **MC-R**
-    /// operator engagement prompt when disposition is **ask** / **defer** / **handoff**. **Paladin and other assistants
-    /// are headless** — they never draw UI; the store awaits the operator here. Uses ``OperatorPromptOrigin/mreEngagementAsk``
-    /// with ``MissionRunEngagementAction/swapInReserve`` so routing matches other MRE engagement prompts.
-    func awaitPaladinFixedReserveSwapEngagementConsent(
+    /// operator engagement prompt when disposition is **ask** / **defer** / **handoff**. Headless callers supply
+    /// ``OperatorPromptDisplaySource`` (e.g. ``OperatorPromptDisplaySource/assistant`` from a plugin); Mission Control does not map
+    /// ``MissionRunCommandIssuerKey`` strings to plugins — use ``MissionControlStore/raiseOperatorPromptSwapInReserve`` `operatorPromptDisplaySource`.
+    /// Uses ``OperatorPromptOrigin/mreEngagementAsk`` with ``MissionRunEngagementAction/swapInReserve`` so routing matches other MRE engagement prompts.
+    func awaitFixedReserveSwapEngagementConsent(
         missionRunID: UUID,
         primary: MissionRunAssignment,
         reserve: MissionRunAssignment,
         missionTaskID: UUID,
-        taskName: String
+        taskName: String,
+        displaySource: OperatorPromptDisplaySource
     ) async -> FleetRecipeResumptionVerb {
         let target = OperatorPromptTarget(
             missionRunID: missionRunID,
@@ -100,45 +94,26 @@ final class MissionRunRecipeOperatorPromptBridge: ObservableObject {
                 emphasis: .normal,
                 group: "Identifiers"
             ),
-            OperatorPromptContextFact(
-                label: "Proposal source",
-                value: "Headless assistant (run log speaker: Paladin)",
-                emphasis: .normal,
-                group: "Identifiers"
-            ),
         ]
+        let body: String = {
+            switch displaySource {
+            case .assistant:
+                return "Moving the reserve aircraft bound to “\(reserve.slotName)” onto the active roster slot “\(primary.slotName)”. Confirm only if this matches your intent for this task."
+            case .missionControl, .mre:
+                return "Rules of engagement require your consent before moving the reserve aircraft bound to “\(reserve.slotName)” onto the active roster slot “\(primary.slotName)”. Confirm only if this matches your intent for this task."
+            }
+        }()
         let event = OperatorPromptEvent(
             origin: .mreEngagementAsk(runID: missionRunID, action: .swapInReserve),
+            displaySource: displaySource,
             target: target,
             severity: .warning,
             title: "Swap in reserve?",
-            body: "A headless assistant proposed moving the reserve aircraft bound to “\(reserve.slotName)” onto the active roster slot “\(primary.slotName)”. Confirm only if this matches your intent for this task.",
+            body: body,
             contextFacts: facts,
             allowedVerbs: [.acknowledge, .abort]
         )
-        register(event, missionRunID: missionRunID)
-        defer { unregister(promptID: event.id, missionRunID: missionRunID) }
         let answer = await OperatorPromptCenter.shared.awaitAnswer(for: event)
         return answer.verb
-    }
-
-    private func register(_ event: OperatorPromptEvent, missionRunID: UUID) {
-        var copy = activePromptsByMissionRunID
-        var list = copy[missionRunID] ?? []
-        list.append(event)
-        copy[missionRunID] = list
-        activePromptsByMissionRunID = copy
-    }
-
-    private func unregister(promptID: UUID, missionRunID: UUID) {
-        var copy = activePromptsByMissionRunID
-        guard var list = copy[missionRunID] else { return }
-        list.removeAll { $0.id == promptID }
-        if list.isEmpty {
-            copy.removeValue(forKey: missionRunID)
-        } else {
-            copy[missionRunID] = list
-        }
-        activePromptsByMissionRunID = copy
     }
 }

@@ -9,6 +9,7 @@ struct MissionControlView: View {
     @ObservedObject var fleetLink: FleetLinkService
     @ObservedObject var sitl: SitlService
     @ObservedObject var generalSettings: GeneralSettingsStore
+    @EnvironmentObject private var operatorPromptReviewFocus: OperatorPromptReviewFocusController
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var selectedRunID: UUID?
@@ -48,6 +49,11 @@ struct MissionControlView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.backgroundBase)
+        .onChange(of: operatorPromptReviewFocus.pendingMissionControlRunID) { newRunID in
+            guard let newRunID else { return }
+            selectedRunID = newRunID
+            operatorPromptReviewFocus.consumeMissionControlDrillIn()
+        }
         .sheet(isPresented: $showingAddRunSheet) {
             AddMissionRunSheet(
                 missionStore: missionStore,

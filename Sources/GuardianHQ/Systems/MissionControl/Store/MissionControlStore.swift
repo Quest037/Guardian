@@ -228,6 +228,7 @@ final class MissionControlStore: ObservableObject {
     ) {
         if run.status == .setup {
             compileMissionControlPlan(run: run, mission: mission, fleetVehicles: fleetVehicles)
+            run.systems.executor.synchronizePendingCommandBatchesWithAssignmentFleetTokens()
             return
         }
         run.updateTemplate(mission)
@@ -250,6 +251,7 @@ final class MissionControlStore: ObservableObject {
             ]
         )
         run.refreshDerivedTaskStates()
+        run.systems.executor.synchronizePendingCommandBatchesWithAssignmentFleetTokens()
     }
 
     func ingestFleetMirrorLine(
@@ -343,6 +345,17 @@ final class MissionControlStore: ObservableObject {
             }
         }
         return false
+    }
+
+    /// First mission run id (running / paused / recovery) whose roster resolves `vehicleID` to this bridge stream id.
+    func activeMissionRunIDEngagingVehicle(vehicleID: String, fleetLink: FleetLinkService, sitl: SitlService) -> UUID? {
+        for r in runs where r.status == .running || r.status == .paused || r.status == .recovery {
+            for a in r.assignments {
+                guard let vid = resolvedFleetStreamVehicleID(assignment: a, fleetLink: fleetLink, sitl: sitl) else { continue }
+                if vid == vehicleID { return r.id }
+            }
+        }
+        return nil
     }
 
     private func isVehicleSimulationStream(vehicleID: String, fleetLink: FleetLinkService, sitl: SitlService) -> Bool {
@@ -623,10 +636,12 @@ final class MissionControlStore: ObservableObject {
     }
 
     /// Raises a **fixed template reserve → active primary/wingman** swap through Mission Control when rules of
-    /// engagement require handling; logs structured lines for the **issuer** (e.g. Paladin) either way.
+    /// engagement require handling; logs structured lines for the **issuer** (via `issuerKey` in log params) either way.
     ///
-    /// **Headless assistants** (Paladin has no UI) must use this Mission Control API so swap-in uses the same **MRE**
-    /// roster primitives as operator flows — not a second implementation in a plugin. MC-R chrome, if any, is owned by Mission Control.
+    /// **Headless assistants** must use this Mission Control API so swap-in uses the same **MRE** roster primitives as
+    /// operator flows — not a second implementation in a plugin. Pass ``operatorPromptDisplaySource`` (e.g.
+    /// ``OperatorPromptDisplaySource/assistant`` from the calling plugin) so MC-R operator prompts show correct attribution;
+    /// Mission Control does **not** infer plugin identity from `issuerKey`. MC-R chrome is owned by Mission Control.
     ///
     /// - Returns `true` when the proposal is structurally valid **and** engagement is not ``MissionRunEngagementDisposition/forbidden``.
     ///   For **autonomous** engagement, Mission Control does not register an MC-R engagement prompt — the proposal is logged, a roster commit is attempted
@@ -640,6 +655,7 @@ final class MissionControlStore: ObservableObject {
         primaryAssignmentID: UUID,
         reserveAssignmentID: UUID,
         issuerKey: String,
+        operatorPromptDisplaySource: OperatorPromptDisplaySource = .mre,
         observerToken: UUID
     ) -> Bool {
         guard observerPermissions(for: observerToken)?.contains(.act) == true else { return false }
@@ -654,13 +670,14 @@ final class MissionControlStore: ObservableObject {
         case .failure:
             return false
         case .success(let payload):
-            return Self.raisePaladinReserveSwapAfterValidation(
+            return Self.raiseFixedReserveSwapAfterValidation(
                 store: self,
                 run: run,
                 task: payload.task,
                 primary: payload.primary,
                 reserve: payload.reserve,
-                issuerKey: issuerKey
+                issuerKey: issuerKey,
+                operatorPromptDisplaySource: operatorPromptDisplaySource
             )
         }
     }
@@ -704,6 +721,22 @@ final class MissionControlStore: ObservableObject {
                     fleetVehicles: fleet,
                     planCompileSource: MissionRunReserveSwapPlanRecompilationPolicy.fixedRosterReserveSwapPlanCompileSource
                 )
+                if let vacancyRow = run.assignments.first(where: { $0.id == vacancyAssignmentID }),
+                   let vTok = vacancyRow.attachedFleetVehicleToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !vTok.isEmpty,
+                   let reserveRow = run.assignments.first(where: { $0.id == reserveAssignmentID }) {
+                    let handoffCorrelation = MissionRunReserveRecipeRunnerCorrelation.fixedRosterReserve(
+                        missionRunID: run.id,
+                        missionTaskID: taskID,
+                        vacancyAssignmentID: vacancyAssignmentID,
+                        reserveAssignment: reserveRow,
+                        vehicleID: vTok.replacingOccurrences(of: "|", with: "_")
+                    )
+                    run.beginPostCommitReserveSwapHandoffPipeline(
+                        correlation: handoffCorrelation,
+                        triggerSource: triggerSource
+                    )
+                }
             }
             updateRun(run)
             run.systems.logging.appendLogEvent(
@@ -739,13 +772,14 @@ final class MissionControlStore: ObservableObject {
     }
 
     @discardableResult
-    private static func raisePaladinReserveSwapAfterValidation(
+    private static func raiseFixedReserveSwapAfterValidation(
         store: MissionControlStore,
         run: MissionRunEnvironment,
         task: MissionTask,
         primary: MissionRunAssignment,
         reserve: MissionRunAssignment,
-        issuerKey: String
+        issuerKey: String,
+        operatorPromptDisplaySource: OperatorPromptDisplaySource
     ) -> Bool {
         let tid = task.id
         let logParams: [String: String] = [
@@ -807,12 +841,13 @@ final class MissionControlStore: ObservableObject {
             let paramsSnapshot = logParams
             Task { @MainActor [weak store] in
                 guard let store else { return }
-                let verb = await MissionRunRecipeOperatorPromptBridge.shared.awaitPaladinFixedReserveSwapEngagementConsent(
+                let verb = await MissionRunRecipeOperatorPromptBridge.shared.awaitFixedReserveSwapEngagementConsent(
                     missionRunID: runID,
                     primary: primary,
                     reserve: reserve,
                     missionTaskID: tid,
-                    taskName: taskName
+                    taskName: taskName,
+                    displaySource: operatorPromptDisplaySource
                 )
                 guard let runNow = store.runEnvironment(for: runID) else { return }
                 var resolvedParams = paramsSnapshot

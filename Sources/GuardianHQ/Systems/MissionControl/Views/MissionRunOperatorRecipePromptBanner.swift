@@ -1,14 +1,14 @@
 import SwiftUI
 
 /// MC-R bottom operator prompts for recipe escalations raised by MRE (headless recipe runs).
-/// Uses ``MissionRunRecipeOperatorPromptBridge`` + ``OperatorPromptCenter``; styling aligns with ``GuardianBottomPromptBanner``.
+/// Host registration + lists are owned by ``OperatorPromptCenter``.
 struct MissionRunOperatorRecipePromptBanner: View {
     let missionRunID: UUID
 
-    @ObservedObject private var bridge = MissionRunRecipeOperatorPromptBridge.shared
+    @EnvironmentObject private var operatorPromptCenter: OperatorPromptCenter
 
     private var prompts: [OperatorPromptEvent] {
-        bridge.activePrompts(forMissionRunID: missionRunID)
+        operatorPromptCenter.activeMCRPrompts(forMissionRunID: missionRunID)
     }
 
     var body: some View {
@@ -26,7 +26,7 @@ struct MissionRunOperatorRecipePromptBanner: View {
                                     remember: false,
                                     resolution: .operatorChose
                                 )
-                                bridge.submitOperatorAnswer(answer)
+                                _ = operatorPromptCenter.submitAnswer(answer)
                             }
                         )
                     }
@@ -39,30 +39,49 @@ struct MissionRunOperatorRecipePromptBanner: View {
         .frame(maxWidth: .infinity)
         .animation(GuardianMotion.feedbackCrossfade, value: prompts.map(\.id))
         .allowsHitTesting(!prompts.isEmpty)
+        .onAppear {
+            operatorPromptCenter.setMCRPromptPanelHostActive(true, missionRunID: missionRunID)
+        }
+        .onDisappear {
+            operatorPromptCenter.setMCRPromptPanelHostActive(false, missionRunID: missionRunID)
+        }
     }
 }
 
 // MARK: - Card
 
-private struct MissionRunOperatorRecipePromptCard: View {
+struct MissionRunOperatorRecipePromptCard: View {
     let event: OperatorPromptEvent
     let onSelectOption: (OperatorPromptOption) -> Void
 
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
+    private var cardFill: Color {
+        event.displaySource.resolvedOperatorPromptCardFillColor(severityForAssistantHexFallback: event.severity)
+    }
+
+    private var onPastelIssuerFill: Bool {
+        event.displaySource.usesPastelIssuerOperatorPromptCardFill
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
+            OperatorPromptAttributionCaption(source: event.displaySource)
             HStack(alignment: .top, spacing: GuardianSpacing.denseGutter) {
                 Image(systemName: event.severity.icon)
                     .font(GuardianTypography.font(.bottomPromptIcon))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(onPastelIssuerFill ? operatorPromptSeverityIconColor(event.severity) : Color.white)
 
                 VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
                     Text(event.title)
                         .font(GuardianTypography.font(.bottomPromptMessage))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(onPastelIssuerFill ? theme.textPrimary : Color.white)
                     if !event.body.isEmpty {
                         Text(event.body)
                             .font(GuardianTypography.font(.denseFootnoteRegular))
-                            .foregroundStyle(.white.opacity(0.92))
+                            .foregroundStyle(onPastelIssuerFill ? theme.textSecondary : Color.white.opacity(0.92))
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     if !event.contextFacts.isEmpty {
@@ -71,10 +90,10 @@ private struct MissionRunOperatorRecipePromptCard: View {
                                 HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.xsTight) {
                                     Text(fact.label + ":")
                                         .font(GuardianTypography.font(.denseCaption10Semibold))
-                                        .foregroundStyle(.white.opacity(0.75))
+                                        .foregroundStyle(onPastelIssuerFill ? theme.textTertiary : Color.white.opacity(0.75))
                                     Text(fact.value)
                                         .font(GuardianTypography.font(.denseCaption10Regular))
-                                        .foregroundStyle(.white.opacity(0.9))
+                                        .foregroundStyle(onPastelIssuerFill ? theme.textSecondary : Color.white.opacity(0.9))
                                 }
                             }
                         }
@@ -84,20 +103,34 @@ private struct MissionRunOperatorRecipePromptCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            FlowOperatorPromptOptionButtons(options: event.effectiveOptions, onSelect: onSelectOption)
+            FlowOperatorPromptOptionButtons(
+                options: event.effectiveOptions,
+                neutralOutlineTint: onPastelIssuerFill ? theme.textSecondary : Color.white,
+                dangerOutlineTint: onPastelIssuerFill ? GuardianSemanticColors.dangerStroke : Color.white,
+                onSelect: onSelectOption
+            )
         }
         .modifier(MissionRunOperatorRecipePromptExpiryModifier(event: event))
         .padding(.horizontal, GuardianSpacing.cardBodyInset)
         .padding(.vertical, GuardianSpacing.denseGutter)
-        .background(event.severity.bottomPromptBannerBackground)
+        .background(cardFill)
         .overlay(
             Rectangle()
                 .frame(height: 1)
-                .foregroundStyle(Color.white.opacity(0.2)),
+                .foregroundStyle(onPastelIssuerFill ? theme.borderSubtle : Color.white.opacity(0.2)),
             alignment: .top
         )
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .guardianDropShadow(GuardianElevation.feedbackChrome)
+    }
+
+    private func operatorPromptSeverityIconColor(_ severity: GuardianFeedbackSeverity) -> Color {
+        switch severity {
+        case .success: return GuardianSemanticColors.successStroke
+        case .info: return GuardianSemanticColors.infoForeground
+        case .warning: return GuardianSemanticColors.warningStroke
+        case .error: return GuardianSemanticColors.dangerStroke
+        }
     }
 }
 
@@ -105,6 +138,8 @@ private struct MissionRunOperatorRecipePromptCard: View {
 
 private struct FlowOperatorPromptOptionButtons: View {
     let options: [OperatorPromptOption]
+    let neutralOutlineTint: Color
+    let dangerOutlineTint: Color
     let onSelect: (OperatorPromptOption) -> Void
 
     var body: some View {
@@ -140,7 +175,7 @@ private struct FlowOperatorPromptOptionButtons: View {
                 shape: .cornered,
                 action: { onSelect(option) }
             )
-            .tint(.white)
+            .tint(neutralOutlineTint)
             .guardianPointerOnHover()
         case .cancel:
             GuardianThemedButton(
@@ -151,7 +186,7 @@ private struct FlowOperatorPromptOptionButtons: View {
                 shape: .cornered,
                 action: { onSelect(option) }
             )
-            .tint(.white)
+            .tint(dangerOutlineTint)
             .guardianPointerOnHover()
         }
     }
@@ -170,7 +205,7 @@ private struct MissionRunOperatorRecipePromptExpiryModifier: ViewModifier {
                 try? await Task.sleep(nanoseconds: ns)
             }
             await MainActor.run {
-                MissionRunRecipeOperatorPromptBridge.shared.resolveExpiry(for: event)
+                OperatorPromptCenter.shared.resolveExpiry(for: event)
             }
         }
     }

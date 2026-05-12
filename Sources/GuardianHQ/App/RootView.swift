@@ -7,6 +7,7 @@ struct RootView: View {
     @ObservedObject var generalSettingsStore: GeneralSettingsStore
     @EnvironmentObject private var appDrawer: AppDrawer
     @EnvironmentObject private var operatorPromptCenter: OperatorPromptCenter
+    @EnvironmentObject private var operatorPromptReviewFocus: OperatorPromptReviewFocusController
     @EnvironmentObject private var pluginRegistry: GuardianPluginRegistry
     @StateObject private var missionStore = MissionStore()
     @StateObject private var missionControlStore = MissionControlStore()
@@ -61,6 +62,13 @@ struct RootView: View {
             key: GuardianToastShellAnchorPreferenceKey.self,
             value: GuardianToastShellAnchor(topBarHeight: 52, topBarTrailingInset: GuardianSpacing.md)
         )
+        .preference(
+            key: GuardianOperatorPromptPersistentAnchorPreferenceKey.self,
+            value: GuardianOperatorPromptPersistentAnchor(
+                leadingContentInset: sidebarWidth + GuardianSpacing.md,
+                topContentInset: 52 + GuardianSpacing.sm
+            )
+        )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.backgroundBase)
         .onAppear {
@@ -108,6 +116,13 @@ struct RootView: View {
         }
         .onChange(of: selection) { _ in
             appDrawer.dismiss()
+        }
+        .onChange(of: operatorPromptReviewFocus.pendingPrimarySection) { newSection in
+            guard let newSection else { return }
+            if selection != newSection {
+                selection = newSection
+            }
+            operatorPromptReviewFocus.consumePendingPrimarySection()
         }
     }
 

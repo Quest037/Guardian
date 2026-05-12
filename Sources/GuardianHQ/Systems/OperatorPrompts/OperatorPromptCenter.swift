@@ -3,12 +3,11 @@ import Foundation
 
 // MARK: - OperatorPromptCenter
 
-/// Stateful Stage D host: routes via ``OperatorPromptRouter``, mirrors prompts that
-/// dispatch to ``OperatorPromptDeliveryTarget/inAppInbox`` into a live inbox list,
-/// schedules expiry, and bridges ``OperatorPromptResumptionChannel/awaitAnswer(for:)``.
+/// Stateful Stage D host: ``OperatorPromptRouter`` availability from registered UI hosts,
+/// mounts each ``OperatorPromptRoutingDecision/dispatched`` target, and bridges
+/// ``OperatorPromptResumptionChannel/awaitAnswer(for:)``.
 ///
-/// Production publishers should use ``OperatorPromptCenter/shared`` and
-/// ``awaitAnswer(for:)`` so the universal inbox stays aligned with pending work.
+/// Production publishers should use ``OperatorPromptCenter/shared`` and ``awaitAnswer(for:)``.
 @MainActor
 final class OperatorPromptCenter: ObservableObject {
 
@@ -19,10 +18,29 @@ final class OperatorPromptCenter: ObservableObject {
         resumption: OperatorPromptResumptionChannel.shared
     )
 
-    // MARK: State
+    // MARK: Published surfaces
 
-    /// Prompts currently mirrored to the in-app inbox (routing included ``OperatorPromptDeliveryTarget/inAppInbox``).
+    /// In-app Decisions drawer (``OperatorPromptDeliveryTarget/inAppInbox``).
     @Published private(set) var inboxPrompts: [OperatorPromptEvent] = []
+
+    /// MC-R bottom strip for the given mission run id (``OperatorPromptDeliveryTarget/mcrPromptPanel``).
+    @Published private(set) var activeMCRPromptsByMissionRunID: [UUID: [OperatorPromptEvent]] = [:]
+
+    /// Live Drive bottom strip (``OperatorPromptDeliveryTarget/liveDrivePromptPanel``).
+    @Published private(set) var activeLiveDrivePrompts: [OperatorPromptEvent] = []
+
+    /// Sticky top-leading (primary content column) window chips (``OperatorPromptDeliveryTarget/persistentToast``).
+    /// Omitted when the same event is already dispatched to MC-R or Live Drive so the operator is not doubled up.
+    @Published private(set) var persistentOperatorToastPrompts: [OperatorPromptEvent] = []
+
+    // MARK: Host registry (router availability)
+
+    /// Mission runs whose MC-R prompt strip is currently on-screen.
+    private var mcrPromptHostMissionRunIDs: Set<UUID> = []
+
+    /// Live Drive host: vehicle always set when active; mission run id set when that vehicle is engaged on a live run.
+    private var liveDrivePromptHostVehicleID: String?
+    private var liveDrivePromptHostMissionRunID: UUID?
 
     private let router: OperatorPromptRouter
     private let resumption: OperatorPromptResumptionChannel
@@ -36,8 +54,6 @@ final class OperatorPromptCenter: ObservableObject {
 
     // MARK: Session wiring
 
-    /// Installs this center as the source of ``OperatorPromptRouter/availabilityProbe``
-    /// for the router instance this center was constructed with. Safe to call more than once.
     func prepareOperatorPromptRoutingSession() {
         router.availabilityProbe = { [weak self] target in
             guard let self else { return OperatorPromptRouter.defaultAvailabilityProbe(target) }
@@ -45,66 +61,166 @@ final class OperatorPromptCenter: ObservableObject {
         }
     }
 
-    /// v1 availability: only the universal inbox drawer is a live delivery host.
-    /// Contextual panels register in a later pass.
+    /// Router probe: inbox and persistent operator toast always on; MC-R / Live Drive match registered hosts.
     func evaluateDeliveryAvailability(for target: OperatorPromptDeliveryTarget) -> Bool {
         switch target {
-        case .inAppInbox: return true
-        default: return false
+        case .inAppInbox:
+            return true
+        case .mcrPromptPanel(let missionRunID):
+            return mcrPromptHostMissionRunIDs.contains(missionRunID)
+        case .liveDrivePromptPanel(let runID, let vehicleID):
+            guard let hostVehicle = liveDrivePromptHostVehicleID else { return false }
+            if let vehicleID, vehicleID != hostVehicle { return false }
+            if let runID {
+                guard let hostRun = liveDrivePromptHostMissionRunID, hostRun == runID else { return false }
+            }
+            return true
+        case .persistentToast:
+            return true
+        case .userNotification, .vehicleInspectorWizardPanel:
+            return false
         }
+    }
+
+    // MARK: Host registration (SwiftUI onAppear / onDisappear)
+
+    /// Call from ``MissionRunOperatorRecipePromptBanner`` (or any MC-R surface that can show recipe prompts).
+    func setMCRPromptPanelHostActive(_ active: Bool, missionRunID: UUID) {
+        if active {
+            mcrPromptHostMissionRunIDs.insert(missionRunID)
+        } else {
+            mcrPromptHostMissionRunIDs.remove(missionRunID)
+            clearMCRSurfacePrompts(missionRunID: missionRunID)
+        }
+    }
+
+    /// Call from Live Drive when the tab is visible and a control session + vehicle context apply.
+    /// Pass `isActive: false` (or `vehicleID: nil`) to clear.
+    func setLiveDrivePromptPanelHostContext(isActive: Bool, missionRunID: UUID?, vehicleID: String?) {
+        guard isActive, let vehicleID, !vehicleID.isEmpty else {
+            liveDrivePromptHostVehicleID = nil
+            liveDrivePromptHostMissionRunID = nil
+            activeLiveDrivePrompts = []
+            return
+        }
+        liveDrivePromptHostVehicleID = vehicleID
+        liveDrivePromptHostMissionRunID = missionRunID
+    }
+
+    // MARK: Queries
+
+    func activeMCRPrompts(forMissionRunID runID: UUID) -> [OperatorPromptEvent] {
+        activeMCRPromptsByMissionRunID[runID] ?? []
     }
 
     // MARK: Publisher API
 
-    /// Routes `event`, mirrors to the inbox list when policy dispatches ``OperatorPromptDeliveryTarget/inAppInbox``,
-    /// arms an expiry task, then suspends on ``OperatorPromptResumptionChannel`` until resolution.
     func awaitAnswer(for event: OperatorPromptEvent) async -> OperatorPromptAnswer {
         if event.isExpired() {
             return await resumption.awaitAnswer(for: event)
         }
 
         let decision = router.route(event)
-        let mirrorsInbox = decision.dispatched.contains(.inAppInbox)
-        if mirrorsInbox {
-            registerInbox(event)
-        }
+        mountDispatchedPrompts(event, decision: decision)
 
         let expiry = scheduleExpiry(for: event)
         defer {
             expiry.cancel()
-            if mirrorsInbox {
-                unregisterInbox(promptID: event.id)
-            }
+            unmountPromptFromAllSurfaces(promptID: event.id)
         }
 
         return await resumption.awaitAnswer(for: event)
     }
 
-    /// Applies an operator-chosen (or synthesised) answer. Delivery surfaces call this
-    /// instead of touching ``OperatorPromptResumptionChannel`` directly so the center
-    /// stays the single write path for inbox-adjacent actions.
     @discardableResult
     func submitAnswer(_ answer: OperatorPromptAnswer) -> Bool {
-        resumption.submit(answer)
+        let ok = resumption.submit(answer)
+        if ok { unmountPromptFromAllSurfaces(promptID: answer.promptID) }
+        return ok
     }
 
     @discardableResult
     func resolveExpiry(for event: OperatorPromptEvent) -> Bool {
-        resumption.resolveExpiry(for: event)
+        let ok = resumption.resolveExpiry(for: event)
+        if ok { unmountPromptFromAllSurfaces(promptID: event.id) }
+        return ok
     }
 
-    // MARK: Inbox mutations
+    // MARK: Mount / unmount
 
-    private func registerInbox(_ event: OperatorPromptEvent) {
-        if let idx = inboxPrompts.firstIndex(where: { $0.id == event.id }) {
-            inboxPrompts[idx] = event
-        } else {
-            inboxPrompts.append(event)
+    private func mountDispatchedPrompts(_ event: OperatorPromptEvent, decision: OperatorPromptRoutingDecision) {
+        let skipPersistentToastBecauseStripHostsHavePrompt = Self.dispatchedIncludesMCRorLiveDrive(
+            decision.dispatched
+        )
+        for target in decision.dispatched {
+            switch target {
+            case .inAppInbox:
+                registerInbox(event)
+            case .mcrPromptPanel(let missionRunID):
+                var list = activeMCRPromptsByMissionRunID[missionRunID] ?? []
+                appendUniquePrompt(&list, event: event)
+                var mcrCopy = activeMCRPromptsByMissionRunID
+                mcrCopy[missionRunID] = list
+                activeMCRPromptsByMissionRunID = mcrCopy
+            case .liveDrivePromptPanel(_, _):
+                var list = activeLiveDrivePrompts
+                appendUniquePrompt(&list, event: event)
+                activeLiveDrivePrompts = list
+            case .persistentToast:
+                guard !skipPersistentToastBecauseStripHostsHavePrompt else { break }
+                var toastList = persistentOperatorToastPrompts
+                appendUniquePrompt(&toastList, event: event)
+                persistentOperatorToastPrompts = toastList
+            case .userNotification, .vehicleInspectorWizardPanel:
+                break
+            }
         }
     }
 
-    private func unregisterInbox(promptID: UUID) {
+    /// When MC-R or Live Drive already carries this dispatch list, skip mounting the sticky toast for the same event
+    /// so the operator is not shown duplicate chrome. (Vehicle Inspector wizard is not a mounted Stage D surface yet.)
+    private static func dispatchedIncludesMCRorLiveDrive(_ dispatched: [OperatorPromptDeliveryTarget]) -> Bool {
+        dispatched.contains {
+            switch $0 {
+            case .mcrPromptPanel, .liveDrivePromptPanel:
+                return true
+            case .vehicleInspectorWizardPanel, .inAppInbox, .persistentToast, .userNotification:
+                return false
+            }
+        }
+    }
+
+    private func appendUniquePrompt(_ list: inout [OperatorPromptEvent], event: OperatorPromptEvent) {
+        if list.contains(where: { $0.id == event.id }) { return }
+        list.append(event)
+    }
+
+    private func registerInbox(_ event: OperatorPromptEvent) {
+        var list = inboxPrompts
+        appendUniquePrompt(&list, event: event)
+        inboxPrompts = list
+    }
+
+    private func unmountPromptFromAllSurfaces(promptID: UUID) {
         inboxPrompts.removeAll { $0.id == promptID }
+        persistentOperatorToastPrompts.removeAll { $0.id == promptID }
+        activeLiveDrivePrompts.removeAll { $0.id == promptID }
+        var mcrCopy = activeMCRPromptsByMissionRunID
+        for (key, list) in mcrCopy {
+            let filtered = list.filter { $0.id != promptID }
+            if filtered.isEmpty {
+                mcrCopy.removeValue(forKey: key)
+            } else {
+                mcrCopy[key] = filtered
+            }
+        }
+        activeMCRPromptsByMissionRunID = mcrCopy
+    }
+
+    private func clearMCRSurfacePrompts(missionRunID: UUID) {
+        var copy = activeMCRPromptsByMissionRunID
+        copy.removeValue(forKey: missionRunID)
+        activeMCRPromptsByMissionRunID = copy
     }
 
     private func scheduleExpiry(for event: OperatorPromptEvent) -> Task<Void, Never> {

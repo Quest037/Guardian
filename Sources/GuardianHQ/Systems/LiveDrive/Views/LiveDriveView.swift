@@ -10,6 +10,8 @@ struct LiveDriveView: View {
     @ObservedObject var generalSettings: GeneralSettingsStore
     @EnvironmentObject private var toastCenter: ToastCenter
     @EnvironmentObject private var appDrawer: AppDrawer
+    @EnvironmentObject private var operatorPromptCenter: OperatorPromptCenter
+    @EnvironmentObject private var operatorPromptReviewFocus: OperatorPromptReviewFocusController
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var mapModel = GuardianMapModel(preserveView: true)
     @State private var vehiclePickerVisible = false
@@ -41,6 +43,18 @@ struct LiveDriveView: View {
 
     private var liveDriveSidebarAnimation: Animation {
         GuardianMotion.drawerSlide
+    }
+
+    /// Drives ``OperatorPromptCenter/setLiveDrivePromptPanelHostContext`` when Live Drive session + vehicle ↔ mission engagement changes.
+    private var liveDriveOperatorPromptHostSignature: String {
+        let vid = store.activeSessionRecord?.vehicleID ?? store.activeVehicleID ?? ""
+        let active = store.hasActiveSession && !vid.isEmpty
+        let runID = missionControlStore.activeMissionRunIDEngagingVehicle(
+            vehicleID: vid,
+            fleetLink: fleetLink,
+            sitl: sitl
+        )
+        return "\(active)|\(vid)|\(runID?.uuidString ?? "")"
     }
 
     var body: some View {
@@ -105,6 +119,7 @@ struct LiveDriveView: View {
             .onDisappear {
                 appDrawer.dismiss()
                 bottomPromptCenter.dismiss()
+                operatorPromptCenter.setLiveDrivePromptPanelHostContext(isActive: false, missionRunID: nil, vehicleID: nil)
             }
             .sheet(item: $preflightPurpose) { purpose in
                 if let vehicle = selectedPickableVehicle,
@@ -126,9 +141,34 @@ struct LiveDriveView: View {
                 }
             }
 
+            LiveDriveOperatorRecipePromptBanner()
+                .zIndex(2.5)
+
             GuardianBottomPromptBanner(center: bottomPromptCenter)
                 // Above any future in-window overlays in this ZStack (content → modal → prompt shell order).
                 .zIndex(2)
+        }
+        .task(id: liveDriveOperatorPromptHostSignature) {
+            let vid = store.activeSessionRecord?.vehicleID ?? store.activeVehicleID ?? ""
+            guard store.hasActiveSession, !vid.isEmpty else {
+                operatorPromptCenter.setLiveDrivePromptPanelHostContext(isActive: false, missionRunID: nil, vehicleID: nil)
+                return
+            }
+            let runID = missionControlStore.activeMissionRunIDEngagingVehicle(
+                vehicleID: vid,
+                fleetLink: fleetLink,
+                sitl: sitl
+            )
+            operatorPromptCenter.setLiveDrivePromptPanelHostContext(
+                isActive: true,
+                missionRunID: runID,
+                vehicleID: vid
+            )
+        }
+        .onChange(of: operatorPromptReviewFocus.pendingLiveDriveVehicleID) { newVehicleID in
+            guard let newVehicleID, !newVehicleID.isEmpty else { return }
+            store.selectVehicle(newVehicleID)
+            operatorPromptReviewFocus.consumeLiveDriveFocus()
         }
     }
 

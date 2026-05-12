@@ -536,6 +536,116 @@ private extension MissionRunCompleteTactic.Kind {
     }
 }
 
+// MARK: - Reserve swap preference chain (displaced active wind-down)
+
+/// One step in an **ordered** **reserve swap** preference chain: after a successful pool or fixed-reserve swap-in commit,
+/// the **post-commit** row that still owns the displaced aircraft (pool berth or bench ``.reserve``) uses this chain to
+/// choose RTL / rally / loiter / park (same catalogue shapes as complete recovery — see ``MissionRunFleetDispatch/preferentialReserveSwapTacticDispatch``).
+///
+/// Resolution precedence matches abort/complete: **assignment → task → mission** (``MissionRunPolicyResolution``).
+struct MissionRunReserveSwapTactic: Identifiable, Codable, Equatable, Hashable, Sendable {
+    enum Kind: String, Codable, CaseIterable, Sendable {
+        case returnToLaunch
+        case loiter
+        case park
+        case nearestOpenMapPoint
+        case none
+    }
+
+    var id: UUID
+    var kind: Kind
+    var mapPointKind: MissionPointKind?
+
+    init(id: UUID = UUID(), kind: Kind, mapPointKind: MissionPointKind? = nil) {
+        self.id = id
+        self.kind = kind
+        self.mapPointKind = mapPointKind
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, mapPointKind
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        let rawKind = try c.decode(String.self, forKey: .kind)
+        kind = Kind(migratedFromStoredRaw: rawKind)
+        mapPointKind = try c.decodeIfPresent(MissionPointKind.self, forKey: .mapPointKind)
+        if kind == .nearestOpenMapPoint, mapPointKind == nil {
+            mapPointKind = .rally
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(kind, forKey: .kind)
+        if kind == .nearestOpenMapPoint {
+            try c.encode(mapPointKind ?? .rally, forKey: .mapPointKind)
+        } else {
+            try c.encodeIfPresent(mapPointKind, forKey: .mapPointKind)
+        }
+    }
+
+    var setupMenuLabel: String {
+        switch kind {
+        case .returnToLaunch: return "Return to Launch"
+        case .loiter: return "Loiter"
+        case .park: return "Park"
+        case .nearestOpenMapPoint: return "Nearest open mission point"
+        case .none: return "None"
+        }
+    }
+
+    /// Default mission-wide chain for displaced-active wind-down (matches ``MissionRunCompleteTactic/defaultMissionCompletePreferenceChain`` intent).
+    static let defaultMissionReserveSwapPreferenceChain: [MissionRunReserveSwapTactic] = [
+        MissionRunReserveSwapTactic(kind: .returnToLaunch),
+        MissionRunReserveSwapTactic(kind: .park),
+    ]
+
+    static var addMenuKindOrdering: [Kind] {
+        [.nearestOpenMapPoint, .returnToLaunch, .loiter, .none, .park]
+    }
+
+    static func normalizedPreferenceChain(_ tactics: [MissionRunReserveSwapTactic]) -> [MissionRunReserveSwapTactic] {
+        var rows = tactics
+        for i in rows.indices {
+            if rows[i].kind == .nearestOpenMapPoint, rows[i].mapPointKind == nil {
+                rows[i].mapPointKind = .rally
+            }
+        }
+        if rows.isEmpty {
+            return defaultMissionReserveSwapPreferenceChain
+        }
+        if rows.count == 1, rows[0].kind == .none {
+            return rows
+        }
+        if rows.last?.kind != .park {
+            rows.append(MissionRunReserveSwapTactic(kind: .park))
+        }
+        return rows
+    }
+
+    static func copyingForIndependentEdit(_ tactics: [MissionRunReserveSwapTactic]) -> [MissionRunReserveSwapTactic] {
+        tactics.map { MissionRunReserveSwapTactic(id: UUID(), kind: $0.kind, mapPointKind: $0.mapPointKind) }
+    }
+
+    static func summarizedForLogging(_ tactics: [MissionRunReserveSwapTactic]) -> String {
+        tactics.map(\.setupMenuLabel).joined(separator: " → ")
+    }
+}
+
+private extension MissionRunReserveSwapTactic.Kind {
+    init(migratedFromStoredRaw raw: String) {
+        switch raw {
+        case "holdPosition": self = .loiter
+        case "land": self = .returnToLaunch
+        default: self = Self(rawValue: raw) ?? .returnToLaunch
+        }
+    }
+}
+
 // MARK: - Rules of engagement (run-level; not part of compiled plan)
 
 enum MissionRunEngagementAction: String, Codable, CaseIterable, Equatable, Hashable {
@@ -585,7 +695,7 @@ struct MissionRunEngagementRules: Codable, Equatable {
     static let `default` = MissionRunEngagementRules()
 }
 
-/// Run-level policy bundle for ``MissionRunEnvironment`` (engagement only; abort/complete live on ``Mission`` / ``MissionTask`` / ``MissionRunAssignmentPolicies``).
+/// Run-level policy bundle for ``MissionRunEnvironment`` (engagement only; abort / complete / reserve-swap chains live on ``Mission`` / ``MissionTask`` / ``MissionRunAssignmentPolicies``).
 struct MissionRunPolicies: Equatable {
     var engagement: MissionRunEngagementRules
 
@@ -600,14 +710,21 @@ struct MissionRunAssignmentPolicies: Codable, Equatable {
     var abortPreferenceChain: [MissionRunAbortTactic]?
     /// When non-empty, replaces the resolved **complete (recovery) preference chain** for this slot.
     var completePreferenceChain: [MissionRunCompleteTactic]?
+    /// When non-empty, replaces the resolved **reserve swap (displaced active) preference chain** for this slot.
+    var reserveSwapPreferenceChain: [MissionRunReserveSwapTactic]?
 
-    init(abortPreferenceChain: [MissionRunAbortTactic]? = nil, completePreferenceChain: [MissionRunCompleteTactic]? = nil) {
+    init(
+        abortPreferenceChain: [MissionRunAbortTactic]? = nil,
+        completePreferenceChain: [MissionRunCompleteTactic]? = nil,
+        reserveSwapPreferenceChain: [MissionRunReserveSwapTactic]? = nil
+    ) {
         self.abortPreferenceChain = abortPreferenceChain
         self.completePreferenceChain = completePreferenceChain
+        self.reserveSwapPreferenceChain = reserveSwapPreferenceChain
     }
 }
 
-/// Resolves abort / complete autopilot actions for a roster slot: **assignment → task → mission** (most specific wins).
+/// Resolves abort / complete / reserve-swap preference chains for a roster slot: **assignment → task → mission** (most specific wins).
 enum MissionRunPolicyResolution {
     /// Effective task id for an assignment (explicit ``MissionRunAssignment/taskId``, or single enabled task when unambiguous).
     static func resolvedTaskId(for assignment: MissionRunAssignment, mission: Mission?) -> UUID? {
@@ -668,6 +785,33 @@ enum MissionRunPolicyResolution {
         var copy = assignment
         copy.policies.completePreferenceChain = nil
         return resolvedCompletePreferenceChain(assignment: copy, mission: mission)
+    }
+
+    /// Effective ordered reserve-swap tactics: **assignment → task → mission** (first non-empty wins), then normalized.
+    static func resolvedReserveSwapPreferenceChain(assignment: MissionRunAssignment, mission: Mission?) -> [MissionRunReserveSwapTactic] {
+        if let slot = assignment.policies.reserveSwapPreferenceChain, !slot.isEmpty {
+            return MissionRunReserveSwapTactic.normalizedPreferenceChain(slot)
+        }
+        if let mission,
+           let tid = resolvedTaskId(for: assignment, mission: mission),
+           let task = mission.routeMacro.tasks.first(where: { $0.id == tid }),
+           let override = task.reserveSwapPreferenceChainOverride,
+           !override.isEmpty {
+            return MissionRunReserveSwapTactic.normalizedPreferenceChain(override)
+        }
+        return MissionRunReserveSwapTactic.normalizedPreferenceChain(
+            mission?.routeMacro.rules.missionReserveSwapPreferenceChain ?? []
+        )
+    }
+
+    static func missionTemplateReserveSwapPreferenceChain(mission: Mission?) -> [MissionRunReserveSwapTactic] {
+        MissionRunReserveSwapTactic.normalizedPreferenceChain(mission?.routeMacro.rules.missionReserveSwapPreferenceChain ?? [])
+    }
+
+    static func inheritedReserveSwapPreferenceChainForSlot(assignment: MissionRunAssignment, mission: Mission?) -> [MissionRunReserveSwapTactic] {
+        var copy = assignment
+        copy.policies.reserveSwapPreferenceChain = nil
+        return resolvedReserveSwapPreferenceChain(assignment: copy, mission: mission)
     }
 }
 
@@ -810,7 +954,8 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         try c.encodeIfPresent(attachedFleetVehicleToken, forKey: .attachedFleetVehicleToken)
         let hasAbort = policies.abortPreferenceChain != nil && !(policies.abortPreferenceChain?.isEmpty ?? true)
         let hasComplete = policies.completePreferenceChain != nil && !(policies.completePreferenceChain?.isEmpty ?? true)
-        if hasAbort || hasComplete {
+        let hasReserveSwap = policies.reserveSwapPreferenceChain != nil && !(policies.reserveSwapPreferenceChain?.isEmpty ?? true)
+        if hasAbort || hasComplete || hasReserveSwap {
             try c.encode(policies, forKey: .policies)
         }
         try c.encodeIfPresent(slotLifecycleLanes, forKey: .slotLifecycleLanes)
@@ -1108,6 +1253,8 @@ enum MissionRunCommandIssuerKey {
     /// Until operator identity is wired through HQ, local UI acts as this logical operator.
     static let localOperator = "localOperator"
     static let plannerAbort = "planner.abort"
+    /// Issuer key for post–swap-in catalogue steps on the displaced stream (distinct audit trail from whole-run abort).
+    static let plannerReserveSwapPostCommit = "planner.reserveSwapPostCommit"
     static let runTeardown = "run.teardown"
     static let staging = "staging"
     static let missionExecute = "mission.execute"
@@ -1144,6 +1291,24 @@ extension MissionRunFleetDispatch {
     /// Preferential **complete** tactics (non–map-point, non–``MissionRunCompleteTactic/Kind/none``).
     @MainActor
     static func preferentialCompleteTacticDispatch(_ kind: MissionRunCompleteTactic.Kind) -> MissionRunFleetDispatch? {
+        switch kind {
+        case .returnToLaunch:
+            return .recipe(
+                name: FleetMissionRecipeRegistrations.doReturnHomeRecipeName,
+                parameters: .empty
+            )
+        case .loiter:
+            return .catalogue(name: .fleetVehicleDoLoiter, parameters: .empty)
+        case .park:
+            return .catalogue(name: .fleetVehicleDoPark, parameters: .empty)
+        case .nearestOpenMapPoint, .none:
+            return nil
+        }
+    }
+
+    /// Preferential **reserve swap** tactics (non–map-point, non–``MissionRunReserveSwapTactic/Kind/none``).
+    @MainActor
+    static func preferentialReserveSwapTacticDispatch(_ kind: MissionRunReserveSwapTactic.Kind) -> MissionRunFleetDispatch? {
         switch kind {
         case .returnToLaunch:
             return .recipe(
@@ -1279,6 +1444,8 @@ enum MissionRunCommandQueueTag: String, CaseIterable, Hashable {
     /// Recovery wind-down after the current mission cycle (``MissionRunCompleteTactic`` preference chain), distinct from abort policy.
     case complete = "missionControl.queue.complete"
     case missionStart = "missionControl.queue.missionStart"
+    /// Post–reserve-swap-in handoff (mission clear on displaced stream, later upload / start / wind-down).
+    case reserveSwapPostCommit = "missionControl.queue.reserveSwapPostCommit"
 }
 
 /// When a ``MissionRunQueuedCommandBatch`` should be delivered to the fleet.
@@ -1295,12 +1462,22 @@ struct MissionRunQueuedCommandBatch: Identifiable, Equatable {
     let tag: MissionRunCommandQueueTag
     let dispatch: MissionRunQueuedCommandDispatch
     let commands: [MissionRunIssuedCommand]
+    /// When ``tag`` is ``MissionRunCommandQueueTag/reserveSwapPostCommit``, set so sequential dispatch can log
+    /// pipeline phases after fleet acks and post operator toasts on failure.
+    let reserveSwapPostCommitAckContext: MissionRunReserveSwapPostCommitBatchAckContext?
 
-    init(id: UUID = UUID(), tag: MissionRunCommandQueueTag, dispatch: MissionRunQueuedCommandDispatch, commands: [MissionRunIssuedCommand]) {
+    init(
+        id: UUID = UUID(),
+        tag: MissionRunCommandQueueTag,
+        dispatch: MissionRunQueuedCommandDispatch,
+        commands: [MissionRunIssuedCommand],
+        reserveSwapPostCommitAckContext: MissionRunReserveSwapPostCommitBatchAckContext? = nil
+    ) {
         self.id = id
         self.tag = tag
         self.dispatch = dispatch
         self.commands = commands
+        self.reserveSwapPostCommitAckContext = reserveSwapPostCommitAckContext
     }
 }
 
@@ -1522,6 +1699,15 @@ enum MissionRunReserveSwapOperatorCopy {
     static let toastNoPoolClassMatchForRosterSlot = "No floating reserve on this task matches this roster slot’s vehicle class."
     static let toastReserveSwapReturnRejectedPrefix = "Reserve swap aborted — the roster aircraft cannot occupy the pool berth:"
     static let toastReserveSwapPoolClearFailed = "Reserve swap could not clear the pool berth. Check the mission log for this run."
+    /// Post-commit handoff: displaced stream mission clear failed at the fleet layer (roster already committed).
+    static let toastReserveSwapPostCommitDisplacedMissionClearFailed =
+        "Reserve swap handoff: mission clear on the former active failed. Later handoff steps were skipped — check the mission log."
+    /// Post-commit handoff: vacancy upload / arm / start recipe failed.
+    static let toastReserveSwapPostCommitVacancyMissionHandoffFailed =
+        "Reserve swap handoff: mission upload on the new active failed. Wind-down on the former active was skipped — check the mission log."
+    /// Post-commit handoff: displaced wind-down catalogue or recipe failed.
+    static let toastReserveSwapPostCommitDisplacedWindDownFailed =
+        "Reserve swap handoff: wind-down on the former active failed — check the mission log."
     static let toastReserveSwapPickRejectedStale = "Reserve swap aborted: that aircraft is no longer eligible (duplicate binding, written off, or operational state changed). Refresh the roster and pool."
     static let toastPoolBerthNotAvailableForRosterSlot = "That pool berth is not available for this roster slot."
     static let toastNoLiveReserveAutoSwapSkipped = "No live link for this reserve — auto-swap skipped."

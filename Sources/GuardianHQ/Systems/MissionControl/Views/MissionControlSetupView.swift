@@ -4926,6 +4926,10 @@ struct MissionRunDetailView: View {
                     mission: mission,
                     fleetVehicles: fleet
                 )
+                run.beginPostCommitReserveSwapHandoffPipeline(
+                    correlation: poolCorrelation,
+                    triggerSource: triggerSource
+                )
             }
             onUpdate(run)
             focusLiveAssignment(nil)
@@ -5086,6 +5090,10 @@ struct MissionRunDetailView: View {
                     mission: mission,
                     fleetVehicles: fleet,
                     planCompileSource: MissionRunReserveSwapPlanRecompilationPolicy.fixedRosterReserveSwapPlanCompileSource
+                )
+                run.beginPostCommitReserveSwapHandoffPipeline(
+                    correlation: fixedCorrelation,
+                    triggerSource: "operator.missionControlRunning.reserveSwap.autoExecutor"
                 )
             }
             onUpdate(run)
@@ -6076,6 +6084,19 @@ struct MissionRunDetailView: View {
                             .fixedSize(horizontal: false, vertical: true)
                         }
                         MissionRunPreferentialCompletePolicyEditor(chain: missionCompletePreferenceChainBinding, showFootnote: true)
+                        mcSetupRowDivider
+                        VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
+                            Text("Reserve swap preference chain")
+                                .font(GuardianTypography.font(.subsectionTitleSemibold))
+                                .foregroundStyle(theme.textPrimary)
+                            Text(
+                                "Mission-wide default for displaced-active wind-down after a reserve swap-in when a task or roster slot does not override. Same tactic shapes as complete recovery; use None alone for no automatic wind-down command."
+                            )
+                            .font(GuardianTypography.font(.denseCaption12Regular))
+                            .foregroundStyle(theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        }
+                        MissionRunPreferentialReserveSwapPolicyEditor(chain: missionReserveSwapPreferenceChainBinding, showFootnote: true)
                     }
                 } else {
                     VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
@@ -6083,7 +6104,7 @@ struct MissionRunDetailView: View {
                             .font(GuardianTypography.font(.subsectionTitleSemibold))
                             .foregroundStyle(theme.textPrimary)
                         Text(
-                            "This run’s mission is not in the library (or failed to load). Add or restore the mission to edit abort/complete defaults."
+                            "This run’s mission is not in the library (or failed to load). Add or restore the mission to edit mission policy defaults."
                         )
                         .font(GuardianTypography.font(.denseCaption12Regular))
                         .foregroundStyle(theme.textSecondary)
@@ -6201,6 +6222,22 @@ struct MissionRunDetailView: View {
             },
             set: { newValue in
                 _ = run.updateMissionCompletePreferenceChain(newValue, credential: localOperatorCredential)
+                syncRunFromStore()
+                onUpdate(run)
+            }
+        )
+    }
+
+    private var missionReserveSwapPreferenceChainBinding: Binding<[MissionRunReserveSwapTactic]> {
+        Binding(
+            get: {
+                let chain = missionStore.missions.first(where: { $0.id == run.missionId })?
+                    .routeMacro.rules.missionReserveSwapPreferenceChain
+                    ?? []
+                return MissionRunReserveSwapTactic.normalizedPreferenceChain(chain)
+            },
+            set: { newValue in
+                _ = run.updateMissionReserveSwapPreferenceChain(newValue, credential: localOperatorCredential)
                 syncRunFromStore()
                 onUpdate(run)
             }

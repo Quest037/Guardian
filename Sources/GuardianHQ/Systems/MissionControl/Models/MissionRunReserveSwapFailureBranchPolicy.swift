@@ -3,14 +3,25 @@ import Foundation
 // MARK: - Swap pipeline failure branches (policy)
 
 /// Phases for the **live reserve swap-in** pipeline (``MissionRosterReservesToDo.md`` swap pipeline sections).
-/// v1 policy in ``MissionRunReserveSwapFailureBranchPolicy`` applies when a **gate** in a phase fails
-/// before an atomic roster/pool **commit** completes.
+/// v1 policy for **reserve swap-in** gate failures on ranked candidates. Pre-commit phases (``pickReserve`` through ``reposition``)
+/// use retry / next-candidate / escalation rules; ``rosterCommit``, ``postCommitHandoff``, ``displacedMissionClear``, and
+/// ``displacedFleetWindDown`` always yield ``abortSwapPreserveCommittedState``
+/// (no automatic repair of committed roster / post-recompile handoff state).
 enum MissionRunReserveSwapPipelinePhase: String, CaseIterable, Equatable, Sendable {
     case pickReserve
     case swapTimeChecks
     case missionUpload
     case reposition
     case rosterCommit
+    /// After a successful roster/pool commit and plan recompile: resolve **vacancy** vs **displaced** fleet stream rows
+    /// (pool berth or bench ``.reserve`` still carrying the former active) before mission clear / upload / wind-down.
+    case postCommitHandoff
+    /// Catalogue ``fleetVehicleDoMissionClear`` on the **displaced** stream row (former active binding), same atom as
+    /// ``MissionRunPlannerSubsystem/buildAbortPlan`` leading clear — enqueue only while the run is live executing.
+    case displacedMissionClear
+    /// First dispatchable step from ``MissionRunPolicyResolution/resolvedReserveSwapPreferenceChain`` on the **displaced**
+    /// stream row (RTL / rally+park / loiter / park), same optimistic shapes as complete recovery wind-down.
+    case displacedFleetWindDown
 }
 
 /// What the executor / orchestration should do **after** a gate failure on the current reserve candidate.
@@ -23,7 +34,7 @@ enum MissionRunReserveSwapFailureDisposition: Equatable, Sendable {
     case escalateToOperatorPrompt
     /// End the swap attempt without mutating **already-committed** run state; discard ephemeral phase state only.
     ///
-    /// **Roster commit:** failures during or after ``rosterCommit`` always map here (no silent re-drive of commit).
+    /// **Roster commit** and **post-commit executor phases** (``postCommitHandoff``, ``displacedMissionClear``, …) failures always map here (no silent re-drive of commit).
     /// **Today’s** MCS pool swap primitive is already **single-shot** atomic before log — future multi-phase flows must
     /// keep mutations behind one commit barrier or explicitly document repair (e.g. ``MissionRunFloatingReserveSwapOutcome/poolClearFailed``).
     case abortSwapPreserveCommittedState
@@ -40,7 +51,8 @@ enum MissionRunReserveSwapFailureBranchPolicy {
     /// returns the next orchestration step.
     ///
     /// - Parameters:
-    ///   - phase: Failing pipeline phase. ``rosterCommit`` always yields ``abortSwapPreserveCommittedState``.
+    ///   - phase: Failing pipeline phase. ``rosterCommit`` and post-commit executor phases (including ``displacedMissionClear``
+    ///     and ``displacedFleetWindDown``) always yield ``abortSwapPreserveCommittedState``.
     ///   - consecutiveFailedGateAttemptsOnCurrentCandidate: Count of **consecutive** failed attempts for this gate
     ///     on this candidate, **including** the attempt that just failed (≥ 1).
     ///   - hasAnotherRankedCandidate: Whether enumeration still has at least one **other** viable candidate after
@@ -53,7 +65,9 @@ enum MissionRunReserveSwapFailureBranchPolicy {
         hasAnotherRankedCandidate: Bool,
         operatorPromptChannelAvailable: Bool
     ) -> MissionRunReserveSwapFailureDisposition {
-        if phase == .rosterCommit {
+        if phase == .rosterCommit || phase == .postCommitHandoff || phase == .displacedMissionClear
+            || phase == .displacedFleetWindDown
+        {
             return .abortSwapPreserveCommittedState
         }
 

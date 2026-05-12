@@ -17,6 +17,9 @@ enum MissionRunReserveSwapPhaseLogTemplateKey: Sendable {
         case .missionUpload: return "mission_upload"
         case .reposition: return "reposition"
         case .rosterCommit: return "roster_commit"
+        case .postCommitHandoff: return "post_commit_handoff"
+        case .displacedMissionClear: return "displaced_mission_clear"
+        case .displacedFleetWindDown: return "displaced_fleet_wind_down"
         }
     }
 

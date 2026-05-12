@@ -63,6 +63,32 @@ extension MissionRunEnvironment {
     }
 
     @discardableResult
+    func updateMissionReserveSwapPreferenceChain(
+        _ chain: [MissionRunReserveSwapTactic],
+        credential: MissionRunPolicyEditCredential
+    ) -> MissionRunPolicyEditDecision {
+        let scope = MissionRunPolicyEditScope.missionReserveSwapPolicy
+        let decision = systems.policyAuthority.evaluate(scope, credential: credential)
+        guard decision.isAllowed else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: denialReason(decision) ?? .permissionDenied)
+            return decision
+        }
+        guard var mission = template else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: .missionUnavailable)
+            return .denied(.missionUnavailable)
+        }
+        let normalized = MissionRunReserveSwapTactic.normalizedPreferenceChain(chain)
+        mission.routeMacro.rules.missionReserveSwapPreferenceChain = normalized
+        applyMissionTemplateMutation(mission)
+        logPolicyEditApplied(
+            scope: scope,
+            credential: credential,
+            value: MissionRunReserveSwapTactic.summarizedForLogging(normalized)
+        )
+        return .allowed
+    }
+
+    @discardableResult
     func updateMissionEngagementRules(
         _ rules: MissionRunEngagementRules,
         credential: MissionRunPolicyEditCredential
@@ -189,6 +215,44 @@ extension MissionRunEnvironment {
         return .allowed
     }
 
+    @discardableResult
+    func updateTaskReserveSwapPreferenceChainOverride(
+        taskID: UUID,
+        _ chain: [MissionRunReserveSwapTactic]?,
+        credential: MissionRunPolicyEditCredential
+    ) -> MissionRunPolicyEditDecision {
+        let scope = MissionRunPolicyEditScope.taskReserveSwapPolicyOverride(taskID: taskID)
+        let decision = systems.policyAuthority.evaluate(scope, credential: credential)
+        guard decision.isAllowed else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: denialReason(decision) ?? .permissionDenied)
+            return decision
+        }
+        guard var mission = template else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: .missionUnavailable)
+            return .denied(.missionUnavailable)
+        }
+        guard let idx = mission.routeMacro.tasks.firstIndex(where: { $0.id == taskID }) else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: .taskNotFound)
+            return .denied(.taskNotFound)
+        }
+        let logValue: String
+        if let chain, !chain.isEmpty {
+            let normalized = MissionRunReserveSwapTactic.normalizedPreferenceChain(chain)
+            mission.routeMacro.tasks[idx].reserveSwapPreferenceChainOverride = normalized
+            logValue = MissionRunReserveSwapTactic.summarizedForLogging(normalized)
+        } else {
+            mission.routeMacro.tasks[idx].reserveSwapPreferenceChainOverride = nil
+            logValue = "Inherit"
+        }
+        applyMissionTemplateMutation(mission)
+        logPolicyEditApplied(
+            scope: scope,
+            credential: credential,
+            value: logValue
+        )
+        return .allowed
+    }
+
     // MARK: - Assignment-level
 
     @discardableResult
@@ -247,6 +311,39 @@ extension MissionRunEnvironment {
             logValue = MissionRunCompleteTactic.summarizedForLogging(normalized)
         } else {
             assignments[idx].policies.completePreferenceChain = nil
+            logValue = "Inherit"
+        }
+        logPolicyEditApplied(
+            scope: scope,
+            credential: credential,
+            value: logValue
+        )
+        return .allowed
+    }
+
+    @discardableResult
+    func updateAssignmentReserveSwapPreferenceChain(
+        assignmentID: UUID,
+        _ chain: [MissionRunReserveSwapTactic]?,
+        credential: MissionRunPolicyEditCredential
+    ) -> MissionRunPolicyEditDecision {
+        let scope = MissionRunPolicyEditScope.assignmentReserveSwapPolicy(assignmentID: assignmentID)
+        let decision = systems.policyAuthority.evaluate(scope, credential: credential)
+        guard decision.isAllowed else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: denialReason(decision) ?? .permissionDenied)
+            return decision
+        }
+        guard let idx = assignments.firstIndex(where: { $0.id == assignmentID }) else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: .assignmentNotFound)
+            return .denied(.assignmentNotFound)
+        }
+        let logValue: String
+        if let chain, !chain.isEmpty {
+            let normalized = MissionRunReserveSwapTactic.normalizedPreferenceChain(chain)
+            assignments[idx].policies.reserveSwapPreferenceChain = normalized
+            logValue = MissionRunReserveSwapTactic.summarizedForLogging(normalized)
+        } else {
+            assignments[idx].policies.reserveSwapPreferenceChain = nil
             logValue = "Inherit"
         }
         logPolicyEditApplied(
@@ -320,12 +417,12 @@ extension MissionRunEnvironment {
     /// in the canonical color and link to the matching overlay.
     private func target(for scope: MissionRunPolicyEditScope) -> MissionRunEventTarget {
         switch scope {
-        case .missionAbortPolicy, .missionCompletePolicy, .missionEngagementRules:
+        case .missionAbortPolicy, .missionCompletePolicy, .missionEngagementRules, .missionReserveSwapPolicy:
             return .missionControl
-        case .taskAbortPolicyOverride(let id), .taskCompletePolicyOverride(let id):
+        case .taskAbortPolicyOverride(let id), .taskCompletePolicyOverride(let id), .taskReserveSwapPolicyOverride(let id):
             let name = template?.routeMacro.tasks.first(where: { $0.id == id })?.name ?? "Task"
             return .task(id: id, name: name)
-        case .assignmentAbortPolicy(let id), .assignmentCompletePolicy(let id):
+        case .assignmentAbortPolicy(let id), .assignmentCompletePolicy(let id), .assignmentReserveSwapPolicy(let id):
             return .slot(id: id)
         }
     }
@@ -346,9 +443,9 @@ extension MissionRunEnvironment {
     /// `[<TaskName>]` wrapper for slot edits the same way they do for task edits.
     private func scopeTaskID(_ scope: MissionRunPolicyEditScope) -> UUID? {
         switch scope {
-        case .taskAbortPolicyOverride(let id), .taskCompletePolicyOverride(let id):
+        case .taskAbortPolicyOverride(let id), .taskCompletePolicyOverride(let id), .taskReserveSwapPolicyOverride(let id):
             return id
-        case .assignmentAbortPolicy(let id), .assignmentCompletePolicy(let id):
+        case .assignmentAbortPolicy(let id), .assignmentCompletePolicy(let id), .assignmentReserveSwapPolicy(let id):
             guard let assignment = assignments.first(where: { $0.id == id }) else { return nil }
             return MissionRunPolicyResolution.resolvedTaskId(for: assignment, mission: template)
         default:
@@ -368,10 +465,13 @@ extension MissionRunEnvironment {
         case .missionAbortPolicy: return "Mission abort preference chain"
         case .missionCompletePolicy: return "Mission complete preference chain"
         case .missionEngagementRules: return "Rules of engagement"
+        case .missionReserveSwapPolicy: return "Mission reserve swap preference chain"
         case .taskAbortPolicyOverride: return "Task abort policy override"
         case .taskCompletePolicyOverride: return "Task complete policy override"
+        case .taskReserveSwapPolicyOverride: return "Task reserve swap policy override"
         case .assignmentAbortPolicy: return "Slot abort policy"
         case .assignmentCompletePolicy: return "Slot complete policy"
+        case .assignmentReserveSwapPolicy: return "Slot reserve swap policy"
         }
     }
 }

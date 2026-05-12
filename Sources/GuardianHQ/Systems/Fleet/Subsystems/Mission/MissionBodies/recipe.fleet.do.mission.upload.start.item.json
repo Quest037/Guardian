@@ -1,0 +1,120 @@
+{
+  "_comment": "MRE reserve swap-in handoff: full mission upload, set current mission item (0-based index), arm, start. Same as recipe.fleet.do.mission.upload.start plus a jump step after upload. Requires missionItemsJSON + missionStartItemIndex (integer).",
+  "entryStepID": "upload",
+  "overallBudgetSeconds": 180,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "upload",
+      "command": "command.fleet.vehicle.do.mission.upload",
+      "parameters": {
+        "missionItemsJSON": { "kind": "reference", "value": "missionItemsJSON" }
+      },
+      "retry": {
+        "maxAttempts": 3,
+        "delaySeconds": 0.5,
+        "retryableErrorKinds": ["autopilotBusy", "noSession", "notConnected"],
+        "retryOnTimeout": true
+      },
+      "matchers": [
+        { "when": { "kind": "success" }, "then": { "kind": "continueToNextStep" } },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "confirmation",
+              "confirmationKind": { "rawValue": "confirmInLiveMission" }
+            },
+            "allowedVerbs": ["abort", "acknowledge", "retry"]
+          }
+        }
+      ]
+    },
+    {
+      "kind": "invokeCommand",
+      "id": "setMissionItem",
+      "command": "command.fleet.vehicle.do.mission.jump.to",
+      "parameters": {
+        "index": { "kind": "reference", "value": "missionStartItemIndex" }
+      },
+      "retry": {
+        "maxAttempts": 3,
+        "delaySeconds": 0.5,
+        "retryableErrorKinds": ["autopilotBusy", "noSession", "notConnected"],
+        "retryOnTimeout": true
+      },
+      "matchers": [
+        { "when": { "kind": "success" }, "then": { "kind": "continueToNextStep" } },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "confirmation",
+              "confirmationKind": { "rawValue": "confirmInLiveMission" }
+            },
+            "allowedVerbs": ["abort", "acknowledge", "retry"]
+          }
+        }
+      ]
+    },
+    {
+      "kind": "invokeCommand",
+      "id": "arm",
+      "command": "command.fleet.vehicle.do.arm",
+      "retry": {
+        "maxAttempts": 3,
+        "delaySeconds": 0.5,
+        "retryableErrorKinds": ["autopilotBusy", "noSession", "notConnected"],
+        "retryOnTimeout": true
+      },
+      "matchers": [
+        { "when": { "kind": "success" }, "then": { "kind": "continueToNextStep" } },
+        {
+          "when": { "kind": "error", "errorKind": "alreadyArmed" },
+          "then": { "kind": "continueToNextStep" }
+        },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "confirmation",
+              "confirmationKind": { "rawValue": "confirmInLiveMission" }
+            },
+            "allowedVerbs": ["abort", "acknowledge", "retry"]
+          }
+        }
+      ]
+    },
+    {
+      "kind": "invokeCommand",
+      "id": "start",
+      "command": "command.fleet.vehicle.do.mission.start",
+      "parameters": {
+        "missionItemsJSON": { "kind": "reference", "value": "missionItemsJSON" }
+      },
+      "retry": {
+        "maxAttempts": 3,
+        "delaySeconds": 0.5,
+        "retryableErrorKinds": ["autopilotBusy", "noSession", "notConnected"],
+        "retryOnTimeout": true
+      },
+      "matchers": [
+        { "when": { "kind": "success" }, "then": { "kind": "succeed" } },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "confirmation",
+              "confirmationKind": { "rawValue": "confirmInLiveMission" }
+            },
+            "allowedVerbs": ["abort", "acknowledge", "retry"]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -13,6 +13,8 @@ final class MissionRunReserveSwapPhaseLogTemplateKeyTests: XCTestCase {
     func test_expected_key_shape() {
         let k = MissionRunReserveSwapPhaseLogTemplateKey.templateKey(phase: .swapTimeChecks, passed: false)
         XCTAssertEqual(k, "missioncontrol.mre.reserve.phase.swap_time_checks.fail")
+        let post = MissionRunReserveSwapPhaseLogTemplateKey.templateKey(phase: .postCommitHandoff, passed: true)
+        XCTAssertEqual(post, "missioncontrol.mre.reserve.phase.post_commit_handoff.pass")
     }
 
     func test_catalog_has_pattern_for_every_key() {

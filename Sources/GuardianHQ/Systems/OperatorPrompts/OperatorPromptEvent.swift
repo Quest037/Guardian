@@ -71,6 +71,11 @@ struct OperatorPromptEvent: Identifiable, Equatable, Sendable {
     /// Who published this prompt and why. Routing decisions branch on this.
     let origin: OperatorPromptOrigin
 
+    /// Operator-facing **who surfaced this prompt** for captions (MC-R, Live Drive, Decisions, sticky toast).
+    /// Keep ``origin`` for routing; use ``displaySource`` for consistent “Source: …” copy instead of duplicating
+    /// issuer strings in ``body`` / ``contextFacts``.
+    let displaySource: OperatorPromptDisplaySource
+
     /// Where this prompt lives in the app's domain — mission run, task, squad, slot,
     /// vehicle, recipe run, plugin. Used by the router to filter delivery to the
     /// operator's current focus, by the drawer to render the addressing stamp, and
@@ -124,6 +129,7 @@ struct OperatorPromptEvent: Identifiable, Equatable, Sendable {
     init(
         id: UUID = UUID(),
         origin: OperatorPromptOrigin,
+        displaySource: OperatorPromptDisplaySource = .missionControl,
         target: OperatorPromptTarget = .unspecified,
         severity: GuardianFeedbackSeverity,
         title: String,
@@ -137,6 +143,7 @@ struct OperatorPromptEvent: Identifiable, Equatable, Sendable {
     ) {
         self.id = id
         self.origin = origin
+        self.displaySource = displaySource
         self.target = target
         self.severity = severity
         self.title = title
@@ -702,8 +709,8 @@ extension OperatorPromptEvent {
     /// first.
     ///
     /// Callers can supply explicit `title` / `body` / `severity` / `options` /
-    /// `policyKey` to override the derived defaults when domain-specific
-    /// phrasing matters.
+    /// `policyKey` / `displaySource` to override the derived defaults when domain-specific
+    /// phrasing matters. Recipe escalations default ``OperatorPromptDisplaySource/missionControl``.
     init(
         fromRecipeEscalation event: FleetRecipeEscalationEvent,
         target overrideTarget: OperatorPromptTarget? = nil,
@@ -713,6 +720,7 @@ extension OperatorPromptEvent {
         contextFacts extraFacts: [OperatorPromptContextFact] = [],
         options: [OperatorPromptOption]? = nil,
         policyKey: String? = nil,
+        displaySource: OperatorPromptDisplaySource = .missionControl,
         createdAt: Date = Date(),
         timeout: TimeInterval = OperatorPromptEvent.defaultTimeout
     ) {
@@ -737,6 +745,7 @@ extension OperatorPromptEvent {
         ]
         self.init(
             origin: .recipeEscalation(event: event),
+            displaySource: displaySource,
             target: overrideTarget ?? derivedTarget,
             severity: overrideSeverity ?? derived.severity,
             title: overrideTitle ?? derived.title,

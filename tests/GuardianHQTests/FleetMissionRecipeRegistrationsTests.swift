@@ -41,6 +41,38 @@ final class FleetMissionRecipeRegistrationsTests: XCTestCase {
         )
     }
 
+    func test_registerAll_registersDoMissionUploadStartItem() {
+        FleetMissionRecipeRegistrations.registerAll()
+
+        let name = FleetMissionRecipeRegistrations.doMissionUploadStartItemRecipeName
+        let descriptor = FleetRecipesCatalogue.shared.descriptor(for: name)
+        XCTAssertNotNil(descriptor)
+        XCTAssertEqual(descriptor?.riskTier, .confirmInLiveMission)
+        XCTAssertEqual(descriptor?.appliesToSystems, ["mission"])
+        XCTAssertEqual(descriptor?.parameters.count, 2)
+        XCTAssertEqual(Set(descriptor?.parameters.map(\.name) ?? []), ["missionItemsJSON", "missionStartItemIndex"])
+
+        let body = descriptor?.body
+        XCTAssertEqual(body?.entryStepID.rawValue, "upload")
+        XCTAssertEqual(body?.steps.count, 4)
+        XCTAssertEqual(body?.steps.map(\.id.rawValue), ["upload", "setMissionItem", "arm", "start"])
+
+        guard let descriptor else { return }
+        guard let body = descriptor.body else {
+            return XCTFail("Mission upload/start.item recipe descriptor must carry a body")
+        }
+        let parseErrors = FleetRecipeBodyParser.validate(
+            body,
+            against: descriptor,
+            recipes: FleetRecipesCatalogue.shared,
+            commands: FleetCommandsCatalogue.shared
+        )
+        XCTAssertTrue(
+            parseErrors.isEmpty,
+            "Mission upload/start.item recipe body must validate (bundle JSON or compiled-in): \(parseErrors)"
+        )
+    }
+
     func test_registerAll_registersDoReturnHome() {
         FleetMissionRecipeRegistrations.registerAll()
 

@@ -92,6 +92,9 @@ struct PaladinIssuedCommand: Equatable {
 @MainActor
 /// Per-run Mission Control assistant. Task **attempting** (``MissionRunEnvironment/taskAttemptingByTaskID`` / ``MissionTaskAttemptState``) co-refreshes with ``taskStateByTaskID``; read that map when Paladin needs protocol intent distinct from settled ``MissionTaskState``.
 final class PaladinMissionAssistant {
+    /// RGB card **background** for Paladin-originated **operator prompts** (MC-R / Decisions). Owned by the plugin — Mission Control must never hardcode this value.
+    nonisolated static let operatorPromptCardBackgroundHex6 = "b996d3"
+
     /// Plain string constant — `nonisolated` so non-MainActor sites (e.g. ``PaladinEvent`` initializers)
     /// can reference the canonical assistant key without crossing actor boundaries.
     nonisolated static let assistantKey = "paladin.missionAssistant"
@@ -132,6 +135,11 @@ final class PaladinMissionAssistant {
             primaryAssignmentID: primaryAssignmentID,
             reserveAssignmentID: reserveAssignmentID,
             issuerKey: MissionRunCommandIssuerKey.paladin,
+            operatorPromptDisplaySource: .assistant(
+                pluginID: GuardianPluginID.paladin.rawValue,
+                displayName: Self.assistantDisplayName,
+                operatorPromptBackgroundHex: Self.operatorPromptCardBackgroundHex6
+            ),
             observerToken: token
         )
     }

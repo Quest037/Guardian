@@ -118,7 +118,10 @@ struct ProcessPromptPolicy: Equatable, Sendable {
     /// Bind a single entry template to a concrete delivery target using
     /// `eventTarget`. Returns `nil` when the entry's required addressing is
     /// absent from the event.
-    private static func bind(
+    ///
+    /// Shared with ``OperatorPromptReviewSurfaceResolver`` so “review where this
+    /// prompt belongs” follows the same binding rules as routing.
+    static func bind(
         entry: Entry,
         to eventTarget: OperatorPromptTarget
     ) -> OperatorPromptDeliveryTarget? {
@@ -231,5 +234,15 @@ extension ProcessPromptPolicy {
             .persistentToast,
             .userNotification(style: .mcrCriticalReturn),
         ], mirrorToInbox: mirrorToInbox)
+    }
+
+    /// Effective routing policy for `event` — same shape ``OperatorPromptRouter`` uses
+    /// after origin-specific refinements (e.g. mission-scoped airframe-replacement escalations).
+    static func routingPolicy(for event: OperatorPromptEvent) -> ProcessPromptPolicy {
+        let base = Self.default(for: event.origin)
+        guard case .recipeEscalation(let esc) = event.origin else { return base }
+        guard case .unrecoverableFailure(let k) = esc.reason, k == .needsAirframeReplacement else { return base }
+        guard event.target.missionRunID != nil else { return base }
+        return Self.recipeEscalationMissionRunNeedsAirframeReplacement(mirrorToInbox: base.mirrorToInbox)
     }
 }

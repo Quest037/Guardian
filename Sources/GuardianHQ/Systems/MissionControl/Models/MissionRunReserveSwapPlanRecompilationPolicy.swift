@@ -8,6 +8,8 @@ import Foundation
 /// which calls ``MissionRunPlannerSubsystem/compileInitialPlan`` so the same **plugin assistant** hooks as normal plan
 /// builds observe the new ``MissionRunEnvironment/assignments`` + ``compiledPlan``. Use ``fixedRosterReserveSwapPlanCompileSource``
 /// after ``MissionRunEnvironment/swapRosterVacancyWithFixedTemplateReserveAssignment`` so exports distinguish the commit kind.
+///
+/// **Post-commit:** after that recompile (same run loop), ``MissionRunEnvironment/beginPostCommitReserveSwapHandoffPipeline`` resolves vacancy vs displaced stream rows, logs ``MissionRunReserveSwapPipelinePhase/postCommitHandoff``, and (when live executing) enqueues ``MissionRunQueuedCommandBatch`` work tagged ``MissionRunCommandQueueTag/reserveSwapPostCommit`` — displaced mission clear, vacancy mission upload recipes, and displaced **reserve-swap preference** wind-down — via ``MissionRunExecutionSubsystem/enqueueCommandBatch``.
 enum MissionRunReserveSwapPlanRecompilationPolicy: Sendable {
 
     /// Passed to ``MissionRunPlannerSubsystem/compileInitialPlan(source:reason:)`` after a successful MCS floating-pool
@@ -15,7 +17,7 @@ enum MissionRunReserveSwapPlanRecompilationPolicy: Sendable {
     static let floatingReserveSwapPlanCompileSource = "missionControl.plan.floatingReserveSwap"
 
     /// Same planner / mutation-commit hook path as ``floatingReserveSwapPlanCompileSource`` after a **template reserve roster row**
-    /// ↔ active primary/wingman binding swap (Paladin consent or autonomous engagement).
+    /// ↔ active primary/wingman binding swap (headless assistant or operator consent path through Mission Control).
     static let fixedRosterReserveSwapPlanCompileSource = "missionControl.plan.fixedRosterReserveSwap"
 
     /// ``MissionRunPlannerSubsystem/compileInitialPlan`` invokes registered **mutation commit** callbacks in

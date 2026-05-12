@@ -33,6 +33,8 @@ final class OperatorPromptCenterTests: XCTestCase {
 
         XCTAssertEqual(center.inboxPrompts.count, 1)
         XCTAssertEqual(center.inboxPrompts.first?.id, event.id)
+        XCTAssertEqual(center.persistentOperatorToastPrompts.count, 1)
+        XCTAssertEqual(center.persistentOperatorToastPrompts.first?.id, event.id)
 
         let submitted = center.submitAnswer(
             OperatorPromptAnswer(
@@ -48,15 +50,110 @@ final class OperatorPromptCenterTests: XCTestCase {
         let answer = await task.value
         XCTAssertEqual(answer.verb, .retry)
         XCTAssertEqual(center.inboxPrompts.count, 0)
+        XCTAssertTrue(center.persistentOperatorToastPrompts.isEmpty)
     }
 
-    func test_prepareOperatorPromptRoutingSession_installsInboxOnlyProbeOnRouter() {
+    func test_prepareOperatorPromptRoutingSession_installsProbe_mcrAndLiveDriveFalseUntilHostsRegister() {
         let router = OperatorPromptRouter(availabilityProbe: { _ in true })
         let center = OperatorPromptCenter(router: router, resumption: OperatorPromptResumptionChannel())
         center.prepareOperatorPromptRoutingSession()
 
         let probe = router.availabilityProbe
         XCTAssertTrue(probe(.inAppInbox))
-        XCTAssertFalse(probe(.persistentToast))
+        XCTAssertTrue(probe(.persistentToast))
+        let rid = UUID()
+        XCTAssertFalse(probe(.mcrPromptPanel(missionRunID: rid)))
+        center.setMCRPromptPanelHostActive(true, missionRunID: rid)
+        XCTAssertTrue(probe(.mcrPromptPanel(missionRunID: rid)))
+        center.setMCRPromptPanelHostActive(false, missionRunID: rid)
+    }
+
+    func test_awaitAnswer_mountsPersistentToastWhenNoStripContextualDispatched() async {
+        let resumption = OperatorPromptResumptionChannel()
+        let router = OperatorPromptRouter(availabilityProbe: OperatorPromptRouter.defaultAvailabilityProbe)
+        let center = OperatorPromptCenter(router: router, resumption: resumption)
+        center.prepareOperatorPromptRoutingSession()
+
+        let escalation = FleetRecipeEscalationEvent(
+            runID: FleetRecipeRunID(),
+            recipe: .literal("recipe.fleet.test.escalation.prompt"),
+            vehicleID: "ALPHA-1",
+            stepID: .literal("step"),
+            reason: .operatorActionRequired(kind: .rotateDrone),
+            allowedVerbs: [.retry, .abort],
+            lastResponse: .success()
+        )
+        let event = OperatorPromptEvent(fromRecipeEscalation: escalation)
+
+        let task = Task { await center.awaitAnswer(for: event) }
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertEqual(center.inboxPrompts.count, 1)
+        XCTAssertEqual(center.persistentOperatorToastPrompts.count, 1)
+        XCTAssertEqual(center.persistentOperatorToastPrompts.first?.id, event.id)
+
+        XCTAssertTrue(
+            center.submitAnswer(
+                OperatorPromptAnswer(
+                    promptID: event.id,
+                    selectedOptionID: OperatorPromptOption.standardID(for: .retry),
+                    verb: .retry,
+                    remember: false,
+                    resolution: .operatorChose
+                )
+            )
+        )
+        let answer = await task.value
+        XCTAssertEqual(answer.verb, .retry)
+        XCTAssertTrue(center.persistentOperatorToastPrompts.isEmpty)
+    }
+
+    func test_awaitAnswer_skipsPersistentToastWhenMCRStripDispatched() async {
+        let resumption = OperatorPromptResumptionChannel()
+        let router = OperatorPromptRouter(availabilityProbe: OperatorPromptRouter.defaultAvailabilityProbe)
+        let center = OperatorPromptCenter(router: router, resumption: resumption)
+        center.prepareOperatorPromptRoutingSession()
+        let runID = UUID()
+        center.setMCRPromptPanelHostActive(true, missionRunID: runID)
+        defer { center.setMCRPromptPanelHostActive(false, missionRunID: runID) }
+
+        let escalation = FleetRecipeEscalationEvent(
+            runID: FleetRecipeRunID(),
+            recipe: .literal("recipe.fleet.test.escalation.prompt"),
+            vehicleID: "ALPHA-1",
+            stepID: .literal("step"),
+            reason: .operatorActionRequired(kind: .rotateDrone),
+            allowedVerbs: [.retry, .abort],
+            lastResponse: .success()
+        )
+        let event = OperatorPromptEvent(
+            fromRecipeEscalation: escalation,
+            target: OperatorPromptTarget(
+                missionRunID: runID,
+                affectedVehicleID: "ALPHA-1",
+                recipeRunID: escalation.runID
+            )
+        )
+
+        let task = Task { await center.awaitAnswer(for: event) }
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertEqual(center.activeMCRPrompts(forMissionRunID: runID).count, 1)
+        XCTAssertTrue(center.persistentOperatorToastPrompts.isEmpty)
+
+        XCTAssertTrue(
+            center.submitAnswer(
+                OperatorPromptAnswer(
+                    promptID: event.id,
+                    selectedOptionID: OperatorPromptOption.standardID(for: .retry),
+                    verb: .retry,
+                    remember: false,
+                    resolution: .operatorChose
+                )
+            )
+        )
+        _ = await task.value
     }
 }

@@ -13,5 +13,5 @@ When adding or changing an **app-wide trailing drawer**:
 - Inject ``@EnvironmentObject private var appDrawer: AppDrawer`` and call ``present(title:preferredWidth:scrimTapDismisses:animation:content:)`` / ``dismiss()``.
 - Use ``title: nil`` when the content view already includes a full custom header (e.g. segmented control in the header). Use a non-nil ``title`` when the shared ``AppDrawerChrome`` (title + close) should wrap the body.
 - Dismiss overlays when leaving a screen if needed (e.g. ``onDisappear``); tab changes already call ``dismiss()`` from ``RootView``.
-- Window stacking: see ``GuardianLayoutPatterns`` — ``withAppDrawer()`` wraps ``RootView``; ``withGuardianConfirmOverlayHost()`` stacks on that; ``withToasts()`` is outermost above both.
+- Window stacking: see ``GuardianLayoutPatterns`` — ``withAppDrawer()`` wraps ``RootView``; ``withGuardianConfirmOverlayHost()`` stacks on that; ``withOperatorPromptPersistentToasts()`` then ``withToasts()`` (ephemeral) stack outward.
 - Reference: **Theme** panel → **App drawer** section (scrim swatches, ``AppDrawerChrome`` preview, live sample ``present``).

@@ -39,6 +39,14 @@ Locked contracts (**pool / written-off**, **fleet wind-down via catalogue + reci
 
 ---
 
+## Post-commit swap executor & **reserveSwap** policy (finish handoff)
+
+Ordered work to go **beyond** roster/pool commit + plan recompile: **clear mission on the displaced aircraft → mission upload (+ arm + start) on the reserve so it picks up where the active left off → fleet wind-down on the old binding** using the same catalogue / ``MissionRunFleetDispatch`` surfaces as abort/complete (not bespoke MAVLink). **Arm + start on the new active** ship inside ``recipe.fleet.do.mission.upload.start`` / ``recipe.fleet.do.mission.upload.start.item`` in the post-commit batch (see **README.md** → **Floating reserve pool**); there is no separate post-commit “mission start only” enqueue in v1. **Displaced wind-down** uses ``MissionRunExecutionSubsystem/buildReserveSwapPolicyWindDownCommands`` (``MissionRunPolicyResolution/resolvedReserveSwapPreferenceChain`` on the displaced row), logged as ``MissionRunReserveSwapPipelinePhase/displacedFleetWindDown``.
+
+1. [ ] **Tests + README** — Extend unit tests for partial upload slice / policy-driven paths when those land; keep **README.md** → **Floating reserve pool** aligned with shipped executor behaviour (todo hygiene).
+
+---
+
 ## UI checklist (cross-cutting)
 
 - [ ] **Swap wizard / sheet** — phases with progress, cancel, retry; theme tokens (**README** design system).
@@ -66,12 +74,6 @@ Xcode’s **Issue Navigator** can list **dozens of red errors** under `MissionCo
 
 ---
 
-## Implementation order (suggested)
+## Implementation order (historical)
 
-1. Candidate model + class matrix + enumerate API (no UI).  
-2. Manual operator swap happy path (fixed reserve first, then pool) with confirm + commit + plan recompile.  
-3. Mission upload + reposition phases (reuse execution subsystem patterns).  
-4. Arm/calibrate swap-time recipe bundle + failure handling.  
-5. Map presentation (MC-R / MCS).  
-6. Auto-triggers + escalation suggestions + Paladin.  
-7. Hardening, tests, docs migration into **README.md** when behaviour is stable (then trim this file per todo hygiene).
+Earlier bullets (candidate enumeration, MC-R swap UI + commit, map, arm probe path, **post-commit pending command token sync**, **post-commit fleet ack phase logs + operator toasts on failure**) have largely landed. **Remaining ordered work** is tracked in **Post-commit swap executor & reserveSwap policy** above; automation / Paladin / escalation layers still follow the **Swap pipeline** phases and **README** → **Floating reserve pool**.

@@ -9,6 +9,7 @@ import SwiftUI
 /// | Channel | Scope | Blocks interaction? | Typical persistence | Notes |
 /// | --- | --- | --- | --- | --- |
 /// | **Toast** (`ToastCenter` / `View/withToasts()`) | Window · **top-trailing** over the main **top bar** (Simulate + appearance; hosted above the app drawer) | No | Auto-dismiss (default ≈2.2s) | Single slot; does not cover the sidebar rail. |
+/// | **Persistent operator toast** (`OperatorPromptCenter` / `View/withOperatorPromptPersistentToasts()`) | Window · **top-leading in the content column** (below top bar, right of nav rail) | No | Until the prompt is answered or times out | Sticky chip; tap opens the Decisions drawer. Sits **below** ephemeral ``ToastHost`` (see z-order). |
 /// | **Bottom prompt** (`GuardianBottomPromptCenter` / `GuardianBottomPromptBanner`) | **Screen-local** (host owns the center, e.g. Mission Control run, Live Drive) | Optional two-button flows gate the next step | Until dismissed or confirmed | Solid bottom banner; heavier than a toast. |
 /// | **Inline notice** (`GuardianInlineNotice`) | **Screen-local** (embedded in a layout) | No | Until your state removes it | Raised surface + border; use for contextual callouts. |
 /// | **Confirm** (`guardianConfirmOverlay` + `GuardianConfirmOverlayHost`) | **Whole window** | **Yes** (dimmed scrim) | Until action or Escape | Below window-level toasts — see z-order below. |
@@ -17,7 +18,8 @@ import SwiftUI
 ///
 /// **Back → front (window shell):** ``RootView`` (sidebar + `content`; publishes ``GuardianToastShellAnchorPreferenceKey``) →
 /// ``View/withAppDrawer()`` (full-window scrim + trailing panel) → ``View/withGuardianConfirmOverlayHost()`` (blocking
-/// scrim + panel) → ``View/withToasts()`` (outermost; ``ToastHost`` uses a higher ``zIndex`` than the confirm layer).
+/// scrim + panel) → ``View/withOperatorPromptPersistentToasts()`` (sticky top-leading operator prompt chips in the content column) →
+/// ``View/withToasts()`` (outermost; ``ToastHost`` uses a higher ``zIndex`` than the persistent operator layer).
 /// See ``GuardianLayoutPatterns`` for modifier order.
 ///
 /// ## Naming bridge

@@ -86,6 +86,7 @@ final class MissionRunAbortPreferencePolicyTests: XCTestCase {
         let rules = try JSONDecoder().decode(RouteRules.self, from: data)
         XCTAssertEqual(rules.missionAbortPreferenceChain.last?.kind, .park)
         XCTAssertEqual(rules.missionCompletePreferenceChain.last?.kind, .park)
+        XCTAssertEqual(rules.missionReserveSwapPreferenceChain.last?.kind, .park)
     }
 
     func test_abortTactic_decodeNearestOpenDefaultsMapKindToRally() throws {
@@ -174,6 +175,107 @@ final class MissionRunAbortPreferencePolicyTests: XCTestCase {
         )
 
         let resolved = MissionRunPolicyResolution.resolvedCompletePreferenceChain(assignment: assignment, mission: mission)
+        XCTAssertEqual(resolved.first?.kind, .loiter)
+    }
+
+    func test_normalizedReserveSwapPreferenceChain_singleNoneStaysAlone() {
+        let input = [MissionRunReserveSwapTactic(kind: .none)]
+        let out = MissionRunReserveSwapTactic.normalizedPreferenceChain(input)
+        XCTAssertEqual(out.count, 1)
+        XCTAssertEqual(out[0].kind, .none)
+    }
+
+    func test_resolvedReserveSwapPreferenceChain_assignmentOverridesTask() {
+        let taskID = UUID()
+        let rosterID = UUID()
+        var task = MissionTask(id: taskID, name: "Alpha")
+        task.reserveSwapPreferenceChainOverride = [MissionRunReserveSwapTactic(kind: .returnToLaunch)]
+
+        var rules = RouteRules()
+        rules.missionReserveSwapPreferenceChain = [MissionRunReserveSwapTactic(kind: .returnToLaunch)]
+
+        let mission = Mission(
+            id: UUID(),
+            name: "M",
+            description: "",
+            type: .mobile,
+            routeMacro: RouteMacro(tasks: [task], rules: rules)
+        )
+
+        var policies = MissionRunAssignmentPolicies()
+        policies.reserveSwapPreferenceChain = [MissionRunReserveSwapTactic(kind: .loiter)]
+
+        let assignment = MissionRunAssignment(
+            taskId: taskID,
+            rosterDeviceId: rosterID,
+            slotName: "P1",
+            policies: policies
+        )
+
+        let resolved = MissionRunPolicyResolution.resolvedReserveSwapPreferenceChain(assignment: assignment, mission: mission)
+        XCTAssertEqual(resolved.first?.kind, .loiter)
+    }
+
+    func test_inheritedReserveSwapPreferenceChainForSlot_ignoresSlotOverride() {
+        let taskID = UUID()
+        let rosterID = UUID()
+        var task = MissionTask(id: taskID, name: "Alpha")
+        task.reserveSwapPreferenceChainOverride = [MissionRunReserveSwapTactic(kind: .loiter)]
+
+        var rules = RouteRules()
+        rules.missionReserveSwapPreferenceChain = [MissionRunReserveSwapTactic(kind: .returnToLaunch)]
+
+        let mission = Mission(
+            id: UUID(),
+            name: "M",
+            description: "",
+            type: .mobile,
+            routeMacro: RouteMacro(tasks: [task], rules: rules)
+        )
+
+        var policies = MissionRunAssignmentPolicies()
+        policies.reserveSwapPreferenceChain = [MissionRunReserveSwapTactic(kind: .returnToLaunch)]
+
+        let assignment = MissionRunAssignment(
+            taskId: taskID,
+            rosterDeviceId: rosterID,
+            slotName: "P1",
+            policies: policies
+        )
+
+        let inherited = MissionRunPolicyResolution.inheritedReserveSwapPreferenceChainForSlot(assignment: assignment, mission: mission)
+        XCTAssertEqual(inherited.first?.kind, .loiter)
+    }
+
+    func test_missionTemplateReserveSwapPreferenceChain_ignoresOverrides() {
+        let taskID = UUID()
+        let rosterID = UUID()
+        var task = MissionTask(id: taskID, name: "Alpha")
+        task.reserveSwapPreferenceChainOverride = [MissionRunReserveSwapTactic(kind: .loiter)]
+
+        var rules = RouteRules()
+        rules.missionReserveSwapPreferenceChain = [MissionRunReserveSwapTactic(kind: .park)]
+
+        let mission = Mission(
+            id: UUID(),
+            name: "M",
+            description: "",
+            type: .mobile,
+            routeMacro: RouteMacro(tasks: [task], rules: rules)
+        )
+
+        let policies = MissionRunAssignmentPolicies()
+        let assignment = MissionRunAssignment(
+            taskId: taskID,
+            rosterDeviceId: rosterID,
+            slotName: "P1",
+            policies: policies
+        )
+
+        let template = MissionRunPolicyResolution.missionTemplateReserveSwapPreferenceChain(mission: mission)
+        XCTAssertEqual(template.first?.kind, .park)
+
+        let resolved = MissionRunPolicyResolution.resolvedReserveSwapPreferenceChain(assignment: assignment, mission: mission)
         XCTAssertEqual(resolved.first?.kind, .loiter)
     }
 }

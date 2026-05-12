@@ -7,6 +7,8 @@ import SwiftUI
 struct OperatorPromptInboxDrawerView: View {
 
     @EnvironmentObject private var center: OperatorPromptCenter
+    @EnvironmentObject private var operatorPromptReviewFocus: OperatorPromptReviewFocusController
+    @EnvironmentObject private var appDrawer: AppDrawer
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var rememberByPromptID: [UUID: Bool] = [:]
@@ -48,6 +50,24 @@ struct OperatorPromptInboxDrawerView: View {
 
     private func promptCard(_ event: OperatorPromptEvent) -> some View {
         VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+            OperatorPromptAttributionCaption(source: event.displaySource)
+            if let reviewSurface = OperatorPromptReviewSurfaceResolver.resolve(for: event) {
+                GuardianThemedButton(
+                    title: reviewSurface.reviewNavigationButtonTitle,
+                    accent: .neutral,
+                    surface: .outline,
+                    size: .small,
+                    shape: .cornered,
+                    action: {
+                        operatorPromptReviewFocus.requestReviewFocus(for: event) {
+                            appDrawer.dismiss()
+                        }
+                    }
+                )
+                .help(reviewSurface.reviewNavigationAccessibilityHint)
+                .accessibilityHint(reviewSurface.reviewNavigationAccessibilityHint)
+                .guardianPointerOnHover()
+            }
             HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.xs) {
                 Image(systemName: event.severity.feedbackChromeSymbol)
                     .foregroundStyle(severityColor(event.severity))
@@ -98,7 +118,7 @@ struct OperatorPromptInboxDrawerView: View {
         }
         .padding(GuardianSpacing.cardBodyInset)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(theme.backgroundRaised)
+        .background(event.displaySource.resolvedOperatorPromptCardFillColor(severityForAssistantHexFallback: event.severity))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)

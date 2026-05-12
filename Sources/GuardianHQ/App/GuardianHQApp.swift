@@ -87,6 +87,7 @@ struct GuardianHQApp: App {
     @StateObject private var generalSettingsStore = GeneralSettingsStore()
     @StateObject private var osmRoutingService = OSMRoutingService()
     @StateObject private var pluginPreferences = PluginPreferencesStore()
+    @StateObject private var operatorPromptReviewFocusController = OperatorPromptReviewFocusController()
 
     init() {
         NSWindow.allowsAutomaticWindowTabbing = false
@@ -100,7 +101,7 @@ struct GuardianHQApp: App {
                 if showingSplash {
                     TacticalSplashView()
                 } else {
-                    // Theme 12.1 — window stack: RootView → AppDrawer → blocking confirm host → toasts (see `GuardianLayoutPatterns`).
+                    // Theme 12.1 — window stack: RootView → AppDrawer → blocking confirm host → persistent operator toasts → ephemeral toasts (see `GuardianLayoutPatterns`).
                     RootView(
                         selection: $selection,
                         fleetLinkService: fleetLinkService,
@@ -109,9 +110,11 @@ struct GuardianHQApp: App {
                     )
                         .withAppDrawer()
                         .withGuardianConfirmOverlayHost()
+                        .withOperatorPromptPersistentToasts()
                         .withToasts()
                         .environmentObject(appDrawer)
                         .environmentObject(OperatorPromptCenter.shared)
+                        .environmentObject(operatorPromptReviewFocusController)
                         .environmentObject(osmRoutingService)
                         .onAppear {
                             // SwiftPM / early launch: re-run after splash so permission + System Settings registration line up with a real NSApplication + window session.
@@ -123,6 +126,12 @@ struct GuardianHQApp: App {
             // descendant must resolve the same ``ToastCenter`` instance — do not attach only inside the
             // post-splash branch or modifier-order bugs can strand auto-dismiss behind a stale host binding.
             .environmentObject(toastCenter)
+            .onReceive(NotificationCenter.default.publisher(for: GuardianReserveSwapPostCommitOperatorToastNotification.name)) { note in
+                guard let message = note.userInfo?[GuardianReserveSwapPostCommitOperatorToastNotification.messageKey] as? String else { return }
+                let raw = note.userInfo?[GuardianReserveSwapPostCommitOperatorToastNotification.severityRawKey] as? String
+                let style = GuardianFeedbackSeverity(rawValue: raw ?? "") ?? .error
+                toastCenter.show(message, style: style, duration: 4.5)
+            }
             // Must be an ancestor of ``View/withGuardianConfirmOverlayHost()`` so ``GuardianConfirmOverlayRootModifier`` can resolve ``@EnvironmentObject`` (it wraps the drawer, not the other way around).
             .environmentObject(guardianConfirmOverlayHost)
             .onChange(of: showingSplash) { stillShowingSplash in

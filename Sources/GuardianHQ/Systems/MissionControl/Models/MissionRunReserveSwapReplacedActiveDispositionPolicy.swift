@@ -29,12 +29,14 @@ enum MissionRunReserveSwapReplacedActivePoolDispositionPolicy: Sendable {
 enum MissionRunReserveSwapReplacedActiveFleetWindDownPolicy: Sendable {
 
     /// Dispatch shapes are always ``MissionRunFleetDispatch`` (``MissionRunFleetDispatch/preferentialCompleteTacticDispatch``,
+    /// ``MissionRunFleetDispatch/preferentialReserveSwapTacticDispatch``,
     /// ``MissionRunFleetDispatch/preferentialAbortTacticDispatch``, move-point-park recipes, mission-clear atoms) matching
     /// ``MissionRunExecutionSubsystem`` / ``MissionRunPlannerSubsystem`` builders.
     static let useMissionControlCatalogueAndRecipeDispatchOnly = true
 
     /// For an **orderly** handoff (reserve takes the vacancy; old active still needs RTL / rally / loiter / park),
-    /// prefer ``MissionRunPolicyResolution/resolvedCompletePreferenceChain`` and
+    /// prefer ``MissionRunPolicyResolution/resolvedReserveSwapPreferenceChain`` (or, when a single recovery surface is
+    /// intentional, ``MissionRunPolicyResolution/resolvedCompletePreferenceChain``) and
     /// ``MissionRunExecutionSubsystem/buildCompletePolicyWindDownCommands(limitedToAssignmentIDs:)`` scoped to the
     /// **assignment row that still owns the replaced fleet token** (e.g. pool berth / `.reserve` roster), **not** the
     /// vacancy row (which now carries the reserve token after commit).

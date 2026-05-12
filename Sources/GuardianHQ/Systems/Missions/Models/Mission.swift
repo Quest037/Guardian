@@ -609,6 +609,8 @@ struct MissionTask: Identifiable, Codable, Equatable {
     var abortPreferenceChainOverride: [MissionRunAbortTactic]?
     /// When non-empty, overrides ``RouteRules/missionCompletePreferenceChain`` for this task’s roster slots (unless a slot sets ``MissionRunAssignmentPolicies/completePreferenceChain``).
     var completePreferenceChainOverride: [MissionRunCompleteTactic]?
+    /// When non-empty, overrides ``RouteRules/missionReserveSwapPreferenceChain`` for this task’s roster slots (unless a slot sets ``MissionRunAssignmentPolicies/reserveSwapPreferenceChain``).
+    var reserveSwapPreferenceChainOverride: [MissionRunReserveSwapTactic]?
 
     enum CodingKeys: String, CodingKey {
         case id, name, enabled, waypoints, loopMode, cycles
@@ -619,7 +621,7 @@ struct MissionTask: Identifiable, Codable, Equatable {
         case legacyStartDelayInt = "startDelay"
         case rosterDeviceIds = "spaceBindings"
         case legacyScheduleRefs = "scheduleRefs"
-        case abortPreferenceChainOverride, completePreferenceChainOverride
+        case abortPreferenceChainOverride, completePreferenceChainOverride, reserveSwapPreferenceChainOverride
     }
 
     /// Effective start deferral duration for execution (seconds).
@@ -655,7 +657,8 @@ struct MissionTask: Identifiable, Codable, Equatable {
         startDelayValue: Double = 0,
         startDelayUnit: DelayUnit = .secs,
         abortPreferenceChainOverride: [MissionRunAbortTactic]? = nil,
-        completePreferenceChainOverride: [MissionRunCompleteTactic]? = nil
+        completePreferenceChainOverride: [MissionRunCompleteTactic]? = nil,
+        reserveSwapPreferenceChainOverride: [MissionRunReserveSwapTactic]? = nil
     ) {
         self.id = id
         self.name = name
@@ -674,6 +677,7 @@ struct MissionTask: Identifiable, Codable, Equatable {
         self.startDelayUnit = startDelayUnit
         self.abortPreferenceChainOverride = abortPreferenceChainOverride
         self.completePreferenceChainOverride = completePreferenceChainOverride
+        self.reserveSwapPreferenceChainOverride = reserveSwapPreferenceChainOverride
         normalizeDelayFields()
     }
 
@@ -734,6 +738,7 @@ struct MissionTask: Identifiable, Codable, Equatable {
 
         abortPreferenceChainOverride = try c.decodeIfPresent([MissionRunAbortTactic].self, forKey: .abortPreferenceChainOverride)
         completePreferenceChainOverride = try c.decodeIfPresent([MissionRunCompleteTactic].self, forKey: .completePreferenceChainOverride)
+        reserveSwapPreferenceChainOverride = try c.decodeIfPresent([MissionRunReserveSwapTactic].self, forKey: .reserveSwapPreferenceChainOverride)
 
         waypoints = Self.migratePathMetadataIfNeeded(waypoints)
         normalizeDelayFields()
@@ -785,6 +790,7 @@ struct MissionTask: Identifiable, Codable, Equatable {
         try c.encode(startDelayUnit, forKey: .startDelayUnit)
         try c.encodeIfPresent(abortPreferenceChainOverride, forKey: .abortPreferenceChainOverride)
         try c.encodeIfPresent(completePreferenceChainOverride, forKey: .completePreferenceChainOverride)
+        try c.encodeIfPresent(reserveSwapPreferenceChainOverride, forKey: .reserveSwapPreferenceChainOverride)
     }
 }
 
@@ -798,21 +804,25 @@ struct RouteRules: Codable, Equatable {
     var missionAbortPreferenceChain: [MissionRunAbortTactic]
     /// Default **ordered** complete (recovery) tactics unless overridden per task or per roster assignment.
     var missionCompletePreferenceChain: [MissionRunCompleteTactic]
+    /// Default **ordered** reserve-swap (displaced active wind-down) tactics unless overridden per task or per roster assignment.
+    var missionReserveSwapPreferenceChain: [MissionRunReserveSwapTactic]
 
     init(
         defaultSpeed: Double = 5,
         defaultHeadingHold: Bool = true,
         missionAbortPreferenceChain: [MissionRunAbortTactic] = MissionRunAbortTactic.defaultMissionAbortPreferenceChain,
-        missionCompletePreferenceChain: [MissionRunCompleteTactic] = MissionRunCompleteTactic.defaultMissionCompletePreferenceChain
+        missionCompletePreferenceChain: [MissionRunCompleteTactic] = MissionRunCompleteTactic.defaultMissionCompletePreferenceChain,
+        missionReserveSwapPreferenceChain: [MissionRunReserveSwapTactic] = MissionRunReserveSwapTactic.defaultMissionReserveSwapPreferenceChain
     ) {
         self.defaultSpeed = defaultSpeed
         self.defaultHeadingHold = defaultHeadingHold
         self.missionAbortPreferenceChain = MissionRunAbortTactic.normalizedPreferenceChain(missionAbortPreferenceChain)
         self.missionCompletePreferenceChain = MissionRunCompleteTactic.normalizedPreferenceChain(missionCompletePreferenceChain)
+        self.missionReserveSwapPreferenceChain = MissionRunReserveSwapTactic.normalizedPreferenceChain(missionReserveSwapPreferenceChain)
     }
 
     enum CodingKeys: String, CodingKey {
-        case defaultSpeed, defaultHeadingHold, missionAbortPreferenceChain, missionCompletePreferenceChain
+        case defaultSpeed, defaultHeadingHold, missionAbortPreferenceChain, missionCompletePreferenceChain, missionReserveSwapPreferenceChain
     }
 
     init(from decoder: Decoder) throws {
@@ -831,6 +841,12 @@ struct RouteRules: Codable, Equatable {
         } else {
             missionCompletePreferenceChain = MissionRunCompleteTactic.defaultMissionCompletePreferenceChain
         }
+        if let decoded = try c.decodeIfPresent([MissionRunReserveSwapTactic].self, forKey: .missionReserveSwapPreferenceChain),
+           !decoded.isEmpty {
+            missionReserveSwapPreferenceChain = MissionRunReserveSwapTactic.normalizedPreferenceChain(decoded)
+        } else {
+            missionReserveSwapPreferenceChain = MissionRunReserveSwapTactic.defaultMissionReserveSwapPreferenceChain
+        }
     }
 
     func encode(to encoder: Encoder) throws {
@@ -839,6 +855,7 @@ struct RouteRules: Codable, Equatable {
         try c.encode(defaultHeadingHold, forKey: .defaultHeadingHold)
         try c.encode(missionAbortPreferenceChain, forKey: .missionAbortPreferenceChain)
         try c.encode(missionCompletePreferenceChain, forKey: .missionCompletePreferenceChain)
+        try c.encode(missionReserveSwapPreferenceChain, forKey: .missionReserveSwapPreferenceChain)
     }
 }
 

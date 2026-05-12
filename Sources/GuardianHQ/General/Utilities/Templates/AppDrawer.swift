@@ -23,8 +23,8 @@ struct PresentedAppDrawer: Identifiable {
 ///
 /// Inject via environment and attach ``View/withAppDrawer()`` on the window root (after ``RootView``).
 ///
-/// Ephemeral app toasts use ``View/withToasts()`` **after** ``withGuardianConfirmOverlayHost()`` on the window root so
-/// they paint **above** the drawer and blocking confirms; ``RootView`` publishes ``GuardianToastShellAnchorPreferenceKey``
+/// Ephemeral app toasts use ``View/withToasts()`` **after** ``withOperatorPromptPersistentToasts()`` and ``withGuardianConfirmOverlayHost()`` on the window root so
+/// they paint **above** persistent operator prompt chips, the drawer, and blocking confirms; ``RootView`` publishes ``GuardianToastShellAnchorPreferenceKey``
 /// for top-bar alignment (top-trailing over the Simulate + appearance cluster) — see ``GuardianLayoutPatterns``.
 @MainActor
 final class AppDrawer: ObservableObject {

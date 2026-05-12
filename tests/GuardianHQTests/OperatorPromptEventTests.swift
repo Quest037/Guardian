@@ -194,6 +194,30 @@ final class OperatorPromptEventTests: XCTestCase {
         XCTAssertEqual(wrapped, escalation)
     }
 
+    func test_recipeEscalationInit_defaultsDisplaySourceToMissionControl() {
+        let escalation = sampleEscalation(reason: .operatorActionRequired(kind: .rotateDrone))
+        let event = OperatorPromptEvent(fromRecipeEscalation: escalation)
+        XCTAssertEqual(event.displaySource, .missionControl)
+    }
+
+    func test_recipeEscalationInit_customDisplaySourceIsPreserved() {
+        let escalation = sampleEscalation(reason: .operatorActionRequired(kind: .rotateDrone))
+        let event = OperatorPromptEvent(
+            fromRecipeEscalation: escalation,
+            displaySource: .assistant(
+                pluginID: GuardianPluginID.paladin.rawValue,
+                displayName: "Paladin",
+                operatorPromptBackgroundHex: "aabbcc"
+            )
+        )
+        guard case .assistant(let pid, let name, let hex) = event.displaySource else {
+            return XCTFail("expected assistant display source")
+        }
+        XCTAssertEqual(pid, GuardianPluginID.paladin.rawValue)
+        XCTAssertEqual(name, "Paladin")
+        XCTAssertEqual(hex, "aabbcc")
+    }
+
     func test_recipeEscalationInit_operatorActionRequired_defaultsToWarning() {
         let escalation = sampleEscalation(reason: .operatorActionRequired(kind: .rotateDrone))
         let event = OperatorPromptEvent(fromRecipeEscalation: escalation)

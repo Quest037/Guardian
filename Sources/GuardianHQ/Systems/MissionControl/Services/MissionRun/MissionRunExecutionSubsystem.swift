@@ -14,6 +14,9 @@ final class MissionRunExecutionSubsystem {
     private var pendingCommandBatches: [MissionRunQueuedCommandBatch] = []
     private var wallClockBatchTasks: [UUID: Task<Void, Never>] = [:]
 
+    /// Set when an immediate ``MissionRunCommandQueueTag/reserveSwapPostCommit`` batch is enqueued (for diagnostics / unit tests).
+    private(set) var lastEnqueuedReserveSwapPostCommitAckContext: MissionRunReserveSwapPostCommitBatchAckContext?
+
     /// Pending batches not yet delivered (e.g. after-cycle or wall-clock); for UI/diagnostics.
     var pendingCommandBatchesSnapshot: [MissionRunQueuedCommandBatch] { pendingCommandBatches }
 
@@ -212,6 +215,48 @@ final class MissionRunExecutionSubsystem {
         pendingCommandBatches.removeAll()
     }
 
+    /// Rewrites each pending command’s ``MissionRunIssuedCommand/vehicleTokenKey`` from the current roster row for its ``assignmentID``.
+    ///
+    /// **Reserve swap-in:** ``MissionRunEnvironment`` mutates ``MissionRunAssignment/attachedFleetVehicleToken`` before
+    /// ``MissionControlStore/recompileMissionControlPlanAfterFloatingReserveSwap`` refreshes the compiled plan. Pending
+    /// ``MissionRunQueuedCommandBatch`` rows are still keyed by the **prior** stream binding — without this pass, the next
+    /// cycle or wall-clock delivery would address the **old** aircraft while the vacancy row already shows the reserve.
+    func synchronizePendingCommandBatchesWithAssignmentFleetTokens() {
+        guard let environment else { return }
+        let byAssignmentID = Dictionary(uniqueKeysWithValues: environment.assignments.map { ($0.id, $0) })
+        var next: [MissionRunQueuedCommandBatch] = []
+        next.reserveCapacity(pendingCommandBatches.count)
+        for batch in pendingCommandBatches {
+            let newCommands = batch.commands.map { cmd -> MissionRunIssuedCommand in
+                guard let row = byAssignmentID[cmd.assignmentID],
+                      let key = row.attachedFleetVehicleToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !key.isEmpty
+                else { return cmd }
+                if cmd.vehicleTokenKey == key { return cmd }
+                return MissionRunIssuedCommand(
+                    id: cmd.id,
+                    assignmentID: cmd.assignmentID,
+                    slotName: cmd.slotName,
+                    vehicleTokenKey: key,
+                    dispatch: cmd.dispatch,
+                    issuer: cmd.issuer,
+                    issuerKey: cmd.issuerKey,
+                    category: cmd.category
+                )
+            }
+            next.append(
+                MissionRunQueuedCommandBatch(
+                    id: batch.id,
+                    tag: batch.tag,
+                    dispatch: batch.dispatch,
+                    commands: newCommands,
+                    reserveSwapPostCommitAckContext: batch.reserveSwapPostCommitAckContext
+                )
+            )
+        }
+        pendingCommandBatches = next
+    }
+
     /// Removes pending batches matching `tags`, optionally narrowed by `whereDispatch`.
     @discardableResult
     func cancelPendingCommandBatches(
@@ -248,11 +293,21 @@ final class MissionRunExecutionSubsystem {
             _ = cancelPendingCommandBatches(tags: Set([batch.tag]))
         }
 
+        if batch.tag == .reserveSwapPostCommit {
+            lastEnqueuedReserveSwapPostCommitAckContext = batch.reserveSwapPostCommitAckContext
+        }
+
         switch batch.dispatch {
         case .immediate:
-            if Self.commandsContainCatalogueMissionClear(batch.commands) {
+            let postCommitSequential = batch.tag == .reserveSwapPostCommit && !batch.commands.isEmpty
+            if Self.commandsContainCatalogueMissionClear(batch.commands) || postCommitSequential {
                 Task { @MainActor [weak self] in
-                    await self?.dispatchCommandsRespectingMissionClearBarrier(batch.commands, context: context)
+                    guard let self else { return }
+                    if batch.tag == .reserveSwapPostCommit, batch.reserveSwapPostCommitAckContext != nil {
+                        await self.dispatchReserveSwapPostCommitBatch(batch, context: context)
+                    } else {
+                        await self.dispatchCommandsRespectingMissionClearBarrier(batch.commands, context: context)
+                    }
                 }
             } else {
                 dispatchCommands(batch.commands, context: context)
@@ -349,7 +404,9 @@ final class MissionRunExecutionSubsystem {
     }
 
     /// Catalogue mission clear must finish before later commands in the same batch (e.g. move+park) are dispatched;
-    /// otherwise the recipe’s move step races an active MAVLink mission.
+    /// otherwise the recipe’s move step races an active MAVLink mission. **Reserve swap post-commit** batches also use
+    /// this path so mission-clear → vacancy mission recipe → displaced wind-down recipes dispatch **sequentially** with
+    /// proper awaits between catalogue clears and nested recipes.
     private static func isCatalogueMissionClearCommand(_ issued: MissionRunIssuedCommand) -> Bool {
         if case .catalogue(let name, _) = issued.dispatch {
             return name == .fleetVehicleDoMissionClear
@@ -369,13 +426,13 @@ final class MissionRunExecutionSubsystem {
         guard let environment else { return }
         for issued in commands {
             if Self.isCatalogueMissionClearCommand(issued) {
-                await environment.systems.commands.awaitCatalogueMissionClearDispatchAndAckLogs(
+                _ = await environment.systems.commands.awaitCatalogueMissionClearDispatchAndAckLogs(
                     issued: issued,
                     fleetLink: context.fleetLink,
                     sitl: context.sitl
                 )
             } else if case .recipe = issued.dispatch {
-                await environment.systems.commands.awaitRecipeDispatchAppendingDispatchedThenAckLogs(
+                _ = await environment.systems.commands.awaitRecipeDispatchAppendingDispatchedThenAckLogs(
                     issued: issued,
                     fleetLink: context.fleetLink,
                     sitl: context.sitl
@@ -386,6 +443,127 @@ final class MissionRunExecutionSubsystem {
                 )
             }
         }
+    }
+
+    /// Sequential post–reserve-swap handoff: log ``MissionRunReserveSwapPipelinePhase`` pass/fail **after** fleet acks,
+    /// post operator toasts on failure, and **stop** the chain on the first awaited failure (later steps are skipped).
+    private func dispatchReserveSwapPostCommitBatch(_ batch: MissionRunQueuedCommandBatch, context: MissionRunExecutionContext) async {
+        guard let environment, let ack = batch.reserveSwapPostCommitAckContext else {
+            await dispatchCommandsRespectingMissionClearBarrier(batch.commands, context: context)
+            return
+        }
+        let correlation = ack.correlation
+        let trigger = ack.triggerSource
+        for issued in batch.commands {
+            let phase = MissionRunReserveSwapPostCommitPipelinePhaseResolver.phase(for: issued, correlation: correlation)
+            if Self.isCatalogueMissionClearCommand(issued) {
+                let ok = await environment.systems.commands.awaitCatalogueMissionClearDispatchAndAckLogs(
+                    issued: issued,
+                    fleetLink: context.fleetLink,
+                    sitl: context.sitl
+                )
+                let detail = ok
+                    ? "Displaced mission clear fleet ack succeeded (\(trigger))."
+                    : "Displaced mission clear fleet ack failed — see mission log for reason (\(trigger))."
+                environment.appendReserveSwapPipelinePhaseLog(
+                    phase: .displacedMissionClear,
+                    passed: ok,
+                    correlation: correlation,
+                    detail: detail
+                )
+                if !ok {
+                    Self.postReserveSwapPostCommitOperatorToast(
+                        message: MissionRunReserveSwapOperatorCopy.toastReserveSwapPostCommitDisplacedMissionClearFailed,
+                        style: .error
+                    )
+                    return
+                }
+            } else if case .recipe = issued.dispatch {
+                let ok = await environment.systems.commands.awaitRecipeDispatchAppendingDispatchedThenAckLogs(
+                    issued: issued,
+                    fleetLink: context.fleetLink,
+                    sitl: context.sitl
+                )
+                let recipeRaw: String? = {
+                    if case .recipe(let n, _) = issued.dispatch { return n.rawValue }
+                    return nil
+                }()
+                let detail: String
+                if ok {
+                    detail = phase == .missionUpload
+                        ? "Vacancy mission handoff recipe fleet ack succeeded (\(trigger))."
+                        : "Displaced wind-down recipe fleet ack succeeded (\(trigger))."
+                } else {
+                    detail = phase == .missionUpload
+                        ? "Vacancy mission handoff recipe fleet ack failed — see mission log (\(trigger))."
+                        : "Displaced wind-down recipe fleet ack failed (\(trigger))."
+                }
+                environment.appendReserveSwapPipelinePhaseLog(
+                    phase: phase,
+                    passed: ok,
+                    correlation: correlation,
+                    detail: detail,
+                    recipeRaw: recipeRaw
+                )
+                if !ok {
+                    if phase == .missionUpload {
+                        Self.postReserveSwapPostCommitOperatorToast(
+                            message: MissionRunReserveSwapOperatorCopy.toastReserveSwapPostCommitVacancyMissionHandoffFailed,
+                            style: .error
+                        )
+                    } else {
+                        Self.postReserveSwapPostCommitOperatorToast(
+                            message: MissionRunReserveSwapOperatorCopy.toastReserveSwapPostCommitDisplacedWindDownFailed,
+                            style: .error
+                        )
+                    }
+                    return
+                }
+            } else if case .catalogue = issued.dispatch {
+                let ok = await environment.systems.commands.awaitCatalogueDispatchAndAckLogs(
+                    issued: issued,
+                    fleetLink: context.fleetLink,
+                    sitl: context.sitl
+                )
+                let detail = ok
+                    ? "Displaced wind-down catalogue fleet ack succeeded (\(trigger))."
+                    : "Displaced wind-down catalogue fleet ack failed — see mission log (\(trigger))."
+                environment.appendReserveSwapPipelinePhaseLog(
+                    phase: .displacedFleetWindDown,
+                    passed: ok,
+                    correlation: correlation,
+                    detail: detail
+                )
+                if !ok {
+                    Self.postReserveSwapPostCommitOperatorToast(
+                        message: MissionRunReserveSwapOperatorCopy.toastReserveSwapPostCommitDisplacedWindDownFailed,
+                        style: .error
+                    )
+                    return
+                }
+            } else {
+                environment.appendEvent(
+                    environment.systems.commands.dispatchCommand(issued, fleetLink: context.fleetLink, sitl: context.sitl)
+                )
+                environment.appendReserveSwapPipelinePhaseLog(
+                    phase: .displacedFleetWindDown,
+                    passed: true,
+                    correlation: correlation,
+                    detail: "Dispatched displaced wind-down vehicle command (fleet ack follows standard mission log path; \(trigger))."
+                )
+            }
+        }
+    }
+
+    private static func postReserveSwapPostCommitOperatorToast(message: String, style: GuardianFeedbackSeverity) {
+        NotificationCenter.default.post(
+            name: GuardianReserveSwapPostCommitOperatorToastNotification.name,
+            object: nil,
+            userInfo: [
+                GuardianReserveSwapPostCommitOperatorToastNotification.messageKey: message,
+                GuardianReserveSwapPostCommitOperatorToastNotification.severityRawKey: style.rawValue,
+            ]
+        )
     }
 
     func issueReturnToLaunchForAllAssignments() {
@@ -491,6 +669,95 @@ final class MissionRunExecutionSubsystem {
                     dispatch: dispatch,
                     issuer: .operator,
                     issuerKey: MissionRunCommandIssuerKey.localOperator,
+                    category: .missionControl
+                )
+            }
+        }
+        return nil
+    }
+
+    /// Per-assignment fleet commands from the resolved **reserve swap** preference chain (assignment → task → mission),
+    /// using the same optimistic dispatch rules as ``buildCompletePolicyWindDownCommands`` for map-point tactics.
+    func buildReserveSwapPolicyWindDownCommands(limitedToAssignmentIDs: Set<UUID>? = nil) -> [MissionRunIssuedCommand] {
+        guard let environment else { return [] }
+        var out: [MissionRunIssuedCommand] = []
+        guard let mission = environment.template else { return [] }
+        for assignment in environment.assignments {
+            if let limitedToAssignmentIDs, !limitedToAssignmentIDs.contains(assignment.id) { continue }
+            guard let issued = Self.optimisticReserveSwapIssuedCommand(
+                assignment: assignment,
+                preferenceChain: MissionRunReserveSwapTactic.normalizedPreferenceChain(
+                    MissionRunPolicyResolution.resolvedReserveSwapPreferenceChain(
+                        assignment: assignment,
+                        mission: mission
+                    )
+                ),
+                environment: environment,
+                mission: mission
+            ) else { continue }
+            out.append(issued)
+        }
+        return out
+    }
+
+    private static func optimisticReserveSwapIssuedCommand(
+        assignment: MissionRunAssignment,
+        preferenceChain: [MissionRunReserveSwapTactic],
+        environment: MissionRunEnvironment,
+        mission: Mission
+    ) -> MissionRunIssuedCommand? {
+        guard let tokenKey = assignment.attachedFleetVehicleToken,
+              FleetMissionVehicleToken(storageKey: tokenKey) != nil
+        else {
+            return nil
+        }
+        let hub = environment.abortPlanningHubTelemetry(for: assignment)
+        let taskId = MissionRunPolicyResolution.resolvedTaskId(for: assignment, mission: mission)
+        let points = environment.runtimeMissionPoints
+
+        for tactic in preferenceChain {
+            switch tactic.kind {
+            case .none:
+                continue
+            case .nearestOpenMapPoint:
+                guard let tid = taskId else { continue }
+                let pointKind = tactic.mapPointKind ?? .rally
+                guard let hub,
+                      let lat = hub.latitudeDeg,
+                      let lon = hub.longitudeDeg
+                else { continue }
+                let relAlt = hub.guardianAbortPlanningRelativeAltitudeM
+                guard let params = try? MissionRunMovePointParkPlanner.buildMovePointParkRecipeParameters(
+                    kind: pointKind,
+                    parentTaskID: tid,
+                    missionPoints: points,
+                    vehicleLatitudeDeg: lat,
+                    vehicleLongitudeDeg: lon,
+                    currentRelativeAltitudeM: relAlt,
+                    yawDeg: hub.yawDeg ?? 0
+                ) else { continue }
+                return MissionRunIssuedCommand(
+                    assignmentID: assignment.id,
+                    slotName: assignment.slotName,
+                    vehicleTokenKey: tokenKey,
+                    dispatch: .recipe(
+                        name: FleetMovePointParkRecipeRegistrations.movePointParkRecipeName,
+                        parameters: params
+                    ),
+                    issuer: .missionControl,
+                    issuerKey: MissionRunCommandIssuerKey.plannerReserveSwapPostCommit,
+                    category: .missionControl
+                )
+
+            case .returnToLaunch, .loiter, .park:
+                guard let dispatch = MissionRunFleetDispatch.preferentialReserveSwapTacticDispatch(tactic.kind) else { continue }
+                return MissionRunIssuedCommand(
+                    assignmentID: assignment.id,
+                    slotName: assignment.slotName,
+                    vehicleTokenKey: tokenKey,
+                    dispatch: dispatch,
+                    issuer: .missionControl,
+                    issuerKey: MissionRunCommandIssuerKey.plannerReserveSwapPostCommit,
                     category: .missionControl
                 )
             }

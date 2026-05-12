@@ -125,7 +125,7 @@ final class MissionRunPlannerSubsystem {
                 tacticIssued = nil
             }
             var issuedCommands: [MissionRunIssuedCommand] = []
-            if let clear = Self.abortPlanMissionClearCommand(assignment: assignment) {
+            if let clear = Self.catalogueMissionClearCommand(forAssignment: assignment) {
                 issuedCommands.append(clear)
             }
             if let tacticIssued {
@@ -216,9 +216,12 @@ final class MissionRunPlannerSubsystem {
         return (nil, nil)
     }
 
-    /// Default first step for abort plans: clear the onboard MAVLink mission so later tactics are not
-    /// fighting an active mission / auto-land segment.
-    private static func abortPlanMissionClearCommand(assignment: MissionRunAssignment) -> MissionRunIssuedCommand? {
+    /// Catalogue ``fleetVehicleDoMissionClear`` for one assignment — same leading atom ``buildAbortPlan`` uses per row
+    /// (and the post–reserve-swap displaced-stream clear).
+    static func catalogueMissionClearCommand(
+        forAssignment assignment: MissionRunAssignment,
+        issuerKey: String = MissionRunCommandIssuerKey.plannerAbort
+    ) -> MissionRunIssuedCommand? {
         guard let tokenKey = assignment.attachedFleetVehicleToken,
               FleetMissionVehicleToken(storageKey: tokenKey) != nil
         else {
@@ -230,7 +233,7 @@ final class MissionRunPlannerSubsystem {
             vehicleTokenKey: tokenKey,
             dispatch: .catalogue(name: .fleetVehicleDoMissionClear, parameters: .empty),
             issuer: .missionControl,
-            issuerKey: MissionRunCommandIssuerKey.plannerAbort,
+            issuerKey: issuerKey,
             category: .missionControl
         )
     }

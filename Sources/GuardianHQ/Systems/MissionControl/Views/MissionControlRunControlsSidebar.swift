@@ -56,6 +56,16 @@ struct MissionRunControlsSidebarView: View {
                 MissionRunPreferentialCompletePolicyEditor(chain: missionCompletePreferenceChainBinding, showFootnote: true)
             }
             .padding(.vertical, GuardianSpacing.xs)
+
+            Divider().overlay(theme.borderSubtle)
+
+            VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+                Text("Reserve swap preference chain")
+                    .font(GuardianTypography.font(.disclosureRowTitle))
+                    .foregroundStyle(theme.textPrimary)
+                MissionRunPreferentialReserveSwapPolicyEditor(chain: missionReserveSwapPreferenceChainBinding, showFootnote: true)
+            }
+            .padding(.vertical, GuardianSpacing.xs)
         }
         .padding(GuardianSpacing.cardBodyInset)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -152,6 +162,20 @@ struct MissionRunControlsSidebarView: View {
             },
             set: { newValue in
                 _ = run.updateMissionCompletePreferenceChain(newValue, credential: credential)
+                onChange()
+            }
+        )
+    }
+
+    private var missionReserveSwapPreferenceChainBinding: Binding<[MissionRunReserveSwapTactic]> {
+        Binding(
+            get: {
+                let mission = run.template ?? missionStore.missions.first(where: { $0.id == run.missionId })
+                let chain = mission?.routeMacro.rules.missionReserveSwapPreferenceChain ?? []
+                return MissionRunReserveSwapTactic.normalizedPreferenceChain(chain)
+            },
+            set: { newValue in
+                _ = run.updateMissionReserveSwapPreferenceChain(newValue, credential: credential)
                 onChange()
             }
         )

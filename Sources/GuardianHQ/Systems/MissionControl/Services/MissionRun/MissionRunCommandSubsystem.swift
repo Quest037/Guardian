@@ -200,17 +200,33 @@ final class MissionRunCommandSubsystem {
     /// Appends ``MissionRunLogTemplateKey/commandDispatched``, **awaits** catalogue completion, then appends the same
     /// ack success / failure logs as the fire-and-forget ``dispatchCatalogueInvoke`` path. Used so abort batches can
     /// finish ``FleetCommandName/fleetVehicleDoMissionClear`` before a follow-on recipe (e.g. move+park) starts.
+    /// - Returns: whether the catalogue invoke reported success (including dispatch prerequisites).
+    @discardableResult
     func awaitCatalogueMissionClearDispatchAndAckLogs(
         issued: MissionRunIssuedCommand,
         fleetLink: FleetLinkService,
         sitl: SitlService
-    ) async {
-        guard case .catalogue(let name, let parameters) = issued.dispatch, name == .fleetVehicleDoMissionClear else {
-            return
+    ) async -> Bool {
+        guard case .catalogue(let name, _) = issued.dispatch, name == .fleetVehicleDoMissionClear else {
+            return false
+        }
+        return await awaitCatalogueDispatchAndAckLogs(issued: issued, fleetLink: fleetLink, sitl: sitl)
+    }
+
+    /// Awaits any **catalogue** dispatch (not only mission clear) with the same logging shape as ``dispatchCatalogueInvoke``.
+    /// - Returns: whether the catalogue invoke reported success (including dispatch prerequisites).
+    @discardableResult
+    func awaitCatalogueDispatchAndAckLogs(
+        issued: MissionRunIssuedCommand,
+        fleetLink: FleetLinkService,
+        sitl: SitlService
+    ) async -> Bool {
+        guard case .catalogue(let name, let parameters) = issued.dispatch else {
+            return false
         }
         let ctx = environment?.systems.logging.effectiveTaskFields(forAssignmentID: issued.assignmentID) ?? (nil, nil)
         let slotIDString = issued.assignmentID.uuidString
-        guard let environment else { return }
+        guard let environment else { return false }
         guard let token = FleetMissionVehicleToken(storageKey: issued.vehicleTokenKey) else {
             environment.appendEvent(
                 MissionRunEvent(
@@ -222,7 +238,7 @@ final class MissionRunCommandSubsystem {
                     templateParams: ["slot": issued.slotName, "slotID": slotIDString]
                 )
             )
-            return
+            return false
         }
         guard let vehicleID = resolvedFleetStreamVehicleID(token: token, fleetLink: fleetLink, sitl: sitl) else {
             environment.appendEvent(
@@ -235,7 +251,7 @@ final class MissionRunCommandSubsystem {
                     templateParams: ["slot": issued.slotName, "slotID": slotIDString]
                 )
             )
-            return
+            return false
         }
         let summary = shortDispatchSummary(issued.dispatch)
         environment.appendEvent(
@@ -268,6 +284,7 @@ final class MissionRunCommandSubsystem {
             slotIDString: slotIDString,
             summary: summary
         )
+        return response.isSuccess
     }
 
     private func appendCatalogueInvokeAckLogs(
@@ -318,15 +335,17 @@ final class MissionRunCommandSubsystem {
     /// Same recipe execution + ack logs as ``dispatchRecipeRun``'s background `Task`, but **awaited** so abort
     /// batches can finish move+park (etc.) before ``MissionRunExecutionSubsystem/completeRun`` flips the run
     /// into ``MissionRunSessionPhase/aborting`` (which would otherwise strand the recipe and confuse telemetry).
+    /// - Returns: whether the recipe outcome is success (including dispatch prerequisites).
+    @discardableResult
     func awaitRecipeDispatchAppendingDispatchedThenAckLogs(
         issued: MissionRunIssuedCommand,
         fleetLink: FleetLinkService,
         sitl: SitlService
-    ) async {
-        guard case .recipe(let name, let parameters) = issued.dispatch else { return }
+    ) async -> Bool {
+        guard case .recipe(let name, let parameters) = issued.dispatch else { return false }
         let ctx = environment?.systems.logging.effectiveTaskFields(forAssignmentID: issued.assignmentID) ?? (nil, nil)
         let slotIDString = issued.assignmentID.uuidString
-        guard let environment else { return }
+        guard let environment else { return false }
         guard let token = FleetMissionVehicleToken(storageKey: issued.vehicleTokenKey) else {
             environment.appendEvent(
                 MissionRunEvent(
@@ -338,7 +357,7 @@ final class MissionRunCommandSubsystem {
                     templateParams: ["slot": issued.slotName, "slotID": slotIDString]
                 )
             )
-            return
+            return false
         }
         guard let vehicleID = resolvedFleetStreamVehicleID(token: token, fleetLink: fleetLink, sitl: sitl) else {
             environment.appendEvent(
@@ -351,7 +370,7 @@ final class MissionRunCommandSubsystem {
                     templateParams: ["slot": issued.slotName, "slotID": slotIDString]
                 )
             )
-            return
+            return false
         }
         let summary = shortDispatchSummary(issued.dispatch)
         environment.appendEvent(
@@ -384,10 +403,12 @@ final class MissionRunCommandSubsystem {
             vehicleID: vehicleID,
             slotIDString: slotIDString
         )
+        return outcome.isSuccess
     }
 
     private func ensureRecipeDescriptorsLoadedIfNeeded(name: FleetRecipeName) {
-        if name == FleetMissionRecipeRegistrations.doMissionUploadStartRecipeName,
+        if name == FleetMissionRecipeRegistrations.doMissionUploadStartRecipeName
+            || name == FleetMissionRecipeRegistrations.doMissionUploadStartItemRecipeName,
            FleetRecipesCatalogue.shared.descriptor(for: name) == nil {
             FleetRecipesCatalogueBootstrap.ensureRegistered()
             FleetMissionRecipeRegistrations.registerAll()
@@ -554,7 +575,7 @@ final class MissionRunCommandSubsystem {
     private func shortDispatchSummary(_ dispatch: MissionRunFleetDispatch) -> String {
         switch dispatch {
         case .vehicleCommand(let command):
-            return shortVehicleCommandSummary(command)
+            return command.missionRunDispatchShortLabel
         case .catalogue(let name, let parameters):
             if name == .fleetVehicleDoMissionUploadStart,
                let json = parameters.string(named: "missionItemsJSON"),
@@ -568,6 +589,12 @@ final class MissionRunCommandSubsystem {
                let items = try? FleetVehicleCommandMissionItemPayload.decodeMissionItems(fromJSON: json) {
                 return "recipe upload+arm+start (\(items.count) item(s))"
             }
+            if name == FleetMissionRecipeRegistrations.doMissionUploadStartItemRecipeName,
+               let json = parameters.string(named: "missionItemsJSON"),
+               let idx = parameters.integer(named: "missionStartItemIndex"),
+               let items = try? FleetVehicleCommandMissionItemPayload.decodeMissionItems(fromJSON: json) {
+                return "recipe upload+jump(\(idx))+arm+start (\(items.count) item(s))"
+            }
             if name == FleetMissionRecipeRegistrations.doReturnHomeRecipeName {
                 return "recipe return home (RTL)"
             }
@@ -576,38 +603,6 @@ final class MissionRunCommandSubsystem {
                 return "recipe move+park — \(line)"
             }
             return "recipe \(name.rawValue)"
-        }
-    }
-
-    private func shortVehicleCommandSummary(_ command: FleetVehicleCommand) -> String {
-        switch command {
-        case .arm: return "arm"
-        case .disarm: return "disarm"
-        case .holdPosition: return "hold"
-        case .gotoCoordinate: return "goto"
-        case .uploadMission(let items): return "upload mission (\(items.count) item(s))"
-        case .missionClear: return "mission clear"
-        case .missionStart: return "mission start"
-        case .missionPause: return "mission pause"
-        case .missionSetCurrentItem(let index): return "mission set item \(index)"
-        case .missionDownloadPlanJSON: return "mission download"
-        case .missionIsFinishedQuery: return "mission is finished"
-        case .missionGetRtlAfter: return "mission RTL-after read"
-        case .missionSetRtlAfter(let enable): return "mission RTL-after set \(enable)"
-        case .cancelMissionUpload: return "cancel mission upload"
-        case .cancelMissionDownload: return "cancel mission download"
-        case .returnToLaunch: return "return to launch"
-        case .land: return "land"
-        case .park: return "park"
-        case .idle: return "idle (manual)"
-        case .manualControl(let manual): return "manual \(manual.intent.rawValue)"
-        case .calibrateMavsdk(let kind): return "calibrate \(kind.rawValue)"
-        case .mavlinkCommandLong(let request): return "mavlink command \(request.command)"
-        case .cancelCalibration: return "cancel calibration"
-        case .setParameterFloat(let name, _): return "param \(name) (float)"
-        case .setParameterInt(let name, _): return "param \(name) (int)"
-        case .setMode(let mode): return "set mode \(mode.rawValue)"
-        case .rebootAutopilot: return "reboot autopilot"
         }
     }
 }

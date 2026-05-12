@@ -9,13 +9,16 @@ import SwiftUI
 /// 1. ``RootView`` — app navigation rail, top bar, and feature `content`.
 /// 2. ``View/withAppDrawer()`` — app-wide **trailing drawer** (scrim + panel). Not the main nav rail.
 /// 3. ``View/withGuardianConfirmOverlayHost()`` — **blocking** confirm scrim + panel over the drawer stack.
-/// 4. ``View/withToasts()`` — ephemeral toasts on top of that shell; placement follows ``GuardianToastShellAnchorPreferenceKey``
+/// 4. ``View/withOperatorPromptPersistentToasts()`` — sticky top-leading operator prompt chips in the primary content column when routing selects
+///    ``OperatorPromptDeliveryTarget/persistentToast`` (see ``OperatorPromptCenter`` / ``GuardianOperatorPromptPersistentAnchorPreferenceKey``).
+/// 5. ``View/withToasts()`` — ephemeral toasts on top of that shell; placement follows ``GuardianToastShellAnchorPreferenceKey``
 ///    from ``RootView`` (top-trailing over the window top bar, aligned with Simulate / appearance controls).
 ///
 /// ```swift
 /// RootView(...)
 ///     .withAppDrawer()
 ///     .withGuardianConfirmOverlayHost()
+///     .withOperatorPromptPersistentToasts()
 ///     .withToasts()
 /// ```
 ///
@@ -28,7 +31,8 @@ import SwiftUI
 /// 1. **Navigation chrome** — ``RootView`` sidebar + top bar + feature content (maps, tables, etc.).
 /// 2. **App drawer** — ``AppDrawerHostModifier`` draws a full-window scrim and trailing panel above ``RootView``.
 /// 3. **Blocking confirm** — ``GuardianConfirmOverlayRootModifier`` adds a dimmed scrim + panel above the drawer stack.
-/// 4. **Toasts** — ``ToastHost`` (window-level) draws above the confirm layer; ``RootView`` publishes shell insets so the chip
+/// 4. **Persistent operator toasts** — ``OperatorPromptPersistentToastHost`` draws top-leading sticky prompt chips in the content column above the confirm layer.
+/// 5. **Ephemeral toasts** — ``ToastHost`` (window-level) draws above the persistent operator layer; ``RootView`` publishes shell insets so the chip
 ///    sits **top-trailing** over the window top bar (Simulate + appearance), not over the nav rail.
 ///
 /// ## Trailing slide-in panels

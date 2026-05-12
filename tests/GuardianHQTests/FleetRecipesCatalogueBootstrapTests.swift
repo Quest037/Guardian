@@ -72,8 +72,8 @@ final class FleetRecipesCatalogueBootstrapTests: XCTestCase {
         )
         XCTAssertEqual(
             mission.count,
-            1,
-            "Mission subsystem ships 1 recipe under fleet.do.mission.*: recipe.fleet.do.mission.upload.start for MRE. Update when new mission recipes land."
+            2,
+            "Mission subsystem ships 2 recipes under fleet.do.mission.*: recipe.fleet.do.mission.upload.start and recipe.fleet.do.mission.upload.start.item for MRE post-commit handoff. Update when new mission recipes land."
         )
         XCTAssertEqual(
             returnHomeNav.count,

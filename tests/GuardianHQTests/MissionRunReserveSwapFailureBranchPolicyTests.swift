@@ -58,15 +58,22 @@ final class MissionRunReserveSwapFailureBranchPolicyTests: XCTestCase {
         XCTAssertEqual(d, .abortSwapPreserveCommittedState)
     }
 
-    func test_roster_commit_always_aborts_regardless_of_counts() {
-        for failures in 0 ... 5 {
-            let d = MissionRunReserveSwapFailureBranchPolicy.disposition(
-                phase: .rosterCommit,
-                consecutiveFailedGateAttemptsOnCurrentCandidate: failures,
-                hasAnotherRankedCandidate: true,
-                operatorPromptChannelAvailable: true
-            )
-            XCTAssertEqual(d, .abortSwapPreserveCommittedState, "failures=\(failures)")
+    func test_roster_commit_post_commit_and_displaced_clear_always_abort_regardless_of_counts() {
+        for phase in [
+            MissionRunReserveSwapPipelinePhase.rosterCommit,
+            .postCommitHandoff,
+            .displacedMissionClear,
+            .displacedFleetWindDown,
+        ] {
+            for failures in 0 ... 5 {
+                let d = MissionRunReserveSwapFailureBranchPolicy.disposition(
+                    phase: phase,
+                    consecutiveFailedGateAttemptsOnCurrentCandidate: failures,
+                    hasAnotherRankedCandidate: true,
+                    operatorPromptChannelAvailable: true
+                )
+                XCTAssertEqual(d, .abortSwapPreserveCommittedState, "phase=\(phase) failures=\(failures)")
+            }
         }
     }
 }

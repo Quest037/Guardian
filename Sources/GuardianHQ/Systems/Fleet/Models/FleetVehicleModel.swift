@@ -123,6 +123,41 @@ enum FleetVehicleCommand: Equatable {
     case rebootAutopilot
 }
 
+extension FleetVehicleCommand {
+    /// Compact label for mission-run logs and dispatch summaries (Layer‑0 vehicle commands).
+    var missionRunDispatchShortLabel: String {
+        switch self {
+        case .arm: return "arm"
+        case .disarm: return "disarm"
+        case .holdPosition: return "hold"
+        case .gotoCoordinate: return "goto"
+        case .uploadMission(let items): return "upload mission (\(items.count) item(s))"
+        case .missionClear: return "mission clear"
+        case .missionStart: return "mission start"
+        case .missionPause: return "mission pause"
+        case .missionSetCurrentItem(let index): return "mission set item \(index)"
+        case .missionDownloadPlanJSON: return "mission download"
+        case .missionIsFinishedQuery: return "mission is finished"
+        case .missionGetRtlAfter: return "mission RTL-after read"
+        case .missionSetRtlAfter(let enable): return "mission RTL-after set \(enable)"
+        case .cancelMissionUpload: return "cancel mission upload"
+        case .cancelMissionDownload: return "cancel mission download"
+        case .returnToLaunch: return "return to launch"
+        case .land: return "land"
+        case .park: return "park"
+        case .idle: return "idle (manual)"
+        case .manualControl(let manual): return "manual \(manual.intent.rawValue)"
+        case .calibrateMavsdk(let kind): return "calibrate \(kind.rawValue)"
+        case .mavlinkCommandLong(let request): return "mavlink command \(request.command)"
+        case .cancelCalibration: return "cancel calibration"
+        case .setParameterFloat(let name, _): return "param \(name) (float)"
+        case .setParameterInt(let name, _): return "param \(name) (int)"
+        case .setMode(let mode): return "set mode \(mode.rawValue)"
+        case .rebootAutopilot: return "reboot autopilot"
+        }
+    }
+}
+
 /// Stack-agnostic autopilot mode token. Used by ``FleetVehicleCommand/setMode(_:)``
 /// and by the catalogue's `command.fleet.vehicle.do.mode` translation. Each value
 /// has a stack-specific implementation in ``FleetLinkService`` — the converter

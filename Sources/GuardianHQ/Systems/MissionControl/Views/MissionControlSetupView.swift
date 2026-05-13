@@ -484,6 +484,10 @@ struct SetupStagingMapStructureIdentity: Equatable {
     let mcsReservePoolHomePlacementTaskID: UUID?
     /// Selected floating-reserve pool berth on the MCS staging map (``taskID`` + ``slotID`` signature for ``MissionControlReservePoolMapMarkerID``).
     let stagingReservePoolBerthSelectionSignature: String
+    /// Mirrors ``MissionRunOperatorDisplaySettings/showMissionGeofencesOnMap`` for staging geofence layers.
+    let showMissionGeofencesOnMap: Bool
+    let missionGeofenceTemplateTopologySignature: String
+    let missionControlRunGeofenceAugmentationTopologySignature: String
 }
 
 /// MCS staging SITL drag: optimistic map pose until hub telemetry **stably** matches or ``MissionControlSetupSimDragOverlayPolicy/pendingSyncTimeoutSeconds`` elapses.
@@ -783,6 +787,9 @@ struct MissionRunDetailView: View {
                     onChange: {
                         syncRunFromStore()
                         onUpdate(run)
+                    },
+                    onRecompilePlanForGeofenceAugmentationPolicy: {
+                        recompilePlanAfterGeofenceAugmentationPolicyEdit()
                     }
                 )
             }
@@ -891,6 +898,9 @@ struct MissionRunDetailView: View {
                     onChange: {
                         syncRunFromStore()
                         onUpdate(run)
+                    },
+                    onRecompilePlanForGeofenceAugmentationPolicy: {
+                        recompilePlanAfterGeofenceAugmentationPolicyEdit()
                     }
                 )
             }
@@ -923,6 +933,9 @@ struct MissionRunDetailView: View {
                     onChange: {
                         syncRunFromStore()
                         onUpdate(run)
+                    },
+                    onRecompilePlanForGeofenceAugmentationPolicy: {
+                        recompilePlanAfterGeofenceAugmentationPolicyEdit()
                     }
                 )
             }
@@ -1037,6 +1050,19 @@ struct MissionRunDetailView: View {
     private func syncRunFromStore() {
         guard let r = controlStore.runs.first(where: { $0.id == run.id }) else { return }
         r.refreshDerivedTaskStates()
+    }
+
+    /// Recompiles the Mission Control plan so per-task planning fences and squad MAVLink fence lists match run geofence augmentation.
+    private func recompilePlanAfterGeofenceAugmentationPolicyEdit() {
+        guard let mission = missionStore.missions.first(where: { $0.id == run.missionId }) else { return }
+        let fleet = buildMissionPickableVehicles(fleetLink: fleetLink, sitl: sitl)
+        controlStore.recompileMissionControlPlanAfterGeofenceAugmentationPolicyChange(
+            run: run,
+            mission: mission,
+            fleetVehicles: fleet
+        )
+        syncRunFromStore()
+        onUpdate(run)
     }
 
     private func bulkSpawnSimsConfirmMessagePlain(for scope: MissionRunBulkSpawnSimsConfirmKind) -> String {
@@ -2634,6 +2660,8 @@ struct MissionRunDetailView: View {
         }
         .onChange(of: run.operatorDisplaySettings) { _ in
             syncSimBatteryDrainForRunStatus()
+            pushLiveOverviewMapModelFromMission()
+            pushSetupStagingMapModelFromMissionTemplate()
         }
         .onChange(of: run.assignments) { _ in
             syncSimBatteryDrainForRunStatus()
@@ -2756,7 +2784,7 @@ struct MissionRunDetailView: View {
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(
                                 maxWidth: .infinity,
-                                minHeight: missionControlDockedBottomPromptMinHeight,
+                                minHeight: GuardianBottomPromptBanner.missionControlDockedDefaultMinHeight,
                                 alignment: .topLeading
                             )
                         }
@@ -2794,7 +2822,7 @@ struct MissionRunDetailView: View {
 
             GuardianBottomPromptBanner(
                 center: bottomPromptCenter,
-                layout: .missionControlDocked(minHeight: missionControlDockedBottomPromptMinHeight)
+                layout: .missionControlDocked(minHeight: GuardianBottomPromptBanner.missionControlDockedDefaultMinHeight)
             )
                 .zIndex(2)
         }
@@ -3323,8 +3351,6 @@ struct MissionRunDetailView: View {
     private let liveConsoleMapHeight: CGFloat = 260
     /// Roster health card height (title + ID row, subtitle + battery row).
     private let liveConsoleRosterCardHeight: CGFloat = 56
-    /// MC-R docked bottom prompts (recovery / abort / graceful / scheduled start): minimum panel height.
-    private let missionControlDockedBottomPromptMinHeight: CGFloat = 55
     /// Maximum roster cards stacked **vertically** per column (column-major). Strip height uses **actual** row count up to this cap.
     private let liveConsoleRosterGridRows: Int = 3
     /// How many grid **rows** are populated for the current roster strip (1…``liveConsoleRosterGridRows``); empty roster uses **1** for the placeholder card.
@@ -4787,7 +4813,10 @@ struct MissionRunDetailView: View {
             taskPathIDs: pathPayload?.ids ?? [],
             focusedTaskID: liveOverviewMapFocusedTaskID,
             missionPointTopologySignature: topo,
-            rosterSlotBindingSignature: rosterTopo + "§pool§" + poolTopo
+            rosterSlotBindingSignature: rosterTopo + "§pool§" + poolTopo,
+            showMissionGeofencesOnMap: run.operatorDisplaySettings.showMissionGeofencesOnMap,
+            missionGeofenceTemplateTopologySignature: mission?.missionGeofenceTemplateTopologySignature() ?? "",
+            missionControlRunGeofenceAugmentationTopologySignature: run.missionControlRunGeofenceAugmentationTopologySignature()
         )
     }
 
@@ -4859,7 +4888,14 @@ struct MissionRunDetailView: View {
                 isEditingTask: false,
                 missionPointMarkers: missionLiveMissionPointMapMarkers,
                 missionPointPlacementArmed: false,
-                mcsReservePoolHomePlacementArmed: false
+                mcsReservePoolHomePlacementArmed: false,
+                geofenceOverlays: mission.geofenceGuardianMapOverlaysForMissionControl(
+                    operatorSettings: run.operatorDisplaySettings,
+                    mapFocusedTaskID: liveOverviewMapFocusedTaskID,
+                    respectMapTaskIsolation: true,
+                    run: run
+                ),
+                geofenceMapLayerPointerSelectsFence: false
             )
         } else {
             mapModel.routeGeometry = .empty
@@ -6044,6 +6080,18 @@ struct MissionRunDetailView: View {
         )
     }
 
+    private var operatorMissionRunShowGeofencesBinding: Binding<Bool> {
+        Binding(
+            get: { run.operatorDisplaySettings.showMissionGeofencesOnMap },
+            set: { newValue in
+                var s = run.operatorDisplaySettings
+                s.showMissionGeofencesOnMap = newValue
+                run.operatorDisplaySettings = s
+                onUpdate(run)
+            }
+        )
+    }
+
     private var operatorMissionRunResetSimOnCompleteBinding: Binding<Bool> {
         Binding(
             get: { run.operatorDisplaySettings.resetSimToStartPoseOnSuccessfulComplete },
@@ -6079,6 +6127,20 @@ struct MissionRunDetailView: View {
                 Toggle(
                     "",
                     isOn: operatorMissionRunIsolateLiveMapBinding
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .frame(minWidth: 44, alignment: .trailing)
+            }
+            mcSetupRowDivider
+            mcSetupSettingsRow(
+                title: "Show geofences on Mission Control maps",
+                description:
+                    "Draw mission and task geofence regions on setup and running maps for this run."
+            ) {
+                Toggle(
+                    "",
+                    isOn: operatorMissionRunShowGeofencesBinding
                 )
                 .labelsHidden()
                 .toggleStyle(.switch)
@@ -6594,6 +6656,16 @@ struct MissionRunDetailView: View {
                             .fixedSize(horizontal: false, vertical: true)
                         }
                         MissionRunPreferentialReserveSwapPolicyEditor(chain: missionReserveSwapPreferenceChainBinding, showFootnote: true)
+                        mcSetupRowDivider
+                        MissionRunGeofenceAugmentationRunPolicySidebarSection(
+                            title: "Mission run geofence augmentation",
+                            caption: "Additional fences merge after every task’s template fences for this run. v1 is additive only—clear removes mission-wide run-only extras; edit fence shapes on the mission Geofences tab.",
+                            fenceCount: run.policies.missionGeofenceAugmentation.count,
+                            onClear: {
+                                _ = run.updateMissionGeofenceAugmentation([], credential: localOperatorCredential)
+                                recompilePlanAfterGeofenceAugmentationPolicyEdit()
+                            }
+                        )
                     }
                 } else {
                     VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
@@ -6672,9 +6744,9 @@ struct MissionRunDetailView: View {
         onUpdate(run)
     }
 
-    /// Wires the MRE template persister so mission / task policy edits routed through
-    /// ``MissionRunEnvironment`` policy APIs (cog sidebar, future assistants) survive a refresh
-    /// by writing through to the ``MissionStore``.
+    /// Wires the MRE template persister so mission / task **template** policy edits routed through
+    /// ``MissionRunEnvironment`` policy APIs (cog sidebar, assistants) survive a refresh by writing through
+    /// to the ``MissionStore``. Called from ``MissionRunDetailView`` ``onAppear`` for both **MCS** (setup) and **MC‑R** (running).
     private func installMissionTemplatePersister() {
         run.missionTemplatePersister = { [weak missionStore, weak run] mission in
             guard let missionStore else { return }
@@ -7063,7 +7135,10 @@ struct MissionRunDetailView: View {
             selectedTaskPathID: setupStagingMapSelectedTaskPathID,
             selectedStagingRosterAssignmentID: setupSelectedAssignmentId,
             mcsReservePoolHomePlacementTaskID: mcsReservePoolHomePlacementTaskID,
-            stagingReservePoolBerthSelectionSignature: setupSelectedReservePoolBerthSignature
+            stagingReservePoolBerthSelectionSignature: setupSelectedReservePoolBerthSignature,
+            showMissionGeofencesOnMap: run.operatorDisplaySettings.showMissionGeofencesOnMap,
+            missionGeofenceTemplateTopologySignature: mission?.missionGeofenceTemplateTopologySignature() ?? "",
+            missionControlRunGeofenceAugmentationTopologySignature: run.missionControlRunGeofenceAugmentationTopologySignature()
         )
     }
 
@@ -7632,7 +7707,14 @@ struct MissionRunDetailView: View {
                 isEditingTask: false,
                 missionPointMarkers: setupStagingMissionPointMapMarkers,
                 missionPointPlacementArmed: false,
-                mcsReservePoolHomePlacementArmed: mcsReservePoolHomePlacementTaskID != nil
+                mcsReservePoolHomePlacementArmed: mcsReservePoolHomePlacementTaskID != nil,
+                geofenceOverlays: mission.geofenceGuardianMapOverlaysForMissionControl(
+                    operatorSettings: run.operatorDisplaySettings,
+                    mapFocusedTaskID: nil,
+                    respectMapTaskIsolation: false,
+                    run: run
+                ),
+                geofenceMapLayerPointerSelectsFence: false
             )
         } else {
             mapModel.routeGeometry = .empty

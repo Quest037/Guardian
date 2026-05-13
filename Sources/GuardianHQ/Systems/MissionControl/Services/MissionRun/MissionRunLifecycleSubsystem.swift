@@ -105,6 +105,6 @@ extension MissionRunLogTemplateKey {
     static let lifecycleSimCleanupParkBatch = "missioncontrol.mre.lifecycle.sim_cleanup_park_batch"
     /// Params: `park`, `teleport`, `union`, `completion` — async SIM cleanup pass begins (after ``markCompleted``).
     static let lifecycleSimCleanupRunStarted = "missioncontrol.mre.lifecycle.sim_cleanup_run_started"
-    /// Params: `parkAttempted`, `parkFailed`, `missionClear`, `rTeleApplied`, `rTeleSkipped`, `pTeleApplied`, `pTeleSkipped`, `battery` — one-line end summary for the same pass.
+    /// Params: `parkAttempted`, `parkFailed`, `missionClear`, `geofenceClear`, `rTeleApplied`, `rTeleSkipped`, `pTeleApplied`, `pTeleSkipped`, `battery` — one-line end summary for the same pass.
     static let lifecycleSimCleanupRunFinished = "missioncontrol.mre.lifecycle.sim_cleanup_run_finished"
 }

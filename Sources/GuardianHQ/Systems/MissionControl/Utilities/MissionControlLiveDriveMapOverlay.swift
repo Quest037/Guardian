@@ -70,7 +70,14 @@ enum MissionControlLiveDriveMapOverlay {
                 selectedMissionPointID: selectedMissionPointID
             ),
             missionPointPlacementArmed: false,
-            mcsReservePoolHomePlacementArmed: false
+            mcsReservePoolHomePlacementArmed: false,
+            geofenceOverlays: mission.geofenceGuardianMapOverlaysForMissionControl(
+                operatorSettings: run.operatorDisplaySettings,
+                mapFocusedTaskID: focusedTaskID,
+                respectMapTaskIsolation: true,
+                run: run
+            ),
+            geofenceMapLayerPointerSelectsFence: false
         )
     }
 

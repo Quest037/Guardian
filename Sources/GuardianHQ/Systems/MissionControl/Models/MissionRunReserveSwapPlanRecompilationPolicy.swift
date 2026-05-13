@@ -20,6 +20,11 @@ enum MissionRunReserveSwapPlanRecompilationPolicy: Sendable {
     /// ↔ active primary/wingman binding swap (headless assistant or operator consent path through Mission Control).
     static let fixedRosterReserveSwapPlanCompileSource = "missionControl.plan.fixedRosterReserveSwap"
 
+    /// After **run-only geofence augmentation** edits (``MissionRunPolicies/missionGeofenceAugmentation``,
+    /// ``MissionRunEnvironment/taskGeofenceAugmentationsByTaskID``, or ``MissionRunAssignmentPolicies/geofenceAugmentation``)
+    /// so planner outputs stay aligned with the run envelope.
+    static let geofenceAugmentationPolicyPlanCompileSource = "missionControl.plan.geofenceAugmentationPolicy"
+
     /// ``MissionRunPlannerSubsystem/compileInitialPlan`` invokes registered **mutation commit** callbacks in
     /// **lexicographic registration key order** after mutating ``MissionRunEnvironment/compiledPlan`` (see
     /// ``MissionRunPlannerSubsystem`` `mutationCommitCallbacksByKey`).

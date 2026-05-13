@@ -8,7 +8,8 @@
       "id": "upload",
       "command": "command.fleet.vehicle.do.mission.upload",
       "parameters": {
-        "missionItemsJSON": { "kind": "reference", "value": "missionItemsJSON" }
+        "missionItemsJSON": { "kind": "reference", "value": "missionItemsJSON" },
+        "geofencePolygonsJSON": { "kind": "reference", "value": "geofencePolygonsJSON" }
       },
       "retry": {
         "maxAttempts": 3,

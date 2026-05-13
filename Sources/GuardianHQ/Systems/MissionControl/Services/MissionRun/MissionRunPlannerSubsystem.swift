@@ -14,6 +14,8 @@ final class MissionRunPlannerSubsystem {
         let squadIndex: Int
         let squad: MissionTaskSquad
         let missionItems: [Mavsdk.Mission.MissionItem]
+        /// Template + run augmentations + this primary slot’s augmentation (``MissionRunGeofencePolicyResolution/squadGeofences``).
+        let effectiveGeofencesForSquad: [MissionGeofence]
     }
 
     typealias PlanningCallback = @MainActor (
@@ -238,6 +240,27 @@ final class MissionRunPlannerSubsystem {
         )
     }
 
+    /// Catalogue ``fleetVehicleDoGeofenceClear`` for one assignment — run teardown and SIM cleanup use the same shape.
+    static func catalogueGeofenceClearCommand(
+        forAssignment assignment: MissionRunAssignment,
+        issuerKey: String = MissionRunCommandIssuerKey.runTeardownGeofenceClear
+    ) -> MissionRunIssuedCommand? {
+        guard let tokenKey = assignment.attachedFleetVehicleToken,
+              FleetMissionVehicleToken(storageKey: tokenKey) != nil
+        else {
+            return nil
+        }
+        return MissionRunIssuedCommand(
+            assignmentID: assignment.id,
+            slotName: assignment.slotName,
+            vehicleTokenKey: tokenKey,
+            dispatch: .catalogue(name: .fleetVehicleDoGeofenceClear, parameters: .empty),
+            issuer: .missionControl,
+            issuerKey: issuerKey,
+            category: .missionControl
+        )
+    }
+
     func buildPlan(
         mission: Mission,
         fleetVehicles: [MissionPickableFleetVehicle]
@@ -373,6 +396,12 @@ final class MissionRunPlannerSubsystem {
         return orderedPrimaries.enumerated().map { idx, tuple in
             let assignment = tuple.0
             let primary = tuple.1
+            let squadFences = MissionRunGeofencePolicyResolution.squadGeofences(
+                primaryAssignment: assignment,
+                mission: mission,
+                missionWideRunAugmentation: environment.policies.missionGeofenceAugmentation,
+                perTaskRunAugmentationByTaskID: environment.taskGeofenceAugmentationsByTaskID
+            )
             let wingmen = mission.rosterDevices.filter { rd in
                 rd.slot == .wingman && rd.leaderRosterDeviceId == primary.id
             }
@@ -400,7 +429,8 @@ final class MissionRunPlannerSubsystem {
                     primaryRosterDevice: primary,
                     wingmanRosterDevices: wingmen
                 ),
-                missionItems: items
+                missionItems: items,
+                effectiveGeofencesForSquad: squadFences
             )
         }
     }

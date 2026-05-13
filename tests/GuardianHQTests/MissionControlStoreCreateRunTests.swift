@@ -16,8 +16,10 @@ final class MissionControlStoreCreateRunTests: XCTestCase {
         appDefaults.missionControlLiveMapHideOtherTasksOnTaskSelect = false
         appDefaults.missionRunResetSitlToStartPoseOnSuccessfulComplete = true
         appDefaults.missionRunSimBatteryDrainRate = .none
+        appDefaults.missionControlShowMissionGeofencesOnMap = false
         let run = controlStore.createRun(from: mission, cloningMissionRunDefaultsFrom: appDefaults)
         XCTAssertFalse(run.operatorDisplaySettings.isolateLiveMapToSelectedTask)
+        XCTAssertFalse(run.operatorDisplaySettings.showMissionGeofencesOnMap)
         XCTAssertTrue(run.operatorDisplaySettings.resetSimToStartPoseOnSuccessfulComplete)
         XCTAssertEqual(run.operatorDisplaySettings.simBatteryDrainRateDuringRun, .none)
 
@@ -49,5 +51,26 @@ final class MissionControlStoreCreateRunTests: XCTestCase {
         )
         XCTAssertEqual(decision, .allowed)
         XCTAssertEqual(run.template?.routeMacro.tasks.first?.abortPreferenceChainOverride?.first?.kind, .loiter)
+    }
+
+    func test_updateTaskBetweenCyclesAction_persistsOnRunTemplate() {
+        let controlStore = MissionControlStore()
+        let taskID = UUID()
+        var task = MissionTask(id: taskID, name: "Loop", regularity: .continuous)
+        task.betweenCycles = .returnToLaunch
+        let mission = Mission(
+            name: "Op",
+            description: "",
+            type: .mobile,
+            routeMacro: RouteMacro(tasks: [task], rules: RouteRules())
+        )
+        let run = controlStore.createRun(from: mission, cloningMissionRunDefaultsFrom: GeneralSettingsStore())
+        let decision = run.updateTaskBetweenCyclesAction(
+            taskID: taskID,
+            .park,
+            credential: .localOperator(callsign: "T")
+        )
+        XCTAssertEqual(decision, .allowed)
+        XCTAssertEqual(run.template?.routeMacro.tasks.first?.betweenCycles, .park)
     }
 }

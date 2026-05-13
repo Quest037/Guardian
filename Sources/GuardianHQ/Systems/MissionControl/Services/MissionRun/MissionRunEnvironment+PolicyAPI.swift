@@ -2,10 +2,13 @@ import Foundation
 
 /// Public ``MissionRunEnvironment`` APIs for editing run-affecting policies and Rules-of-Engagement.
 ///
-/// All entry points are credential-gated by ``MissionRunPolicyAuthoritySubsystem``. Mission and per-task
-/// edits route through ``MissionRunEnvironment/missionTemplatePersister`` so that downstream stores
-/// (``MissionStore``) remain the source of truth for the mission template; assignment and engagement
-/// edits live on the run environment itself.
+/// All entry points are credential-gated by ``MissionRunPolicyAuthoritySubsystem``. Mutations that change
+/// fields stored on the **mission template** (``Mission/routeMacro`` — mission-level preferential chains,
+/// per-task tactic overrides, ``MissionTask/betweenCycles``, etc.) call ``applyMissionTemplateMutation``, which
+/// prefers ``missionTemplatePersister`` (``MissionRunDetailView`` installs this on ``onAppear`` for the shared
+/// MCS + MC‑R drill-in: ``MissionStore/updateMission`` then ``updateTemplate``) and otherwise updates the
+/// template on the run only. Assignment-level preference chains, run geofence augmentation, and engagement rules
+/// mutate ``MissionRunEnvironment`` state without ``applyMissionTemplateMutation``.
 extension MissionRunEnvironment {
 
     // MARK: - Mission-level
@@ -137,6 +140,90 @@ extension MissionRunEnvironment {
         return .allowed
     }
 
+    // MARK: - Run geofence augmentation (run envelope only)
+
+    @discardableResult
+    func updateMissionGeofenceAugmentation(
+        _ fences: [MissionGeofence],
+        credential: MissionRunPolicyEditCredential
+    ) -> MissionRunPolicyEditDecision {
+        let scope = MissionRunPolicyEditScope.missionGeofenceAugmentation
+        let decision = systems.policyAuthority.evaluate(scope, credential: credential)
+        guard decision.isAllowed else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: denialReason(decision) ?? .permissionDenied)
+            return decision
+        }
+        var next = policies
+        next.missionGeofenceAugmentation = fences
+        policies = next
+        logPolicyEditApplied(
+            scope: scope,
+            credential: credential,
+            value: MissionRunGeofencePolicyResolution.summarizedFenceIDsForLogging(fences)
+        )
+        return .allowed
+    }
+
+    @discardableResult
+    func updateTaskGeofenceAugmentation(
+        taskID: UUID,
+        _ fences: [MissionGeofence],
+        credential: MissionRunPolicyEditCredential
+    ) -> MissionRunPolicyEditDecision {
+        let scope = MissionRunPolicyEditScope.taskGeofenceAugmentation(taskID: taskID)
+        let decision = systems.policyAuthority.evaluate(scope, credential: credential)
+        guard decision.isAllowed else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: denialReason(decision) ?? .permissionDenied)
+            return decision
+        }
+        guard let mission = template else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: .missionUnavailable)
+            return .denied(.missionUnavailable)
+        }
+        guard mission.routeMacro.tasks.contains(where: { $0.id == taskID }) else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: .taskNotFound)
+            return .denied(.taskNotFound)
+        }
+        var copy = taskGeofenceAugmentationsByTaskID
+        if fences.isEmpty {
+            copy.removeValue(forKey: taskID)
+        } else {
+            copy[taskID] = fences
+        }
+        taskGeofenceAugmentationsByTaskID = copy
+        logPolicyEditApplied(
+            scope: scope,
+            credential: credential,
+            value: MissionRunGeofencePolicyResolution.summarizedFenceIDsForLogging(fences)
+        )
+        return .allowed
+    }
+
+    @discardableResult
+    func updateAssignmentGeofenceAugmentation(
+        assignmentID: UUID,
+        _ fences: [MissionGeofence],
+        credential: MissionRunPolicyEditCredential
+    ) -> MissionRunPolicyEditDecision {
+        let scope = MissionRunPolicyEditScope.assignmentGeofenceAugmentation(assignmentID: assignmentID)
+        let decision = systems.policyAuthority.evaluate(scope, credential: credential)
+        guard decision.isAllowed else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: denialReason(decision) ?? .permissionDenied)
+            return decision
+        }
+        guard let idx = assignments.firstIndex(where: { $0.id == assignmentID }) else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: .assignmentNotFound)
+            return .denied(.assignmentNotFound)
+        }
+        assignments[idx].policies.geofenceAugmentation = fences
+        logPolicyEditApplied(
+            scope: scope,
+            credential: credential,
+            value: MissionRunGeofencePolicyResolution.summarizedFenceIDsForLogging(fences)
+        )
+        return .allowed
+    }
+
     // MARK: - Task-level
 
     @discardableResult
@@ -249,6 +336,36 @@ extension MissionRunEnvironment {
             scope: scope,
             credential: credential,
             value: logValue
+        )
+        return .allowed
+    }
+
+    @discardableResult
+    func updateTaskBetweenCyclesAction(
+        taskID: UUID,
+        _ action: MissionTaskBetweenCyclesAction,
+        credential: MissionRunPolicyEditCredential
+    ) -> MissionRunPolicyEditDecision {
+        let scope = MissionRunPolicyEditScope.taskBetweenCyclesAction(taskID: taskID)
+        let decision = systems.policyAuthority.evaluate(scope, credential: credential)
+        guard decision.isAllowed else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: denialReason(decision) ?? .permissionDenied)
+            return decision
+        }
+        guard var mission = template else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: .missionUnavailable)
+            return .denied(.missionUnavailable)
+        }
+        guard let idx = mission.routeMacro.tasks.firstIndex(where: { $0.id == taskID }) else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: .taskNotFound)
+            return .denied(.taskNotFound)
+        }
+        mission.routeMacro.tasks[idx].betweenCycles = action
+        applyMissionTemplateMutation(mission)
+        logPolicyEditApplied(
+            scope: scope,
+            credential: credential,
+            value: action.displayTitle
         )
         return .allowed
     }
@@ -417,12 +534,12 @@ extension MissionRunEnvironment {
     /// in the canonical color and link to the matching overlay.
     private func target(for scope: MissionRunPolicyEditScope) -> MissionRunEventTarget {
         switch scope {
-        case .missionAbortPolicy, .missionCompletePolicy, .missionEngagementRules, .missionReserveSwapPolicy:
+        case .missionAbortPolicy, .missionCompletePolicy, .missionEngagementRules, .missionReserveSwapPolicy, .missionGeofenceAugmentation:
             return .missionControl
-        case .taskAbortPolicyOverride(let id), .taskCompletePolicyOverride(let id), .taskReserveSwapPolicyOverride(let id):
+        case .taskAbortPolicyOverride(let id), .taskCompletePolicyOverride(let id), .taskReserveSwapPolicyOverride(let id), .taskBetweenCyclesAction(let id), .taskGeofenceAugmentation(let id):
             let name = template?.routeMacro.tasks.first(where: { $0.id == id })?.name ?? "Task"
             return .task(id: id, name: name)
-        case .assignmentAbortPolicy(let id), .assignmentCompletePolicy(let id), .assignmentReserveSwapPolicy(let id):
+        case .assignmentAbortPolicy(let id), .assignmentCompletePolicy(let id), .assignmentReserveSwapPolicy(let id), .assignmentGeofenceAugmentation(let id):
             return .slot(id: id)
         }
     }
@@ -443,9 +560,9 @@ extension MissionRunEnvironment {
     /// `[<TaskName>]` wrapper for slot edits the same way they do for task edits.
     private func scopeTaskID(_ scope: MissionRunPolicyEditScope) -> UUID? {
         switch scope {
-        case .taskAbortPolicyOverride(let id), .taskCompletePolicyOverride(let id), .taskReserveSwapPolicyOverride(let id):
+        case .taskAbortPolicyOverride(let id), .taskCompletePolicyOverride(let id), .taskReserveSwapPolicyOverride(let id), .taskBetweenCyclesAction(let id), .taskGeofenceAugmentation(let id):
             return id
-        case .assignmentAbortPolicy(let id), .assignmentCompletePolicy(let id), .assignmentReserveSwapPolicy(let id):
+        case .assignmentAbortPolicy(let id), .assignmentCompletePolicy(let id), .assignmentReserveSwapPolicy(let id), .assignmentGeofenceAugmentation(let id):
             guard let assignment = assignments.first(where: { $0.id == id }) else { return nil }
             return MissionRunPolicyResolution.resolvedTaskId(for: assignment, mission: template)
         default:
@@ -469,9 +586,13 @@ extension MissionRunEnvironment {
         case .taskAbortPolicyOverride: return "Task abort policy override"
         case .taskCompletePolicyOverride: return "Task complete policy override"
         case .taskReserveSwapPolicyOverride: return "Task reserve swap policy override"
+        case .taskBetweenCyclesAction: return "Task between-cycles action"
         case .assignmentAbortPolicy: return "Slot abort policy"
         case .assignmentCompletePolicy: return "Slot complete policy"
         case .assignmentReserveSwapPolicy: return "Slot reserve swap policy"
+        case .missionGeofenceAugmentation: return "Mission run geofence augmentation"
+        case .taskGeofenceAugmentation: return "Task run geofence augmentation"
+        case .assignmentGeofenceAugmentation: return "Slot run geofence augmentation"
         }
     }
 }

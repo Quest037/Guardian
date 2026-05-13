@@ -64,6 +64,11 @@ extension FleetCommandName {
     static let fleetVehicleDoMissionUploadStart =
         FleetCommandName.literal("command.fleet.vehicle.do.mission.upload.start")
 
+    static let fleetVehicleDoGeofenceUpload =
+        FleetCommandName.literal("command.fleet.vehicle.do.geofence.upload")
+    static let fleetVehicleDoGeofenceClear =
+        FleetCommandName.literal("command.fleet.vehicle.do.geofence.clear")
+
     static let fleetVehicleGetMissionFinished =
         FleetCommandName.literal("command.fleet.vehicle.get.mission.finished")
     static let fleetVehicleGetMissionRtlAfter =
@@ -239,6 +244,7 @@ enum FleetVehicleCoreCommandRegistrations {
     static func registerAll() {
         registerNavCommands()
         registerMissionCatalogueCommands()
+        registerGeofenceCatalogueCommands()
         registerCalibrationCommands()
         registerLifecycleCommands()
         registerTelemetryGetCommands()
@@ -490,7 +496,9 @@ enum FleetVehicleCoreCommandRegistrations {
         // Mission items are passed through as a JSON string under `missionItemsJSON`
         // because the catalogue's parameter schema only supports scalar values. The
         // shared converter helper decodes the JSON into `[Mavsdk.Mission.MissionItem]`
-        // and the stack converters produce `[.uploadMission(items:)]`.
+        // and the stack converters produce `[.uploadMission(items:)]`, optionally
+        // prefixed by `[.uploadGeofence(polygons:)]` when `geofencePolygonsJSON` is present
+        // and decodes to a non-empty polygon list.
         //
         // Scope: this command is the **upload step only** (mirrors MAVSDK
         // `Mission.uploadMission` + `setCurrentMissionItem(0)`). The composite
@@ -499,18 +507,55 @@ enum FleetVehicleCoreCommandRegistrations {
         FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
             name: .fleetVehicleDoMissionUpload,
             humanLabel: "Upload mission",
-            humanDescription: "Upload a list of mission items to the autopilot's Mission plugin and reset the current item to the first waypoint. Atomic upload only — does not arm or start the mission.",
+            humanDescription: "Upload a list of mission items to the autopilot's Mission plugin and reset the current item to the first waypoint. Atomic upload only — does not arm or start the mission. Optional `geofencePolygonsJSON` (same shape as `do.geofence.upload`) uploads geofences **before** the mission when non-empty.",
             parameters: [
                 FleetCommandParameterDeclaration(
                     name: "missionItemsJSON",
                     type: .string,
                     required: true,
                     humanLabel: "Mission items (JSON array)"
-                )
+                ),
+                FleetCommandParameterDeclaration(
+                    name: "geofencePolygonsJSON",
+                    type: .string,
+                    required: false,
+                    humanLabel: "Geofence polygons (JSON array)"
+                ),
             ],
             declaredResponseKinds: FleetCommandDeclaredResponseKinds.standardDo.adding(
                 .autopilotBusy
             ),
+            retryHints: .conservative,
+            riskTier: .confirmInLiveMission
+        ))
+    }
+
+    // MARK: do — geofence plugin (MAVSDK Geofence)
+
+    @MainActor
+    private static func registerGeofenceCatalogueCommands() {
+        let kinds = FleetCommandDeclaredResponseKinds.standardDo.adding(.autopilotBusy)
+        FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
+            name: .fleetVehicleDoGeofenceUpload,
+            humanLabel: "Upload geofence",
+            humanDescription: "Upload geofence polygons to the autopilot (`Geofence.uploadGeofence`). Replaces the onboard geofence plan. Pass polygons as JSON array under `geofencePolygonsJSON` (same encoding as the optional companion field on `do.mission.upload`).",
+            parameters: [
+                FleetCommandParameterDeclaration(
+                    name: "geofencePolygonsJSON",
+                    type: .string,
+                    required: true,
+                    humanLabel: "Geofence polygons (JSON array)"
+                ),
+            ],
+            declaredResponseKinds: kinds,
+            retryHints: .conservative,
+            riskTier: .confirmInLiveMission
+        ))
+        FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
+            name: .fleetVehicleDoGeofenceClear,
+            humanLabel: "Clear geofence",
+            humanDescription: "Clear all geofences stored on the autopilot (`Geofence.clearGeofence`).",
+            declaredResponseKinds: kinds,
             retryHints: .conservative,
             riskTier: .confirmInLiveMission
         ))
@@ -661,14 +706,20 @@ enum FleetVehicleCoreCommandRegistrations {
         FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
             name: .fleetVehicleDoMissionUploadStart,
             humanLabel: "Upload, arm, then start mission",
-            humanDescription: "Composite: uploads `missionItemsJSON`, arms (`do.arm`), then starts mission execution (`do.mission.start`). Same parameters as upload — extra keys are ignored by the arm step.",
+            humanDescription: "Composite: uploads `missionItemsJSON` (and optional `geofencePolygonsJSON` on the upload child), arms (`do.arm`), then starts mission execution (`do.mission.start`). Same parameters as upload — extra keys are ignored by the arm step.",
             parameters: [
                 FleetCommandParameterDeclaration(
                     name: "missionItemsJSON",
                     type: .string,
                     required: true,
                     humanLabel: "Mission items (JSON array)"
-                )
+                ),
+                FleetCommandParameterDeclaration(
+                    name: "geofencePolygonsJSON",
+                    type: .string,
+                    required: false,
+                    humanLabel: "Geofence polygons (JSON array)"
+                ),
             ],
             declaredResponseKinds: missionDoKinds,
             retryHints: .conservative,

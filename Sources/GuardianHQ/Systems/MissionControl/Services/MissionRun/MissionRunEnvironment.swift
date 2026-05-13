@@ -27,6 +27,8 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     @Published var reportCyclesCompleted: Int?
     @Published var completionKind: MissionRunCompletionKind?
     @Published var policies: MissionRunPolicies = MissionRunPolicies()
+    /// Run-only **additional** geofences for a specific task id (merged after mission-wide augmentation).
+    @Published var taskGeofenceAugmentationsByTaskID: [UUID: [MissionGeofence]] = [:]
 
     /// Per-run Mission Control chrome and completion side-effects (cloned from app Mission Run defaults at create time).
     @Published var operatorDisplaySettings: MissionRunOperatorDisplaySettings = .default

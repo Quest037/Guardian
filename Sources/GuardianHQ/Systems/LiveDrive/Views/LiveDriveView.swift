@@ -174,7 +174,10 @@ struct LiveDriveView: View {
             LiveDriveOperatorRecipePromptBanner()
                 .zIndex(2.5)
 
-            GuardianBottomPromptBanner(center: bottomPromptCenter)
+            GuardianBottomPromptBanner(
+                center: bottomPromptCenter,
+                layout: .missionControlDocked(minHeight: GuardianBottomPromptBanner.missionControlDockedDefaultMinHeight)
+            )
                 // Above any future in-window overlays in this ZStack (content → modal → prompt shell order).
                 .zIndex(2)
         }

@@ -23,7 +23,9 @@ final class GuardianMapGeometryTaskPathIDsTests: XCTestCase {
             isEditingTask: false,
             missionPointMarkers: [],
             missionPointPlacementArmed: false,
-            mcsReservePoolHomePlacementArmed: false
+            mcsReservePoolHomePlacementArmed: false,
+            geofenceOverlays: [],
+            geofenceMapLayerPointerSelectsFence: false
         )
         let same = GuardianRouteMapGeometry(
             home: nil,
@@ -37,7 +39,9 @@ final class GuardianMapGeometryTaskPathIDsTests: XCTestCase {
             isEditingTask: false,
             missionPointMarkers: [],
             missionPointPlacementArmed: false,
-            mcsReservePoolHomePlacementArmed: false
+            mcsReservePoolHomePlacementArmed: false,
+            geofenceOverlays: [],
+            geofenceMapLayerPointerSelectsFence: false
         )
         let otherID = GuardianRouteMapGeometry(
             home: nil,
@@ -51,7 +55,9 @@ final class GuardianMapGeometryTaskPathIDsTests: XCTestCase {
             isEditingTask: false,
             missionPointMarkers: [],
             missionPointPlacementArmed: false,
-            mcsReservePoolHomePlacementArmed: false
+            mcsReservePoolHomePlacementArmed: false,
+            geofenceOverlays: [],
+            geofenceMapLayerPointerSelectsFence: false
         )
         XCTAssertEqual(base, same)
         XCTAssertNotEqual(base, otherID)
@@ -72,7 +78,9 @@ final class GuardianMapGeometryTaskPathIDsTests: XCTestCase {
             isEditingTask: false,
             missionPointMarkers: [],
             missionPointPlacementArmed: false,
-            mcsReservePoolHomePlacementArmed: false
+            mcsReservePoolHomePlacementArmed: false,
+            geofenceOverlays: [],
+            geofenceMapLayerPointerSelectsFence: false
         )
         let on = GuardianRouteMapGeometry(
             home: nil,
@@ -86,7 +94,47 @@ final class GuardianMapGeometryTaskPathIDsTests: XCTestCase {
             isEditingTask: false,
             missionPointMarkers: [],
             missionPointPlacementArmed: false,
-            mcsReservePoolHomePlacementArmed: true
+            mcsReservePoolHomePlacementArmed: true,
+            geofenceOverlays: [],
+            geofenceMapLayerPointerSelectsFence: false
+        )
+        XCTAssertNotEqual(off, on)
+    }
+
+    func test_geofence_map_pointer_selects_participates_in_equatable() {
+        let coord = RouteCoordinate(lat: 1, lon: 2)
+        let id = UUID()
+        let off = GuardianRouteMapGeometry(
+            home: nil,
+            allTasksCoords: [[coord]],
+            taskPathIDs: [id],
+            selectedTaskWaypoints: [],
+            selectedWaypointIndex: nil,
+            headingPreview: nil,
+            cameraPreview: nil,
+            preserveView: true,
+            isEditingTask: false,
+            missionPointMarkers: [],
+            missionPointPlacementArmed: false,
+            mcsReservePoolHomePlacementArmed: false,
+            geofenceOverlays: [],
+            geofenceMapLayerPointerSelectsFence: false
+        )
+        let on = GuardianRouteMapGeometry(
+            home: nil,
+            allTasksCoords: [[coord]],
+            taskPathIDs: [id],
+            selectedTaskWaypoints: [],
+            selectedWaypointIndex: nil,
+            headingPreview: nil,
+            cameraPreview: nil,
+            preserveView: true,
+            isEditingTask: false,
+            missionPointMarkers: [],
+            missionPointPlacementArmed: false,
+            mcsReservePoolHomePlacementArmed: false,
+            geofenceOverlays: [],
+            geofenceMapLayerPointerSelectsFence: true
         )
         XCTAssertNotEqual(off, on)
     }

@@ -124,4 +124,30 @@ final class MissionRunSimCleanupParkPolicyTests: XCTestCase {
         }
         XCTAssertEqual(name, .fleetVehicleDoMissionClear)
     }
+
+    func test_catalogueGeofenceClearCommand_runCleanupIssuer() {
+        let sid = UUID(uuidString: "00000000-0000-0000-0000-0000000000F1")!
+        let token = FleetMissionVehicleToken.sitl(sid).storageKey
+        let a = MissionRunAssignment(
+            id: UUID(),
+            rosterDeviceId: UUID(),
+            slotName: "Slot",
+            attachedDevice: "",
+            attachedFleetVehicleToken: token
+        )
+        guard let issued = MissionRunPlannerSubsystem.catalogueGeofenceClearCommand(
+            forAssignment: a,
+            issuerKey: MissionRunCommandIssuerKey.runCleanupGeofenceClear
+        ) else {
+            XCTFail("expected geofence clear issued command")
+            return
+        }
+        XCTAssertEqual(issued.issuerKey, MissionRunCommandIssuerKey.runCleanupGeofenceClear)
+        XCTAssertEqual(issued.issuer, .missionControl)
+        guard case .catalogue(let name, _) = issued.dispatch else {
+            XCTFail("expected catalogue geofence clear")
+            return
+        }
+        XCTAssertEqual(name, .fleetVehicleDoGeofenceClear)
+    }
 }

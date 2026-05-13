@@ -77,6 +77,13 @@ final class FleetRecipesCatalogueBootstrapTests: XCTestCase {
                 "recipe.fleet.do.mission.upload.start.item, and recipe.fleet.do.mission.continue.after.operator.park. " +
                 "Update when new mission recipes land."
         )
+        let geofenceRecipes = FleetRecipesCatalogue.shared
+            .descriptors(underNamespacePrefix: ["fleet", "do", "geofence"])
+        XCTAssertEqual(
+            geofenceRecipes.count,
+            2,
+            "Mission registrations ship recipe.fleet.do.geofence.upload and recipe.fleet.do.geofence.clear under fleet.do.geofence.*."
+        )
         XCTAssertEqual(
             returnHomeNav.count,
             1,

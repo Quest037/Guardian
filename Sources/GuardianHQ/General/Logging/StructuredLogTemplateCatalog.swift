@@ -104,6 +104,11 @@ enum StructuredLogTemplateCatalog: Sendable {
             mcr: "ACK fail · {{summary}} — {{reason}}"
         )
         put(
+            MissionRunLogTemplateKey.missionRunGeofenceFleetAckFailed,
+            "Geofence fleet step failed: {{summary}} — {{reason}} (vehicle {{vehicleID}}).",
+            mcr: "Geofence ACK fail · {{summary}} — {{reason}} · {{vehicleID}}"
+        )
+        put(
             MissionRunLogTemplateKey.executorPendingBatchesCancelledForLiveDriveEngage,
             "Cleared {{removedCount}} pending executor batch(es) before Live Drive for @{{slotID}}.",
             mcr: "Live Drive prep · cleared {{removedCount}} queued batch(es) · @{{slotID}}"
@@ -316,6 +321,11 @@ enum StructuredLogTemplateCatalog: Sendable {
             mcr: "Plan encode failed · @{{slotID}} · {{reason}}"
         )
         put(
+            MissionRunLogTemplateKey.missionGeofencePolygonsEncodeFailed,
+            "Could not encode geofence polygons for MAVLink upload @{{slotID}} ({{reason}}).",
+            mcr: "Geofence encode failed · @{{slotID}} · {{reason}}"
+        )
+        put(
             MissionRunLogTemplateKey.missionExecuting,
             "Executing MAVLink mission for @{{slotID}} ({{itemCount}} item(s), {{formation}}, {{timing}}).",
             mcr: "MAVLink live · @{{slotID}} · {{itemCount}} items · {{formation}} · {{timing}}"
@@ -475,8 +485,8 @@ enum StructuredLogTemplateCatalog: Sendable {
         )
         put(
             MissionRunLogTemplateKey.lifecycleSimCleanupRunFinished,
-            "Run-complete SIM cleanup finished: park attempted {{parkAttempted}} (failed {{parkFailed}}), mission clear {{missionClear}}, roster teleport applied {{rTeleApplied}} skipped {{rTeleSkipped}}, pool teleport applied {{pTeleApplied}} skipped {{pTeleSkipped}}, battery vehicles {{battery}}.",
-            mcr: "SIM cleanup · done · park {{parkAttempted}} (fail {{parkFailed}}) · clr {{missionClear}} · r-tel {{rTeleApplied}}/{{rTeleSkipped}} · p-tel {{pTeleApplied}}/{{pTeleSkipped}} · bat {{battery}}"
+            "Run-complete SIM cleanup finished: park attempted {{parkAttempted}} (failed {{parkFailed}}), mission clear {{missionClear}}, geofence clear {{geofenceClear}}, roster teleport applied {{rTeleApplied}} skipped {{rTeleSkipped}}, pool teleport applied {{pTeleApplied}} skipped {{pTeleSkipped}}, battery vehicles {{battery}}.",
+            mcr: "SIM cleanup · done · park {{parkAttempted}} (fail {{parkFailed}}) · clr {{missionClear}} · gf {{geofenceClear}} · r-tel {{rTeleApplied}}/{{rTeleSkipped}} · p-tel {{pTeleApplied}}/{{pTeleSkipped}} · bat {{battery}}"
         )
 
         put(
@@ -509,6 +519,11 @@ enum StructuredLogTemplateCatalog: Sendable {
             MissionRunLogTemplateKey.missionRunningUnboundedRegularity,
             "Mission remains running (unbounded task regularity). Stop manually when ready.",
             mcr: "Unbounded regularity · mission still running"
+        )
+        put(
+            MissionRunLogTemplateKey.betweenCyclesPrimaryFailedDispatchingFallback,
+            "Between-cycles command failed ({{primary}}) for @{{slotID}} ({{slot}}); roster class {{vehicleClass}} — issuing fallback: {{fallback}}.",
+            mcr: "Between cycles · {{primary}} failed · @{{slotID}} · {{vehicleClass}} · fallback {{fallback}}"
         )
 
         put(

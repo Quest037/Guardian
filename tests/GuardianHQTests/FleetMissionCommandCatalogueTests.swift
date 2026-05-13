@@ -9,10 +9,13 @@ final class FleetMissionCommandCatalogueTests: XCTestCase {
     func test_mission_command_name_literals_validate() {
         let raws = [
             "command.fleet.vehicle.do.mission.clear",
+            "command.fleet.vehicle.do.mission.upload",
             "command.fleet.vehicle.do.mission.start",
             "command.fleet.vehicle.do.mission.pause",
             "command.fleet.vehicle.do.mission.jump.to",
             "command.fleet.vehicle.do.mission.download",
+            "command.fleet.vehicle.do.geofence.upload",
+            "command.fleet.vehicle.do.geofence.clear",
             "command.fleet.vehicle.do.mission.upload.with.progress",
             "command.fleet.vehicle.do.mission.download.with.progress",
             "command.fleet.vehicle.do.mission.rtl.after.set",
@@ -86,6 +89,70 @@ final class FleetMissionCommandCatalogueTests: XCTestCase {
             ],
             "`do.mission.upload.start` must mirror MRE upload+arm+start ordering."
         )
+    }
+
+    func test_translate_mission_upload_with_geofence_prefixes_upload() throws {
+        let item = FleetVehicleCommandMissionItemPayload(
+            latitudeDeg: -33.0,
+            longitudeDeg: 151.0,
+            relativeAltitudeM: 10,
+            speedMS: 5,
+            isFlyThrough: false,
+            gimbalPitchDeg: 0,
+            gimbalYawDeg: 0,
+            cameraAction: "none",
+            loiterTimeS: 0,
+            cameraPhotoIntervalS: 0,
+            acceptanceRadiusM: 2,
+            yawDeg: 0,
+            cameraPhotoDistanceM: 0
+        )
+        let missionJSON = try XCTUnwrap(
+            String(data: try JSONEncoder().encode([item]), encoding: .utf8)
+        )
+        let poly = Mavsdk.Geofence.Polygon(
+            points: [
+                Mavsdk.Geofence.Point(latitudeDeg: -33.0, longitudeDeg: 151.0),
+                Mavsdk.Geofence.Point(latitudeDeg: -33.001, longitudeDeg: 151.0),
+                Mavsdk.Geofence.Point(latitudeDeg: -33.001, longitudeDeg: 151.001),
+            ],
+            fenceType: .inclusion
+        )
+        let fenceJSON = try FleetVehicleCommandGeofencePolygonPayload.encodePolygonsToJSON(polygons: [poly])
+        let params = FleetCommandParameters(values: [
+            "missionItemsJSON": .string(missionJSON),
+            "geofencePolygonsJSON": .string(fenceJSON),
+        ])
+        guard let t = FleetCommandStackConverterShared.translateFleetVehicleMissionIfNeeded(
+            commandName: .fleetVehicleDoMissionUpload,
+            parameters: params
+        ) else {
+            return XCTFail("expected mission translation")
+        }
+        guard case .vehicleCommands(let cmds) = t else {
+            return XCTFail("expected .vehicleCommands")
+        }
+        guard case .uploadGeofence(let polys) = cmds.first else {
+            return XCTFail("expected geofence upload first, got \(String(describing: cmds.first))")
+        }
+        XCTAssertEqual(polys.count, 1)
+        guard case .uploadMission(let items) = cmds.last else {
+            return XCTFail("expected mission upload last")
+        }
+        XCTAssertEqual(items.count, 1)
+    }
+
+    func test_translate_geofence_clear_emits_clear() {
+        guard let t = FleetCommandStackConverterShared.translateFleetVehicleGeofenceIfNeeded(
+            commandName: .fleetVehicleDoGeofenceClear,
+            parameters: .empty
+        ) else {
+            return XCTFail("expected geofence translation")
+        }
+        guard case .vehicleCommands(let cmds) = t else {
+            return XCTFail("expected .vehicleCommands")
+        }
+        XCTAssertEqual(cmds, [.clearGeofence])
     }
 
     func test_mission_item_json_encode_decode_roundTrip() throws {

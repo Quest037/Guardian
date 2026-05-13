@@ -175,6 +175,7 @@ final class MissionRunCommandSubsystem {
             )
             self.appendCatalogueInvokeAckLogs(
                 issued: issued,
+                catalogueCommandName: name,
                 response: response,
                 vehicleID: vehicleID,
                 slotIDString: slotIDString,
@@ -279,6 +280,7 @@ final class MissionRunCommandSubsystem {
         )
         appendCatalogueInvokeAckLogs(
             issued: issued,
+            catalogueCommandName: name,
             response: response,
             vehicleID: vehicleID,
             slotIDString: slotIDString,
@@ -289,6 +291,7 @@ final class MissionRunCommandSubsystem {
 
     private func appendCatalogueInvokeAckLogs(
         issued: MissionRunIssuedCommand,
+        catalogueCommandName: FleetCommandName,
         response: FleetCommandResponse,
         vehicleID: String,
         slotIDString: String,
@@ -313,12 +316,17 @@ final class MissionRunCommandSubsystem {
                 ]
             )
         } else {
+            let geofenceCatalogueFailure =
+                catalogueCommandName == .fleetVehicleDoGeofenceUpload || catalogueCommandName == .fleetVehicleDoGeofenceClear
+            let ackKey = geofenceCatalogueFailure
+                ? MissionRunLogTemplateKey.missionRunGeofenceFleetAckFailed
+                : MissionRunLogTemplateKey.fleetAckFailed
             environment.systems.logging.appendLogEvent(
                 level: .error,
                 taskID: ackCtx.0,
                 taskLabel: ackCtx.1,
                 speaker: .missionControl,
-                templateKey: MissionRunLogTemplateKey.fleetAckFailed,
+                templateKey: ackKey,
                 templateParams: [
                     "summary": summary,
                     "reason": Self.catalogueOutcomeReason(response),
@@ -500,12 +508,19 @@ final class MissionRunCommandSubsystem {
                 ]
             )
         } else {
+            let ackKey: String
+            if case .recipe(let recipeName, _) = issued.dispatch,
+               outcome.isMissionRunGeofenceFleetFailureForDistinctExecutorLogs(recipeName: recipeName) {
+                ackKey = MissionRunLogTemplateKey.missionRunGeofenceFleetAckFailed
+            } else {
+                ackKey = MissionRunLogTemplateKey.fleetAckFailed
+            }
             environment.systems.logging.appendLogEvent(
                 level: .error,
                 taskID: ackCtx.0,
                 taskLabel: ackCtx.1,
                 speaker: .missionControl,
-                templateKey: MissionRunLogTemplateKey.fleetAckFailed,
+                templateKey: ackKey,
                 templateParams: [
                     "summary": summary,
                     "reason": outcome.loggable,
@@ -624,4 +639,6 @@ extension MissionRunLogTemplateKey {
     static let commandNotSent = "missioncontrol.mre.command.not_sent"
     static let fleetAckSuccess = "missioncontrol.mre.fleet.ack_success"
     static let fleetAckFailed = "missioncontrol.mre.fleet.ack_failed"
+    /// Same params as ``fleetAckFailed`` — geofence upload/clear or composite mission upload failing on the geofence stack child.
+    static let missionRunGeofenceFleetAckFailed = "missioncontrol.mre.fleet.geofence_ack_failed"
 }

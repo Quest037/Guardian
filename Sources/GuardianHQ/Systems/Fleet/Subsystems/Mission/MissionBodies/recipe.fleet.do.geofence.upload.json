@@ -1,0 +1,35 @@
+{
+  "_comment": "Single-step geofence upload: invokes command.fleet.vehicle.do.geofence.upload with geofencePolygonsJSON (same JSON array shape as do.mission.upload optional field).",
+  "entryStepID": "uploadGeofence",
+  "overallBudgetSeconds": 60,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "uploadGeofence",
+      "command": "command.fleet.vehicle.do.geofence.upload",
+      "parameters": {
+        "geofencePolygonsJSON": { "kind": "reference", "value": "geofencePolygonsJSON" }
+      },
+      "retry": {
+        "maxAttempts": 3,
+        "delaySeconds": 0.5,
+        "retryableErrorKinds": ["autopilotBusy", "noSession", "notConnected"],
+        "retryOnTimeout": true
+      },
+      "matchers": [
+        { "when": { "kind": "success" }, "then": { "kind": "succeed" } },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "confirmation",
+              "confirmationKind": { "rawValue": "confirmInLiveMission" }
+            },
+            "allowedVerbs": ["abort", "acknowledge", "retry"]
+          }
+        }
+      ]
+    }
+  ]
+}

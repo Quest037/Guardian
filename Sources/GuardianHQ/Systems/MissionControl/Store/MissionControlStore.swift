@@ -64,12 +64,13 @@ final class MissionControlStore: ObservableObject {
         )
         run.operatorDisplaySettings = MissionRunOperatorDisplaySettings(
             isolateLiveMapToSelectedTask: appMissionRunDefaults.missionControlLiveMapHideOtherTasksOnTaskSelect,
+            showMissionGeofencesOnMap: appMissionRunDefaults.missionControlShowMissionGeofencesOnMap,
             resetSimToStartPoseOnSuccessfulComplete: appMissionRunDefaults.missionRunResetSitlToStartPoseOnSuccessfulComplete,
             simBatteryDrainRateDuringRun: appMissionRunDefaults.missionRunSimBatteryDrainRate
         )
         /// The convenience initializer seeds a **placeholder** ``MissionRunEnvironment/template`` (empty tasks).
-        /// Hydrate from the source ``Mission`` so task-scoped policy APIs (abort / complete chain overrides) can
-        /// resolve ``taskID`` in ``MissionRunEnvironment/updateTaskAbortPreferenceChainOverride`` and peers.
+        /// Hydrate from the source ``Mission`` so task-scoped policy APIs (abort / complete chain overrides,
+        /// ``MissionRunEnvironment/updateTaskBetweenCyclesAction``, etc.) can resolve ``taskID``.
         run.updateTemplate(mission)
         runs.insert(run, at: 0)
         run.refreshDerivedTaskStates()
@@ -257,6 +258,21 @@ final class MissionControlStore: ObservableObject {
         )
         run.refreshDerivedTaskStates()
         run.systems.executor.synchronizePendingCommandBatchesWithAssignmentFleetTokens()
+    }
+
+    /// Recompiles the Mission Control plan after **run-only geofence augmentation** policy changes so
+    /// ``MissionControlPlan/planningGeofencesByTaskID`` and per-squad fence lists match the current run envelope.
+    func recompileMissionControlPlanAfterGeofenceAugmentationPolicyChange(
+        run: MissionRunEnvironment,
+        mission: Mission,
+        fleetVehicles: [MissionPickableFleetVehicle]
+    ) {
+        recompileMissionControlPlanAfterFloatingReserveSwap(
+            run: run,
+            mission: mission,
+            fleetVehicles: fleetVehicles,
+            planCompileSource: MissionRunReserveSwapPlanRecompilationPolicy.geofenceAugmentationPolicyPlanCompileSource
+        )
     }
 
     func ingestFleetMirrorLine(

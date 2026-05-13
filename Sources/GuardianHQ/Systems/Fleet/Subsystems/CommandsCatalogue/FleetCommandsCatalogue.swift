@@ -396,7 +396,12 @@ final class FleetCommandsCatalogue: ObservableObject {
                 fleetLink: fleetLink,
                 timeout: timeout
             )
-            if case .failed = lastOutcome { break }
+            if case .failed(let raw) = lastOutcome {
+                // Prefix so catalogue consumers (e.g. Mission Run executor logs) can
+                // attribute composite `do.mission.upload` failures to geofence vs mission upload.
+                lastOutcome = .failed("\(command.missionRunDispatchShortLabel) — \(raw)")
+                break
+            }
         }
         return converter.normaliseOutcome(
             lastOutcome,

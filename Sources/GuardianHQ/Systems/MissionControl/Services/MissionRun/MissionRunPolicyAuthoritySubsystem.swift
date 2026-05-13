@@ -53,6 +53,10 @@ enum MissionRunPolicyEditScopeCategory: String, CaseIterable, Hashable {
     case assignmentPolicy
     /// Run-level ``MissionRunEngagementRules``.
     case engagementRules
+    /// ``MissionTask/betweenCycles`` (Return to Launch / Loiter / Park) for repeating tasks — mission template mutation on the run.
+    case taskBetweenCycles
+    /// Run-only **additional** geofence regions (``MissionRunPolicies/missionGeofenceAugmentation``, per-task map on ``MissionRunEnvironment``, ``MissionRunAssignmentPolicies/geofenceAugmentation``).
+    case geofencePolicy
 }
 
 /// What a single MRE policy / Rules-of-Engagement edit targets.
@@ -64,9 +68,13 @@ enum MissionRunPolicyEditScope: Equatable, Hashable {
     case taskAbortPolicyOverride(taskID: UUID)
     case taskCompletePolicyOverride(taskID: UUID)
     case taskReserveSwapPolicyOverride(taskID: UUID)
+    case taskBetweenCyclesAction(taskID: UUID)
     case assignmentAbortPolicy(assignmentID: UUID)
     case assignmentCompletePolicy(assignmentID: UUID)
     case assignmentReserveSwapPolicy(assignmentID: UUID)
+    case missionGeofenceAugmentation
+    case taskGeofenceAugmentation(taskID: UUID)
+    case assignmentGeofenceAugmentation(assignmentID: UUID)
 
     var category: MissionRunPolicyEditScopeCategory {
         switch self {
@@ -76,10 +84,14 @@ enum MissionRunPolicyEditScope: Equatable, Hashable {
             return .completePolicy
         case .missionReserveSwapPolicy, .taskReserveSwapPolicyOverride:
             return .reserveSwapPolicy
+        case .taskBetweenCyclesAction:
+            return .taskBetweenCycles
         case .assignmentAbortPolicy, .assignmentCompletePolicy, .assignmentReserveSwapPolicy:
             return .assignmentPolicy
         case .missionEngagementRules:
             return .engagementRules
+        case .missionGeofenceAugmentation, .taskGeofenceAugmentation, .assignmentGeofenceAugmentation:
+            return .geofencePolicy
         }
     }
 }

@@ -709,12 +709,15 @@ struct MissionRunEngagementRules: Codable, Equatable {
     static let `default` = MissionRunEngagementRules()
 }
 
-/// Run-level policy bundle for ``MissionRunEnvironment`` (engagement only; abort / complete / reserve-swap chains live on ``Mission`` / ``MissionTask`` / ``MissionRunAssignmentPolicies``).
+/// Run-level policy bundle for ``MissionRunEnvironment`` (engagement + run geofence augmentation; abort / complete / reserve-swap chains live on ``Mission`` / ``MissionTask`` / ``MissionRunAssignmentPolicies``).
 struct MissionRunPolicies: Equatable {
     var engagement: MissionRunEngagementRules
+    /// **Additional** geofences for this run merged **after** all template fences for **every** task (see ``MissionRunGeofencePolicyResolution``).
+    var missionGeofenceAugmentation: [MissionGeofence]
 
-    init(engagement: MissionRunEngagementRules = .default) {
+    init(engagement: MissionRunEngagementRules = .default, missionGeofenceAugmentation: [MissionGeofence] = []) {
         self.engagement = engagement
+        self.missionGeofenceAugmentation = missionGeofenceAugmentation
     }
 }
 
@@ -726,15 +729,41 @@ struct MissionRunAssignmentPolicies: Codable, Equatable {
     var completePreferenceChain: [MissionRunCompleteTactic]?
     /// When non-empty, replaces the resolved **reserve swap (displaced active) preference chain** for this slot.
     var reserveSwapPreferenceChain: [MissionRunReserveSwapTactic]?
+    /// **Additional** geofences for this slot merged **after** task-level planning fences (``MissionRunGeofencePolicyResolution``).
+    var geofenceAugmentation: [MissionGeofence]
 
     init(
         abortPreferenceChain: [MissionRunAbortTactic]? = nil,
         completePreferenceChain: [MissionRunCompleteTactic]? = nil,
-        reserveSwapPreferenceChain: [MissionRunReserveSwapTactic]? = nil
+        reserveSwapPreferenceChain: [MissionRunReserveSwapTactic]? = nil,
+        geofenceAugmentation: [MissionGeofence] = []
     ) {
         self.abortPreferenceChain = abortPreferenceChain
         self.completePreferenceChain = completePreferenceChain
         self.reserveSwapPreferenceChain = reserveSwapPreferenceChain
+        self.geofenceAugmentation = geofenceAugmentation
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case abortPreferenceChain, completePreferenceChain, reserveSwapPreferenceChain, geofenceAugmentation
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        abortPreferenceChain = try c.decodeIfPresent([MissionRunAbortTactic].self, forKey: .abortPreferenceChain)
+        completePreferenceChain = try c.decodeIfPresent([MissionRunCompleteTactic].self, forKey: .completePreferenceChain)
+        reserveSwapPreferenceChain = try c.decodeIfPresent([MissionRunReserveSwapTactic].self, forKey: .reserveSwapPreferenceChain)
+        geofenceAugmentation = try c.decodeIfPresent([MissionGeofence].self, forKey: .geofenceAugmentation) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(abortPreferenceChain, forKey: .abortPreferenceChain)
+        try c.encodeIfPresent(completePreferenceChain, forKey: .completePreferenceChain)
+        try c.encodeIfPresent(reserveSwapPreferenceChain, forKey: .reserveSwapPreferenceChain)
+        if !geofenceAugmentation.isEmpty {
+            try c.encode(geofenceAugmentation, forKey: .geofenceAugmentation)
+        }
     }
 }
 
@@ -826,6 +855,73 @@ enum MissionRunPolicyResolution {
         var copy = assignment
         copy.policies.reserveSwapPreferenceChain = nil
         return resolvedReserveSwapPreferenceChain(assignment: copy, mission: mission)
+    }
+}
+
+// MARK: - Geofence policy resolution (MRE)
+
+/// Merges **mission template** geofences with **run-only augmentations** for planning and per-squad MAVLink builds.
+///
+/// **v1 product lock — additive only:** each stage appends; there is no “replace template fences” override.
+/// Order: template (`Mission.missionGeofences` + `MissionTask.geofences`) → ``MissionRunPolicies/missionGeofenceAugmentation``
+/// → ``MissionRunEnvironment/taskGeofenceAugmentationsByTaskID`` → ``MissionRunAssignmentPolicies/geofenceAugmentation`` (squad path only).
+enum MissionRunGeofencePolicyResolution {
+    /// Geofences attached to a task row in ``MissionControlPlan`` / map previews for that task (no per-slot augmentation).
+    static func planningGeofences(
+        taskID: UUID,
+        mission: Mission,
+        missionWideRunAugmentation: [MissionGeofence],
+        perTaskRunAugmentation: [MissionGeofence]
+    ) -> [MissionGeofence] {
+        let base = MissionTemplateGeofenceUtilities().effectiveTemplateGeofencesForPlanning(taskID: taskID, mission: mission)
+        return base + missionWideRunAugmentation + perTaskRunAugmentation
+    }
+
+    /// Full fence list for one primary squad’s MAVLink plan row (planning fences + this slot’s augmentation).
+    static func squadGeofences(
+        primaryAssignment: MissionRunAssignment,
+        mission: Mission,
+        missionWideRunAugmentation: [MissionGeofence],
+        perTaskRunAugmentationByTaskID: [UUID: [MissionGeofence]]
+    ) -> [MissionGeofence] {
+        guard let tid = MissionRunPolicyResolution.resolvedTaskId(for: primaryAssignment, mission: mission) else {
+            return missionWideRunAugmentation + primaryAssignment.policies.geofenceAugmentation
+        }
+        let taskAug = perTaskRunAugmentationByTaskID[tid] ?? []
+        return planningGeofences(
+            taskID: tid,
+            mission: mission,
+            missionWideRunAugmentation: missionWideRunAugmentation,
+            perTaskRunAugmentation: taskAug
+        ) + primaryAssignment.policies.geofenceAugmentation
+    }
+
+    static func summarizedFenceIDsForLogging(_ fences: [MissionGeofence]) -> String {
+        if fences.isEmpty { return "none" }
+        return fences.map(\.id.uuidString).joined(separator: ",")
+    }
+}
+
+extension MissionRunEnvironment {
+    /// ID-only signature so Mission Control maps rebuild geofence layers when **run-only** augmentation changes
+    /// (independent of template ``Mission/missionGeofenceTemplateTopologySignature()`` and hub telemetry).
+    func missionControlRunGeofenceAugmentationTopologySignature() -> String {
+        let m = policies.missionGeofenceAugmentation.map(\.id.uuidString).sorted().joined(separator: ",")
+        let t = taskGeofenceAugmentationsByTaskID.keys
+            .sorted(by: { $0.uuidString < $1.uuidString })
+            .map { tid in
+                let ids = (taskGeofenceAugmentationsByTaskID[tid] ?? []).map(\.id.uuidString).sorted().joined(separator: ",")
+                return "\(tid.uuidString)=\(ids)"
+            }
+            .joined(separator: ";")
+        let s = assignments
+            .map { asn in
+                let ids = asn.policies.geofenceAugmentation.map(\.id.uuidString).sorted().joined(separator: ",")
+                return "\(asn.id.uuidString)=\(ids)"
+            }
+            .sorted()
+            .joined(separator: "|")
+        return "m:\(m)|t:\(t)|s:\(s)"
     }
 }
 
@@ -969,7 +1065,8 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         let hasAbort = policies.abortPreferenceChain != nil && !(policies.abortPreferenceChain?.isEmpty ?? true)
         let hasComplete = policies.completePreferenceChain != nil && !(policies.completePreferenceChain?.isEmpty ?? true)
         let hasReserveSwap = policies.reserveSwapPreferenceChain != nil && !(policies.reserveSwapPreferenceChain?.isEmpty ?? true)
-        if hasAbort || hasComplete || hasReserveSwap {
+        let hasGeofenceAug = !policies.geofenceAugmentation.isEmpty
+        if hasAbort || hasComplete || hasReserveSwap || hasGeofenceAug {
             try c.encode(policies, forKey: .policies)
         }
         try c.encodeIfPresent(slotLifecycleLanes, forKey: .slotLifecycleLanes)
@@ -1270,12 +1367,18 @@ enum MissionRunCommandIssuerKey {
     /// Issuer key for post–swap-in catalogue steps on the displaced stream (distinct audit trail from whole-run abort).
     static let plannerReserveSwapPostCommit = "planner.reserveSwapPostCommit"
     static let runTeardown = "run.teardown"
+    /// Catalogue ``fleetVehicleDoGeofenceClear`` paired with implicit run-end RTL (``MissionRunExecutionSubsystem/issueReturnToLaunchForAllAssignments``).
+    static let runTeardownGeofenceClear = "run.teardown.geofence_clear"
     static let staging = "staging"
     static let missionExecute = "mission.execute"
+    /// Between-cycles **fallback** fleet dispatch after the operator-selected primary between-cycles command fails (see ``MissionRunFleetDispatch/betweenCyclesFailureFallbackDispatch``).
+    static let betweenCyclesFallback = "mission.between_cycles.fallback"
     /// Mission Run SIM cleanup — sequential ``recipe.fleet.vehicle.do.park`` after ``markCompleted`` (audit / operator prompt correlation).
     static let runCleanupPark = "missioncontrol.run_cleanup.park"
     /// Catalogue ``fleetVehicleDoMissionClear`` during run-complete SIM cleanup (audit).
     static let runCleanupMissionClear = "missioncontrol.run_cleanup.mission_clear"
+    /// Catalogue ``fleetVehicleDoGeofenceClear`` during run-complete SIM cleanup (audit).
+    static let runCleanupGeofenceClear = "missioncontrol.run_cleanup.geofence_clear"
 }
 
 /// How a mission-run slot reaches Layer 0: ``FleetVehicleCommand`` queue, a
@@ -1353,10 +1456,40 @@ extension MissionRunFleetDispatch {
             )
         case .holdPosition:
             return .catalogue(name: .fleetVehicleDoLoiter, parameters: .empty)
-        case .land:
-            return .catalogue(name: .fleetVehicleDoLand, parameters: .empty)
-        case .none:
-            return nil
+        case .park:
+            return .catalogue(name: .fleetVehicleDoPark, parameters: .empty)
+        }
+    }
+
+    /// When the configured between-cycles primary dispatch fails, issue **Loiter** for roster slots that expect **UAV**,
+    /// otherwise **Park** (UGV / USV / UUV / unknown).
+    @MainActor
+    static func betweenCyclesFailureFallbackDispatch(expectedGranularClass: FleetVehicleType) -> MissionRunFleetDispatch {
+        switch expectedGranularClass.universalClass {
+        case .uav:
+            return .catalogue(name: .fleetVehicleDoLoiter, parameters: .empty)
+        case .ugv, .usv, .uuv, .unknown:
+            return .catalogue(name: .fleetVehicleDoPark, parameters: .empty)
+        }
+    }
+
+    /// Short operator-facing label for between-cycles policy dispatches (Return to Launch / Loiter / Park).
+    @MainActor
+    var betweenCyclesPolicyLogLabel: String {
+        switch self {
+        case .recipe(let name, _):
+            if name == FleetMissionRecipeRegistrations.doReturnHomeRecipeName {
+                return "Return to Launch"
+            }
+            return name.rawValue
+        case .catalogue(let name, _):
+            switch name {
+            case .fleetVehicleDoLoiter: return "Loiter"
+            case .fleetVehicleDoPark: return "Park"
+            default: return name.rawValue
+            }
+        case .vehicleCommand(let command):
+            return command.missionRunDispatchShortLabel
         }
     }
 }
@@ -1602,6 +1735,8 @@ struct MissionControlPlan: Equatable {
     let workPartitionMode: MissionControlWorkPartitionMode
     let handoffMode: MissionControlHandoffMode
     let roleTracks: [MissionControlRoleTrack]
+    /// Geofences **merged for planning** per enabled task id: template + run mission-wide augmentation + run per-task augmentation (see ``MissionRunGeofencePolicyResolution/planningGeofences``).
+    let planningGeofencesByTaskID: [UUID: [MissionGeofence]]
 }
 
 enum MissionControlPlanMutation: Equatable {
@@ -1717,6 +1852,18 @@ enum MissionControlPlanCompiler {
         let workPartitionMode: MissionControlWorkPartitionMode = hasMultiVehicleTask ? .segmentOwned : .taskOwned
         let handoffMode: MissionControlHandoffMode = .none
 
+        let planningGeofencesByTaskID = Dictionary(uniqueKeysWithValues: enabledTasks.map { task in
+            (
+                task.id,
+                MissionRunGeofencePolicyResolution.planningGeofences(
+                    taskID: task.id,
+                    mission: mission,
+                    missionWideRunAugmentation: run.policies.missionGeofenceAugmentation,
+                    perTaskRunAugmentation: run.taskGeofenceAugmentationsByTaskID[task.id] ?? []
+                )
+            )
+        })
+
         return MissionControlPlan(
             missionID: mission.id,
             runID: run.id,
@@ -1726,7 +1873,8 @@ enum MissionControlPlanCompiler {
             teamTopology: teamTopology,
             workPartitionMode: workPartitionMode,
             handoffMode: handoffMode,
-            roleTracks: roleTracks
+            roleTracks: roleTracks,
+            planningGeofencesByTaskID: planningGeofencesByTaskID
         )
     }
 }

@@ -50,6 +50,6 @@ Deferred product and engineering ideas for a future release. Entries are appende
 
 ## 2026-05-13 — Mission task between-cycles: Swap In Replacement action
 
-- **Idea:** Add a future **between-cycles** action choice **“Swap In Replacement”** (reserve / hull swap during the gap between task cycles), alongside the locked v1 set (**RTL**, **Loiter**, **Park**) tracked in `MissionTaskBetweenCyclesToDo.md`.
+- **Idea:** Add a future **between-cycles** action choice **“Swap In Replacement”** (reserve / hull swap during the gap between task cycles), alongside the locked v1 set (**Return to Launch**, **Loiter**, **Park**) documented in **README.md** (Fleet Layer 1 — **MRE policy & between-cycles dispatch**).
 - **Context:** `MissionTaskBetweenCyclesAction`, `MissionRunFleetDispatch.betweenCyclesTaskDispatch`, `MissionRunExecutionSubsystem` between-cycle planning; floating reserve pool and roster swap flows (`MissionRunEnvironment`, reserve swap recipes).
-- **Notes:** Implement after the v1 between-cycles UX, dispatch paths, and failure fallbacks in `MissionTaskBetweenCyclesToDo.md` are stable.
+- **Notes:** Implement when product wants the extra action; v1 between-cycles UX, dispatch, failure fallbacks, and MissionStore persistence are shipped (see README bullets above).

@@ -17,6 +17,13 @@ enum Utilities {
 @MainActor
 final class MissionUtilities {
     let path = MissionPathUtilities()
+    let templateGeofences = MissionTemplateGeofenceUtilities()
+    let geofenceGeometry = MissionGeofenceGeometryUtilities()
+
+    /// MAVSDK geofence polygon JSON for fleet upload (``FleetVehicleCommandGeofencePolygonPayload`` wire shape).
+    func geofencePolygonsJSON(forGeofences fences: [MissionGeofence]) throws -> String {
+        try MissionGeofenceMavsdkGeofenceUtilities.encodeGeofencePolygonsJSON(forGeofences: fences)
+    }
 }
 
 @MainActor

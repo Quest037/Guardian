@@ -555,14 +555,36 @@ enum MissionTaskRegularity: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-/// Autopilot action for a squad between scheduled task cycles (e.g. while waiting for a delayed next run).
+/// What the squad does in the **gap between task cycles** (repeating / delayed-repeat tasks only).
+/// Operator labels: **Return to Launch**, **Loiter**, **Park** — map to fleet dispatch via ``MissionRunFleetDispatch/betweenCyclesTaskDispatch``.
 enum MissionTaskBetweenCyclesAction: String, Codable, CaseIterable, Identifiable {
     case returnToLaunch
     case holdPosition
-    case land
-    case none
+    case park
 
     var id: String { rawValue }
+
+    /// Short label for mission authoring and Mission Control task settings (no autopilot jargon).
+    var displayTitle: String {
+        switch self {
+        case .returnToLaunch: return "Return to Launch"
+        case .holdPosition: return "Loiter"
+        case .park: return "Park"
+        }
+    }
+
+    /// Normalizes persisted strings from older mission JSON into the v1 enum set.
+    static func migrated(fromRaw raw: String) -> MissionTaskBetweenCyclesAction {
+        switch raw.lowercased() {
+        case "returntolaunch", "rtl": return .returnToLaunch
+        case "holdposition", "loiter": return .holdPosition
+        case "park": return .park
+        case "land", "none":
+            return .returnToLaunch
+        default:
+            return MissionTaskBetweenCyclesAction(rawValue: raw) ?? .returnToLaunch
+        }
+    }
 }
 
 /// High-level formation / route pattern for planner and authoring (distinct from waypoint loop geometry).
@@ -611,6 +633,8 @@ struct MissionTask: Identifiable, Codable, Equatable {
     var completePreferenceChainOverride: [MissionRunCompleteTactic]?
     /// When non-empty, overrides ``RouteRules/missionReserveSwapPreferenceChain`` for this task’s roster slots (unless a slot sets ``MissionRunAssignmentPolicies/reserveSwapPreferenceChain``).
     var reserveSwapPreferenceChainOverride: [MissionRunReserveSwapTactic]?
+    /// Task-scoped geofences (``Mission/missionGeofences`` are mission-wide).
+    var geofences: [MissionGeofence]
 
     enum CodingKeys: String, CodingKey {
         case id, name, enabled, waypoints, loopMode, cycles
@@ -622,6 +646,7 @@ struct MissionTask: Identifiable, Codable, Equatable {
         case rosterDeviceIds = "spaceBindings"
         case legacyScheduleRefs = "scheduleRefs"
         case abortPreferenceChainOverride, completePreferenceChainOverride, reserveSwapPreferenceChainOverride
+        case geofences
     }
 
     /// Effective start deferral duration for execution (seconds).
@@ -658,7 +683,8 @@ struct MissionTask: Identifiable, Codable, Equatable {
         startDelayUnit: DelayUnit = .secs,
         abortPreferenceChainOverride: [MissionRunAbortTactic]? = nil,
         completePreferenceChainOverride: [MissionRunCompleteTactic]? = nil,
-        reserveSwapPreferenceChainOverride: [MissionRunReserveSwapTactic]? = nil
+        reserveSwapPreferenceChainOverride: [MissionRunReserveSwapTactic]? = nil,
+        geofences: [MissionGeofence] = []
     ) {
         self.id = id
         self.name = name
@@ -678,6 +704,7 @@ struct MissionTask: Identifiable, Codable, Equatable {
         self.abortPreferenceChainOverride = abortPreferenceChainOverride
         self.completePreferenceChainOverride = completePreferenceChainOverride
         self.reserveSwapPreferenceChainOverride = reserveSwapPreferenceChainOverride
+        self.geofences = geofences
         normalizeDelayFields()
     }
 
@@ -722,7 +749,12 @@ struct MissionTask: Identifiable, Codable, Equatable {
         } else {
             regularity = .onceAtStart
         }
-        betweenCycles = try c.decodeIfPresent(MissionTaskBetweenCyclesAction.self, forKey: .betweenCycles) ?? .returnToLaunch
+        if let raw = try c.decodeIfPresent(String.self, forKey: .betweenCycles) {
+            betweenCycles = MissionTaskBetweenCyclesAction(rawValue: raw)
+                ?? MissionTaskBetweenCyclesAction.migrated(fromRaw: raw)
+        } else {
+            betweenCycles = .returnToLaunch
+        }
 
         pattern = try c.decodeIfPresent(MissionTaskPattern.self, forKey: .pattern) ?? .patrol
 
@@ -739,6 +771,7 @@ struct MissionTask: Identifiable, Codable, Equatable {
         abortPreferenceChainOverride = try c.decodeIfPresent([MissionRunAbortTactic].self, forKey: .abortPreferenceChainOverride)
         completePreferenceChainOverride = try c.decodeIfPresent([MissionRunCompleteTactic].self, forKey: .completePreferenceChainOverride)
         reserveSwapPreferenceChainOverride = try c.decodeIfPresent([MissionRunReserveSwapTactic].self, forKey: .reserveSwapPreferenceChainOverride)
+        geofences = try c.decodeIfPresent([MissionGeofence].self, forKey: .geofences) ?? []
 
         waypoints = Self.migratePathMetadataIfNeeded(waypoints)
         normalizeDelayFields()
@@ -791,6 +824,7 @@ struct MissionTask: Identifiable, Codable, Equatable {
         try c.encodeIfPresent(abortPreferenceChainOverride, forKey: .abortPreferenceChainOverride)
         try c.encodeIfPresent(completePreferenceChainOverride, forKey: .completePreferenceChainOverride)
         try c.encodeIfPresent(reserveSwapPreferenceChainOverride, forKey: .reserveSwapPreferenceChainOverride)
+        try c.encode(geofences, forKey: .geofences)
     }
 }
 
@@ -1088,6 +1122,8 @@ struct Mission: Identifiable, Codable {
     var routeMacro: RouteMacro
     /// Typed map pins (rally, extraction, …) — orthogonal to task path waypoints; see ``MissionPoint``.
     var missionPoints: [MissionPoint]
+    /// Mission-wide geofences (all tasks); see ``MissionTask/geofences`` for per-task regions.
+    var missionGeofences: [MissionGeofence]
     let createdAt: Date
     /// Bumped when a new list/grid JPEG is written so SwiftUI reloads ``MissionCardThumbnailView``.
     var cardThumbnailVersion: Int
@@ -1104,6 +1140,7 @@ struct Mission: Identifiable, Codable {
         rosterDevices: [RosterDevice] = [],
         routeMacro: RouteMacro = RouteMacro(),
         missionPoints: [MissionPoint] = [],
+        missionGeofences: [MissionGeofence] = [],
         createdAt: Date = Date(),
         cardThumbnailVersion: Int = 0
     ) {
@@ -1118,13 +1155,14 @@ struct Mission: Identifiable, Codable {
         self.rosterDevices = rosterDevices
         self.routeMacro = routeMacro
         self.missionPoints = missionPoints
+        self.missionGeofences = missionGeofences
         self.createdAt = createdAt
         self.cardThumbnailVersion = cardThumbnailVersion
     }
 
     enum CodingKeys: String, CodingKey {
         case id, name, description, type, isArchived, count, duration, schedule, deviceIDs, routeMacro, createdAt
-        case cardThumbnailVersion, missionPoints
+        case cardThumbnailVersion, missionPoints, missionGeofences
         case rosterDevices = "spaces"
         case mapRegion, routePlan // legacy
     }
@@ -1157,6 +1195,7 @@ struct Mission: Identifiable, Codable {
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         cardThumbnailVersion = try container.decodeIfPresent(Int.self, forKey: .cardThumbnailVersion) ?? 0
         missionPoints = try container.decodeIfPresent([MissionPoint].self, forKey: .missionPoints) ?? []
+        missionGeofences = try container.decodeIfPresent([MissionGeofence].self, forKey: .missionGeofences) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -1172,6 +1211,7 @@ struct Mission: Identifiable, Codable {
         try container.encode(rosterDevices, forKey: .rosterDevices)
         try container.encode(routeMacro, forKey: .routeMacro)
         try container.encode(missionPoints, forKey: .missionPoints)
+        try container.encode(missionGeofences, forKey: .missionGeofences)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(cardThumbnailVersion, forKey: .cardThumbnailVersion)
     }

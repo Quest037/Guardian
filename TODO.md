@@ -6,8 +6,7 @@
 ## App System
 
 - Make clicking non-input UI areas unfocus the currently focused input field (desktop blur-on-background-click behavior).
-- **Turn project into real .app:** this allows us to access lots of systems and permissions that our current swift build cannot.
-- **UserNotifications:** hook into MacOS user notifications system so that MC-R can keep user updated if app is running in background. Include **MissionRunEnvironment → operator prompts** (see **Operator prompts subsystem** under `### MissionRunEnvironment`) when replacing the prompt stub with delivered notifications.
+- **macOS `.app` bundle + UserNotifications:** `AppMacOSBundleUserNotificationsToDo.md` — proper app for TCC / `UNUserNotificationCenter`, local test workflow, optional Xcode app target, delegate + deep link, operator prompt delivery (replaces stub; MC-R background).
 - **Internationalization (i18n):** expand localization coverage beyond Paladin log templates to full UI copy, formatting rules, and locale-aware defaults.
 - **Extended Display Mode:** - convert app into extended display mode aware to allow user to have different main tabs on different displays (vehicles, logs, missions), and to allow them to do the same for MC-R.
 
@@ -89,8 +88,6 @@ The controllers system is designed to allow a user to control a linked vehicle w
 
 - **CesiumJS 3D map spike (LiveDrive + MC Running):** evaluate replacing the current Leaflet 2D map in **LiveDrive** and **Mission Control Running** with a CesiumJS-based 3D map mode (camera follow/tracked entity, per-marker context menu parity, route/vehicle overlays, and acceptable telemetry update performance in `WKWebView`). Keep **Settings → default SIM coords** and mission authoring maps on lightweight 2D for now; this spike is for operational views first.
 
-- Fix reset button going to a fixed zoom (it should use a bbox for everything)
-
 ## Live Drive
 
 The Live Drive system allows a user to manually take control of a connected vehicle and send it commands to do things. The user can fly UAVs, drive UGVs etc. This works for both live vehicles and SIMs. This system can be used in freestyle, or can be the way the user takes control of a vehicle in a running mission.
@@ -107,14 +104,8 @@ Missions are the templates created by users that involve telling one or more veh
   - Create pre-defined mission templates that the user can quick start their mission and build from
   - Offer these by default in a modal when user clicks "Add Mission", with the first option being a blank mission.
 
-- **Mission image generator:** 
-  - Add more preset variations beyond double-chevron.
-  - Add a blacklist for hexcode ranges (no black on black)
-
 ### Mission Mechanics
 - **Mission Task.staggerDelay:** - Add a field (or fields) to control a tasks stagger delay between drone groups when method is staggered. (duration + time style e.g. 30+seconds, 10+mins, 1+hour)
-- **Mission Task.geofence:** - Add a geofence limit around a MissionTask to say drones cannot exit it.
-- **Mission Task.betweenCycles** — `MissionTaskBetweenCyclesToDo.md` (RTL / Loiter / Park; missions + MCS + MCR task drawers; failure fallbacks).
 
 ### Mission Roster Slots
 
@@ -159,9 +150,10 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 
 - **Mission Controls (Sidebar):**
 
-- **Vehicles:**
-  
-- **Vehicles (Sidebar):**
+- **Roster:**
+  - Functionality to release a vehicle from a roster slot
+  - Functionality to select a new vehicle for a roster slot (empty)
+  - Functionality to switch a vehicle for a roster slot
 
 #### Squads
 - **Formations:** 

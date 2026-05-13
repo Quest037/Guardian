@@ -15,7 +15,10 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             selectedTaskPathID: nil,
             selectedStagingRosterAssignmentID: nil,
             mcsReservePoolHomePlacementTaskID: nil,
-            stagingReservePoolBerthSelectionSignature: ""
+            stagingReservePoolBerthSelectionSignature: "",
+            showMissionGeofencesOnMap: true,
+            missionGeofenceTemplateTopologySignature: "",
+            missionControlRunGeofenceAugmentationTopologySignature: ""
         )
         let withPath = SetupStagingMapStructureIdentity(
             missionID: nil,
@@ -28,7 +31,10 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             selectedTaskPathID: UUID(),
             selectedStagingRosterAssignmentID: nil,
             mcsReservePoolHomePlacementTaskID: nil,
-            stagingReservePoolBerthSelectionSignature: ""
+            stagingReservePoolBerthSelectionSignature: "",
+            showMissionGeofencesOnMap: true,
+            missionGeofenceTemplateTopologySignature: "",
+            missionControlRunGeofenceAugmentationTopologySignature: ""
         )
         XCTAssertNotEqual(base, withPath)
     }
@@ -46,7 +52,10 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             selectedTaskPathID: nil,
             selectedStagingRosterAssignmentID: nil,
             mcsReservePoolHomePlacementTaskID: nil,
-            stagingReservePoolBerthSelectionSignature: ""
+            stagingReservePoolBerthSelectionSignature: "",
+            showMissionGeofencesOnMap: true,
+            missionGeofenceTemplateTopologySignature: "",
+            missionControlRunGeofenceAugmentationTopologySignature: ""
         )
         let b = SetupStagingMapStructureIdentity(
             missionID: nil,
@@ -59,7 +68,10 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             selectedTaskPathID: nil,
             selectedStagingRosterAssignmentID: UUID(),
             mcsReservePoolHomePlacementTaskID: nil,
-            stagingReservePoolBerthSelectionSignature: ""
+            stagingReservePoolBerthSelectionSignature: "",
+            showMissionGeofencesOnMap: true,
+            missionGeofenceTemplateTopologySignature: "",
+            missionControlRunGeofenceAugmentationTopologySignature: ""
         )
         XCTAssertNotEqual(a, b)
     }
@@ -77,7 +89,10 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             selectedTaskPathID: nil,
             selectedStagingRosterAssignmentID: nil,
             mcsReservePoolHomePlacementTaskID: nil,
-            stagingReservePoolBerthSelectionSignature: ""
+            stagingReservePoolBerthSelectionSignature: "",
+            showMissionGeofencesOnMap: true,
+            missionGeofenceTemplateTopologySignature: "",
+            missionControlRunGeofenceAugmentationTopologySignature: ""
         )
         let b = SetupStagingMapStructureIdentity(
             missionID: nil,
@@ -90,7 +105,10 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             selectedTaskPathID: nil,
             selectedStagingRosterAssignmentID: nil,
             mcsReservePoolHomePlacementTaskID: UUID(),
-            stagingReservePoolBerthSelectionSignature: ""
+            stagingReservePoolBerthSelectionSignature: "",
+            showMissionGeofencesOnMap: true,
+            missionGeofenceTemplateTopologySignature: "",
+            missionControlRunGeofenceAugmentationTopologySignature: ""
         )
         XCTAssertNotEqual(a, b)
     }
@@ -110,7 +128,10 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             selectedTaskPathID: nil,
             selectedStagingRosterAssignmentID: nil,
             mcsReservePoolHomePlacementTaskID: nil,
-            stagingReservePoolBerthSelectionSignature: ""
+            stagingReservePoolBerthSelectionSignature: "",
+            showMissionGeofencesOnMap: true,
+            missionGeofenceTemplateTopologySignature: "",
+            missionControlRunGeofenceAugmentationTopologySignature: ""
         )
         let b = SetupStagingMapStructureIdentity(
             missionID: nil,
@@ -123,7 +144,10 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             selectedTaskPathID: nil,
             selectedStagingRosterAssignmentID: nil,
             mcsReservePoolHomePlacementTaskID: nil,
-            stagingReservePoolBerthSelectionSignature: "\(t.uuidString)|\(s.uuidString)"
+            stagingReservePoolBerthSelectionSignature: "\(t.uuidString)|\(s.uuidString)",
+            showMissionGeofencesOnMap: true,
+            missionGeofenceTemplateTopologySignature: "",
+            missionControlRunGeofenceAugmentationTopologySignature: ""
         )
         XCTAssertNotEqual(a, b)
     }

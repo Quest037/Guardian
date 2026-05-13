@@ -10,6 +10,13 @@ final class MissionRunReserveSwapPlanRecompilationPolicyTests: XCTestCase {
         )
     }
 
+    func test_geofenceAugmentationPolicyPlanCompileSource_isStableTelemetryToken() {
+        XCTAssertEqual(
+            MissionRunReserveSwapPlanRecompilationPolicy.geofenceAugmentationPolicyPlanCompileSource,
+            "missionControl.plan.geofenceAugmentationPolicy"
+        )
+    }
+
     func test_mutationCommitCallbacksLexicographicFlag_isLockedTrue() {
         XCTAssertTrue(MissionRunReserveSwapPlanRecompilationPolicy.mutationCommitCallbacksInvokedLexicographicByRegistrationKey)
     }

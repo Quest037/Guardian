@@ -226,6 +226,34 @@ extension MissionRunEnvironment {
             return
         }
 
+        let geofencePolygonsJSON: String
+        do {
+            geofencePolygonsJSON = try MissionGeofenceMavsdkGeofenceUtilities.encodeGeofencePolygonsJSON(
+                forGeofences: squad.effectiveGeofencesForSquad
+            )
+        } catch {
+            appendReserveSwapPipelinePhaseLog(
+                phase: .missionUpload,
+                passed: false,
+                correlation: correlation,
+                detail: "Geofence encode failed: \(error.localizedDescription) (\(triggerSource))."
+            )
+            appendDisplacedReserveSwapWindDownCommands(
+                commands: &commands,
+                mission: mission,
+                displacedRow: displacedRow,
+                correlation: correlation,
+                triggerSource: triggerSource
+            )
+            enqueueReserveSwapPostCommitBatchIfNonEmpty(
+                commands: commands,
+                context: ctx,
+                correlation: correlation,
+                triggerSource: triggerSource
+            )
+            return
+        }
+
         let hub = reserveSwapHubMissionProgressForDisplacedStorageKey(
             snap.displacedFleetStorageKey,
             fleetLink: fleetLink,
@@ -243,11 +271,13 @@ extension MissionRunEnvironment {
             recipeParams = FleetRecipeParameters(values: [
                 "missionItemsJSON": .string(missionItemsJSON),
                 "missionStartItemIndex": .integer(Int64(idx)),
+                "geofencePolygonsJSON": .string(geofencePolygonsJSON),
             ])
         } else {
             recipeName = FleetMissionRecipeRegistrations.doMissionUploadStartRecipeName
             recipeParams = FleetRecipeParameters(values: [
                 "missionItemsJSON": .string(missionItemsJSON),
+                "geofencePolygonsJSON": .string(geofencePolygonsJSON),
             ])
         }
 

@@ -1039,6 +1039,10 @@ final class FleetLinkService: ObservableObject {
                 vehicleID: vehicleID,
                 session: session
             )
+        case .uploadGeofence(let polygons):
+            completion = session.drone.geofence.uploadGeofence(polygons: polygons)
+        case .clearGeofence:
+            completion = session.drone.geofence.clearGeofence()
         case .missionClear:
             completion = session.drone.mission.clearMission()
         case .missionStart:
@@ -2494,6 +2498,10 @@ final class FleetLinkService: ObservableObject {
             )
         case .uploadMission(let items):
             return "uploadMission(\(items.count) items)"
+        case .uploadGeofence(let polys):
+            return "uploadGeofence(\(polys.count) polygon(s))"
+        case .clearGeofence:
+            return "clearGeofence"
         case .missionClear:
             return "missionClear"
         case .missionStart:

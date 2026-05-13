@@ -586,6 +586,14 @@ final class MissionRunExecutionSubsystem {
             guard let key = assignment.attachedFleetVehicleToken,
                   FleetMissionVehicleToken(storageKey: key) != nil
             else { continue }
+            if let clearGeofence = MissionRunPlannerSubsystem.catalogueGeofenceClearCommand(
+                forAssignment: assignment,
+                issuerKey: MissionRunCommandIssuerKey.runTeardownGeofenceClear
+            ) {
+                environment.appendEvent(
+                    environment.systems.commands.dispatchCommand(clearGeofence, fleetLink: fleetLink, sitl: sitl)
+                )
+            }
             let issued = MissionRunIssuedCommand(
                 assignmentID: assignment.id,
                 slotName: assignment.slotName,
@@ -1101,26 +1109,35 @@ final class MissionRunExecutionSubsystem {
         )
         if !nextPlan.immediateTaskIDs.isEmpty || !nextPlan.delayedTaskIDs.isEmpty {
             if !nextPlan.betweenCyclesCommands.isEmpty {
-                for issued in nextPlan.betweenCyclesCommands {
-                    environment.appendEvent(environment.systems.commands.dispatchCommand(issued, fleetLink: context.fleetLink, sitl: context.sitl))
-                }
-            }
-            for taskID in nextPlan.immediateTaskIDs {
-                startTaskExecution(taskID: taskID, mission: mission, context: context)
-            }
-            for taskID in nextPlan.delayedTaskIDs {
-                let task = mission.routeMacro.tasks.first(where: { $0.id == taskID })
-                let delaySeconds = max(1, task?.regularityDelayTotalSeconds ?? 1)
-                let startAt = Date().addingTimeInterval(delaySeconds)
-                environment.systems.scheduling.setTaskStartDeferral(
-                    MissionTaskStartDeferral(startAt: startAt, totalDelay: delaySeconds),
-                    forTaskID: taskID
-                )
-                environment.systems.scheduling.armTaskMissionStartTask(taskID: taskID, startAt: startAt) { [weak self] in
+                Task { @MainActor [weak self] in
                     guard let self else { return }
-                    _ = self.handleEvent(.deferredTaskStartDue(taskID: taskID), context: context)
+                    guard self.environment != nil else { return }
+                    for issued in nextPlan.betweenCyclesCommands {
+                        await self.dispatchBetweenCyclesIssuedCommandWithOptionalFallback(issued, context: context)
+                    }
+                    self.startPlannedImmediateCycleTasks(
+                        immediateTaskIDs: nextPlan.immediateTaskIDs,
+                        mission: mission,
+                        context: context
+                    )
+                    self.scheduleAutoCycleDelayedStartsForPlannedCycle(
+                        delayedTaskIDs: nextPlan.delayedTaskIDs,
+                        mission: mission,
+                        context: context
+                    )
                 }
+                return .progressed
             }
+            startPlannedImmediateCycleTasks(
+                immediateTaskIDs: nextPlan.immediateTaskIDs,
+                mission: mission,
+                context: context
+            )
+            scheduleAutoCycleDelayedStartsForPlannedCycle(
+                delayedTaskIDs: nextPlan.delayedTaskIDs,
+                mission: mission,
+                context: context
+            )
             return .progressed
         }
 
@@ -1236,6 +1253,97 @@ final class MissionRunExecutionSubsystem {
                 category: .missionControl
             )
         }
+    }
+
+    private func startPlannedImmediateCycleTasks(
+        immediateTaskIDs: [UUID],
+        mission: Mission,
+        context: MissionRunExecutionContext
+    ) {
+        for taskID in immediateTaskIDs {
+            startTaskExecution(taskID: taskID, mission: mission, context: context)
+        }
+    }
+
+    private func scheduleAutoCycleDelayedStartsForPlannedCycle(
+        delayedTaskIDs: [UUID],
+        mission: Mission,
+        context: MissionRunExecutionContext
+    ) {
+        guard let environment else { return }
+        for taskID in delayedTaskIDs {
+            let task = mission.routeMacro.tasks.first(where: { $0.id == taskID })
+            let delaySeconds = max(1, task?.regularityDelayTotalSeconds ?? 1)
+            let startAt = Date().addingTimeInterval(delaySeconds)
+            environment.systems.scheduling.setTaskStartDeferral(
+                MissionTaskStartDeferral(startAt: startAt, totalDelay: delaySeconds),
+                forTaskID: taskID
+            )
+            environment.systems.scheduling.armTaskMissionStartTask(taskID: taskID, startAt: startAt) { [weak self] in
+                guard let self else { return }
+                _ = self.handleEvent(.deferredTaskStartDue(taskID: taskID), context: context)
+            }
+        }
+    }
+
+    /// Awaits catalogue or recipe acknowledgement for a between-cycles primary; on failure, dispatches class-based fallback (UAV → loiter, else park) when it differs from the primary.
+    private func dispatchBetweenCyclesIssuedCommandWithOptionalFallback(
+        _ issued: MissionRunIssuedCommand,
+        context: MissionRunExecutionContext
+    ) async {
+        guard let environment else { return }
+        let cmds = environment.systems.commands
+        let primaryOK: Bool
+        switch issued.dispatch {
+        case .vehicleCommand:
+            primaryOK = false
+        case .catalogue:
+            primaryOK = await cmds.awaitCatalogueDispatchAndAckLogs(
+                issued: issued,
+                fleetLink: context.fleetLink,
+                sitl: context.sitl
+            )
+        case .recipe:
+            primaryOK = await cmds.awaitRecipeDispatchAppendingDispatchedThenAckLogs(
+                issued: issued,
+                fleetLink: context.fleetLink,
+                sitl: context.sitl
+            )
+        }
+        if primaryOK { return }
+        let vClass = environment.assignments.first(where: { $0.id == issued.assignmentID })
+            .map { environment.expectedFleetVehicleClassForRosterAssignment($0) } ?? .unknown
+        let fallbackDispatch = MissionRunFleetDispatch.betweenCyclesFailureFallbackDispatch(expectedGranularClass: vClass)
+        if fallbackDispatch == issued.dispatch { return }
+        let fields = environment.systems.logging.effectiveTaskFields(forAssignmentID: issued.assignmentID)
+        environment.systems.logging.appendLogEvent(
+            level: .warning,
+            taskID: fields.0,
+            taskLabel: fields.1,
+            speaker: .missionControl,
+            templateKey: MissionRunLogTemplateKey.betweenCyclesPrimaryFailedDispatchingFallback,
+            templateParams: [
+                "slot": issued.slotName,
+                "slotID": issued.assignmentID.uuidString,
+                "primary": issued.dispatch.betweenCyclesPolicyLogLabel,
+                "fallback": fallbackDispatch.betweenCyclesPolicyLogLabel,
+                "vehicleClass": vClass.classCode,
+            ]
+        )
+        let fallbackIssued = MissionRunIssuedCommand(
+            assignmentID: issued.assignmentID,
+            slotName: issued.slotName,
+            vehicleTokenKey: issued.vehicleTokenKey,
+            dispatch: fallbackDispatch,
+            issuer: .missionControl,
+            issuerKey: MissionRunCommandIssuerKey.betweenCyclesFallback,
+            category: .missionControl
+        )
+        _ = await cmds.awaitCatalogueDispatchAndAckLogs(
+            issued: fallbackIssued,
+            fleetLink: context.fleetLink,
+            sitl: context.sitl
+        )
     }
 
     private func launchInitialMissionBatches(
@@ -1474,13 +1582,39 @@ final class MissionRunExecutionSubsystem {
                 )
                 continue
             }
+            let geofencePolygonsJSON: String
+            do {
+                geofencePolygonsJSON = try MissionGeofenceMavsdkGeofenceUtilities.encodeGeofencePolygonsJSON(
+                    forGeofences: squad.effectiveGeofencesForSquad
+                )
+            } catch {
+                let pc = MissionControlTaskTagName.taskContext(for: squad.squad.primaryAssignment, mission: mission)
+                events.append(
+                    MissionRunEvent(
+                        level: .error,
+                        taskID: pc?.id,
+                        taskLabel: pc?.label,
+                        speaker: .missionControl,
+                        templateKey: MissionRunLogTemplateKey.missionGeofencePolygonsEncodeFailed,
+                        templateParams: [
+                            "slot": squad.squad.primaryAssignment.slotName,
+                            "slotID": squad.squad.primaryAssignment.id.uuidString,
+                            "reason": error.localizedDescription,
+                        ]
+                    )
+                )
+                continue
+            }
             let issued = MissionRunIssuedCommand(
                 assignmentID: squad.squad.primaryAssignment.id,
                 slotName: squad.squad.primaryAssignment.slotName,
                 vehicleTokenKey: tokenKey,
                 dispatch: .recipe(
                     name: FleetMissionRecipeRegistrations.doMissionUploadStartRecipeName,
-                    parameters: FleetRecipeParameters(values: ["missionItemsJSON": .string(missionItemsJSON)])
+                    parameters: FleetRecipeParameters(values: [
+                        "missionItemsJSON": .string(missionItemsJSON),
+                        "geofencePolygonsJSON": .string(geofencePolygonsJSON),
+                    ])
                 ),
                 issuer: .missionControl,
                 issuerKey: MissionRunCommandIssuerKey.missionExecute,
@@ -1611,6 +1745,7 @@ extension MissionRunLogTemplateKey {
     static let missionNotStartedNeedsPath = "missioncontrol.mre.mission.not_started_needs_path"
     static let missionNotStartedNoPrimaries = "missioncontrol.mre.mission.not_started_no_primaries"
     static let missionPlanItemsEncodeFailed = "missioncontrol.mre.mission.plan_items_encode_failed"
+    static let missionGeofencePolygonsEncodeFailed = "missioncontrol.mre.mission.geofence_polygons_encode_failed"
     static let missionExecuting = "missioncontrol.mre.mission.executing"
     static let startMissionTaskSkippedPhase = "missioncontrol.mre.mission.start_skipped_phase"
     static let startMissionTaskNoDispatchContext = "missioncontrol.mre.mission.start_no_dispatch_context"
@@ -1639,6 +1774,7 @@ extension MissionRunLogTemplateKey {
     static let scheduleCompleteNowSkippedNoContext = "missioncontrol.mre.schedule.complete_now_skipped_no_context"
     static let scheduleAbortNowSkippedNoContext = "missioncontrol.mre.schedule.abort_now_skipped_no_context"
     static let missionRunningUnboundedRegularity = "missioncontrol.mre.mission.running_unbounded"
+    static let betweenCyclesPrimaryFailedDispatchingFallback = "missioncontrol.mre.between_cycles.primary_failed_fallback"
     static let planRevisionAppliedImmediate = "missioncontrol.mre.plan.revision_applied_immediate"
     static let planRevisionQueuedSafePoint = "missioncontrol.mre.plan.revision_queued_safe_point"
     static let planRevisionQueuedNextCycle = "missioncontrol.mre.plan.revision_queued_next_cycle"

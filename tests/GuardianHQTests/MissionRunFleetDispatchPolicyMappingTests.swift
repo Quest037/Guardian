@@ -51,8 +51,21 @@ final class MissionRunFleetDispatchPolicyMappingTests: XCTestCase {
         XCTAssertNil(MissionRunFleetDispatch.preferentialCompleteTacticDispatch(.none))
     }
 
-    func test_betweenCycles_land_isCatalogueLand() {
-        guard let d = MissionRunFleetDispatch.betweenCyclesTaskDispatch(.land) else {
+    func test_betweenCycles_rtl_isReturnHomeRecipe() {
+        guard let d = MissionRunFleetDispatch.betweenCyclesTaskDispatch(.returnToLaunch) else {
+            XCTFail("expected dispatch")
+            return
+        }
+        guard case .recipe(let name, let params) = d else {
+            XCTFail("expected recipe, got \(d)")
+            return
+        }
+        XCTAssertEqual(name, FleetMissionRecipeRegistrations.doReturnHomeRecipeName)
+        XCTAssertEqual(params, .empty)
+    }
+
+    func test_betweenCycles_loiter_isCatalogueLoiter() {
+        guard let d = MissionRunFleetDispatch.betweenCyclesTaskDispatch(.holdPosition) else {
             XCTFail("expected dispatch")
             return
         }
@@ -60,7 +73,44 @@ final class MissionRunFleetDispatchPolicyMappingTests: XCTestCase {
             XCTFail("expected catalogue, got \(d)")
             return
         }
-        XCTAssertEqual(name, .fleetVehicleDoLand)
+        XCTAssertEqual(name, .fleetVehicleDoLoiter)
         XCTAssertEqual(params, .empty)
+    }
+
+    func test_betweenCycles_park_isCataloguePark() {
+        guard let d = MissionRunFleetDispatch.betweenCyclesTaskDispatch(.park) else {
+            XCTFail("expected dispatch")
+            return
+        }
+        guard case .catalogue(let name, let params) = d else {
+            XCTFail("expected catalogue, got \(d)")
+            return
+        }
+        XCTAssertEqual(name, .fleetVehicleDoPark)
+        XCTAssertEqual(params, .empty)
+    }
+
+    func test_betweenCycles_failureFallback_uavKinds_areLoiter() {
+        for v in [FleetVehicleType.uavCopter, .uavFixedWing, .uavVTOL] {
+            let d = MissionRunFleetDispatch.betweenCyclesFailureFallbackDispatch(expectedGranularClass: v)
+            guard case .catalogue(let name, let params) = d else {
+                XCTFail("expected catalogue for \(v), got \(d)")
+                return
+            }
+            XCTAssertEqual(name, .fleetVehicleDoLoiter)
+            XCTAssertEqual(params, .empty)
+        }
+    }
+
+    func test_betweenCycles_failureFallback_nonUavKinds_arePark() {
+        for v in [FleetVehicleType.ugvWheeled, .ugvTracked, .ugvLegged, .usv, .uuv, .unknown] {
+            let d = MissionRunFleetDispatch.betweenCyclesFailureFallbackDispatch(expectedGranularClass: v)
+            guard case .catalogue(let name, let params) = d else {
+                XCTFail("expected catalogue for \(v), got \(d)")
+                return
+            }
+            XCTAssertEqual(name, .fleetVehicleDoPark)
+            XCTAssertEqual(params, .empty)
+        }
     }
 }

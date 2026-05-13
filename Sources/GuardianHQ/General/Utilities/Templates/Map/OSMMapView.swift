@@ -45,6 +45,71 @@ struct CameraPreview: Equatable {
     var fovDeg: Double
 }
 
+/// Resolved stroke + fill strings for mission geofence overlays in the Leaflet ``WKWebView`` bridge.
+/// Sourced from ``GuardianSemanticColors`` (success = inclusion stay-in, danger = exclusion no-go).
+struct GuardianGeofenceLeafletChrome: Equatable, Sendable {
+    var inclusionStrokeHex: String
+    var inclusionFillRGBA: String
+    var exclusionStrokeHex: String
+    var exclusionFillRGBA: String
+
+    init(colorScheme: ColorScheme) {
+        inclusionStrokeHex = Self.hex6(GuardianSemanticColors.successStroke, colorScheme: colorScheme)
+        inclusionFillRGBA = Self.rgba(GuardianSemanticColors.successBackground, colorScheme: colorScheme)
+        exclusionStrokeHex = Self.hex6(GuardianSemanticColors.dangerStroke, colorScheme: colorScheme)
+        exclusionFillRGBA = Self.rgba(GuardianSemanticColors.dangerBackground, colorScheme: colorScheme)
+    }
+
+    /// JSON object literal (not wrapped in outer quotes) for embedding in `setMissionData(...)`.
+    func jsonObjectFragmentEscapedForJS() -> String {
+        func q(_ s: String) -> String {
+            let escaped = s
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            return "\"\(escaped)\""
+        }
+        return """
+        {"inclusionStroke":\(q(inclusionStrokeHex)),"inclusionFill":\(q(inclusionFillRGBA)),"exclusionStroke":\(q(exclusionStrokeHex)),"exclusionFill":\(q(exclusionFillRGBA))}
+        """
+    }
+
+    private static func hex6(_ color: Color, colorScheme: ColorScheme) -> String {
+        let (r, g, b, _) = sRGBAComponents(color, colorScheme: colorScheme)
+        return String(
+            format: "#%02X%02X%02X",
+            Int((r * 255).rounded(.toNearestOrAwayFromZero)),
+            Int((g * 255).rounded(.toNearestOrAwayFromZero)),
+            Int((b * 255).rounded(.toNearestOrAwayFromZero))
+        )
+    }
+
+    private static func rgba(_ color: Color, colorScheme: ColorScheme) -> String {
+        let (r, g, b, a) = sRGBAComponents(color, colorScheme: colorScheme)
+        let rr = (r * 1000).rounded() / 1000
+        let gg = (g * 1000).rounded() / 1000
+        let bb = (b * 1000).rounded() / 1000
+        let aa = (a * 1000).rounded() / 1000
+        return "rgba(\(rr),\(gg),\(bb),\(aa))"
+    }
+
+    private static func sRGBAComponents(_ color: Color, colorScheme: ColorScheme) -> (CGFloat, CGFloat, CGFloat, CGFloat) {
+        #if os(macOS)
+        let appearanceName: NSAppearance.Name = colorScheme == .dark ? .darkAqua : .aqua
+        guard let appearance = NSAppearance(named: appearanceName) else {
+            return (0.2, 0.62, 0.31, 0.92)
+        }
+        var out: (CGFloat, CGFloat, CGFloat, CGFloat) = (0.5, 0.5, 0.5, 1)
+        appearance.performAsCurrentDrawingAppearance {
+            let ns = NSColor(color).usingColorSpace(.sRGB) ?? NSColor.labelColor
+            out = (ns.redComponent, ns.greenComponent, ns.blueComponent, ns.alphaComponent)
+        }
+        return out
+        #else
+        return (0.5, 0.5, 0.5, 1)
+        #endif
+    }
+}
+
 struct MapVehicleMarker: Equatable {
     var id: String
     var lat: Double
@@ -86,6 +151,11 @@ struct OSMMapView: NSViewRepresentable {
     var missionPointPlacementArmed: Bool = false
     /// MCS staging map: reserve pool bulk-home placement mode (pointer + cursor-following preview in Leaflet).
     var mcsReservePoolHomePlacementArmed: Bool = false
+    var geofenceOverlays: [GuardianGeofenceMapOverlay] = []
+    /// Inclusion / exclusion colours for geofence layers (``GuardianSemanticColors`` → Leaflet).
+    var geofenceLeafletChrome: GuardianGeofenceLeafletChrome
+    /// When true, geofence polygons/circles are interactive and post ``geofenceClick`` (mission Geofences tab).
+    var geofenceMapLayerPointerSelectsFence: Bool = false
     var contextMenuPolicy: GuardianMapContextMenuPolicy
     var onMapClick: (Double, Double) -> Void
     var onVehicleMarkerMoved: (String, Double, Double) -> Void
@@ -104,6 +174,15 @@ struct OSMMapView: NSViewRepresentable {
     var onHomeTap: (GuardianMapHomePointerEvent) -> Void = { _ in }
     var onHomeDoubleTap: (GuardianMapHomePointerEvent) -> Void = { _ in }
     var onViewportCenterChanged: (Double, Double) -> Void = { _, _ in }
+    var onGeofenceClick: (UUID) -> Void = { _ in }
+    /// Mission workspace **Fences** tab: drag circle center / radius handle.
+    var onGeofenceCircleCenterMoved: (UUID, Double, Double) -> Void = { _, _, _ in }
+    var onGeofenceCircleRadiusMoved: (UUID, Double) -> Void = { _, _ in }
+    /// Drag polygon vertex or translate whole ring via centroid handle.
+    var onGeofencePolygonVertexMoved: (UUID, Int, Double, Double) -> Void = { _, _, _, _ in }
+    var onGeofencePolygonTranslated: (UUID, Double, Double) -> Void = { _, _, _ in }
+    /// Primary click on a polygon edge hit-strip inserts a vertex (selected fence only).
+    var onGeofencePolygonEdgeInsert: (UUID, Int, Double, Double) -> Void = { _, _, _, _ in }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -123,7 +202,13 @@ struct OSMMapView: NSViewRepresentable {
             onTaskPathDoubleTap: onTaskPathDoubleTap,
             onHomeTap: onHomeTap,
             onHomeDoubleTap: onHomeDoubleTap,
-            onViewportCenterChanged: onViewportCenterChanged
+            onViewportCenterChanged: onViewportCenterChanged,
+            onGeofenceClick: onGeofenceClick,
+            onGeofenceCircleCenterMoved: onGeofenceCircleCenterMoved,
+            onGeofenceCircleRadiusMoved: onGeofenceCircleRadiusMoved,
+            onGeofencePolygonVertexMoved: onGeofencePolygonVertexMoved,
+            onGeofencePolygonTranslated: onGeofencePolygonTranslated,
+            onGeofencePolygonEdgeInsert: onGeofencePolygonEdgeInsert
         )
     }
 
@@ -146,6 +231,12 @@ struct OSMMapView: NSViewRepresentable {
         controller.add(context.coordinator, name: "homeClick")
         controller.add(context.coordinator, name: "homeDoubleClick")
         controller.add(context.coordinator, name: "mapViewportCenter")
+        controller.add(context.coordinator, name: "geofenceClick")
+        controller.add(context.coordinator, name: "geofenceCircleCenterMove")
+        controller.add(context.coordinator, name: "geofenceCircleRadiusMove")
+        controller.add(context.coordinator, name: "geofencePolygonVertexMove")
+        controller.add(context.coordinator, name: "geofencePolygonTranslate")
+        controller.add(context.coordinator, name: "geofencePolygonEdgeInsert")
 
         let config = WKWebViewConfiguration()
         config.userContentController = controller
@@ -182,6 +273,12 @@ struct OSMMapView: NSViewRepresentable {
         c.onTaskPathDoubleTap = onTaskPathDoubleTap
         c.onHomeTap = onHomeTap
         c.onHomeDoubleTap = onHomeDoubleTap
+        c.onGeofenceClick = onGeofenceClick
+        c.onGeofenceCircleCenterMoved = onGeofenceCircleCenterMoved
+        c.onGeofenceCircleRadiusMoved = onGeofenceCircleRadiusMoved
+        c.onGeofencePolygonVertexMoved = onGeofencePolygonVertexMoved
+        c.onGeofencePolygonTranslated = onGeofencePolygonTranslated
+        c.onGeofencePolygonEdgeInsert = onGeofencePolygonEdgeInsert
         let homeJSON: String
         if let home {
             homeJSON = "{\"lat\":\(home.coord.lat),\"lon\":\(home.coord.lon)}"
@@ -234,7 +331,22 @@ struct OSMMapView: NSViewRepresentable {
         {"vehicleActions":[\(contextMenuPolicy.vehicleActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"waypointActions":[\(contextMenuPolicy.waypointActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"homeActions":[\(contextMenuPolicy.homeActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"missionPointActions":[\(contextMenuPolicy.missionPointActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))]}
         """
         let mcsPoolHomeArmedJS = mcsReservePoolHomePlacementArmed ? "true" : "false"
-        let js = "setMissionData(\(homeJSON), [\(allPathsJSON)], \(taskPathIDsJSON), [\(waypointsJSON)], \(selectedWaypointIndexJS), [\(vehicleMarkersJSON)], \"\(mapStyle.rawValue)\", \(recenterNonce), \(headingPreviewJSON), \(cameraPreviewJSON), \(followedVehicleMarkerIDJSON), \(contextMenuPolicyJSON), \(preserveView ? "true" : "false"), \(isEditingTask ? "true" : "false"), \(missionPointPlacementArmed ? "true" : "false"), \(mcsPoolHomeArmedJS), [\(missionPointsJSON)]);"
+        let geofencesJSON = geofenceOverlays.map { g in
+            let polyInner = g.polygonLatLons.map { "{\"lat\":\($0.0),\"lon\":\($0.1)}" }.joined(separator: ",")
+            let cirLat: String
+            if let v = g.circleLat { cirLat = String(v) } else { cirLat = "null" }
+            let cirLon: String
+            if let v = g.circleLon { cirLon = String(v) } else { cirLon = "null" }
+            let cirR: String
+            if let v = g.circleRadiusM { cirR = String(v) } else { cirR = "null" }
+            let boundary = g.isInclusion ? "inclusion" : "exclusion"
+            let shape = g.isPolygon ? "polygon" : "circle"
+            let sel = g.isAuthoringMapSelected ? "true" : "false"
+            return "{\"id\":\(Self.jsStringLiteral(g.id.uuidString)),\"boundary\":\(Self.jsStringLiteral(boundary)),\"shape\":\(Self.jsStringLiteral(shape)),\"polygon\":[\(polyInner)],\"circleLat\":\(cirLat),\"circleLon\":\(cirLon),\"circleRadiusM\":\(cirR),\"selected\":\(sel)}"
+        }.joined(separator: ",")
+        let geofenceChromeJSON = geofenceLeafletChrome.jsonObjectFragmentEscapedForJS()
+        let geofencePtrSelJS = geofenceMapLayerPointerSelectsFence ? "true" : "false"
+        let js = "setMissionData(\(homeJSON), [\(allPathsJSON)], \(taskPathIDsJSON), [\(waypointsJSON)], \(selectedWaypointIndexJS), [\(vehicleMarkersJSON)], \"\(mapStyle.rawValue)\", \(recenterNonce), \(headingPreviewJSON), \(cameraPreviewJSON), \(followedVehicleMarkerIDJSON), \(contextMenuPolicyJSON), \(preserveView ? "true" : "false"), \(isEditingTask ? "true" : "false"), \(missionPointPlacementArmed ? "true" : "false"), \(mcsPoolHomeArmedJS), [\(missionPointsJSON)], [\(geofencesJSON)], \(geofenceChromeJSON), \(geofencePtrSelJS));"
         context.coordinator.queueMissionUpdate(script: js)
         context.coordinator.applyViewportNudge(viewportNudge, webView: webView)
     }
@@ -340,6 +452,12 @@ extension OSMMapView {
         var onTaskPathDoubleTap: (GuardianMapTaskPathPointerEvent) -> Void
         var onHomeTap: (GuardianMapHomePointerEvent) -> Void
         var onHomeDoubleTap: (GuardianMapHomePointerEvent) -> Void
+        var onGeofenceClick: (UUID) -> Void
+        var onGeofenceCircleCenterMoved: (UUID, Double, Double) -> Void
+        var onGeofenceCircleRadiusMoved: (UUID, Double) -> Void
+        var onGeofencePolygonVertexMoved: (UUID, Int, Double, Double) -> Void
+        var onGeofencePolygonTranslated: (UUID, Double, Double) -> Void
+        var onGeofencePolygonEdgeInsert: (UUID, Int, Double, Double) -> Void
 
         init(
             onMapClick: @escaping (Double, Double) -> Void,
@@ -358,7 +476,13 @@ extension OSMMapView {
             onTaskPathDoubleTap: @escaping (GuardianMapTaskPathPointerEvent) -> Void,
             onHomeTap: @escaping (GuardianMapHomePointerEvent) -> Void,
             onHomeDoubleTap: @escaping (GuardianMapHomePointerEvent) -> Void,
-            onViewportCenterChanged: @escaping (Double, Double) -> Void
+            onViewportCenterChanged: @escaping (Double, Double) -> Void,
+            onGeofenceClick: @escaping (UUID) -> Void,
+            onGeofenceCircleCenterMoved: @escaping (UUID, Double, Double) -> Void,
+            onGeofenceCircleRadiusMoved: @escaping (UUID, Double) -> Void,
+            onGeofencePolygonVertexMoved: @escaping (UUID, Int, Double, Double) -> Void,
+            onGeofencePolygonTranslated: @escaping (UUID, Double, Double) -> Void,
+            onGeofencePolygonEdgeInsert: @escaping (UUID, Int, Double, Double) -> Void
         ) {
             self.onMapClick = onMapClick
             self.onVehicleMarkerMoved = onVehicleMarkerMoved
@@ -377,6 +501,12 @@ extension OSMMapView {
             self.onHomeTap = onHomeTap
             self.onHomeDoubleTap = onHomeDoubleTap
             self.onViewportCenterChanged = onViewportCenterChanged
+            self.onGeofenceClick = onGeofenceClick
+            self.onGeofenceCircleCenterMoved = onGeofenceCircleCenterMoved
+            self.onGeofenceCircleRadiusMoved = onGeofenceCircleRadiusMoved
+            self.onGeofencePolygonVertexMoved = onGeofencePolygonVertexMoved
+            self.onGeofencePolygonTranslated = onGeofencePolygonTranslated
+            self.onGeofencePolygonEdgeInsert = onGeofencePolygonEdgeInsert
         }
 
         private func noteLayerPointerDeliveredToSwift() {
@@ -646,6 +776,71 @@ extension OSMMapView {
                 onHomeDoubleTap(GuardianMapHomePointerEvent(lat: lat, lon: lon))
                 return
             }
+
+            if message.name == "geofenceClick",
+               let payload = message.body as? [String: Any],
+               let idStr = OSMMapView.WKScriptPayloadBridge.optionalString(payload["id"]),
+               let uuid = UUID(uuidString: idStr) {
+                noteLayerPointerDeliveredToSwift()
+                onGeofenceClick(uuid)
+                return
+            }
+
+            if message.name == "geofenceCircleCenterMove",
+               let payload = message.body as? [String: Any],
+               let idStr = OSMMapView.WKScriptPayloadBridge.optionalString(payload["id"]),
+               let uuid = UUID(uuidString: idStr),
+               let lat = OSMMapView.WKScriptPayloadBridge.double(payload["lat"]),
+               let lon = OSMMapView.WKScriptPayloadBridge.double(payload["lon"]) {
+                noteLayerPointerDeliveredToSwift()
+                onGeofenceCircleCenterMoved(uuid, lat, lon)
+                return
+            }
+
+            if message.name == "geofenceCircleRadiusMove",
+               let payload = message.body as? [String: Any],
+               let idStr = OSMMapView.WKScriptPayloadBridge.optionalString(payload["id"]),
+               let uuid = UUID(uuidString: idStr),
+               let r = OSMMapView.WKScriptPayloadBridge.double(payload["radiusM"]) {
+                noteLayerPointerDeliveredToSwift()
+                onGeofenceCircleRadiusMoved(uuid, r)
+                return
+            }
+
+            if message.name == "geofencePolygonVertexMove",
+               let payload = message.body as? [String: Any],
+               let idStr = OSMMapView.WKScriptPayloadBridge.optionalString(payload["id"]),
+               let uuid = UUID(uuidString: idStr),
+               let idx = OSMMapView.WKScriptPayloadBridge.int(payload["idx"]),
+               let lat = OSMMapView.WKScriptPayloadBridge.double(payload["lat"]),
+               let lon = OSMMapView.WKScriptPayloadBridge.double(payload["lon"]) {
+                noteLayerPointerDeliveredToSwift()
+                onGeofencePolygonVertexMoved(uuid, idx, lat, lon)
+                return
+            }
+
+            if message.name == "geofencePolygonTranslate",
+               let payload = message.body as? [String: Any],
+               let idStr = OSMMapView.WKScriptPayloadBridge.optionalString(payload["id"]),
+               let uuid = UUID(uuidString: idStr),
+               let dLat = OSMMapView.WKScriptPayloadBridge.double(payload["dLat"]),
+               let dLon = OSMMapView.WKScriptPayloadBridge.double(payload["dLon"]) {
+                noteLayerPointerDeliveredToSwift()
+                onGeofencePolygonTranslated(uuid, dLat, dLon)
+                return
+            }
+
+            if message.name == "geofencePolygonEdgeInsert",
+               let payload = message.body as? [String: Any],
+               let idStr = OSMMapView.WKScriptPayloadBridge.optionalString(payload["id"]),
+               let uuid = UUID(uuidString: idStr),
+               let afterIndex = OSMMapView.WKScriptPayloadBridge.int(payload["afterIndex"]),
+               let lat = OSMMapView.WKScriptPayloadBridge.double(payload["lat"]),
+               let lon = OSMMapView.WKScriptPayloadBridge.double(payload["lon"]) {
+                noteLayerPointerDeliveredToSwift()
+                onGeofencePolygonEdgeInsert(uuid, afterIndex, lat, lon)
+                return
+            }
         }
     }
 }
@@ -725,6 +920,18 @@ private extension OSMMapView {
     const vehicleMarkerById = new Map();
     const missionPointMarkerById = new Map();
     const pathLines = [];
+    const geofenceLayers = [];
+    const geofenceHandleLayers = [];
+    function clearGeofenceLayers() {
+      while (geofenceHandleLayers.length > 0) {
+        const h = geofenceHandleLayers.pop();
+        try { map.removeLayer(h); } catch (e) {}
+      }
+      while (geofenceLayers.length > 0) {
+        const lyr = geofenceLayers.pop();
+        try { map.removeLayer(lyr); } catch (e) {}
+      }
+    }
     const state = { lastDataSignature: null, lastRecenterNonce: -1, lastFullMissionSig: null, lastStructureSig: null };
     let contextMenuEl = null;
     let followedVehicleMarkerID = null;
@@ -1284,7 +1491,91 @@ private extension OSMMapView {
       }
     }
 
-    function setMissionData(home, allTasksCoords, taskPathIds, selectedWaypoints, selectedWaypointIndex, missionVehicleMarkers, mapStyle, recenterNonce, headingPreview, cameraPreview, followVehicleMarkerID, menuPolicy, preserveView, isEditingTask, missionPointPlacementArmed, mcsReservePoolHomePlacementArmed, missionPointMarkersArg) {
+    function guardianGeofenceVertexIcon() {
+      return L.divIcon({
+        className: 'gf-vtx',
+        html: '<div style="width:12px;height:12px;border-radius:999px;background:#fff;border:2px solid #2563eb;"></div>',
+        iconSize: [14, 14],
+        iconAnchor: [7, 7]
+      });
+    }
+    function guardianGeofenceCentroidIcon() {
+      return L.divIcon({
+        className: 'gf-ctr',
+        html: '<div style="width:14px;height:14px;border-radius:3px;background:#fde047;border:2px solid #854d0e;"></div>',
+        iconSize: [16, 16],
+        iconAnchor: [8, 8]
+      });
+    }
+    function guardianHaversineMeters(lat1, lon1, lat2, lon2) {
+      const R = 6371000;
+      const toR = Math.PI / 180;
+      const φ1 = lat1 * toR;
+      const φ2 = lat2 * toR;
+      const Δφ = (lat2 - lat1) * toR;
+      const Δλ = (lon2 - lon1) * toR;
+      const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+      return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+    }
+    function guardianBearingDeg(lat1, lon1, lat2, lon2) {
+      const toR = Math.PI / 180;
+      const φ1 = lat1 * toR;
+      const φ2 = lat2 * toR;
+      const Δλ = (lon2 - lon1) * toR;
+      const y = Math.sin(Δλ) * Math.cos(φ2);
+      const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+      let θ = (Math.atan2(y, x) * 180) / Math.PI;
+      return (θ + 360) % 360;
+    }
+    function guardianDestinationLatLng(lat, lon, bearingDeg, distanceM) {
+      const R = 6371000;
+      const br = (bearingDeg * Math.PI) / 180;
+      const dr = distanceM / R;
+      const lat1 = (lat * Math.PI) / 180;
+      const lon1 = (lon * Math.PI) / 180;
+      const lat2 = Math.asin(Math.sin(lat1) * Math.cos(dr) + Math.cos(lat1) * Math.sin(dr) * Math.cos(br));
+      const lon2 = lon1 + Math.atan2(Math.sin(br) * Math.sin(dr) * Math.cos(lat1), Math.cos(dr) - Math.sin(lat1) * Math.sin(lat2));
+      return { lat: (lat2 * 180) / Math.PI, lng: (lon2 * 180) / Math.PI };
+    }
+    function guardianClosestPointOnSegmentLatLng(clickLL, aLL, bLL) {
+      const p = map.project(clickLL);
+      const pa = map.project(aLL);
+      const pb = map.project(bLL);
+      const abx = pb.x - pa.x;
+      const aby = pb.y - pa.y;
+      const apx = p.x - pa.x;
+      const apy = p.y - pa.y;
+      const ab2 = abx * abx + aby * aby;
+      const t = ab2 === 0 ? 0 : Math.max(0, Math.min(1, (apx * abx + apy * aby) / ab2));
+      const cx = pa.x + t * abx;
+      const cy = pa.y + t * aby;
+      return map.containerPointToLatLng(L.point(cx, cy));
+    }
+    function guardianClosedPolygonNearestEdge(verts, clickLatLng) {
+      const n = verts.length;
+      let bestDist = 1e99;
+      let afterIndex = 0;
+      let lat = clickLatLng.lat;
+      let lng = clickLatLng.lng;
+      const pClick = map.project(clickLatLng);
+      for (let i = 0; i < n; i++) {
+        const a = verts[i];
+        const b = verts[(i + 1) % n];
+        const aLL = L.latLng(a.lat, a.lon);
+        const bLL = L.latLng(b.lat, b.lon);
+        const closest = guardianClosestPointOnSegmentLatLng(clickLatLng, aLL, bLL);
+        const d = pClick.distanceTo(map.project(closest));
+        if (d < bestDist) {
+          bestDist = d;
+          afterIndex = i;
+          lat = closest.lat;
+          lng = closest.lng;
+        }
+      }
+      return { afterIndex, lat, lng };
+    }
+
+    function setMissionData(home, allTasksCoords, taskPathIds, selectedWaypoints, selectedWaypointIndex, missionVehicleMarkers, mapStyle, recenterNonce, headingPreview, cameraPreview, followVehicleMarkerID, menuPolicy, preserveView, isEditingTask, missionPointPlacementArmed, mcsReservePoolHomePlacementArmed, missionPointMarkersArg, geofenceOverlaysArg, geofenceChrome, geofencePointerSelects) {
       const geometryTasks = (allTasksCoords || []).filter(path => path && path.length > 0);
       const fullMissionSig = JSON.stringify({
         home: home,
@@ -1303,7 +1594,10 @@ private extension OSMMapView {
         isEditingTask: !!isEditingTask,
         missionPointPlacementArmed: !!missionPointPlacementArmed,
         mcsReservePoolHomePlacementArmed: !!mcsReservePoolHomePlacementArmed,
-        missionPoints: missionPointMarkersArg || []
+        missionPoints: missionPointMarkersArg || [],
+        geofences: geofenceOverlaysArg || [],
+        geofenceChrome: geofenceChrome || null,
+        geofencePointerSelects: !!geofencePointerSelects
       });
       if (fullMissionSig === state.lastFullMissionSig) {
         return;
@@ -1323,7 +1617,10 @@ private extension OSMMapView {
         preserveView: !!preserveView,
         isEditingTask: !!isEditingTask,
         missionPointPlacementArmed: !!missionPointPlacementArmed,
-        mcsReservePoolHomePlacementArmed: !!mcsReservePoolHomePlacementArmed
+        mcsReservePoolHomePlacementArmed: !!mcsReservePoolHomePlacementArmed,
+        geofences: JSON.stringify(geofenceOverlaysArg || []),
+        geofenceChrome: JSON.stringify(geofenceChrome || {}),
+        geofencePointerSelects: !!geofencePointerSelects
       });
       const canPatchMarkersOnly = state.lastStructureSig !== null && structureSig === state.lastStructureSig;
 
@@ -1402,6 +1699,7 @@ private extension OSMMapView {
         const line = pathLines.pop();
         map.removeLayer(line);
       }
+      clearGeofenceLayers();
       while (waypointMarkers.length > 0) {
         const m = waypointMarkers.pop();
         map.removeLayer(m);
@@ -1536,6 +1834,217 @@ private extension OSMMapView {
             });
           }
           waypointMarkers.push(marker);
+        });
+      }
+
+      if (geofenceOverlaysArg && geofenceOverlaysArg.length > 0) {
+        const gfInteractive = !!geofencePointerSelects;
+        geofenceOverlaysArg.forEach((g) => {
+          const stroke = (g.boundary === 'inclusion')
+            ? ((geofenceChrome && geofenceChrome.inclusionStroke) || '#1b5e20')
+            : ((geofenceChrome && geofenceChrome.exclusionStroke) || '#b71c1c');
+          const fill = (g.boundary === 'inclusion')
+            ? ((geofenceChrome && geofenceChrome.inclusionFill) || 'rgba(27,94,32,0.18)')
+            : ((geofenceChrome && geofenceChrome.exclusionFill) || 'rgba(183,28,28,0.18)');
+          const weight = (g.selected === true) ? 4 : 2;
+          if (g.shape === 'circle' && Number.isFinite(g.circleLat) && Number.isFinite(g.circleLon) && Number.isFinite(g.circleRadiusM)) {
+            const c = L.circle([g.circleLat, g.circleLon], {
+              radius: Math.max(1, g.circleRadiusM),
+              color: stroke,
+              weight: weight,
+              fillColor: fill,
+              fillOpacity: 1,
+              interactive: gfInteractive
+            }).addTo(map);
+            geofenceLayers.push(c);
+            if (gfInteractive) {
+              c.on('click', function(e) {
+                L.DomEvent.stop(e);
+                guardianMarkLayerMapClickSuppressed();
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.geofenceClick) {
+                  window.webkit.messageHandlers.geofenceClick.postMessage({ id: String(g.id) });
+                }
+              });
+            }
+            if (gfInteractive && g.selected) {
+              const idStr = String(g.id);
+              const ctrLL = L.latLng(g.circleLat, g.circleLon);
+              const rimDest = guardianDestinationLatLng(g.circleLat, g.circleLon, 90, Math.max(5, g.circleRadiusM));
+              const mCtr = L.marker(ctrLL, { draggable: true, zIndexOffset: 5000, icon: guardianGeofenceCentroidIcon() }).addTo(map);
+              const mRim = L.marker([rimDest.lat, rimDest.lng], { draggable: true, zIndexOffset: 5000, icon: guardianGeofenceVertexIcon() }).addTo(map);
+              mCtr.on('dragstart', function() {
+                const cc = mCtr.getLatLng();
+                const rr = mRim.getLatLng();
+                mCtr._gfRimBrg = guardianBearingDeg(cc.lat, cc.lng, rr.lat, rr.lng);
+                mCtr._gfRadiusM = Math.max(5, c.getRadius());
+              });
+              mCtr.on('drag', function() {
+                const pos = mCtr.getLatLng();
+                const brg = mCtr._gfRimBrg;
+                const rM = mCtr._gfRadiusM;
+                if (brg == null || rM == null) {
+                  return;
+                }
+                c.setLatLng(pos);
+                const dest = guardianDestinationLatLng(pos.lat, pos.lng, brg, rM);
+                mRim.setLatLng(L.latLng(dest.lat, dest.lng));
+              });
+              mCtr.on('dragend', function(e) {
+                mCtr._gfRimBrg = null;
+                mCtr._gfRadiusM = null;
+                const pos = e.target.getLatLng();
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.geofenceCircleCenterMove) {
+                  window.webkit.messageHandlers.geofenceCircleCenterMove.postMessage({ id: idStr, lat: pos.lat, lon: pos.lng });
+                }
+              });
+              geofenceHandleLayers.push(mCtr);
+              mRim.on('drag', function() {
+                const pos = mRim.getLatLng();
+                const cc = mCtr.getLatLng();
+                const r = Math.max(5, guardianHaversineMeters(cc.lat, cc.lng, pos.lat, pos.lng));
+                c.setLatLng(cc);
+                c.setRadius(r);
+              });
+              mRim.on('dragend', function(e) {
+                const pos = e.target.getLatLng();
+                const cc = mCtr.getLatLng();
+                const r = guardianHaversineMeters(cc.lat, cc.lng, pos.lat, pos.lng);
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.geofenceCircleRadiusMove) {
+                  window.webkit.messageHandlers.geofenceCircleRadiusMove.postMessage({ id: idStr, radiusM: Math.max(5, r) });
+                }
+              });
+              geofenceHandleLayers.push(mRim);
+            }
+            try {
+              const b = c.getBounds();
+              points.push([b.getNorthEast().lat, b.getNorthEast().lng]);
+              points.push([b.getSouthWest().lat, b.getSouthWest().lng]);
+            } catch (e) {}
+          } else if (g.shape === 'polygon' && g.polygon && g.polygon.length >= 3) {
+            const latlngs = g.polygon.map((p) => [p.lat, p.lon]);
+            latlngs.forEach((p) => points.push(p));
+            const poly = L.polygon(latlngs, {
+              color: stroke,
+              weight: weight,
+              fillColor: fill,
+              fillOpacity: 1,
+              interactive: gfInteractive
+            }).addTo(map);
+            geofenceLayers.push(poly);
+            if (gfInteractive) {
+              poly.on('click', function(e) {
+                L.DomEvent.stop(e);
+                guardianMarkLayerMapClickSuppressed();
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.geofenceClick) {
+                  window.webkit.messageHandlers.geofenceClick.postMessage({ id: String(g.id) });
+                }
+              });
+            }
+            if (gfInteractive && g.selected) {
+              const idStr = String(g.id);
+              const verts = g.polygon;
+              const n = verts.length;
+              const vertexMarkers = [];
+              const edgeLayers = [];
+              for (let i = 0; i < n; i++) {
+                const a = verts[i];
+                const b = verts[(i + 1) % n];
+                const edge = L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
+                  color: '#000',
+                  opacity: 0,
+                  weight: 16,
+                  interactive: true
+                }).addTo(map);
+                edgeLayers.push(edge);
+                edge.on('click', function(e) {
+                  L.DomEvent.stop(e);
+                  guardianMarkLayerMapClickSuppressed();
+                  const ring0 = poly.getLatLngs()[0];
+                  const vSnap = ring0.map((ll) => ({ lat: ll.lat, lon: ll.lng }));
+                  const best = guardianClosedPolygonNearestEdge(vSnap, e.latlng);
+                  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.geofencePolygonEdgeInsert) {
+                    window.webkit.messageHandlers.geofencePolygonEdgeInsert.postMessage({
+                      id: idStr,
+                      afterIndex: best.afterIndex,
+                      lat: best.lat,
+                      lon: best.lng
+                    });
+                  }
+                });
+                geofenceHandleLayers.push(edge);
+              }
+              verts.forEach(function(v, vi) {
+                const vm = L.marker([v.lat, v.lon], { draggable: true, zIndexOffset: 5100, icon: guardianGeofenceVertexIcon() }).addTo(map);
+                vm.on('drag', function(e) {
+                  const pos = e.target.getLatLng();
+                  const ring = poly.getLatLngs()[0].map((ll) => L.latLng(ll.lat, ll.lng));
+                  ring[vi] = pos;
+                  poly.setLatLngs([ring]);
+                  const ni = (vi + 1) % n;
+                  const pi = (vi - 1 + n) % n;
+                  edgeLayers[pi].setLatLngs([[ring[pi].lat, ring[pi].lng], [ring[vi].lat, ring[vi].lng]]);
+                  edgeLayers[vi].setLatLngs([[ring[vi].lat, ring[vi].lng], [ring[ni].lat, ring[ni].lng]]);
+                });
+                vm.on('dragend', function(e) {
+                  const pos = e.target.getLatLng();
+                  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.geofencePolygonVertexMove) {
+                    window.webkit.messageHandlers.geofencePolygonVertexMove.postMessage({ id: idStr, idx: vi, lat: pos.lat, lon: pos.lng });
+                  }
+                });
+                vertexMarkers.push(vm);
+                geofenceHandleLayers.push(vm);
+              });
+              let sumLat = 0;
+              let sumLon = 0;
+              verts.forEach(function(v) {
+                sumLat += v.lat;
+                sumLon += v.lon;
+              });
+              const cLat = sumLat / n;
+              const cLon = sumLon / n;
+              const mCent = L.marker([cLat, cLon], { draggable: true, zIndexOffset: 5000, icon: guardianGeofenceCentroidIcon() }).addTo(map);
+              mCent.on('dragstart', function(e) {
+                e.target._gfCent0 = e.target.getLatLng();
+                const ring = poly.getLatLngs()[0];
+                e.target._gfRing0 = ring.map((ll) => ({ lat: ll.lat, lng: ll.lng }));
+              });
+              mCent.on('drag', function(e) {
+                const st = e.target._gfCent0;
+                const r0 = e.target._gfRing0;
+                if (!st || !r0) {
+                  return;
+                }
+                const pos = e.target.getLatLng();
+                const dLat = pos.lat - st.lat;
+                const dLon = pos.lng - st.lng;
+                const newRing = r0.map((p) => L.latLng(p.lat + dLat, p.lng + dLon));
+                poly.setLatLngs([newRing]);
+                for (let i = 0; i < n; i++) {
+                  vertexMarkers[i].setLatLng(newRing[i]);
+                }
+                for (let i = 0; i < n; i++) {
+                  const a = newRing[i];
+                  const b = newRing[(i + 1) % n];
+                  edgeLayers[i].setLatLngs([[a.lat, a.lng], [b.lat, b.lng]]);
+                }
+              });
+              mCent.on('dragend', function(e) {
+                const st = e.target._gfCent0;
+                if (!st) {
+                  return;
+                }
+                const pos = e.target.getLatLng();
+                const dLat = pos.lat - st.lat;
+                const dLon = pos.lng - st.lng;
+                e.target._gfCent0 = null;
+                e.target._gfRing0 = null;
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.geofencePolygonTranslate) {
+                  window.webkit.messageHandlers.geofencePolygonTranslate.postMessage({ id: idStr, dLat, dLon });
+                }
+              });
+              geofenceHandleLayers.push(mCent);
+            }
+          }
         });
       }
 

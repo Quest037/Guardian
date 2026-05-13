@@ -2,6 +2,10 @@ import SwiftUI
 
 /// MC-R bottom operator prompts for recipe escalations raised by MRE (headless recipe runs).
 /// Host registration + lists are owned by ``OperatorPromptCenter``.
+///
+/// Visual shell matches ``GuardianBottomPromptBanner`` **mission-control docked** strips (flush to the
+/// content column’s leading/trailing/bottom — the host already sits right of the nav sidebar): full width,
+/// top hairline, no floating rounded card.
 struct MissionRunOperatorRecipePromptBanner: View {
     let missionRunID: UUID
 
@@ -14,8 +18,13 @@ struct MissionRunOperatorRecipePromptBanner: View {
     var body: some View {
         Group {
             if !prompts.isEmpty {
-                VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
-                    ForEach(prompts, id: \.id) { event in
+                VStack(spacing: 0) {
+                    ForEach(Array(prompts.enumerated()), id: \.element.id) { index, event in
+                        if index > 0 {
+                            Rectangle()
+                                .frame(height: 1)
+                                .foregroundStyle(Color.white.opacity(0.12))
+                        }
                         MissionRunOperatorRecipePromptCard(
                             event: event,
                             onSelectOption: { option in
@@ -31,8 +40,6 @@ struct MissionRunOperatorRecipePromptBanner: View {
                         )
                     }
                 }
-                .padding(.horizontal, GuardianSpacing.sm)
-                .padding(.bottom, GuardianSpacing.sm)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
@@ -67,52 +74,15 @@ struct MissionRunOperatorRecipePromptCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
-            OperatorPromptAttributionCaption(source: event.displaySource)
-            HStack(alignment: .top, spacing: GuardianSpacing.denseGutter) {
-                Image(systemName: event.severity.icon)
-                    .font(GuardianTypography.font(.bottomPromptIcon))
-                    .foregroundStyle(onPastelIssuerFill ? operatorPromptSeverityIconColor(event.severity) : Color.white)
-
-                VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
-                    Text(event.title)
-                        .font(GuardianTypography.font(.bottomPromptMessage))
-                        .foregroundStyle(onPastelIssuerFill ? theme.textPrimary : Color.white)
-                    if !event.body.isEmpty {
-                        Text(event.body)
-                            .font(GuardianTypography.font(.denseFootnoteRegular))
-                            .foregroundStyle(onPastelIssuerFill ? theme.textSecondary : Color.white.opacity(0.92))
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    if !event.contextFacts.isEmpty {
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach(Array(event.contextFacts.enumerated()), id: \.offset) { _, fact in
-                                HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.xsTight) {
-                                    Text(fact.label + ":")
-                                        .font(GuardianTypography.font(.denseCaption10Semibold))
-                                        .foregroundStyle(onPastelIssuerFill ? theme.textTertiary : Color.white.opacity(0.75))
-                                    Text(fact.value)
-                                        .font(GuardianTypography.font(.denseCaption10Regular))
-                                        .foregroundStyle(onPastelIssuerFill ? theme.textSecondary : Color.white.opacity(0.9))
-                                }
-                            }
-                        }
-                        .padding(.top, 2)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            FlowOperatorPromptOptionButtons(
-                options: event.effectiveOptions,
-                neutralOutlineTint: onPastelIssuerFill ? theme.textSecondary : Color.white,
-                dangerOutlineTint: onPastelIssuerFill ? GuardianSemanticColors.dangerStroke : Color.white,
-                onSelect: onSelectOption
-            )
+        ViewThatFits(in: .horizontal) {
+            dockedFourColumnRow
+                .frame(minWidth: 780)
+            dockedCompactStacked
         }
         .modifier(MissionRunOperatorRecipePromptExpiryModifier(event: event))
         .padding(.horizontal, GuardianSpacing.cardBodyInset)
-        .padding(.vertical, GuardianSpacing.denseGutter)
+        .padding(.vertical, GuardianSpacing.md)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(cardFill)
         .overlay(
             Rectangle()
@@ -120,8 +90,130 @@ struct MissionRunOperatorRecipePromptCard: View {
                 .foregroundStyle(onPastelIssuerFill ? theme.borderSubtle : Color.white.opacity(0.2)),
             alignment: .top
         )
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .guardianDropShadow(GuardianElevation.feedbackChrome)
+    }
+
+    // MARK: Wide layout (HStack — four blocks)
+
+    private var dockedFourColumnRow: some View {
+        HStack(alignment: .top, spacing: GuardianSpacing.md) {
+            sourceGlyphBlock
+                .frame(width: 104, alignment: .center)
+
+            titleAndDescriptionBlock
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(2)
+
+            contextFactsBlock
+                .frame(minWidth: 140, idealWidth: 220, maxWidth: 300, alignment: .leading)
+                .layoutPriority(1)
+
+            HStack {
+                Spacer(minLength: 0)
+                OperatorRecipePromptOptionGrid(
+                    options: event.effectiveOptions,
+                    neutralOutlineTint: onPastelIssuerFill ? theme.textSecondary : Color.white,
+                    dangerOutlineTint: onPastelIssuerFill ? GuardianSemanticColors.dangerStroke : Color.white,
+                    onSelect: onSelectOption
+                )
+                .frame(maxWidth: 320, alignment: .trailing)
+            }
+            .frame(minWidth: 200, alignment: .trailing)
+        }
+    }
+
+    // MARK: Compact layout (narrow host)
+
+    private var dockedCompactStacked: some View {
+        VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+            HStack(alignment: .top, spacing: GuardianSpacing.md) {
+                sourceGlyphBlock
+                    .frame(width: 104, alignment: .center)
+                titleAndDescriptionBlock
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            contextFactsBlock
+                .frame(maxWidth: .infinity, alignment: .leading)
+            OperatorRecipePromptOptionGrid(
+                options: event.effectiveOptions,
+                neutralOutlineTint: onPastelIssuerFill ? theme.textSecondary : Color.white,
+                dangerOutlineTint: onPastelIssuerFill ? GuardianSemanticColors.dangerStroke : Color.white,
+                onSelect: onSelectOption
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    // MARK: Blocks
+
+    private var sourceGlyphBlock: some View {
+        VStack(spacing: GuardianSpacing.xsTight) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(sourceGlyphPlateFill)
+                    .frame(width: 44, height: 44)
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(severityAccentColor)
+            }
+            Text(event.displaySource.operatorFacingShortLabel)
+                .font(GuardianTypography.font(.denseCaption10Semibold))
+                .foregroundStyle(sourceCaptionForeground)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Source \(event.displaySource.operatorFacingShortLabel)")
+    }
+
+    private var sourceGlyphPlateFill: Color {
+        if onPastelIssuerFill {
+            return theme.backgroundElevated.opacity(0.55)
+        }
+        return Color.white.opacity(0.14)
+    }
+
+    private var sourceCaptionForeground: Color {
+        onPastelIssuerFill ? theme.textSecondary : Color.white.opacity(0.88)
+    }
+
+    private var severityAccentColor: Color {
+        operatorPromptSeverityIconColor(event.severity)
+    }
+
+    private var titleAndDescriptionBlock: some View {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
+            Text(event.title)
+                .font(GuardianTypography.font(.bottomPromptMessage))
+                .foregroundStyle(onPastelIssuerFill ? theme.textPrimary : Color.white)
+            if !event.body.isEmpty {
+                Text(event.body)
+                    .font(GuardianTypography.font(.denseFootnoteRegular))
+                    .foregroundStyle(onPastelIssuerFill ? theme.textSecondary : Color.white.opacity(0.92))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private var contextFactsBlock: some View {
+        if event.contextFacts.isEmpty {
+            EmptyView()
+        } else {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Array(event.contextFacts.enumerated()), id: \.offset) { _, fact in
+                    HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.xsTight) {
+                        Text(fact.label + ":")
+                            .font(GuardianTypography.font(.denseCaption10Semibold))
+                            .foregroundStyle(onPastelIssuerFill ? theme.textTertiary : Color.white.opacity(0.75))
+                        Text(fact.value)
+                            .font(GuardianTypography.font(.denseCaption10Regular))
+                            .foregroundStyle(onPastelIssuerFill ? theme.textSecondary : Color.white.opacity(0.9))
+                    }
+                }
+            }
+            .accessibilityElement(children: .combine)
+        }
     }
 
     private func operatorPromptSeverityIconColor(_ severity: GuardianFeedbackSeverity) -> Color {
@@ -134,25 +226,37 @@ struct MissionRunOperatorRecipePromptCard: View {
     }
 }
 
-// MARK: - Option buttons
+// MARK: - Option grid
 
-private struct FlowOperatorPromptOptionButtons: View {
+private struct OperatorRecipePromptOptionGrid: View {
     let options: [OperatorPromptOption]
     let neutralOutlineTint: Color
     let dangerOutlineTint: Color
     let onSelect: (OperatorPromptOption) -> Void
 
+    private var columns: [GridItem] {
+        switch options.count {
+        case 0:
+            return []
+        case 1:
+            return [GridItem(.flexible())]
+        default:
+            return [
+                GridItem(.flexible(), spacing: GuardianSpacing.xs),
+                GridItem(.flexible(), spacing: GuardianSpacing.xs),
+            ]
+        }
+    }
+
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: GuardianSpacing.xs) {
-                ForEach(options, id: \.id) { option in
-                    optionButton(option)
-                }
-            }
-            VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
-                ForEach(options, id: \.id) { option in
-                    optionButton(option)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+        Group {
+            if options.isEmpty {
+                EmptyView()
+            } else {
+                LazyVGrid(columns: columns, alignment: .leading, spacing: GuardianSpacing.xs) {
+                    ForEach(options, id: \.id) { option in
+                        optionButton(option)
+                    }
                 }
             }
         }

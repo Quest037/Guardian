@@ -1,6 +1,9 @@
 import SwiftUI
 
 /// Live Drive bottom operator prompts when routing selects ``OperatorPromptDeliveryTarget/liveDrivePromptPanel``.
+///
+/// Uses the same docked strip chrome as ``MissionRunOperatorRecipePromptBanner`` (flush to the Live Drive
+/// content column’s leading/trailing/bottom).
 struct LiveDriveOperatorRecipePromptBanner: View {
 
     @EnvironmentObject private var operatorPromptCenter: OperatorPromptCenter
@@ -12,8 +15,13 @@ struct LiveDriveOperatorRecipePromptBanner: View {
     var body: some View {
         Group {
             if !prompts.isEmpty {
-                VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
-                    ForEach(prompts, id: \.id) { event in
+                VStack(spacing: 0) {
+                    ForEach(Array(prompts.enumerated()), id: \.element.id) { index, event in
+                        if index > 0 {
+                            Rectangle()
+                                .frame(height: 1)
+                                .foregroundStyle(Color.white.opacity(0.12))
+                        }
                         MissionRunOperatorRecipePromptCard(
                             event: event,
                             onSelectOption: { option in
@@ -29,8 +37,6 @@ struct LiveDriveOperatorRecipePromptBanner: View {
                         )
                     }
                 }
-                .padding(.horizontal, GuardianSpacing.sm)
-                .padding(.bottom, GuardianSpacing.sm)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }

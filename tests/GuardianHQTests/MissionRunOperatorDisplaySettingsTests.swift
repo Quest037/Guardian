@@ -25,11 +25,13 @@ final class MissionRunOperatorDisplaySettingsTests: XCTestCase {
             .default,
             MissionRunOperatorDisplaySettings(
                 isolateLiveMapToSelectedTask: true,
+                showMissionGeofencesOnMap: true,
                 resetSimToStartPoseOnSuccessfulComplete: false,
                 simBatteryDrainRateDuringRun: .fast
             ),
             MissionRunOperatorDisplaySettings(
                 isolateLiveMapToSelectedTask: false,
+                showMissionGeofencesOnMap: false,
                 resetSimToStartPoseOnSuccessfulComplete: true,
                 simBatteryDrainRateDuringRun: .none
             ),
@@ -45,6 +47,7 @@ final class MissionRunOperatorDisplaySettingsTests: XCTestCase {
         let json = #"{"liveMapIsolateOnTaskSelect":null}"#
         let decoded = try JSONDecoder().decode(MissionRunOperatorDisplaySettings.self, from: Data(json.utf8))
         XCTAssertTrue(decoded.isolateLiveMapToSelectedTask)
+        XCTAssertTrue(decoded.showMissionGeofencesOnMap)
         XCTAssertFalse(decoded.resetSimToStartPoseOnSuccessfulComplete)
         XCTAssertEqual(decoded.simBatteryDrainRateDuringRun, .normal)
     }
@@ -53,18 +56,28 @@ final class MissionRunOperatorDisplaySettingsTests: XCTestCase {
         let json = #"{"liveMapIsolateOnTaskSelect":false}"#
         let decoded = try JSONDecoder().decode(MissionRunOperatorDisplaySettings.self, from: Data(json.utf8))
         XCTAssertFalse(decoded.isolateLiveMapToSelectedTask)
+        XCTAssertTrue(decoded.showMissionGeofencesOnMap)
+    }
+
+    func test_decode_withoutShowGeofencesKey_defaultsShowTrue() throws {
+        let json = #"{"isolateLiveMapToSelectedTask":true,"resetSimToStartPoseOnSuccessfulComplete":false,"simBatteryDrainRateDuringRun":"normal"}"#
+        let decoded = try JSONDecoder().decode(MissionRunOperatorDisplaySettings.self, from: Data(json.utf8))
+        XCTAssertTrue(decoded.showMissionGeofencesOnMap)
     }
 
     func test_cloneFromAppDefaults_copiesGeneralSettingsMissionRunFields() {
         let app = GeneralSettingsStore()
         app.missionControlLiveMapHideOtherTasksOnTaskSelect = false
+        app.missionControlShowMissionGeofencesOnMap = false
         app.missionRunResetSitlToStartPoseOnSuccessfulComplete = true
         let run = MissionRunOperatorDisplaySettings(
             isolateLiveMapToSelectedTask: app.missionControlLiveMapHideOtherTasksOnTaskSelect,
+            showMissionGeofencesOnMap: app.missionControlShowMissionGeofencesOnMap,
             resetSimToStartPoseOnSuccessfulComplete: app.missionRunResetSitlToStartPoseOnSuccessfulComplete,
             simBatteryDrainRateDuringRun: app.missionRunSimBatteryDrainRate
         )
         XCTAssertFalse(run.isolateLiveMapToSelectedTask)
+        XCTAssertFalse(run.showMissionGeofencesOnMap)
         XCTAssertTrue(run.resetSimToStartPoseOnSuccessfulComplete)
         XCTAssertEqual(run.simBatteryDrainRateDuringRun, app.missionRunSimBatteryDrainRate)
     }

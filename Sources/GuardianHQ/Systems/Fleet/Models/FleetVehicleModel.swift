@@ -43,6 +43,11 @@ enum FleetVehicleCommand: Equatable {
     /// callers compose those as separate commands (`.arm`, plus a future "start mission"
     /// atom). This atom is what `command.fleet.vehicle.do.mission.upload` dispatches.
     case uploadMission(items: [Mavsdk.Mission.MissionItem])
+    /// Upload geofence polygons to the autopilot (``Geofence/uploadGeofence``). Replaces any
+    /// prior fence plan on the vehicle for this upload call.
+    case uploadGeofence(polygons: [Mavsdk.Geofence.Polygon])
+    /// Clear all geofences on the autopilot (``Geofence/clearGeofence``).
+    case clearGeofence
     /// Clear the mission plan on the autopilot (`Mission.clearMission()`).
     case missionClear
     /// Start mission execution (`Mission.startMission()`).
@@ -136,6 +141,8 @@ extension FleetVehicleCommand {
         case .holdPosition: return "hold"
         case .gotoCoordinate: return "goto"
         case .uploadMission(let items): return "upload mission (\(items.count) item(s))"
+        case .uploadGeofence(let polys): return "upload geofence (\(polys.count) polygon(s))"
+        case .clearGeofence: return "clear geofence"
         case .missionClear: return "mission clear"
         case .missionStart: return "mission start"
         case .missionPause: return "mission pause"

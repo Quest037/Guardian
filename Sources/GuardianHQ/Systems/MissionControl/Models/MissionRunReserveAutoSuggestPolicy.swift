@@ -71,6 +71,7 @@ enum MissionRunReserveAutoSuggestPolicy: Sendable {
     /// `MissionRunEvent.templateKey` values that count as a recent dispatch failure for this feature.
     static let recentFleetDispatchFailureTemplateKeys: Set<String> = [
         MissionRunLogTemplateKey.fleetAckFailed,
+        MissionRunLogTemplateKey.missionRunGeofenceFleetAckFailed,
         MissionRunLogTemplateKey.commandNotSent,
         MissionRunLogTemplateKey.commandInvalidToken,
         MissionRunLogTemplateKey.commandVehicleUnavailable,

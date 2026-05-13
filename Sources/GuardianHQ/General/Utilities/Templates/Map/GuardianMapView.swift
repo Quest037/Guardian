@@ -80,6 +80,54 @@ struct GuardianMapContextMenuPolicy {
     static let disabled = GuardianMapContextMenuPolicy()
 }
 
+/// Geofence overlay for Leaflet (mission editor + Mission Control previews).
+struct GuardianGeofenceMapOverlay: Sendable {
+    var id: UUID
+    /// `true` = inclusion (stay-in), `false` = exclusion (no-go).
+    var isInclusion: Bool
+    var isPolygon: Bool
+    var polygonLatLons: [(Double, Double)]
+    var circleLat: Double?
+    var circleLon: Double?
+    var circleRadiusM: Double?
+    /// Mission authoring: emphasize the fence that matches ``selectedGeofenceID`` in the sidebar.
+    var isAuthoringMapSelected: Bool
+
+    init(
+        id: UUID,
+        isInclusion: Bool,
+        isPolygon: Bool,
+        polygonLatLons: [(Double, Double)],
+        circleLat: Double?,
+        circleLon: Double?,
+        circleRadiusM: Double?,
+        isAuthoringMapSelected: Bool = false
+    ) {
+        self.id = id
+        self.isInclusion = isInclusion
+        self.isPolygon = isPolygon
+        self.polygonLatLons = polygonLatLons
+        self.circleLat = circleLat
+        self.circleLon = circleLon
+        self.circleRadiusM = circleRadiusM
+        self.isAuthoringMapSelected = isAuthoringMapSelected
+    }
+}
+
+extension GuardianGeofenceMapOverlay: Equatable {
+    static func == (lhs: GuardianGeofenceMapOverlay, rhs: GuardianGeofenceMapOverlay) -> Bool {
+        lhs.id == rhs.id
+            && lhs.isInclusion == rhs.isInclusion
+            && lhs.isPolygon == rhs.isPolygon
+            && lhs.polygonLatLons.count == rhs.polygonLatLons.count
+            && zip(lhs.polygonLatLons, rhs.polygonLatLons).allSatisfy { $0.0 == $1.0 && $0.1 == $1.1 }
+            && lhs.circleLat == rhs.circleLat
+            && lhs.circleLon == rhs.circleLon
+            && lhs.circleRadiusM == rhs.circleRadiusM
+            && lhs.isAuthoringMapSelected == rhs.isAuthoringMapSelected
+    }
+}
+
 /// One rally / extraction pin for Leaflet (mission editor or read-only previews).
 struct GuardianMissionPointMapMarker: Equatable, Sendable {
     var id: UUID
@@ -114,6 +162,10 @@ struct GuardianRouteMapGeometry: Equatable {
     var missionPointPlacementArmed: Bool
     /// MCS staging: **Set reserve pool home** armed — pointer + Leaflet preview (mutually exclusive with ``missionPointPlacementArmed`` in UI).
     var mcsReservePoolHomePlacementArmed: Bool
+    /// Mission template geofence polygons / circles. Mission workspace **Fences** tab enables pointer selection + map authoring handles when ``geofenceMapLayerPointerSelectsFence`` is on; other surfaces keep read-only overlays.
+    var geofenceOverlays: [GuardianGeofenceMapOverlay]
+    /// Mission workspace **Geofences** tab: fence layers accept primary clicks and post ``geofenceClick`` to Swift.
+    var geofenceMapLayerPointerSelectsFence: Bool
 
     static let empty = GuardianRouteMapGeometry(
         home: nil,
@@ -127,7 +179,9 @@ struct GuardianRouteMapGeometry: Equatable {
         isEditingTask: false,
         missionPointMarkers: [],
         missionPointPlacementArmed: false,
-        mcsReservePoolHomePlacementArmed: false
+        mcsReservePoolHomePlacementArmed: false,
+        geofenceOverlays: [],
+        geofenceMapLayerPointerSelectsFence: false
     )
 }
 
@@ -296,6 +350,7 @@ struct GuardianMapToolbarOptions {
 /// rewriting any per-screen plumbing.
 struct GuardianMapView: View {
     @ObservedObject var model: GuardianMapModel
+    @Environment(\.colorScheme) private var colorScheme
     var toolbar: GuardianMapToolbarOptions
     var contextMenuPolicy: GuardianMapContextMenuPolicy
     var onMapClick: (Double, Double) -> Void
@@ -316,6 +371,13 @@ struct GuardianMapView: View {
     var onHomeDoubleTap: (GuardianMapHomePointerEvent) -> Void
     /// Fired when the map viewport center changes (debounced on the JS side).
     var onViewportCenterChanged: (Double, Double) -> Void
+    /// Mission authoring: primary click on a geofence overlay (only when ``GuardianRouteMapGeometry/geofenceMapLayerPointerSelectsFence`` is on).
+    var onGeofenceClick: (UUID) -> Void
+    var onGeofenceCircleCenterMoved: (UUID, Double, Double) -> Void
+    var onGeofenceCircleRadiusMoved: (UUID, Double) -> Void
+    var onGeofencePolygonVertexMoved: (UUID, Int, Double, Double) -> Void
+    var onGeofencePolygonTranslated: (UUID, Double, Double) -> Void
+    var onGeofencePolygonEdgeInsert: (UUID, Int, Double, Double) -> Void
 
     init(
         model: GuardianMapModel,
@@ -337,7 +399,13 @@ struct GuardianMapView: View {
         onTaskPathDoubleTap: @escaping (GuardianMapTaskPathPointerEvent) -> Void = { _ in },
         onHomeTap: @escaping (GuardianMapHomePointerEvent) -> Void = { _ in },
         onHomeDoubleTap: @escaping (GuardianMapHomePointerEvent) -> Void = { _ in },
-        onViewportCenterChanged: @escaping (Double, Double) -> Void = { _, _ in }
+        onViewportCenterChanged: @escaping (Double, Double) -> Void = { _, _ in },
+        onGeofenceClick: @escaping (UUID) -> Void = { _ in },
+        onGeofenceCircleCenterMoved: @escaping (UUID, Double, Double) -> Void = { _, _, _ in },
+        onGeofenceCircleRadiusMoved: @escaping (UUID, Double) -> Void = { _, _ in },
+        onGeofencePolygonVertexMoved: @escaping (UUID, Int, Double, Double) -> Void = { _, _, _, _ in },
+        onGeofencePolygonTranslated: @escaping (UUID, Double, Double) -> Void = { _, _, _ in },
+        onGeofencePolygonEdgeInsert: @escaping (UUID, Int, Double, Double) -> Void = { _, _, _, _ in }
     ) {
         self.model = model
         self.toolbar = toolbar
@@ -359,6 +427,12 @@ struct GuardianMapView: View {
         self.onHomeTap = onHomeTap
         self.onHomeDoubleTap = onHomeDoubleTap
         self.onViewportCenterChanged = onViewportCenterChanged
+        self.onGeofenceClick = onGeofenceClick
+        self.onGeofenceCircleCenterMoved = onGeofenceCircleCenterMoved
+        self.onGeofenceCircleRadiusMoved = onGeofenceCircleRadiusMoved
+        self.onGeofencePolygonVertexMoved = onGeofencePolygonVertexMoved
+        self.onGeofencePolygonTranslated = onGeofencePolygonTranslated
+        self.onGeofencePolygonEdgeInsert = onGeofencePolygonEdgeInsert
     }
 
     var body: some View {
@@ -381,6 +455,9 @@ struct GuardianMapView: View {
                 missionPointMarkers: model.routeGeometry.missionPointMarkers,
                 missionPointPlacementArmed: model.routeGeometry.missionPointPlacementArmed,
                 mcsReservePoolHomePlacementArmed: model.routeGeometry.mcsReservePoolHomePlacementArmed,
+                geofenceOverlays: model.routeGeometry.geofenceOverlays,
+                geofenceLeafletChrome: GuardianGeofenceLeafletChrome(colorScheme: colorScheme),
+                geofenceMapLayerPointerSelectsFence: model.routeGeometry.geofenceMapLayerPointerSelectsFence,
                 contextMenuPolicy: contextMenuPolicy,
                 onMapClick: onMapClick,
                 onVehicleMarkerMoved: onVehicleMarkerMoved,
@@ -398,7 +475,13 @@ struct GuardianMapView: View {
                 onTaskPathDoubleTap: onTaskPathDoubleTap,
                 onHomeTap: onHomeTap,
                 onHomeDoubleTap: onHomeDoubleTap,
-                onViewportCenterChanged: onViewportCenterChanged
+                onViewportCenterChanged: onViewportCenterChanged,
+                onGeofenceClick: onGeofenceClick,
+                onGeofenceCircleCenterMoved: onGeofenceCircleCenterMoved,
+                onGeofenceCircleRadiusMoved: onGeofenceCircleRadiusMoved,
+                onGeofencePolygonVertexMoved: onGeofencePolygonVertexMoved,
+                onGeofencePolygonTranslated: onGeofencePolygonTranslated,
+                onGeofencePolygonEdgeInsert: onGeofencePolygonEdgeInsert
             )
 
             if toolbar.hasAnyVisibleButton {
@@ -496,5 +579,101 @@ private struct GuardianMapToolbarOverlay: View {
         }
         out.append(contentsOf: toolbar.extraButtons)
         return out
+    }
+}
+
+// MARK: - Mission geofence overlays
+
+extension MissionGeofence {
+    /// Builds a map overlay when geometry is valid for the current ``shape``.
+    func asGuardianMapOverlay(mapSelectionFenceID: UUID? = nil) -> GuardianGeofenceMapOverlay? {
+        let selected = mapSelectionFenceID == id
+        switch shape {
+        case .polygon:
+            guard polygonVertices.count >= 3 else { return nil }
+            return GuardianGeofenceMapOverlay(
+                id: id,
+                isInclusion: boundary == .inclusion,
+                isPolygon: true,
+                polygonLatLons: polygonVertices.map { ($0.lat, $0.lon) },
+                circleLat: nil,
+                circleLon: nil,
+                circleRadiusM: nil,
+                isAuthoringMapSelected: selected
+            )
+        case .circle:
+            return GuardianGeofenceMapOverlay(
+                id: id,
+                isInclusion: boundary == .inclusion,
+                isPolygon: false,
+                polygonLatLons: [],
+                circleLat: circleCenter.lat,
+                circleLon: circleCenter.lon,
+                circleRadiusM: circleRadiusMeters,
+                isAuthoringMapSelected: selected
+            )
+        }
+    }
+}
+
+extension Mission {
+    /// Mission-wide fences plus every task fence (template authoring / MC map previews).
+    func allGuardianGeofenceMapOverlays(mapSelectionFenceID: UUID? = nil) -> [GuardianGeofenceMapOverlay] {
+        let mission = missionGeofences.compactMap { $0.asGuardianMapOverlay(mapSelectionFenceID: mapSelectionFenceID) }
+        let tasks = routeMacro.tasks.flatMap {
+            $0.geofences.compactMap { $0.asGuardianMapOverlay(mapSelectionFenceID: mapSelectionFenceID) }
+        }
+        return mission + tasks
+    }
+
+    /// Stable fingerprint when only template geofence membership changes (Mission Control map structure identity).
+    func missionGeofenceTemplateTopologySignature() -> String {
+        let missionPart = missionGeofences.map(\.id.uuidString).sorted().joined(separator: ",")
+        let taskPart = routeMacro.tasks.flatMap { task in
+            task.geofences.map { "\(task.id.uuidString)|\($0.id.uuidString)" }
+        }.sorted().joined(separator: ";")
+        return "\(missionPart)§\(taskPart)"
+    }
+
+    /// Geofence overlays for **Mission Control** maps (running overview, setup staging, Live Drive mission overlay).
+    ///
+    /// - When ``MissionRunOperatorDisplaySettings/showMissionGeofencesOnMap`` is false, returns an empty list.
+    /// - When ``respectMapTaskIsolation`` is true and ``MissionRunOperatorDisplaySettings/isolateLiveMapToSelectedTask`` is on, draws **mission-level** fences plus only the **focused** task’s fences; if no task is focused, mission-level only.
+    /// - When isolation is off or ``respectMapTaskIsolation`` is false, draws mission-level plus **all** task fences.
+    /// - When ``run`` is non-`nil`, merges **run-only** augmentation after template geometry: ``MissionRunPolicies/missionGeofenceAugmentation`` (mission-wide), ``MissionRunEnvironment/taskGeofenceAugmentationsByTaskID`` (per task), and ``MissionRunAssignmentPolicies/geofenceAugmentation`` for roster rows mapped to each task (union of all slots on that task).
+    @MainActor
+    func geofenceGuardianMapOverlaysForMissionControl(
+        operatorSettings: MissionRunOperatorDisplaySettings,
+        mapFocusedTaskID: UUID?,
+        respectMapTaskIsolation: Bool = true,
+        run: MissionRunEnvironment? = nil
+    ) -> [GuardianGeofenceMapOverlay] {
+        guard operatorSettings.showMissionGeofencesOnMap else { return [] }
+        let missionWideAug = run?.policies.missionGeofenceAugmentation ?? []
+        let missionBase = missionGeofences + missionWideAug
+        let missionPart = missionBase.compactMap { $0.asGuardianMapOverlay(mapSelectionFenceID: nil) }
+
+        func slotAugmentationUnion(forTaskID taskID: UUID) -> [MissionGeofence] {
+            guard let run else { return [] }
+            return run.assignments
+                .filter { MissionRunPolicyResolution.resolvedTaskId(for: $0, mission: self) == taskID }
+                .flatMap(\.policies.geofenceAugmentation)
+        }
+
+        let perTaskRunAug = run?.taskGeofenceAugmentationsByTaskID ?? [:]
+        let isolateForFences = respectMapTaskIsolation && operatorSettings.isolateLiveMapToSelectedTask
+        if isolateForFences {
+            guard let tid = mapFocusedTaskID,
+                  let task = routeMacro.tasks.first(where: { $0.id == tid })
+            else {
+                return missionPart
+            }
+            let taskBody = task.geofences + (perTaskRunAug[tid] ?? []) + slotAugmentationUnion(forTaskID: tid)
+            return missionPart + taskBody.compactMap { $0.asGuardianMapOverlay(mapSelectionFenceID: nil) }
+        }
+        let allTaskFences = routeMacro.tasks.flatMap { t in
+            t.geofences + (perTaskRunAug[t.id] ?? []) + slotAugmentationUnion(forTaskID: t.id)
+        }
+        return missionPart + allTaskFences.compactMap { $0.asGuardianMapOverlay(mapSelectionFenceID: nil) }
     }
 }

@@ -120,4 +120,30 @@ final class GeneralSettingsStoreMissionRunSnapshotTests: XCTestCase {
         let store = GeneralSettingsStore(userDefaults: ud)
         XCTAssertEqual(store.liveDriveSimBatteryDrainRate, .fast)
     }
+
+    func test_missionControlShowMissionGeofencesOnMap_defaultsTrueAndPersists() {
+        let suiteName = "test.generalSettings.missionRun.geofenceShow.\(UUID().uuidString)"
+        let ud = UserDefaults(suiteName: suiteName)!
+        defer { ud.removePersistentDomain(forName: suiteName) }
+
+        let first = GeneralSettingsStore(userDefaults: ud)
+        XCTAssertTrue(first.missionControlShowMissionGeofencesOnMap)
+
+        first.missionControlShowMissionGeofencesOnMap = false
+        let second = GeneralSettingsStore(userDefaults: ud)
+        XCTAssertFalse(second.missionControlShowMissionGeofencesOnMap)
+    }
+
+    func test_decodeSnapshotWithoutMissionControlShowGeofencesKey_defaultsTrue() throws {
+        let suiteName = "test.generalSettings.missionRun.geofenceShow.decode.\(UUID().uuidString)"
+        let ud = UserDefaults(suiteName: suiteName)!
+        defer { ud.removePersistentDomain(forName: suiteName) }
+
+        let legacyJSON = #"{"defaultSimulationPlatform":"ardupilot"}"#
+        let data = try XCTUnwrap(legacyJSON.data(using: .utf8))
+        ud.set(data, forKey: "guardian.generalSettings.v1")
+
+        let store = GeneralSettingsStore(userDefaults: ud)
+        XCTAssertTrue(store.missionControlShowMissionGeofencesOnMap)
+    }
 }

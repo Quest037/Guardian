@@ -164,7 +164,9 @@ struct GuardianHQApp: App {
             }
             .preferredColorScheme(preferredColorScheme)
         }
-        .windowResizability(.contentSize)
+        /// ``contentMinSize`` (via ``automatic``) lets the window grow to the screen; ``contentSize`` caps
+        /// the window to the content’s size range and fights a launch-time maximize.
+        .windowResizability(.automatic)
         .defaultSize(width: 1320, height: 860)
     }
 
@@ -187,7 +189,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.applicationIconImage = logo
         }
         NSApp.activate(ignoringOtherApps: true)
-        NSApp.windows.first?.makeKeyAndOrderFront(nil)
+        /// Defer one turn so SwiftUI has installed the ``WindowGroup`` window before we resize (not Full Screen — fills ``NSScreen/visibleFrame``).
+        DispatchQueue.main.async {
+            Self.resizePrimaryWindowToFillVisibleScreen()
+        }
         Task { @MainActor in
             UserNotificationService.shared.configure()
         }
@@ -200,6 +205,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 UserNotificationService.shared.refreshAuthorizationStatus()
             }
         }
+    }
+
+    /// Expands the main titled window to the largest usable rect (menu bar + Dock safe), without entering macOS Full Screen.
+    private static func resizePrimaryWindowToFillVisibleScreen() {
+        let window = NSApp.mainWindow
+            ?? NSApp.keyWindow
+            ?? NSApp.windows.first(where: { $0.styleMask.contains(.titled) })
+        guard let window else { return }
+        guard let screen = window.screen ?? NSScreen.main else { return }
+        window.setFrame(screen.visibleFrame, display: true, animate: false)
+        window.makeKeyAndOrderFront(nil)
     }
 
     func applicationWillTerminate(_ notification: Notification) {

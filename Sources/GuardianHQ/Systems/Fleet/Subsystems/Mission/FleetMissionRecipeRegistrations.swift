@@ -41,10 +41,22 @@ enum FleetMissionRecipeRegistrations {
         "recipe.fleet.do.mission.continue.after.operator.park"
     )
 
+    /// Single-step geofence upload (``FleetCommandName/fleetVehicleDoGeofenceUpload``).
+    static let doGeofenceUploadRecipeName = FleetRecipeName.literal(
+        "recipe.fleet.do.geofence.upload"
+    )
+
+    /// Single-step geofence clear (``FleetCommandName/fleetVehicleDoGeofenceClear``).
+    static let doGeofenceClearRecipeName = FleetRecipeName.literal(
+        "recipe.fleet.do.geofence.clear"
+    )
+
     static func registerAll() {
         let before = FleetRecipesCatalogue.shared.descriptors.count
         registerDoMissionUploadStart()
         registerDoMissionUploadStartItem()
+        registerDoGeofenceUpload()
+        registerDoGeofenceClear()
         registerDoReturnHome()
         registerVehicleDoPark()
         registerDoContinueMissionAfterOperatorPark()
@@ -80,6 +92,12 @@ enum FleetMissionRecipeRegistrations {
                     type: .string,
                     required: true,
                     humanLabel: "Mission items (JSON array)"
+                ),
+                FleetRecipeParameterDeclaration(
+                    name: "geofencePolygonsJSON",
+                    type: .string,
+                    required: true,
+                    humanLabel: "Geofence polygons (JSON array)"
                 ),
             ],
             riskTier: .confirmInLiveMission,
@@ -130,9 +148,91 @@ enum FleetMissionRecipeRegistrations {
                     required: true,
                     humanLabel: "Mission item index (0-based) after upload"
                 ),
+                FleetRecipeParameterDeclaration(
+                    name: "geofencePolygonsJSON",
+                    type: .string,
+                    required: true,
+                    humanLabel: "Geofence polygons (JSON array)"
+                ),
             ],
             riskTier: .confirmInLiveMission,
             expectedDuration: 50,
+            appliesToSystems: ["mission"],
+            defaultRetryPolicy: .catalogueDefault,
+            relaxRetryCaps: false,
+            body: body,
+            cancelRecipe: nil
+        )
+        if !FleetRecipesCatalogue.shared.register(descriptor) {
+            os_log(.fault, log: log, "FleetRecipesCatalogue refused mission recipe %{public}@.", name.rawValue)
+        }
+    }
+
+    private static func registerDoGeofenceUpload() {
+        let name = doGeofenceUploadRecipeName
+        let body: FleetRecipeBody
+        if let loaded = loadBody(for: name) {
+            body = loaded
+        } else {
+            os_log(
+                .info,
+                log: log,
+                "Using compiled-in body for %{public}@ (MissionBodies JSON not loaded from bundle).",
+                name.rawValue
+            )
+            body = makeDoGeofenceUploadBodyBuiltIn()
+        }
+
+        let descriptor = FleetRecipeDescriptor(
+            name: name,
+            humanLabel: "Upload geofence",
+            humanDescription:
+                "Invokes catalogue command.fleet.vehicle.do.geofence.upload with `geofencePolygonsJSON`. " +
+                "Use from automation when mission upload is not part of the flow.",
+            parameters: [
+                FleetRecipeParameterDeclaration(
+                    name: "geofencePolygonsJSON",
+                    type: .string,
+                    required: true,
+                    humanLabel: "Geofence polygons (JSON array)"
+                ),
+            ],
+            riskTier: .confirmInLiveMission,
+            expectedDuration: 30,
+            appliesToSystems: ["mission"],
+            defaultRetryPolicy: .catalogueDefault,
+            relaxRetryCaps: false,
+            body: body,
+            cancelRecipe: nil
+        )
+        if !FleetRecipesCatalogue.shared.register(descriptor) {
+            os_log(.fault, log: log, "FleetRecipesCatalogue refused mission recipe %{public}@.", name.rawValue)
+        }
+    }
+
+    private static func registerDoGeofenceClear() {
+        let name = doGeofenceClearRecipeName
+        let body: FleetRecipeBody
+        if let loaded = loadBody(for: name) {
+            body = loaded
+        } else {
+            os_log(
+                .info,
+                log: log,
+                "Using compiled-in body for %{public}@ (MissionBodies JSON not loaded from bundle).",
+                name.rawValue
+            )
+            body = makeDoGeofenceClearBodyBuiltIn()
+        }
+
+        let descriptor = FleetRecipeDescriptor(
+            name: name,
+            humanLabel: "Clear geofence",
+            humanDescription:
+                "Invokes catalogue command.fleet.vehicle.do.geofence.clear — removes all geofences from the autopilot.",
+            parameters: [],
+            riskTier: .confirmInLiveMission,
+            expectedDuration: 15,
             appliesToSystems: ["mission"],
             defaultRetryPolicy: .catalogueDefault,
             relaxRetryCaps: false,
@@ -269,6 +369,7 @@ enum FleetMissionRecipeRegistrations {
     private static func makeDoMissionUploadStartBodyBuiltIn() -> FleetRecipeBody {
         let missionItemsJSON = FleetRecipeParameters(values: [
             "missionItemsJSON": .reference(name: "missionItemsJSON"),
+            "geofencePolygonsJSON": .reference(name: "geofencePolygonsJSON"),
         ])
         let stepRetry = FleetRecipeRetryPolicy(
             maxAttempts: 3,
@@ -325,6 +426,7 @@ enum FleetMissionRecipeRegistrations {
     private static func makeDoMissionUploadStartItemBodyBuiltIn() -> FleetRecipeBody {
         let missionItemsJSON = FleetRecipeParameters(values: [
             "missionItemsJSON": .reference(name: "missionItemsJSON"),
+            "geofencePolygonsJSON": .reference(name: "geofencePolygonsJSON"),
         ])
         let jumpParams = FleetRecipeParameters(values: [
             "index": .reference(name: "missionStartItemIndex"),
@@ -446,6 +548,65 @@ enum FleetMissionRecipeRegistrations {
             entryStepID: .literal("park"),
             steps: [park],
             overallBudgetSeconds: 120
+        )
+    }
+
+    private static func makeDoGeofenceUploadBodyBuiltIn() -> FleetRecipeBody {
+        let params = FleetRecipeParameters(values: [
+            "geofencePolygonsJSON": .reference(name: "geofencePolygonsJSON"),
+        ])
+        let stepRetry = FleetRecipeRetryPolicy(
+            maxAttempts: 3,
+            delaySeconds: 0.5,
+            retryableErrorKinds: [.autopilotBusy, .noSession, .notConnected],
+            retryOnTimeout: true
+        )
+        let liveMissionEscalate = FleetRecipeControlOutcome.escalate(
+            reason: .confirmation(kind: .confirmInLiveMission),
+            allowedVerbs: [.abort, .acknowledge, .retry]
+        )
+        let upload = FleetRecipeStep.invokeCommand(
+            id: .literal("uploadGeofence"),
+            command: .fleetVehicleDoGeofenceUpload,
+            parameters: params,
+            retry: stepRetry,
+            matchers: [
+                FleetRecipeStepMatcher(when: .success(), then: .succeed),
+                FleetRecipeStepMatcher(when: .any, then: liveMissionEscalate),
+            ]
+        )
+        return FleetRecipeBody(
+            entryStepID: .literal("uploadGeofence"),
+            steps: [upload],
+            overallBudgetSeconds: 60
+        )
+    }
+
+    private static func makeDoGeofenceClearBodyBuiltIn() -> FleetRecipeBody {
+        let stepRetry = FleetRecipeRetryPolicy(
+            maxAttempts: 3,
+            delaySeconds: 0.5,
+            retryableErrorKinds: [.autopilotBusy, .noSession, .notConnected],
+            retryOnTimeout: true
+        )
+        let liveMissionEscalate = FleetRecipeControlOutcome.escalate(
+            reason: .confirmation(kind: .confirmInLiveMission),
+            allowedVerbs: [.abort, .acknowledge, .retry]
+        )
+        let clear = FleetRecipeStep.invokeCommand(
+            id: .literal("clearGeofence"),
+            command: .fleetVehicleDoGeofenceClear,
+            parameters: .empty,
+            retry: stepRetry,
+            matchers: [
+                FleetRecipeStepMatcher(when: .success(), then: .succeed),
+                FleetRecipeStepMatcher(when: .any, then: liveMissionEscalate),
+            ]
+        )
+        return FleetRecipeBody(
+            entryStepID: .literal("clearGeofence"),
+            steps: [clear],
+            overallBudgetSeconds: 30
         )
     }
 

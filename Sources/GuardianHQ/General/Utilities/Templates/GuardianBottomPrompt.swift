@@ -377,6 +377,11 @@ struct GuardianBottomPromptBanner: View {
     }
 }
 
+extension GuardianBottomPromptBanner {
+    /// Shared floor height for ``GuardianBottomPromptBannerLayout/missionControlDocked`` (MC‑R and Live Drive).
+    static let missionControlDockedDefaultMinHeight: CGFloat = 55
+}
+
 private struct BottomPromptBannerShapeModifier: ViewModifier {
     let docked: Bool
 

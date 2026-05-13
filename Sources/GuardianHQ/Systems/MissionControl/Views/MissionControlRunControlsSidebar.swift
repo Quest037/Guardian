@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// MC-R **Run Rules** drawer: mission-level policy chains + rules-of-engagement editor.
+/// MC-R **Run Rules** drawer: mission-level policy chains, mission-wide run geofence augmentation summary, and rules-of-engagement editor.
 ///
 /// All edits route through ``MissionRunEnvironment``'s policy APIs as the local operator
 /// (``MissionRunPolicyEditCredential/localOperator``). The host wraps this view in
@@ -11,6 +11,8 @@ struct MissionRunControlsSidebarView: View {
     @ObservedObject var generalSettings: GeneralSettingsStore
     /// Reflected view-side change so the parent can persist anything that doesn't already round-trip via `missionTemplatePersister`.
     let onChange: () -> Void
+    /// Rebuilds the compiled Mission Control plan after mission-wide run geofence augmentation changes.
+    let onRecompilePlanForGeofenceAugmentationPolicy: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -77,6 +79,19 @@ struct MissionRunControlsSidebarView: View {
                     compactVerticalRhythm: true
                 )
             }
+            .padding(.vertical, GuardianSpacing.xs)
+
+            Divider().overlay(theme.borderSubtle)
+
+            MissionRunGeofenceAugmentationRunPolicySidebarSection(
+                title: "Mission run geofence augmentation",
+                caption: "Additional fences merge after every task’s template fences for this run. Clear removes mission-wide run-only extras; edit shapes on the mission Geofences tab.",
+                fenceCount: run.policies.missionGeofenceAugmentation.count,
+                onClear: {
+                    _ = run.updateMissionGeofenceAugmentation([], credential: credential)
+                    onRecompilePlanForGeofenceAugmentationPolicy()
+                }
+            )
             .padding(.vertical, GuardianSpacing.xs)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

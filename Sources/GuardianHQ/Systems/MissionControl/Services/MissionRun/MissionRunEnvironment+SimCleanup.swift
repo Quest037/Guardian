@@ -227,6 +227,40 @@ extension MissionRunEnvironment {
                 clearWaveStart = clearWaveEnd
             }
 
+            var geofenceClearCommands: [MissionRunIssuedCommand] = []
+            geofenceClearCommands.reserveCapacity(cleanupRows.count)
+            for (_, assignment) in cleanupRows {
+                guard let geIssued = MissionRunPlannerSubsystem.catalogueGeofenceClearCommand(
+                    forAssignment: assignment,
+                    issuerKey: MissionRunCommandIssuerKey.runCleanupGeofenceClear
+                ) else { continue }
+                geofenceClearCommands.append(geIssued)
+            }
+            var geofenceClearIssued = 0
+            var geofenceWaveStart = 0
+            while geofenceWaveStart < geofenceClearCommands.count {
+                let geofenceWaveEnd = min(geofenceWaveStart + waveLimit, geofenceClearCommands.count)
+                let geofenceWave = Array(geofenceClearCommands[geofenceWaveStart..<geofenceWaveEnd])
+                var geofenceTasks: [Task<Void, Never>] = []
+                geofenceTasks.reserveCapacity(geofenceWave.count)
+                for issued in geofenceWave {
+                    let cmd = issued
+                    geofenceTasks.append(Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        _ = await self.systems.commands.awaitCatalogueDispatchAndAckLogs(
+                            issued: cmd,
+                            fleetLink: fleetLink,
+                            sitl: sitl
+                        )
+                    })
+                }
+                for task in geofenceTasks {
+                    await task.value
+                }
+                geofenceClearIssued += geofenceWave.count
+                geofenceWaveStart = geofenceWaveEnd
+            }
+
             var rosterTele = (applied: 0, skipped: 0)
             var poolTele = (applied: 0, skipped: 0)
             if shouldTeleport {
@@ -289,6 +323,7 @@ extension MissionRunEnvironment {
                     "parkAttempted": "\(parkAttempted)",
                     "parkFailed": "\(parkFailedCount)",
                     "missionClear": "\(missionClearIssued)",
+                    "geofenceClear": "\(geofenceClearIssued)",
                     "rTeleApplied": "\(rosterTele.applied)",
                     "rTeleSkipped": "\(rosterTele.skipped)",
                     "pTeleApplied": "\(poolTele.applied)",

@@ -110,6 +110,12 @@ struct LiveOverviewMapStructureIdentity: Equatable {
     /// Intentionally omits fleet tokens / bridge stream keys so reserve swap-in does not force a full map rebuild
     /// (marker churn follows ``liveOverviewMapMarkerCoordinateDigest``).
     let rosterSlotBindingSignature: String
+    /// Mirrors ``MissionRunOperatorDisplaySettings/showMissionGeofencesOnMap`` so toggling fence visibility rebuilds Leaflet geofence layers.
+    let showMissionGeofencesOnMap: Bool
+    /// Fingerprint of template geofence ids so edits to fence geometry refresh the map without hub churn.
+    let missionGeofenceTemplateTopologySignature: String
+    /// Run-only augmentation (mission / task map / slot policies) so MC maps refresh when the run envelope changes.
+    let missionControlRunGeofenceAugmentationTopologySignature: String
 }
 
 struct MissionLiveVehicleHealthCard: View {

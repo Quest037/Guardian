@@ -19,6 +19,11 @@ final class FleetMissionRecipeRegistrationsTests: XCTestCase {
         XCTAssertNotNil(descriptor)
         XCTAssertEqual(descriptor?.riskTier, .confirmInLiveMission)
         XCTAssertEqual(descriptor?.appliesToSystems, ["mission"])
+        XCTAssertEqual(descriptor?.parameters.count, 2)
+        XCTAssertEqual(
+            Set(descriptor?.parameters.map(\.name) ?? []),
+            ["missionItemsJSON", "geofencePolygonsJSON"]
+        )
 
         let body = descriptor?.body
         XCTAssertEqual(body?.entryStepID.rawValue, "upload")
@@ -49,8 +54,11 @@ final class FleetMissionRecipeRegistrationsTests: XCTestCase {
         XCTAssertNotNil(descriptor)
         XCTAssertEqual(descriptor?.riskTier, .confirmInLiveMission)
         XCTAssertEqual(descriptor?.appliesToSystems, ["mission"])
-        XCTAssertEqual(descriptor?.parameters.count, 2)
-        XCTAssertEqual(Set(descriptor?.parameters.map(\.name) ?? []), ["missionItemsJSON", "missionStartItemIndex"])
+        XCTAssertEqual(descriptor?.parameters.count, 3)
+        XCTAssertEqual(
+            Set(descriptor?.parameters.map(\.name) ?? []),
+            ["missionItemsJSON", "missionStartItemIndex", "geofencePolygonsJSON"]
+        )
 
         let body = descriptor?.body
         XCTAssertEqual(body?.entryStepID.rawValue, "upload")
@@ -70,6 +78,39 @@ final class FleetMissionRecipeRegistrationsTests: XCTestCase {
         XCTAssertTrue(
             parseErrors.isEmpty,
             "Mission upload/start.item recipe body must validate (bundle JSON or compiled-in): \(parseErrors)"
+        )
+    }
+
+    func test_registerAll_registersGeofenceRecipes() {
+        FleetMissionRecipeRegistrations.registerAll()
+
+        let upload = FleetRecipesCatalogue.shared.descriptor(for: FleetMissionRecipeRegistrations.doGeofenceUploadRecipeName)
+        XCTAssertNotNil(upload)
+        XCTAssertEqual(upload?.parameters.count, 1)
+        XCTAssertEqual(upload?.parameters.first?.name, "geofencePolygonsJSON")
+
+        let clear = FleetRecipesCatalogue.shared.descriptor(for: FleetMissionRecipeRegistrations.doGeofenceClearRecipeName)
+        XCTAssertNotNil(clear)
+        XCTAssertTrue(clear?.parameters.isEmpty ?? false)
+
+        guard let upload, let clear, let uploadBody = upload.body, let clearBody = clear.body else {
+            return XCTFail("geofence recipes must carry bodies")
+        }
+        XCTAssertTrue(
+            FleetRecipeBodyParser.validate(
+                uploadBody,
+                against: upload,
+                recipes: FleetRecipesCatalogue.shared,
+                commands: FleetCommandsCatalogue.shared
+            ).isEmpty
+        )
+        XCTAssertTrue(
+            FleetRecipeBodyParser.validate(
+                clearBody,
+                against: clear,
+                recipes: FleetRecipesCatalogue.shared,
+                commands: FleetCommandsCatalogue.shared
+            ).isEmpty
         )
     }
 

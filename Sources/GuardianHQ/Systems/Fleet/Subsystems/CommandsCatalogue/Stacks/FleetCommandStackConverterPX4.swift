@@ -318,6 +318,12 @@ struct FleetCommandStackConverterPX4: FleetCommandStackConverter {
             )
 
         default:
+            if let geofence = FleetCommandStackConverterShared.translateFleetVehicleGeofenceIfNeeded(
+                commandName: commandName,
+                parameters: parameters
+            ) {
+                return geofence
+            }
             if let mission = FleetCommandStackConverterShared.translateFleetVehicleMissionIfNeeded(
                 commandName: commandName,
                 parameters: parameters

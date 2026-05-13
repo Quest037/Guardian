@@ -224,6 +224,20 @@ struct SettingsView: View {
                             }
                             rowDivider
                             settingsRow(
+                                title: "Show geofences on Mission Control maps",
+                                description:
+                                    "Draw mission and task geofence regions on Mission Control setup and running maps for each run."
+                            ) {
+                                Toggle(
+                                    "",
+                                    isOn: $generalSettings.missionControlShowMissionGeofencesOnMap
+                                )
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .frame(minWidth: 44, alignment: .trailing)
+                            }
+                            rowDivider
+                            settingsRow(
                                 title: "SIM battery drain",
                                 description:
                                     "Simulate battery drain on SIMs during a mission run."

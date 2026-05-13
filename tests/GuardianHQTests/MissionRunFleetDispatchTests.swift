@@ -43,7 +43,10 @@ final class MissionRunFleetDispatchTests: XCTestCase {
     func test_reattribute_preserves_recipe_dispatch() {
         let id = UUID()
         let assign = UUID()
-        let params = FleetRecipeParameters(values: ["missionItemsJSON": .string("[]")])
+        let params = FleetRecipeParameters(values: [
+            "missionItemsJSON": .string("[]"),
+            "geofencePolygonsJSON": .string("[]"),
+        ])
         let original = MissionRunIssuedCommand(
             id: id,
             assignmentID: assign,

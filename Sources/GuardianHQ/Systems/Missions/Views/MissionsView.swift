@@ -274,11 +274,15 @@ private struct RouteTabMissionPointRowSig: Equatable {
 private enum MissionWorkspaceTasksInnerTab: String, CaseIterable, Identifiable {
     case routes
     case points
+    case geofences
+
     var id: String { rawValue }
+
     var title: String {
         switch self {
         case .routes: "Tasks"
         case .points: "Points"
+        case .geofences: "Fences"
         }
     }
 }
@@ -295,6 +299,7 @@ private struct RouteTabMapSignature: Equatable {
     let selectedMissionPointID: UUID?
     let missionPointPlacementArmed: Bool
     let tasksInnerTab: MissionWorkspaceTasksInnerTab
+    let geofenceChecksum: String
 }
 
 /// Drives ``View/sheet(item:onDismiss:content:)`` so bulk-edit content is never built as ``EmptyView`` on first open.
@@ -353,14 +358,18 @@ private struct MissionWorkspaceView: View {
     @State private var focusedTransitionCameraFieldKey: String?
     @State private var suppressNextMapClick = false
     @State private var selectedMissionPointID: UUID?
+    @State private var selectedGeofenceID: UUID?
     /// Non-`nil` when ``AppDrawer`` is showing ``MissionWorkspaceMissionPointEditDrawer`` for that point (only opened via sidebar pencil).
     @State private var missionPointDrawerEditingID: UUID?
+    @State private var geofenceDrawerEditingID: UUID?
     @State private var missionPointPlacementArmed = false
     @State private var missionPointDeleteCandidate: MissionPointDeleteCandidate?
     @State private var tasksInnerTab: MissionWorkspaceTasksInnerTab = .routes
     /// After **Add point**, scroll this row into view in the Tasks sidebar list.
     @State private var missionWorkspaceMapPointsListScrollEpoch: UInt = 0
     @State private var missionWorkspaceMapPointsListScrollTargetRow: UUID?
+    @State private var missionWorkspaceGeofencesListScrollEpoch: UInt = 0
+    @State private var missionWorkspaceGeofencesListScrollTargetRow: UUID?
     @State private var mapViewportCenter: RouteCoordinate?
     @State private var detailsDescriptionEditorHeight: CGFloat = 96
     /// Task settings panel hosted **inside** this view so `draft` updates refresh pickers (global ``AppDrawer`` does not re-run with mission `@State`).
@@ -545,6 +554,7 @@ private struct MissionWorkspaceView: View {
                 missionPointPlacementArmed = false
                 appDrawer.dismiss()
                 missionPointDrawerEditingID = nil
+                geofenceDrawerEditingID = nil
                 taskSettingsOverlayTaskIndex = nil
                 rosterDeviceEditContext = nil
             }
@@ -556,10 +566,12 @@ private struct MissionWorkspaceView: View {
             if tab != .tasks {
                 appDrawer.dismiss()
                 missionPointDrawerEditingID = nil
+                geofenceDrawerEditingID = nil
                 taskSettingsOverlayTaskIndex = nil
                 clearPreviewFocusState()
                 missionPointPlacementArmed = false
                 selectedMissionPointID = nil
+                selectedGeofenceID = nil
                 tasksInnerTab = .routes
             }
             if tab != .roster {
@@ -600,16 +612,28 @@ private struct MissionWorkspaceView: View {
             if newTab == .points {
                 editingTaskIndex = nil
                 selectedWaypointIndex = nil
+                appDrawer.dismiss()
+                geofenceDrawerEditingID = nil
             }
             if newTab == .routes {
                 missionPointPlacementArmed = false
                 appDrawer.dismiss()
                 missionPointDrawerEditingID = nil
+                geofenceDrawerEditingID = nil
+            }
+            if newTab == .geofences {
+                editingTaskIndex = nil
+                selectedWaypointIndex = nil
+                missionPointPlacementArmed = false
+                appDrawer.dismiss()
+                missionPointDrawerEditingID = nil
+                geofenceDrawerEditingID = nil
             }
         }
         .onChange(of: appDrawer.presented?.id) { newDrawerID in
             if newDrawerID == nil {
                 missionPointDrawerEditingID = nil
+                geofenceDrawerEditingID = nil
             }
         }
         .onChange(of: draft.name) { _ in scheduleDebouncedPersistMission() }
@@ -1465,6 +1489,139 @@ private struct MissionWorkspaceView: View {
         persistMissionToStoreNow()
     }
 
+    // MARK: - Geofences (mission template)
+
+    private func addMissionGeofencePolygon() {
+        let n = draft.missionGeofences.count + 1
+        let fence = MissionGeofence.newPolygon(name: "Mission fence \(n)", around: missionGeofenceDefaultCenter)
+        draft.missionGeofences.append(fence)
+        selectedGeofenceID = fence.id
+        missionWorkspaceGeofencesListScrollTargetRow = fence.id
+        missionWorkspaceGeofencesListScrollEpoch &+= 1
+        persistMissionToStoreNow()
+        onToast("Fence added — drag vertices or the square handle on the map to adjust", .success)
+    }
+
+    private func addMissionGeofenceCircle() {
+        let n = draft.missionGeofences.count + 1
+        let fence = MissionGeofence.newCircle(name: "Mission fence \(n)", center: missionGeofenceDefaultCenter)
+        draft.missionGeofences.append(fence)
+        selectedGeofenceID = fence.id
+        missionWorkspaceGeofencesListScrollTargetRow = fence.id
+        missionWorkspaceGeofencesListScrollEpoch &+= 1
+        persistMissionToStoreNow()
+        onToast("Fence added — drag the center and rim on the map to adjust", .success)
+    }
+
+    private func removeGeofence(id: UUID) {
+        draft.missionGeofences.removeAll { $0.id == id }
+        for ti in draft.routeMacro.tasks.indices {
+            draft.routeMacro.tasks[ti].geofences.removeAll { $0.id == id }
+        }
+        if selectedGeofenceID == id {
+            selectedGeofenceID = nil
+        }
+        if geofenceDrawerEditingID == id {
+            geofenceDrawerEditingID = nil
+            appDrawer.dismiss()
+        }
+        persistMissionToStoreNow()
+    }
+
+    private func duplicateGeofence(id: UUID) {
+        if let i = draft.missionGeofences.firstIndex(where: { $0.id == id }) {
+            var copy = draft.missionGeofences[i].duplicatedForClonedMission()
+            copy.name = copy.name + " copy"
+            draft.missionGeofences.append(copy)
+            selectedGeofenceID = copy.id
+            missionWorkspaceGeofencesListScrollTargetRow = copy.id
+            missionWorkspaceGeofencesListScrollEpoch &+= 1
+            persistMissionToStoreNow()
+            return
+        }
+        for ti in draft.routeMacro.tasks.indices {
+            if let i = draft.routeMacro.tasks[ti].geofences.firstIndex(where: { $0.id == id }) {
+                var copy = draft.routeMacro.tasks[ti].geofences[i].duplicatedForClonedMission()
+                copy.name = copy.name + " copy"
+                draft.routeMacro.tasks[ti].geofences.append(copy)
+                selectedGeofenceID = copy.id
+                missionWorkspaceGeofencesListScrollTargetRow = copy.id
+                missionWorkspaceGeofencesListScrollEpoch &+= 1
+                persistMissionToStoreNow()
+                return
+            }
+        }
+    }
+
+    private func mutateMissionGeofenceFromMap(id: UUID, _ update: (inout MissionGeofence) -> Void) {
+        if let i = draft.missionGeofences.firstIndex(where: { $0.id == id }) {
+            update(&draft.missionGeofences[i])
+            persistMissionToStoreNow()
+            return
+        }
+        for ti in draft.routeMacro.tasks.indices {
+            if let fi = draft.routeMacro.tasks[ti].geofences.firstIndex(where: { $0.id == id }) {
+                update(&draft.routeMacro.tasks[ti].geofences[fi])
+                persistMissionToStoreNow()
+                return
+            }
+        }
+    }
+
+    private func moveGeofenceTemplateToPlacement(fenceID: UUID, target: MissionGeofenceTemplatePlacement) {
+        var fence: MissionGeofence?
+        if let i = draft.missionGeofences.firstIndex(where: { $0.id == fenceID }) {
+            fence = draft.missionGeofences.remove(at: i)
+        } else {
+            for ti in draft.routeMacro.tasks.indices {
+                if let fi = draft.routeMacro.tasks[ti].geofences.firstIndex(where: { $0.id == fenceID }) {
+                    fence = draft.routeMacro.tasks[ti].geofences.remove(at: fi)
+                    break
+                }
+            }
+        }
+        guard let f = fence else { return }
+        switch target {
+        case .missionWide:
+            draft.missionGeofences.append(f)
+        case .taskScoped(let taskUUID):
+            if let ti = draft.routeMacro.tasks.firstIndex(where: { $0.id == taskUUID }) {
+                draft.routeMacro.tasks[ti].geofences.append(f)
+            } else {
+                draft.missionGeofences.append(f)
+            }
+        }
+        persistMissionToStoreNow()
+    }
+
+    private func openGeofenceEditDrawer(fenceID: UUID) {
+        let exists = draft.missionGeofences.contains(where: { $0.id == fenceID })
+            || draft.routeMacro.tasks.contains { $0.geofences.contains { $0.id == fenceID } }
+        guard exists else { return }
+        selectedGeofenceID = fenceID
+        geofenceDrawerEditingID = fenceID
+        appDrawer.present(title: "Edit fence", preferredWidth: 400, scrimTapDismisses: true) {
+            MissionWorkspaceGeofenceEditDrawer(
+                fenceID: fenceID,
+                mission: $draft,
+                onMovePlacement: { placement in moveGeofenceTemplateToPlacement(fenceID: fenceID, target: placement) },
+                persist: { persistMissionToStoreNow() }
+            )
+        }
+    }
+
+    private func toggleGeofenceEditDrawer(fenceID: UUID) {
+        let exists = draft.missionGeofences.contains(where: { $0.id == fenceID })
+            || draft.routeMacro.tasks.contains { $0.geofences.contains { $0.id == fenceID } }
+        guard exists else { return }
+        if geofenceDrawerEditingID == fenceID {
+            geofenceDrawerEditingID = nil
+            appDrawer.dismiss()
+            return
+        }
+        openGeofenceEditDrawer(fenceID: fenceID)
+    }
+
     private func addMissionPointAtMap(lat: Double, lon: Double) {
         let p = MissionPoint(
             pointId: "rally.0",
@@ -1549,6 +1706,28 @@ private struct MissionWorkspaceView: View {
         }
     }
 
+    /// Geofences tab: map polygon/circle tap selects the matching sidebar card and scrolls it into view.
+    private func toggleGeofenceMapSelection(fenceID: UUID) {
+        let onMission = draft.missionGeofences.contains { $0.id == fenceID }
+        let onTask = draft.routeMacro.tasks.contains { $0.geofences.contains { $0.id == fenceID } }
+        guard onMission || onTask else { return }
+        if selectedGeofenceID == fenceID {
+            selectedGeofenceID = nil
+            if geofenceDrawerEditingID == fenceID {
+                geofenceDrawerEditingID = nil
+                appDrawer.dismiss()
+            }
+        } else {
+            if geofenceDrawerEditingID != nil {
+                appDrawer.dismiss()
+                geofenceDrawerEditingID = nil
+            }
+            selectedGeofenceID = fenceID
+            missionWorkspaceGeofencesListScrollTargetRow = fenceID
+            missionWorkspaceGeofencesListScrollEpoch &+= 1
+        }
+    }
+
     @MainActor
     private func maybeRebuildFollowRoadAfterWaypointMove(taskIndex: Int, movedIndex: Int) async {
         guard draft.routeMacro.tasks.indices.contains(taskIndex) else { return }
@@ -1627,6 +1806,9 @@ private struct MissionWorkspaceView: View {
                             }
                             if missionPointPlacementArmed, editingTaskIndex == nil {
                                 addMissionPointAtMap(lat: lat, lon: lon)
+                                return
+                            }
+                            if tasksInnerTab != .routes {
                                 return
                             }
                             Task { @MainActor in
@@ -1728,6 +1910,53 @@ private struct MissionWorkspaceView: View {
                         },
                         onViewportCenterChanged: { lat, lon in
                             mapViewportCenter = RouteCoordinate(lat: lat, lon: lon)
+                        },
+                        onGeofenceClick: { id in
+                            guard tasksInnerTab == .geofences else { return }
+                            toggleGeofenceMapSelection(fenceID: id)
+                        },
+                        onGeofenceCircleCenterMoved: { id, lat, lon in
+                            guard tasksInnerTab == .geofences else { return }
+                            mutateMissionGeofenceFromMap(id: id) { $0.circleCenter.lat = lat; $0.circleCenter.lon = lon }
+                        },
+                        onGeofenceCircleRadiusMoved: { id, radiusM in
+                            guard tasksInnerTab == .geofences else { return }
+                            mutateMissionGeofenceFromMap(id: id) { $0.circleRadiusMeters = max(1, radiusM) }
+                        },
+                        onGeofencePolygonVertexMoved: { id, idx, lat, lon in
+                            guard tasksInnerTab == .geofences else { return }
+                            mutateMissionGeofenceFromMap(id: id) { g in
+                                guard g.shape == .polygon, g.polygonVertices.indices.contains(idx) else { return }
+                                g.polygonVertices[idx].lat = lat
+                                g.polygonVertices[idx].lon = lon
+                            }
+                        },
+                        onGeofencePolygonTranslated: { id, dLat, dLon in
+                            guard tasksInnerTab == .geofences else { return }
+                            mutateMissionGeofenceFromMap(id: id) { g in
+                                guard g.shape == .polygon else { return }
+                                for i in g.polygonVertices.indices {
+                                    g.polygonVertices[i].lat += dLat
+                                    g.polygonVertices[i].lon += dLon
+                                }
+                            }
+                        },
+                        onGeofencePolygonEdgeInsert: { id, afterIndex, lat, lon in
+                            guard tasksInnerTab == .geofences else { return }
+                            mutateMissionGeofenceFromMap(id: id) { g in
+                                guard g.shape == .polygon else { return }
+                                var v = g.polygonVertices
+                                let n = v.count
+                                guard n >= 3, afterIndex >= 0, afterIndex < n else { return }
+                                let insertAt = afterIndex + 1
+                                let coord = RouteCoordinate(lat: lat, lon: lon)
+                                if insertAt >= n {
+                                    v.append(coord)
+                                } else {
+                                    v.insert(coord, at: insertAt)
+                                }
+                                g.polygonVertices = v
+                            }
                         }
                     )
                     .task(id: routeTabMapSignature) {
@@ -1743,7 +1972,11 @@ private struct MissionWorkspaceView: View {
                             isEditingTask: editingTaskIndex != nil,
                             missionPointMarkers: missionPointMapMarkers,
                             missionPointPlacementArmed: missionPointPlacementArmed,
-                            mcsReservePoolHomePlacementArmed: false
+                            mcsReservePoolHomePlacementArmed: false,
+                            geofenceOverlays: draft.allGuardianGeofenceMapOverlays(
+                                mapSelectionFenceID: tasksInnerTab == .geofences ? selectedGeofenceID : nil
+                            ),
+                            geofenceMapLayerPointerSelectsFence: tasksInnerTab == .geofences
                         )
                     }
                     .frame(width: mapWidth)
@@ -1768,24 +2001,41 @@ private struct MissionWorkspaceView: View {
                                 }
                                 .labelsHidden()
                                 .pickerStyle(.segmented)
-                                .frame(maxWidth: 240)
+                                .frame(maxWidth: 360)
                             }
                             .fixedSize(horizontal: true, vertical: false)
 
                             Spacer(minLength: GuardianSpacing.sm)
 
-                            GuardianPrimaryProminentButton(title: tasksInnerTab == .routes ? "Add task" : "Add point") {
+                            Group {
                                 if tasksInnerTab == .routes {
-                                    let nextNum = draft.routeMacro.tasks.count + 1
-                                    draft.routeMacro.tasks.append(MissionTask(name: "Task \(nextNum)"))
-                                    selectedTaskIndex = draft.routeMacro.tasks.count - 1
-                                    editingTaskIndex = nil
-                                    selectedWaypointIndex = nil
+                                    GuardianPrimaryProminentButton(title: "Add task") {
+                                        let nextNum = draft.routeMacro.tasks.count + 1
+                                        draft.routeMacro.tasks.append(MissionTask(name: "Task \(nextNum)"))
+                                        selectedTaskIndex = draft.routeMacro.tasks.count - 1
+                                        editingTaskIndex = nil
+                                        selectedWaypointIndex = nil
+                                    }
+                                    .guardianPointerOnHover()
+                                } else if tasksInnerTab == .points {
+                                    GuardianPrimaryProminentButton(title: "Add point") {
+                                        appendMissionPointAtViewportCenter()
+                                    }
+                                    .guardianPointerOnHover()
                                 } else {
-                                    appendMissionPointAtViewportCenter()
+                                    HStack(spacing: GuardianSpacing.xs) {
+                                        GuardianPrimaryProminentButton(title: "Polygon") {
+                                            addMissionGeofencePolygon()
+                                        }
+                                        .guardianPointerOnHover()
+                                        GuardianPrimaryProminentButton(title: "Circle") {
+                                            addMissionGeofenceCircle()
+                                        }
+                                        .guardianPointerOnHover()
+                                    }
+                                    .fixedSize()
                                 }
                             }
-                            .guardianPointerOnHover()
                         }
                         .padding(.horizontal, GuardianSpacing.md)
                         .padding(.vertical, GuardianSpacing.sm)
@@ -1933,8 +2183,10 @@ private struct MissionWorkspaceView: View {
                                         }
                                     }
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                } else {
+                                } else if tasksInnerTab == .points {
                                     missionPointsListScrollContent
+                                } else {
+                                    missionGeofencesListScrollContent
                                 }
                             }
                             .padding(.horizontal, GuardianSpacing.md)
@@ -1942,6 +2194,14 @@ private struct MissionWorkspaceView: View {
                         }
                         .onChange(of: missionWorkspaceMapPointsListScrollEpoch) { _ in
                             guard let id = missionWorkspaceMapPointsListScrollTargetRow else { return }
+                            DispatchQueue.main.async {
+                                withAnimation(.easeOut(duration: 0.22)) {
+                                    proxy.scrollTo(id, anchor: .center)
+                                }
+                            }
+                        }
+                        .onChange(of: missionWorkspaceGeofencesListScrollEpoch) { _ in
+                            guard let id = missionWorkspaceGeofencesListScrollTargetRow else { return }
                             DispatchQueue.main.async {
                                 withAnimation(.easeOut(duration: 0.22)) {
                                     proxy.scrollTo(id, anchor: .center)
@@ -2016,6 +2276,37 @@ private struct MissionWorkspaceView: View {
         }
     }
 
+    /// Drives map overlay updates when geofence geometry changes (nested under ``draft``).
+    private var geofenceRouteTabChecksum: String {
+        var parts: [String] = []
+        for g in draft.missionGeofences {
+            parts.append(
+                "m:\(g.id.uuidString);\(g.shape.rawValue);\(g.boundary.rawValue);\(g.polygonVertices.count);\(g.circleCenter.lat),\(g.circleCenter.lon);\(g.circleRadiusMeters)"
+            )
+            for v in g.polygonVertices {
+                parts.append("\(v.lat),\(v.lon)")
+            }
+        }
+        for t in draft.routeMacro.tasks {
+            for g in t.geofences {
+                parts.append(
+                    "t:\(t.id.uuidString);\(g.id.uuidString);\(g.shape.rawValue);\(g.boundary.rawValue);\(g.polygonVertices.count);\(g.circleCenter.lat),\(g.circleCenter.lon);\(g.circleRadiusMeters)"
+                )
+                for v in g.polygonVertices {
+                    parts.append("\(v.lat),\(v.lon)")
+                }
+            }
+        }
+        if tasksInnerTab == .geofences {
+            parts.append("gfsel:\(selectedGeofenceID?.uuidString ?? "nil")")
+        }
+        return parts.joined(separator: "|")
+    }
+
+    private var missionGeofenceDefaultCenter: RouteCoordinate {
+        mapViewportCenter ?? RouteCoordinate(lat: -27.4689, lon: 153.0235)
+    }
+
     /// Equatable signature of every input the route-tab map cares about.
     /// Drives `.task(id:)` so the shared `mapModel` is re-pushed whenever the
     /// tasks/selection/preview/edit-state changes.
@@ -2031,13 +2322,149 @@ private struct MissionWorkspaceView: View {
             missionPointRows: routeTabMissionPointRowSigs,
             selectedMissionPointID: selectedMissionPointID,
             missionPointPlacementArmed: missionPointPlacementArmed,
-            tasksInnerTab: tasksInnerTab
+            tasksInnerTab: tasksInnerTab,
+            geofenceChecksum: geofenceRouteTabChecksum
         )
     }
 
     private var selectedTask: MissionTask? {
         guard !draft.routeMacro.tasks.isEmpty else { return nil }
         return draft.routeMacro.tasks[validTaskIndex]
+    }
+
+    /// Geofences sub-tab: mission-wide list plus fences on the **currently selected** task.
+    private var missionGeofencesListScrollContent: some View {
+        VStack(alignment: .leading, spacing: GuardianSpacing.md) {
+            Text("Mission-wide")
+                .font(GuardianTypography.font(.panelSecondaryHeadingSemibold))
+                .foregroundStyle(theme.textPrimary)
+
+            if draft.missionGeofences.isEmpty {
+                Text("No mission-wide fences.")
+                    .font(GuardianTypography.font(.denseCaption12Regular))
+                    .foregroundStyle(theme.textTertiary)
+            } else {
+                ForEach(Array(draft.missionGeofences.enumerated()), id: \.element.id) { _, fence in
+                    geofenceListRow(scopeLabel: "Mission", fence: fence)
+                        .id(fence.id)
+                }
+            }
+
+            Rectangle()
+                .fill(theme.borderSubtle)
+                .frame(height: 1)
+
+            if draft.routeMacro.tasks.isEmpty {
+                Text("Add a task to attach fences to a route.")
+                    .font(GuardianTypography.font(.denseCaption12Regular))
+                    .foregroundStyle(theme.textTertiary)
+            } else {
+                let ti = validTaskIndex
+                if draft.routeMacro.tasks[ti].geofences.isEmpty {
+                    Text("No fences on this task.")
+                        .font(GuardianTypography.font(.denseCaption12Regular))
+                        .foregroundStyle(theme.textTertiary)
+                } else {
+                    ForEach(Array(draft.routeMacro.tasks[ti].geofences.enumerated()), id: \.element.id) { _, fence in
+                        geofenceListRow(scopeLabel: "Task", fence: fence)
+                            .id(fence.id)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func geofenceListRow(scopeLabel: String, fence: MissionGeofence) -> some View {
+        let fenceID = fence.id
+        let isSelected = selectedGeofenceID == fenceID
+        GuardianCard(
+            configuration: GuardianCardConfiguration(
+                border: .subtle,
+                cornerRadius: GuardianCardLayout.cornerRadius,
+                bodyPadding: GuardianSpacing.cardBodyInset
+            ),
+            body: {
+                HStack(alignment: .center, spacing: GuardianSpacing.sm) {
+                    VStack(alignment: .leading, spacing: GuardianSpacing.micro) {
+                        Text(fence.name.isEmpty ? "Untitled fence" : fence.name)
+                            .font(GuardianTypography.font(.subsectionTitleSemibold))
+                            .foregroundStyle(theme.textPrimary)
+                            .lineLimit(2)
+                        HStack(spacing: GuardianSpacing.xs) {
+                            Text(scopeLabel)
+                                .font(GuardianTypography.font(.denseCaption12Regular))
+                                .foregroundStyle(theme.textTertiary)
+                            Text("·")
+                                .foregroundStyle(theme.textTertiary)
+                            Text(fence.shape.displayTitle)
+                                .font(GuardianTypography.font(.denseCaption12Regular))
+                                .foregroundStyle(theme.textSecondary)
+                            Text("·")
+                                .foregroundStyle(theme.textTertiary)
+                            Text(fence.boundary.displayTitle)
+                                .font(GuardianTypography.font(.denseCaption12Regular))
+                                .foregroundStyle(theme.textSecondary)
+                        }
+                        .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    GuardianThemedButton(
+                        accent: .primary,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        contentSizing: .squareToolbarCell,
+                        action: { toggleGeofenceEditDrawer(fenceID: fenceID) },
+                        label: {
+                            Image(systemName: "pencil")
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
+                        }
+                    )
+                    .help("Open or close edit drawer")
+
+                    GuardianThemedButton(
+                        accent: .primary,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        contentSizing: .squareToolbarCell,
+                        action: { duplicateGeofence(id: fenceID) },
+                        label: {
+                            Image(systemName: "doc.on.doc")
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
+                        }
+                    )
+                    .help("Duplicate fence")
+
+                    GuardianThemedButton(
+                        accent: .danger,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        contentSizing: .squareToolbarCell,
+                        action: { removeGeofence(id: fenceID) },
+                        label: {
+                            Image(systemName: "trash")
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
+                        }
+                    )
+                    .help("Delete fence")
+                }
+            }
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            toggleGeofenceMapSelection(fenceID: fenceID)
+        }
+        .overlay {
+            if isSelected {
+                RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous)
+                    .strokeBorder(GuardianSemanticColors.infoForeground.opacity(0.45), lineWidth: 2)
+            }
+        }
     }
 
     /// Map points sub-tab scroll body (header with tabs + Add lives in ``tasksTab`` sidebar chrome).
@@ -3689,6 +4116,21 @@ private struct MissionTaskSettingsSidebar: View {
         )
     }
 
+    private var missionTaskBetweenCyclesRow: some View {
+        missionTaskSettingsFieldRow(label: "Between cycles") {
+            Picker("Between cycles", selection: $task.betweenCycles) {
+                ForEach(MissionTaskBetweenCyclesAction.allCases) { action in
+                    Text(action.displayTitle).tag(action)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+            .accessibilityLabel("Between cycles")
+        }
+        .help("When this task repeats, what the squad does in the gap before the next cycle starts.")
+    }
+
     @ViewBuilder
     private var missionTaskExecutionSettings: some View {
         missionTaskMethodRow
@@ -3700,6 +4142,7 @@ private struct MissionTaskSettingsSidebar: View {
         }
         if showsCycles {
             missionTaskCyclesRow
+            missionTaskBetweenCyclesRow
         }
     }
 

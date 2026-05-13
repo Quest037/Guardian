@@ -1,0 +1,32 @@
+{
+  "_comment": "Single-step geofence clear: invokes command.fleet.vehicle.do.geofence.clear.",
+  "entryStepID": "clearGeofence",
+  "overallBudgetSeconds": 30,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "clearGeofence",
+      "command": "command.fleet.vehicle.do.geofence.clear",
+      "retry": {
+        "maxAttempts": 3,
+        "delaySeconds": 0.5,
+        "retryableErrorKinds": ["autopilotBusy", "noSession", "notConnected"],
+        "retryOnTimeout": true
+      },
+      "matchers": [
+        { "when": { "kind": "success" }, "then": { "kind": "succeed" } },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "confirmation",
+              "confirmationKind": { "rawValue": "confirmInLiveMission" }
+            },
+            "allowedVerbs": ["abort", "acknowledge", "retry"]
+          }
+        }
+      ]
+    }
+  ]
+}

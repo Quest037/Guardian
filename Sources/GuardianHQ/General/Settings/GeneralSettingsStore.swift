@@ -232,6 +232,14 @@ final class GeneralSettingsStore: ObservableObject {
         }
     }
 
+    /// Default **show mission geofences** on Mission Control **setup** and **running** maps. New runs copy into ``MissionRunOperatorDisplaySettings/showMissionGeofencesOnMap``; MC‑R / MCS maps do not read ``GeneralSettingsStore`` at runtime.
+    @Published var missionControlShowMissionGeofencesOnMap: Bool {
+        didSet {
+            guard missionControlShowMissionGeofencesOnMap != oldValue else { return }
+            save()
+        }
+    }
+
     /// Mission Control **SITL reset on successful run completion** (default off, persisted). When on, qualifying run completions restore roster SITL poses from the run’s captured snapshots (see README SIM home reset).
     @Published var missionRunResetSitlToStartPoseOnSuccessfulComplete: Bool {
         didSet {
@@ -284,6 +292,7 @@ final class GeneralSettingsStore: ObservableObject {
                 loaded.missionControlPostponeStepCapSeconds ?? MissionDelayPolicy.defaultOperatorPostponeStepCapSeconds
             )
             missionControlLiveMapHideOtherTasksOnTaskSelect = loaded.missionControlLiveMapHideOtherTasksOnTaskSelect ?? true
+            missionControlShowMissionGeofencesOnMap = loaded.missionControlShowMissionGeofencesOnMap ?? true
             missionRunResetSitlToStartPoseOnSuccessfulComplete = loaded.missionRunResetSitlToStartPoseOnSuccessfulComplete ?? false
             missionRunSimBatteryDrainRate = loaded.missionRunSimBatteryDrainRate ?? .normal
             simSpawnDefaults = loaded.simSpawnDefaults ?? .default
@@ -297,6 +306,7 @@ final class GeneralSettingsStore: ObservableObject {
             liveDriveSimBatteryDrainRate = .normal
             missionControlPostponeStepCapSeconds = MissionDelayPolicy.defaultOperatorPostponeStepCapSeconds
             missionControlLiveMapHideOtherTasksOnTaskSelect = true
+            missionControlShowMissionGeofencesOnMap = true
             missionRunResetSitlToStartPoseOnSuccessfulComplete = false
             missionRunSimBatteryDrainRate = .normal
             simSpawnDefaults = .default
@@ -319,6 +329,7 @@ final class GeneralSettingsStore: ObservableObject {
             defaultSimBatteryDrainRate: nil,
             missionControlPostponeStepCapSeconds: missionControlPostponeStepCapSeconds,
             missionControlLiveMapHideOtherTasksOnTaskSelect: missionControlLiveMapHideOtherTasksOnTaskSelect,
+            missionControlShowMissionGeofencesOnMap: missionControlShowMissionGeofencesOnMap,
             missionRunResetSitlToStartPoseOnSuccessfulComplete: missionRunResetSitlToStartPoseOnSuccessfulComplete,
             missionRunSimBatteryDrainRate: missionRunSimBatteryDrainRate,
             simSpawnDefaults: simSpawnDefaults,
@@ -352,6 +363,8 @@ final class GeneralSettingsStore: ObservableObject {
         var missionControlPostponeStepCapSeconds: Int?
         /// Omitted in older saves; treated as `true`.
         var missionControlLiveMapHideOtherTasksOnTaskSelect: Bool?
+        /// Omitted in older saves; treated as `true`. Seeds new runs’ ``MissionRunOperatorDisplaySettings/showMissionGeofencesOnMap``.
+        var missionControlShowMissionGeofencesOnMap: Bool?
         /// Omitted in older saves; treated as `false`. Drives MC‑R SIM reset-on-complete (README → **SIM home reset on Mission Control run complete**).
         var missionRunResetSitlToStartPoseOnSuccessfulComplete: Bool?
         /// Omitted in older saves; treated as `.normal`. Seeds new runs’ ``MissionRunOperatorDisplaySettings/simBatteryDrainRateDuringRun``.

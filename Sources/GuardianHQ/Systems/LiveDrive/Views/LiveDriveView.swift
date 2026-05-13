@@ -34,10 +34,12 @@ struct LiveDriveView: View {
     @State private var inputSource: LiveDriveInputSource = .keyboard
     @State private var streamActive = false
     @State private var simControlsSidebarVisible = false
-    @State private var liveSimBatteryDrainEnabled = true
-    @State private var liveSimBatteryDrainRate: SimBatteryDrainRate = .normal
     /// Bottom prompts (same template as Mission Control run) — call ``GuardianBottomPromptCenter/present(_:style:onDismiss:)`` from Live Drive flows.
     @StateObject private var bottomPromptCenter = GuardianBottomPromptCenter()
+    /// Prevents overlapping drill-in handlers while an active session is being ended for a vehicle switch.
+    @State private var liveDriveDrillInSessionEndInFlight = false
+    /// After framing the live-mission map once per bridged vehicle, avoid resetting zoom on every hub tick.
+    @State private var liveDriveLiveMissionMapZoomAppliedVehicleKey: String?
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
@@ -45,16 +47,43 @@ struct LiveDriveView: View {
         GuardianMotion.drawerSlide
     }
 
-    /// Drives ``OperatorPromptCenter/setLiveDrivePromptPanelHostContext`` when Live Drive session + vehicle ↔ mission engagement changes.
+    /// Drives ``OperatorPromptCenter/setLiveDrivePromptPanelHostContext`` when session, vehicle, or MC‑R drill-in run id changes.
     private var liveDriveOperatorPromptHostSignature: String {
         let vid = store.activeSessionRecord?.vehicleID ?? store.activeVehicleID ?? ""
-        let active = store.hasActiveSession && !vid.isEmpty
-        let runID = missionControlStore.activeMissionRunIDEngagingVehicle(
-            vehicleID: vid,
-            fleetLink: fleetLink,
-            sitl: sitl
-        )
-        return "\(active)|\(vid)|\(runID?.uuidString ?? "")"
+        let activeSession = store.hasActiveSession && !vid.isEmpty
+        let pendingRun = operatorPromptReviewFocus.pendingLiveDriveMissionRunID?.uuidString ?? ""
+        let engagedRun = (!vid.isEmpty
+            ? missionControlStore.activeMissionRunIDEngagingVehicle(vehicleID: vid, fleetLink: fleetLink, sitl: sitl)
+            : nil)?.uuidString ?? ""
+        return "\(activeSession)|\(vid)|\(pendingRun)|\(engagedRun)"
+    }
+
+    /// MC‑R / Decisions drill-in: ``onChange`` does not run when ``pendingLiveDriveVehicleID`` was set before this view mounted (e.g. tab switch from Mission Control).
+    private func applyPendingLiveDriveVehicleDrillInFromFocus() {
+        guard let pendingVid = operatorPromptReviewFocus.pendingLiveDriveVehicleID, !pendingVid.isEmpty else { return }
+        guard !liveDriveDrillInSessionEndInFlight else { return }
+
+        if store.hasActiveSession {
+            let sessionVid = store.activeSessionRecord?.vehicleID ?? store.activeControlledVehicleID ?? ""
+            guard !sessionVid.isEmpty else { return }
+            if sessionVid == pendingVid {
+                store.selectVehicle(pendingVid)
+                operatorPromptReviewFocus.consumeLiveDriveFocus()
+                return
+            }
+            liveDriveDrillInSessionEndInFlight = true
+            Task { @MainActor in
+                defer { liveDriveDrillInSessionEndInFlight = false }
+                await endActiveLiveDriveSessionForDrillInVehicleSwitch(
+                    sessionVehicleID: sessionVid,
+                    pendingVehicleID: pendingVid
+                )
+            }
+            return
+        }
+
+        store.selectVehicle(pendingVid)
+        operatorPromptReviewFocus.consumeLiveDriveFocus()
     }
 
     var body: some View {
@@ -132,6 +161,7 @@ struct LiveDriveView: View {
                         controlStore: missionControlStore,
                         leaveArmed: true,
                         autoCloseOnPass: true,
+                        allowDuringLiveMission: purpose == .mission,
                         onPassed: {
                             Task { @MainActor in
                                 activateLiveDriveSessionAfterPreflight(kind: purpose.sessionKind)
@@ -150,25 +180,50 @@ struct LiveDriveView: View {
         }
         .task(id: liveDriveOperatorPromptHostSignature) {
             let vid = store.activeSessionRecord?.vehicleID ?? store.activeVehicleID ?? ""
-            guard store.hasActiveSession, !vid.isEmpty else {
+            guard !vid.isEmpty else {
                 operatorPromptCenter.setLiveDrivePromptPanelHostContext(isActive: false, missionRunID: nil, vehicleID: nil)
                 return
             }
-            let runID = missionControlStore.activeMissionRunIDEngagingVehicle(
+            let engagedRun = missionControlStore.activeMissionRunIDEngagingVehicle(
                 vehicleID: vid,
                 fleetLink: fleetLink,
                 sitl: sitl
             )
-            operatorPromptCenter.setLiveDrivePromptPanelHostContext(
-                isActive: true,
-                missionRunID: runID,
-                vehicleID: vid
+            let pendingRun = operatorPromptReviewFocus.pendingLiveDriveMissionRunID
+            let missionRunID = pendingRun ?? engagedRun
+            let onLiveMissionRoster = missionControlStore.isVehicleStreamUsedInLiveMission(
+                vehicleID: vid,
+                fleetLink: fleetLink,
+                sitl: sitl
             )
+
+            if store.hasActiveSession {
+                operatorPromptCenter.setLiveDrivePromptPanelHostContext(
+                    isActive: true,
+                    missionRunID: missionRunID,
+                    vehicleID: vid
+                )
+                return
+            }
+
+            if missionRunID != nil || onLiveMissionRoster {
+                operatorPromptCenter.setLiveDrivePromptPanelHostContext(
+                    isActive: true,
+                    missionRunID: missionRunID,
+                    vehicleID: vid
+                )
+            } else {
+                operatorPromptCenter.setLiveDrivePromptPanelHostContext(isActive: false, missionRunID: nil, vehicleID: nil)
+            }
         }
-        .onChange(of: operatorPromptReviewFocus.pendingLiveDriveVehicleID) { newVehicleID in
-            guard let newVehicleID, !newVehicleID.isEmpty else { return }
-            store.selectVehicle(newVehicleID)
-            operatorPromptReviewFocus.consumeLiveDriveFocus()
+        .onAppear {
+            applyPendingLiveDriveVehicleDrillInFromFocus()
+        }
+        .onChange(of: operatorPromptReviewFocus.pendingLiveDriveVehicleID) { _ in
+            applyPendingLiveDriveVehicleDrillInFromFocus()
+        }
+        .onChange(of: store.activeVehicleID) { _ in
+            liveDriveLiveMissionMapZoomAppliedVehicleKey = nil
         }
     }
 
@@ -188,15 +243,16 @@ struct LiveDriveView: View {
     private var selectedVehicleMarker: [MapVehicleMarker] {
         guard let id = selectedVehicleID, let hub = selectedHub, let lat = hub.latitudeDeg, let lon = hub.longitudeDeg else { return [] }
         let imageDataURL = markerImageDataURL(forVehicleID: id)
+        let slotLabel = liveMissionRosterContext?.slotName ?? ""
         return [
             MapVehicleMarker(
                 id: id,
                 lat: lat,
                 lon: lon,
-                label: "",
+                label: slotLabel,
                 colorHex: fleetLink.mapColorHex(forVehicleID: id),
                 imageDataURL: imageDataURL,
-                showLabel: false,
+                showLabel: !slotLabel.isEmpty,
                 selected: true,
                 draggable: false,
                 headingDeg: hub.headingDeg
@@ -215,130 +271,296 @@ struct LiveDriveView: View {
         )
     }
 
-    /// Menu trigger styled like ``GuardianThemedButton`` outline chips (``Menu`` cannot nest a ``Button``).
-    private func subBarMenuChip(_ title: String, foreground: Color, stroke: Color) -> some View {
-        Text(title)
-            .font(GuardianTypography.font(.inlineNoticeTitle))
-            .foregroundStyle(foreground)
-            .padding(.horizontal, GuardianSpacing.denseGutter)
-            .frame(height: 28)
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(stroke, lineWidth: 1.5)
+    private var liveDriveActiveMissionRun: MissionRunEnvironment? {
+        guard let vid = selectedVehicleID,
+              let rid = missionControlStore.activeMissionRunIDEngagingVehicle(vehicleID: vid, fleetLink: fleetLink, sitl: sitl)
+        else { return nil }
+        return missionControlStore.runs.first { $0.id == rid }
+    }
+
+    /// Task id for the selected vehicle’s roster row, with single-enabled-task fallback when roster `taskId` is nil.
+    private var liveDriveLiveMissionFocusedTaskID: UUID? {
+        guard let vid = selectedVehicleID,
+              let run = liveDriveActiveMissionRun,
+              run.status == .running || run.status == .paused || run.status == .recovery
+        else { return nil }
+        guard let assignment = run.assignments.first(where: {
+            resolvedFleetStreamVehicleID(assignment: $0, fleetLink: fleetLink, sitl: sitl) == vid
+        }) else { return nil }
+        if let tid = assignment.taskId { return tid }
+        if let mission = run.template {
+            let enabled = mission.routeMacro.tasks.filter(\.enabled)
+            if enabled.count == 1 { return enabled.first?.id }
+        }
+        return nil
+    }
+
+    private var liveDriveLiveMissionMapSyncSignature: String {
+        let tab = String(describing: mediaTab)
+        guard vehicleIsInLiveMission,
+              let run = liveDriveActiveMissionRun,
+              let mission = run.template,
+              let vid = selectedVehicleID
+        else {
+            let m = liveDriveMarkerSignature
+            return "free|\(tab)|\(m.vehicleID ?? "")|\(String(describing: m.lat))|\(String(describing: m.lon))|\(String(describing: m.headingDeg))"
+        }
+        let focus = liveDriveLiveMissionFocusedTaskID?.uuidString ?? "none"
+        let path = MissionControlLiveDriveMapOverlay.taskPathPayload(mission: mission, focusedTaskID: liveDriveLiveMissionFocusedTaskID)
+        let pathKey = path.ids.map(\.uuidString).joined(separator: ",")
+        let pts = MissionPoint.filteredForMissionControlLiveMap(run.runtimeMissionPoints, focusedTaskID: liveDriveLiveMissionFocusedTaskID)
+            .map { "\($0.id.uuidString)|\(String(format: "%.5f", $0.coordinate.lat))|\(String(format: "%.5f", $0.coordinate.lon))|\($0.isClosed)" }
+            .joined(separator: ";")
+        let markers = MissionControlLiveDriveMapOverlay.vehicleMarkers(
+            run: run,
+            mission: mission,
+            focusedTaskID: liveDriveLiveMissionFocusedTaskID,
+            ldStreamVehicleID: vid,
+            fleetLink: fleetLink,
+            sitl: sitl
+        )
+        let veh = markers.map { "\($0.id)|\(String(format: "%.5f", $0.lat))|\(String(format: "%.5f", $0.lon))|\($0.headingDeg ?? 0)" }
+            .joined(separator: "|")
+        return "m|\(run.id.uuidString)|\(mission.id.uuidString)|\(focus)|\(pathKey)|\(pts)|\(veh)|\(tab)"
+    }
+
+    private func syncLiveDriveMapContentFromModel() {
+        if vehicleIsInLiveMission,
+           let run = liveDriveActiveMissionRun,
+           let mission = run.template,
+           let vid = selectedVehicleID {
+            mapModel.routeGeometry = MissionControlLiveDriveMapOverlay.routeGeometry(
+                mission: mission,
+                run: run,
+                focusedTaskID: liveDriveLiveMissionFocusedTaskID,
+                selectedMissionPointID: nil
             )
+            mapModel.vehicleMarkers = MissionControlLiveDriveMapOverlay.vehicleMarkers(
+                run: run,
+                mission: mission,
+                focusedTaskID: liveDriveLiveMissionFocusedTaskID,
+                ldStreamVehicleID: vid,
+                fleetLink: fleetLink,
+                sitl: sitl
+            )
+            if mediaTab == .map, liveDriveLiveMissionMapZoomAppliedVehicleKey != vid {
+                fitLiveDriveMapToVisibleContent(mapModel)
+                liveDriveLiveMissionMapZoomAppliedVehicleKey = vid
+            }
+            return
+        }
+        liveDriveLiveMissionMapZoomAppliedVehicleKey = nil
+        mapModel.routeGeometry = .empty
+        mapModel.vehicleMarkers = selectedVehicleMarker
+    }
+
+    /// Same bbox inputs as MC‑R ``MissionControlSetupView/fitLiveOverviewMapToVisibleMissionContent()`` (home, paths, runtime map points, live markers).
+    private func fitLiveDriveMapToVisibleContent(_ model: GuardianMapModel) {
+        if vehicleIsInLiveMission,
+           let run = liveDriveActiveMissionRun,
+           let mission = run.template,
+           let vid = selectedVehicleID {
+            let focus = liveDriveLiveMissionFocusedTaskID
+            let pathPayload = MissionControlLiveDriveMapOverlay.taskPathPayload(mission: mission, focusedTaskID: focus)
+            let markers = MissionControlLiveDriveMapOverlay.vehicleMarkers(
+                run: run,
+                mission: mission,
+                focusedTaskID: focus,
+                ldStreamVehicleID: vid,
+                fleetLink: fleetLink,
+                sitl: sitl
+            )
+            let vehicleLL = markers.map { ($0.lat, $0.lon) }
+            let pts = MissionControlLiveMapFitCoordinates.liveOverviewMissionContentPoints(
+                homeCoordinate: mission.routeMacro.home?.coord,
+                taskPathCoordinates: pathPayload.coords,
+                runtimeMissionPoints: run.runtimeMissionPoints,
+                focusedTaskID: focus,
+                vehicleMarkerLatLon: vehicleLL
+            )
+            guard !pts.isEmpty else {
+                model.recenter()
+                return
+            }
+            model.focusMapFitBounds(points: pts)
+            return
+        }
+        let markerPts: [(Double, Double)] = model.vehicleMarkers.compactMap { m in
+            guard MissionControlLiveMapFitCoordinates.isUsableWgs84ForMapFit(lat: m.lat, lon: m.lon) else { return nil }
+            return (m.lat, m.lon)
+        }
+        guard !markerPts.isEmpty else {
+            model.recenter()
+            return
+        }
+        model.focusMapFitBounds(points: markerPts)
+    }
+
+    private func performReturnToMissionControl() {
+        Task { @MainActor in
+            guard let vid = selectedVehicleID,
+                  let runID = missionControlStore.activeMissionRunIDEngagingVehicle(vehicleID: vid, fleetLink: fleetLink, sitl: sitl),
+                  let run = missionControlStore.runs.first(where: { $0.id == runID })
+            else {
+                toastCenter.show("No live mission run is linked to this vehicle.", style: .warning)
+                return
+            }
+            let assignment = run.assignments.first { resolvedFleetStreamVehicleID(assignment: $0, fleetLink: fleetLink, sitl: sitl) == vid }
+            await clearLiveDriveVehicleIfIdle()
+            operatorPromptReviewFocus.requestMissionControlReturnDrillIn(
+                runID: runID,
+                missionTaskID: assignment?.taskId,
+                liveAssignmentID: assignment?.id
+            )
+        }
     }
 
     private var subBar: some View {
-        HStack(spacing: GuardianSpacing.denseGutter) {
-            Picker("", selection: $mediaTab) {
-                Text("Map").tag(LiveDriveMediaTab.map)
-                Text("Camera").tag(LiveDriveMediaTab.camera)
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 170)
-
-            if selectedVehicleID != nil {
-                inputSourcePill
-                Spacer(minLength: GuardianSpacing.micro)
-
-                if let sessionStatusText {
-                    Text(sessionStatusText)
-                        .font(GuardianTypography.font(.inlineNoticeDetail))
-                        .foregroundStyle(
-                            sessionStatusIsError ? GuardianSemanticColors.warningStroke : theme.textSecondary
-                        )
-                        .lineLimit(1)
-                }
-                if let lastKeyboardCommandText {
-                    Text(lastKeyboardCommandText)
-                        .font(GuardianTypography.font(.inlineNoticeDetail))
-                        .foregroundStyle(
-                            lastKeyboardCommandFailed ? GuardianSemanticColors.warningStroke : theme.textSecondary
-                        )
-                        .lineLimit(1)
-                }
-
-                GuardianThemedButton(
-                    title: "Clear Vehicle",
-                    accent: .neutral,
-                    surface: .outline,
-                    size: .small,
-                    shape: .cornered,
-                    isEnabled: selectedVehicleID != nil && !store.hasActiveSession,
-                    action: { Task { await clearLiveDriveVehicleIfIdle() } }
+        HStack(alignment: .center, spacing: 0) {
+            HStack(spacing: GuardianSpacing.xxs) {
+                GuardianToolbarDualIconModeToggle(
+                    selection: $mediaTab,
+                    leftMode: .map,
+                    leftSystemImage: "map.fill",
+                    leftAccessibilityLabel: "Map",
+                    rightMode: .camera,
+                    rightSystemImage: "video.fill",
+                    rightAccessibilityLabel: "Camera"
                 )
 
                 if selectedVehicleID != nil {
-                    Menu {
-                        Button("Export completed sessions (JSON)…") {
-                            if store.promptExportCompletedSessionsToJSON(activeVehicleIDForMeta: selectedVehicleID) {
-                                sessionStatusText = "Exported Live Drive session history."
-                                sessionStatusIsError = false
-                            }
-                        }
-                        .disabled(store.completedSessions.isEmpty)
-                    } label: {
-                        subBarMenuChip(
-                            "Sessions (\(store.completedSessions.count))",
-                            foreground: theme.textPrimary,
-                            stroke: theme.borderSubtle
-                        )
-                    }
-                    .menuStyle(.borderlessButton)
-                    .guardianPointerOnHover()
+                    GuardianToolbarDualIconModeToggle(
+                        selection: $inputSource,
+                        leftMode: .keyboard,
+                        leftSystemImage: LiveDriveInputSource.keyboard.pickerSystemImage,
+                        leftAccessibilityLabel: "Keyboard",
+                        rightMode: .controller,
+                        rightSystemImage: LiveDriveInputSource.controller.pickerSystemImage,
+                        rightAccessibilityLabel: "Controller",
+                        isEnabled: !store.hasActiveSession
+                    )
+                    .help(store.hasActiveSession ? "End the session to change input device" : "Choose keyboard or controller")
                 }
+            }
 
-                if store.hasActiveSession {
-                    Menu {
-                        ForEach(endSessionActions(for: selectedVehicleClass), id: \.label) { action in
-                            Button(action.label) {
-                                endLiveDriveSession(with: action.command, label: action.label)
-                            }
-                        }
-                    } label: {
-                        subBarMenuChip(
-                            "End Session",
-                            foreground: GuardianSemanticColors.dangerForeground,
-                            stroke: GuardianSemanticColors.dangerStroke.opacity(0.65)
-                        )
+            Spacer(minLength: GuardianSpacing.micro)
+
+            if selectedVehicleID != nil {
+                HStack(alignment: .center, spacing: GuardianSpacing.sm) {
+                    if let sessionStatusText {
+                        Text(sessionStatusText)
+                            .font(GuardianTypography.font(.inlineNoticeDetail))
+                            .foregroundStyle(
+                                sessionStatusIsError ? GuardianSemanticColors.warningStroke : theme.textSecondary
+                            )
+                            .lineLimit(1)
                     }
-                    .menuStyle(.borderlessButton)
-                    .guardianPointerOnHover()
-                } else {
-                    GuardianThemedButton(
-                        title: "Start Session",
-                        accent: .primary,
-                        surface: .solid,
-                        size: .small,
-                        shape: .cornered,
-                        isEnabled: selectedVehicleID != nil && !sessionStartInFlight,
-                        action: {
+                    if let lastKeyboardCommandText {
+                        Text(lastKeyboardCommandText)
+                            .font(GuardianTypography.font(.inlineNoticeDetail))
+                            .foregroundStyle(
+                                lastKeyboardCommandFailed ? GuardianSemanticColors.warningStroke : theme.textSecondary
+                            )
+                            .lineLimit(1)
+                    }
+
+                    if !vehicleIsInLiveMission {
+                        GuardianThemedButton(
+                            title: "Clear Vehicle",
+                            accent: .neutral,
+                            surface: .outline,
+                            size: .small,
+                            shape: .cornered,
+                            isEnabled: selectedVehicleID != nil && !store.hasActiveSession,
+                            action: { Task { await clearLiveDriveVehicleIfIdle() } }
+                        )
+                        .guardianPointerOnHover()
+                    }
+
+                    if selectedVehicleID != nil && !vehicleIsInLiveMission {
+                        Menu {
+                            Button("Export completed sessions (JSON)…") {
+                                if store.promptExportCompletedSessionsToJSON(activeVehicleIDForMeta: selectedVehicleID) {
+                                    sessionStatusText = "Exported Live Drive session history."
+                                    sessionStatusIsError = false
+                                }
+                            }
+                            .disabled(store.completedSessions.isEmpty)
+                        } label: {
+                            GuardianNeutralOutlinedMenuTriggerLabel(title: "Sessions (\(store.completedSessions.count))")
+                        }
+                        .guardianStyledNeutralToolbarMenu()
+                        .fixedSize(horizontal: true, vertical: false)
+                        .guardianPointerOnHover()
+                    }
+
+                    if store.hasActiveSession {
+                        let missionSession = store.activeSessionRecord?.kind == .mission
+                        Menu {
+                            ForEach(
+                                endSessionActions(for: selectedVehicleClass, isLiveMissionSession: missionSession),
+                                id: \.label
+                            ) { action in
+                                Button(action.label) {
+                                    endLiveDriveSession(with: action.command, label: action.label)
+                                }
+                            }
+                        } label: {
+                            GuardianNeutralOutlinedMenuTriggerLabel(title: missionSession ? "End Mission" : "End Session")
+                        }
+                        .guardianStyledNeutralToolbarMenu()
+                        .fixedSize(horizontal: true, vertical: false)
+                        .guardianPointerOnHover()
+                    } else {
+                        HStack(spacing: GuardianSpacing.xs) {
+                            GuardianThemedButton(
+                                title: "Start Session",
+                                accent: .primary,
+                                surface: .solid,
+                                size: .small,
+                                shape: .cornered,
+                                isEnabled: selectedVehicleID != nil && !sessionStartInFlight,
+                                action: {
+                                    if vehicleIsInLiveMission {
+                                        startMissionSession()
+                                    } else {
+                                        startFreestyleSession()
+                                    }
+                                }
+                            )
+                            .guardianPointerOnHover()
                             if vehicleIsInLiveMission {
-                                startMissionSession()
-                            } else {
-                                startFreestyleSession()
+                                GuardianThemedButton(
+                                    title: "Return to Mission",
+                                    accent: .neutral,
+                                    surface: .outline,
+                                    size: .small,
+                                    shape: .cornered,
+                                    action: { performReturnToMissionControl() }
+                                )
+                                .guardianPointerOnHover()
+                                .help("Open Mission Control on this live run.")
                             }
                         }
-                    )
-                }
+                    }
 
-                if let selectedVehicleID, isSimulationVehicle(vehicleID: selectedVehicleID) {
-                    GuardianNeutralBorderedButton(
-                        systemImage: "gearshape",
-                        help: "SIM live settings",
-                        action: {
-                            liveSimBatteryDrainRate = generalSettings.defaultSimBatteryDrainRate
-                            if simControlsSidebarVisible {
-                                appDrawer.dismiss(animation: liveDriveSidebarAnimation)
-                                simControlsSidebarVisible = false
-                            } else {
-                                vehiclePickerVisible = false
-                                simControlsSidebarVisible = true
-                                presentLiveDriveSimControlsSidebar()
+                    if let selectedVehicleID, !vehicleIsInLiveMission, isSimulationVehicle(vehicleID: selectedVehicleID) {
+                        GuardianNeutralBorderedButton(
+                            systemImage: "gearshape",
+                            help: "SIM live settings",
+                            action: {
+                                if simControlsSidebarVisible {
+                                    appDrawer.dismiss(animation: liveDriveSidebarAnimation)
+                                    simControlsSidebarVisible = false
+                                } else {
+                                    vehiclePickerVisible = false
+                                    simControlsSidebarVisible = true
+                                    presentLiveDriveSimControlsSidebar()
+                                }
                             }
-                        }
-                    )
+                        )
+                        .guardianPointerOnHover()
+                    }
                 }
             } else {
                 Spacer(minLength: GuardianSpacing.micro)
@@ -363,9 +585,9 @@ struct LiveDriveView: View {
                     }
                 )
             }
-            
         }
-        .padding(.horizontal, GuardianSpacing.md)
+        .padding(.leading, GuardianSpacing.xxs)
+        .padding(.trailing, GuardianSpacing.md)
         .padding(.vertical, GuardianSpacing.denseGutter)
         .background(theme.backgroundRaised)
         .overlay(alignment: .bottom) {
@@ -375,59 +597,50 @@ struct LiveDriveView: View {
         }
     }
 
-    /// Compact input-source toggle. Disabled mid-session because changing input device
-    /// while streaming requires restarting the plugin (Offboard ↔ ManualControl).
-    private var inputSourcePill: some View {
-        Picker("", selection: $inputSource) {
-            ForEach(LiveDriveInputSource.allCases, id: \.self) { source in
-                Text(source.displayName).tag(source)
-            }
-        }
-        .pickerStyle(.segmented)
-        .frame(width: 165)
-        .disabled(store.hasActiveSession)
-        .help(store.hasActiveSession ? "End the session to change input device" : "Choose keyboard or controller")
-    }
-
     /// Body only; title + close come from ``AppDrawer`` / ``AppDrawerChrome``.
     private var liveSimControlsSidebarBody: some View {
-        GuardianCard(
-            configuration: GuardianCardConfiguration(
-                border: .subtle,
-                cornerRadius: GuardianCardLayout.cornerRadius,
-                bodyPadding: GuardianCardLayout.defaultBodyPadding
-            ),
-            body: {
-                VStack(alignment: .leading, spacing: GuardianSpacing.cardBodyInset) {
-                    Text("Battery drain")
-                        .font(GuardianTypography.font(.subsectionTitleSemibold))
-                        .foregroundStyle(theme.textPrimary)
-                    Toggle("Enable drain", isOn: $liveSimBatteryDrainEnabled)
-                        .toggleStyle(.switch)
-
-                    Picker("Drain rate", selection: $liveSimBatteryDrainRate) {
-                        ForEach(SimBatteryDrainRate.allCases) { rate in
-                            Text(rate.displayName).tag(rate)
-                        }
+        VStack(alignment: .leading, spacing: GuardianSpacing.md) {
+            simLiveSettingsLabeledRow(
+                title: "SIM battery drain",
+                help: "SIM pack depletion on the wire during Live Drive freestyle (PX4 SIM_BAT_DRAIN / ArduPilot SIM_BATT_CAP_AH). None turns drain off."
+            ) {
+                Picker("", selection: $generalSettings.liveDriveSimBatteryDrainRate) {
+                    ForEach(SimBatteryDrainRate.missionRunPickerCases, id: \.self) { rate in
+                        Text(rate.displayName).tag(rate)
                     }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-
-                    GuardianThemedButton(
-                        title: "Apply",
-                        accent: .primary,
-                        surface: .solid,
-                        size: .small,
-                        shape: .cornered,
-                        isEnabled: selectedVehicleID != nil,
-                        action: { applyLiveSimBatteryDrainSettings() }
-                    )
-
-                    Spacer(minLength: 0)
                 }
-                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(minWidth: 160, alignment: .trailing)
+                .accessibilityLabel("SIM battery drain during Live Drive freestyle")
             }
-        )
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .onAppear {
+            applyLiveSimBatteryDrainSettings(recordSessionEvent: false, updateStatusLine: false)
+        }
+        .onChange(of: generalSettings.liveDriveSimBatteryDrainRate) { _ in
+            applyLiveSimBatteryDrainSettings()
+        }
+    }
+
+    private func simLiveSettingsLabeledRow<Content: View>(
+        title: String,
+        help: String,
+        @ViewBuilder control: () -> Content
+    ) -> some View {
+        HStack(alignment: .center, spacing: GuardianSpacing.md) {
+            Text(title)
+                .font(GuardianTypography.font(.formFieldLabel))
+                .foregroundStyle(theme.textPrimary)
+                .frame(width: 118, alignment: .leading)
+                .help(help)
+            control()
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .contentShape(Rectangle())
     }
 
     private func presentLiveDriveVehiclePickerSidebar() {
@@ -454,7 +667,7 @@ struct LiveDriveView: View {
 
     private func presentLiveDriveSimControlsSidebar() {
         appDrawer.present(
-            title: "SIM Live Settings",
+            title: "Settings",
             preferredWidth: 340,
             scrimTapDismisses: true,
             animation: liveDriveSidebarAnimation
@@ -465,6 +678,38 @@ struct LiveDriveView: View {
         }
     }
 
+    /// Live Drive **mission** path: narrow hub gate (HandOff §3) before arm preflight — §1 stabilize is still required upstream in MC‑R.
+    private func liveDriveMissionTelemetryAllowsPreflightProbe() -> Bool {
+        guard let vehicleID = selectedVehicleID else { return false }
+        guard vehicleIsInLiveMission else { return true }
+        let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID)
+        let lifecycle = fleetLink.vehicleStatus(forVehicleID: vehicleID)
+        let now = Date()
+        let operational = FleetVehicleOperationalModel(hub: hub, lifecycleStatus: lifecycle, now: now)
+        let maxHubAge: TimeInterval = isSimulationVehicle(vehicleID: vehicleID)
+            ? MissionControlReserveSwapInPreflightGates.maxHubAgeSecondsSimulation
+            : MissionControlReserveSwapInPreflightGates.maxHubAgeSecondsLive
+        let verdict = MissionRunEngageStabilizeTelemetryClassifier.evaluateLiveDriveMissionStartStabilizeGate(
+            vehicleClass: selectedVehicleClass,
+            hub: hub,
+            operational: operational,
+            now: now,
+            maxHubAgeSeconds: maxHubAge
+        )
+        if case .stable = verdict { return true }
+        let detail: String = {
+            switch verdict {
+            case .stable: return ""
+            case .pending(let r), .fault(let r): return r
+            }
+        }()
+        toastCenter.show(
+            "Live Drive start blocked — stabilize the vehicle in Mission Control first. \(detail)",
+            style: .warning
+        )
+        return false
+    }
+
     private func startFreestyleSession() {
         guard selectedVehicleID != nil else { return }
         sessionStatusText = nil
@@ -472,9 +717,10 @@ struct LiveDriveView: View {
         preflightPurpose = .freestyle
     }
 
-    /// Mission roster vehicle: same preflight + control session as freestyle, recorded as `.mission`.
+    /// Mission roster vehicle: telemetry gate, then arm preflight (``allowDuringLiveMission``) and the same control session as freestyle, recorded as `.mission`.
     private func startMissionSession() {
         guard selectedVehicleID != nil else { return }
+        guard liveDriveMissionTelemetryAllowsPreflightProbe() else { return }
         sessionStatusText = nil
         sessionStatusIsError = false
         preflightPurpose = .mission
@@ -491,10 +737,12 @@ struct LiveDriveView: View {
 
             let isSim = isSimulationVehicle(vehicleID: vehicleID)
             if isSim {
+                let drain = generalSettings.liveDriveSimBatteryDrainRate
+                let enabled = drain != .none
                 fleetLink.setSimBatteryDrainEnabled(
                     vehicleID: vehicleID,
-                    enabled: true,
-                    rate: generalSettings.defaultSimBatteryDrainRate,
+                    enabled: enabled,
+                    rate: enabled ? drain : .normal,
                     source: "liveDrive.sessionStart",
                     onResult: { result in
                         Task { @MainActor in
@@ -541,9 +789,16 @@ struct LiveDriveView: View {
                 sessionStatusIsError = false
                 lastKeyboardCommandText = "Idle"
                 lastKeyboardCommandFailed = false
+                operatorPromptReviewFocus.consumePendingLiveDriveMissionRunDrillIn()
             } else {
                 fleetLink.clearLiveDriveControlSessionVehicleIfMatches(vehicleID: vehicleID)
+                missionControlStore.clearOperatorLiveDriveHandoffForClearedControlSessionVehicle(
+                    vehicleID: vehicleID,
+                    fleetLink: fleetLink,
+                    sitl: sitl
+                )
                 store.discardActiveSessionRecording()
+                operatorPromptReviewFocus.consumePendingLiveDriveMissionRunDrillIn()
                 sessionStatusText = "Live Drive: streaming setup failed; vehicle held."
                 sessionStatusIsError = true
             }
@@ -567,71 +822,108 @@ struct LiveDriveView: View {
     }
 
     @MainActor
-    private func endLiveDriveSession(with command: FleetVehicleCommand, label: String) {
-        guard let vehicleID = selectedVehicleID else { return }
+    private func awaitEndLiveDriveSessionForVehicle(
+        vehicleID: String,
+        vehicleClass: UniversalVehicleClass,
+        command: FleetVehicleCommand,
+        label: String,
+        consumePendingMissionRunDrillIn: Bool
+    ) async {
         let usedInLiveMission = missionControlStore.isVehicleStreamUsedInLiveMission(
             vehicleID: vehicleID,
             fleetLink: fleetLink,
             sitl: sitl
         )
 
-        // Drop held inputs immediately so the next stream tick (if any) sees a zero setpoint.
         heldActions.removeAll()
         streamActive = false
         lastKeyboardCommandText = nil
 
-        Task { @MainActor in
-            await fleetLink.stopManualControlStream(vehicleID: vehicleID)
-            let isSim = isSimulationVehicle(vehicleID: vehicleID)
-            if isSim {
-                fleetLink.setSimBatteryDrainEnabled(
-                    vehicleID: vehicleID,
-                    enabled: false,
-                    rate: generalSettings.defaultSimBatteryDrainRate,
-                    source: "liveDrive.sessionEnd",
-                    onResult: nil
-                )
-                // Intentionally NO snapshot restore on session end — that would throw away the work the
-                // operator just did. Clearing the vehicle row also leaves the SIM where it is.
-            }
-
-            store.appendActiveSessionEvent(
-                LiveDriveSessionEvent(title: "Session end", detail: label)
+        await fleetLink.stopManualControlStream(vehicleID: vehicleID)
+        let isSim = isSimulationVehicle(vehicleID: vehicleID)
+        if isSim {
+            fleetLink.setSimBatteryDrainEnabled(
+                vehicleID: vehicleID,
+                enabled: false,
+                rate: .normal,
+                source: "liveDrive.sessionEnd",
+                onResult: nil
             )
+        }
 
-            // Surface / ground classes get class-aware end-session sequences instead of the bare
-            // command. Park (`.holdPosition`) becomes hold + disarm; RTL becomes RTL + wait-for-arrival
-            // + HOLD + disarm so the vehicle ends "parked at home" rather than "still in RTL mode at
-            // home with autopilot waiting for the next leg." UAVs keep the bare command path because
-            // their RTL ends in LAND (autopilot-managed touchdown + auto-disarm) and Loiter must stay
-            // armed mid-air.
-            let isSurfaceClass = [.ugv, .usv, .uuv].contains(selectedVehicleClass)
-            switch (isSurfaceClass, command) {
-            case (true, .holdPosition):
-                await fleetLink.awaitLiveDriveSurfaceParkHoldAndDisarm(vehicleID: vehicleID)
-            case (true, .returnToLaunch):
-                await fleetLink.awaitLiveDriveSurfaceRTLHomeAndPark(vehicleID: vehicleID)
-            default:
-                _ = fleetLink.executeVehicleCommand(
-                    vehicleID: vehicleID,
-                    command: command,
-                    source: "liveDrive.endSession",
-                    category: .manualTakeover
-                )
-            }
-            fleetLink.setCommandAuthorityGate(vehicleID: vehicleID, minimumCategory: .missionControl)
+        store.appendActiveSessionEvent(
+            LiveDriveSessionEvent(title: "Session end", detail: label)
+        )
 
-            let logLinesNow = fleetLink.storedLogLines(forVehicleID: vehicleID)
-            store.finalizeActiveSession(vehicleLogLinesSnapshot: logLinesNow)
+        let isSurfaceClass = [.ugv, .usv, .uuv].contains(vehicleClass)
+        switch (isSurfaceClass, command) {
+        case (true, .holdPosition):
+            await fleetLink.awaitLiveDriveSurfaceParkHoldAndDisarm(vehicleID: vehicleID)
+        case (true, .returnToLaunch):
+            await fleetLink.awaitLiveDriveSurfaceRTLHomeAndPark(vehicleID: vehicleID)
+        default:
+            _ = fleetLink.executeVehicleCommand(
+                vehicleID: vehicleID,
+                command: command,
+                source: "liveDrive.endSession",
+                category: .manualTakeover
+            )
+        }
+        fleetLink.setCommandAuthorityGate(vehicleID: vehicleID, minimumCategory: .missionControl)
 
-            fleetLink.clearLiveDriveControlSessionVehicleIfMatches(vehicleID: vehicleID)
+        let logLinesNow = fleetLink.storedLogLines(forVehicleID: vehicleID)
+        store.finalizeActiveSession(vehicleLogLinesSnapshot: logLinesNow)
 
-            if usedInLiveMission {
-                sessionStatusText = "Session ended (\(label)); returned to mission authority."
-            } else {
-                sessionStatusText = "Session ended (\(label)); manual control released."
-            }
-            sessionStatusIsError = false
+        fleetLink.clearLiveDriveControlSessionVehicleIfMatches(vehicleID: vehicleID)
+
+        missionControlStore.clearOperatorLiveDriveHandoffForClearedControlSessionVehicle(
+            vehicleID: vehicleID,
+            fleetLink: fleetLink,
+            sitl: sitl
+        )
+        if consumePendingMissionRunDrillIn {
+            operatorPromptReviewFocus.consumePendingLiveDriveMissionRunDrillIn()
+        }
+
+        if usedInLiveMission {
+            sessionStatusText = "Session ended (\(label)); Mission Control has authority — use Continue mission there when you want to resume."
+        } else {
+            sessionStatusText = "Session ended (\(label)); manual control released."
+        }
+        sessionStatusIsError = false
+    }
+
+    /// Ends the current control session using a **safe** class-aware default (Loiter for aerial handoff, Park for surface), then applies MC‑R drill-in selection. Does not clear ``pendingLiveDriveMissionRunID`` so the new handoff context stays intact.
+    @MainActor
+    private func endActiveLiveDriveSessionForDrillInVehicleSwitch(sessionVehicleID: String, pendingVehicleID: String) async {
+        let vehicleClass = universalVehicleClass(forFleetVehicleID: sessionVehicleID)
+        let isMissionSession = store.activeSessionRecord?.kind == .mission
+        guard let end = liveDriveAutoEndSessionActionForVehicleSwitch(
+            vehicleClass: vehicleClass,
+            isLiveMissionSession: isMissionSession
+        ) else { return }
+        await awaitEndLiveDriveSessionForVehicle(
+            vehicleID: sessionVehicleID,
+            vehicleClass: vehicleClass,
+            command: end.command,
+            label: "\(end.label) (auto before handoff)",
+            consumePendingMissionRunDrillIn: false
+        )
+        store.selectVehicle(pendingVehicleID)
+        operatorPromptReviewFocus.consumeLiveDriveFocus()
+    }
+
+    @MainActor
+    private func endLiveDriveSession(with command: FleetVehicleCommand, label: String) {
+        guard let vehicleID = selectedVehicleID else { return }
+        Task { @MainActor in
+            await awaitEndLiveDriveSessionForVehicle(
+                vehicleID: vehicleID,
+                vehicleClass: selectedVehicleClass,
+                command: command,
+                label: label,
+                consumePendingMissionRunDrillIn: true
+            )
         }
     }
 
@@ -639,6 +931,7 @@ struct LiveDriveView: View {
     private func clearLiveDriveVehicleIfIdle() async {
         guard !store.hasActiveSession else { return }
         store.clearActiveVehicleIfIdle()
+        operatorPromptReviewFocus.consumePendingLiveDriveMissionRunDrillIn()
     }
 
     private func isSimulationVehicle(vehicleID: String) -> Bool {
@@ -649,12 +942,18 @@ struct LiveDriveView: View {
         }
     }
 
-    private func applyLiveSimBatteryDrainSettings() {
+    private func applyLiveSimBatteryDrainSettings(
+        recordSessionEvent: Bool = true,
+        updateStatusLine: Bool = true
+    ) {
         guard let vehicleID = selectedVehicleID, isSimulationVehicle(vehicleID: vehicleID) else { return }
+        let rate = generalSettings.liveDriveSimBatteryDrainRate
+        let enabled = rate != .none
+        let wireRate = enabled ? rate : .normal
         fleetLink.setSimBatteryDrainEnabled(
             vehicleID: vehicleID,
-            enabled: liveSimBatteryDrainEnabled,
-            rate: liveSimBatteryDrainRate,
+            enabled: enabled,
+            rate: wireRate,
             source: "liveDrive.simSidebar",
             onResult: { result in
                 Task { @MainActor in
@@ -665,18 +964,20 @@ struct LiveDriveView: View {
                 }
             }
         )
-        sessionStatusText = liveSimBatteryDrainEnabled
-            ? "SIM battery drain enabled (\(liveSimBatteryDrainRate.displayName))."
-            : "SIM battery drain disabled."
-        sessionStatusIsError = false
-        store.appendActiveSessionEvent(
-            LiveDriveSessionEvent(
-                title: "Battery drain",
-                detail: liveSimBatteryDrainEnabled
-                    ? "On (\(liveSimBatteryDrainRate.displayName))"
-                    : "Off"
+        if updateStatusLine {
+            sessionStatusText = enabled
+                ? "SIM battery drain enabled (\(rate.displayName))."
+                : "SIM battery drain disabled."
+            sessionStatusIsError = false
+        }
+        if recordSessionEvent {
+            store.appendActiveSessionEvent(
+                LiveDriveSessionEvent(
+                    title: "Battery drain",
+                    detail: enabled ? "On (\(rate.displayName))" : "Off"
+                )
             )
-        )
+        }
     }
 
     private var mediaCard: some View {
@@ -692,6 +993,11 @@ struct LiveDriveView: View {
                     case .map:
                         GuardianMapView(
                             model: mapModel,
+                            toolbar: GuardianMapToolbarOptions(
+                                mapResetAction: { m in
+                                    fitLiveDriveMapToVisibleContent(m)
+                                }
+                            ),
                             contextMenuPolicy: GuardianMapContextMenuPolicy(
                                 vehicleActions: [.followVehicle, .stopFollowingVehicle, .centerMarker],
                                 waypointActions: [],
@@ -711,16 +1017,16 @@ struct LiveDriveView: View {
                                     sessionStatusText = "Map follow disabled."
                                     sessionStatusIsError = false
                                 case .centerMarker:
-                                    break
+                                    fitLiveDriveMapToVisibleContent(mapModel)
                                 case .deleteWaypoint, .deleteMissionPoint:
                                     break
                                 }
                             }
                         )
-                        .task(id: liveDriveMarkerSignature) {
-                            mapModel.vehicleMarkers = selectedVehicleMarker
+                        .task(id: liveDriveLiveMissionMapSyncSignature) {
+                            syncLiveDriveMapContentFromModel()
                             if let followID = mapModel.followedVehicleMarkerID,
-                               !selectedVehicleMarker.contains(where: { $0.id == followID }) {
+                               !mapModel.vehicleMarkers.contains(where: { $0.id == followID }) {
                                 mapModel.followedVehicleMarkerID = nil
                             }
                         }
@@ -771,9 +1077,9 @@ struct LiveDriveView: View {
                 bodyPadding: GuardianSpacing.sm
             ),
             header: {
-                HStack(alignment: .top, spacing: GuardianSpacing.denseGutter) {
+                HStack(alignment: .center, spacing: GuardianSpacing.denseGutter) {
                     if let vehicle = selectedPickableVehicle {
-                        HStack(spacing: GuardianSpacing.denseGutter) {
+                        HStack(alignment: .center, spacing: GuardianSpacing.denseGutter) {
                             telemetryVehicleBadge(for: vehicle)
                                 .frame(width: 34, height: 28)
                                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
@@ -787,13 +1093,13 @@ struct LiveDriveView: View {
                             }
                         }
                     } else {
-                        Text("Vehicle health / telemetry")
+                        Text("Vehicle Health")
                             .font(GuardianTypography.font(.sectionHeadingSemibold))
                             .foregroundStyle(theme.textPrimary)
                     }
                     Spacer(minLength: GuardianSpacing.xs)
                     if let hub = selectedHub {
-                        HStack(spacing: GuardianSpacing.xs) {
+                        HStack(alignment: .center, spacing: GuardianSpacing.xs) {
                             telemetryPill("Mode", hub.flightMode.isEmpty ? "—" : hub.flightMode)
                             telemetryPill(
                                 "Armed",
@@ -915,6 +1221,28 @@ struct LiveDriveView: View {
         return idText
     }
 
+    private var liveDriveMissionLogEvents: [MissionRunEvent] {
+        guard let run = liveDriveActiveMissionRun,
+              let mission = run.template,
+              selectedVehicleID != nil
+        else { return [] }
+        let focus = liveDriveLiveMissionFocusedTaskID
+        return run.eventsFilteredForLiveTaskLogFocus(focusedTaskID: focus, mission: mission)
+    }
+
+    private var liveDriveMissionLogTailAnchorID: UUID? {
+        liveDriveMissionLogEvents.suffix(80).last?.id
+    }
+
+    /// Matches Mission Control Setup live log header: ``GuardianNeutralBorderedButton`` + `doc.on.doc` + disabled when empty.
+    private var isLiveDriveLogCopyDisabled: Bool {
+        guard let vehicleID = selectedVehicleID else { return true }
+        if vehicleIsInLiveMission {
+            return liveDriveMissionLogEvents.isEmpty
+        }
+        return fleetLink.combinedLogs(filteredVehicleIDs: [vehicleID]).isEmpty
+    }
+
     private var logCard: some View {
         GuardianCard(
             configuration: GuardianCardConfiguration(
@@ -929,54 +1257,139 @@ struct LiveDriveView: View {
                         .foregroundStyle(theme.textPrimary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     if selectedVehicleID != nil {
-                        GuardianPrimaryProminentButton(title: "Copy") {
-                            copyLiveDriveLogToPasteboard()
-                        }
-                        .help("Copy log text to the clipboard")
+                        GuardianNeutralBorderedButton(
+                            systemImage: "doc.on.doc",
+                            help: "Copy log",
+                            action: { copyLiveDriveLogToPasteboard() }
+                        )
+                        .disabled(isLiveDriveLogCopyDisabled)
+                        .guardianPointerOnHover()
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             },
             body: {
-                ScrollView {
-                    Text(logText)
-                        .font(GuardianTypography.font(.telemetryMono11Regular))
-                        .foregroundStyle(theme.textTertiary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
+                Group {
+                    if vehicleIsInLiveMission,
+                       let run = liveDriveActiveMissionRun,
+                       let mission = run.template {
+                        liveDriveMissionLogsScroll(run: run, mission: mission)
+                    } else {
+                        ScrollView {
+                            Text(liveDriveFleetVehicleLogBodyText)
+                                .font(GuardianTypography.font(.telemetryMono11Regular))
+                                .foregroundStyle(theme.textTertiary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         )
     }
 
+    private var liveDriveFleetVehicleLogBodyText: String {
+        guard let vehicleID = selectedVehicleID else { return "No vehicle selected." }
+        let lines = fleetLink.combinedLogs(filteredVehicleIDs: [vehicleID])
+        return lines.isEmpty ? "No vehicle log lines yet." : lines.joined(separator: "\n")
+    }
+
+    @ViewBuilder
+    private func liveDriveMissionLogsScroll(run: MissionRunEnvironment, mission: Mission) -> some View {
+        let events = liveDriveMissionLogEvents
+        ScrollViewReader { proxy in
+            ScrollView {
+                if events.isEmpty {
+                    Text("No mission log lines yet.")
+                        .font(GuardianTypography.font(.telemetryMono11Regular))
+                        .foregroundStyle(theme.textTertiary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
+                        ForEach(events.suffix(80)) { event in
+                            MissionRunLiveLogEventRow(
+                                event: event,
+                                run: run,
+                                mission: mission,
+                                fleetLink: fleetLink,
+                                sitl: sitl
+                            )
+                            .id(event.id)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .textSelection(.enabled)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .environment(\.openURL, OpenURLAction { url in
+                handleLiveDriveMissionLogURL(url, run: run)
+            })
+            .onAppear {
+                if let id = liveDriveMissionLogTailAnchorID {
+                    DispatchQueue.main.async {
+                        proxy.scrollTo(id, anchor: .bottom)
+                    }
+                }
+            }
+            .onChange(of: liveDriveMissionLogTailAnchorID) { id in
+                guard let id else { return }
+                DispatchQueue.main.async {
+                    proxy.scrollTo(id, anchor: .bottom)
+                }
+            }
+        }
+    }
+
+    private func handleLiveDriveMissionLogURL(_ url: URL, run: MissionRunEnvironment) -> OpenURLAction.Result {
+        guard url.scheme == "guardian", url.host == "mcr" else { return .discarded }
+        let parts = url.pathComponents.filter { $0 != "/" }
+        guard parts.count == 2, let id = UUID(uuidString: parts[1]) else { return .discarded }
+        switch parts[0] {
+        case "task":
+            operatorPromptReviewFocus.requestMissionControlReturnDrillIn(runID: run.id, missionTaskID: id)
+            return .handled
+        case "slot":
+            let taskID = run.assignments.first(where: { $0.id == id })?.taskId
+            operatorPromptReviewFocus.requestMissionControlReturnDrillIn(runID: run.id, missionTaskID: taskID)
+            return .handled
+        default:
+            return .discarded
+        }
+    }
+
     private var logHeaderTitle: String {
         if selectedVehicleID == nil { return "Log" }
-        return vehicleIsInLiveMission ? "Paladin Log" : "Vehicle Log"
+        return vehicleIsInLiveMission ? "Mission Logs" : "Vehicle Log"
     }
 
     private func copyLiveDriveLogToPasteboard() {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(logText, forType: .string)
+        NSPasteboard.general.setString(liveDriveLogExportString, forType: .string)
+    }
+
+    private var liveDriveLogExportString: String {
+        guard let vehicleID = selectedVehicleID else { return "No vehicle selected." }
+        if vehicleIsInLiveMission,
+           let run = liveDriveActiveMissionRun,
+           let mission = run.template {
+            let events = liveDriveMissionLogEvents
+            let header: String = {
+                guard let plan = run.compiledPlan else { return "Mission log" }
+                let meta = "\(plan.taskTopology.rawValue) · \(plan.teamTopology.rawValue) · \(plan.roleTracks.count) trk"
+                return "Logs - \(run.sessionPhase.rawValue.capitalized) · \(meta)"
+            }()
+            let body = events.map { $0.plainTextLine(mission: mission, assignments: run.assignments) }
+            return ([header] + body).joined(separator: "\n")
+        }
+        let lines = fleetLink.combinedLogs(filteredVehicleIDs: [vehicleID])
+        return lines.isEmpty ? "No vehicle log lines yet." : lines.joined(separator: "\n")
     }
 
     private var vehicleIsInLiveMission: Bool {
         guard let id = selectedVehicleID else { return false }
         return missionControlStore.isVehicleStreamUsedInLiveMission(vehicleID: id, fleetLink: fleetLink, sitl: sitl)
-    }
-
-    private var logText: String {
-        guard let vehicleID = selectedVehicleID else { return "No vehicle selected." }
-        if vehicleIsInLiveMission {
-            let runs = missionControlStore.runs
-                .filter { $0.status == .running || $0.status == .paused }
-            let lines = runs.flatMap { run in
-                run.events.map { $0.plainTextLine() }
-            }
-            return lines.isEmpty ? "No Paladin lines yet." : lines.joined(separator: "\n")
-        }
-        let lines = fleetLink.combinedLogs(filteredVehicleIDs: [vehicleID])
-        return lines.isEmpty ? "No vehicle log lines yet." : lines.joined(separator: "\n")
     }
 
     private func resolvedVehicleID(for vehicle: MissionPickableFleetVehicle) -> String? {
@@ -1213,23 +1626,62 @@ struct LiveDriveView: View {
         }
     }
 
-    /// Build the End-Session menu items for the given vehicle class.
-    ///
-    /// Class-aware because the safe / sensible "set the vehicle down" actions diverge:
-    ///
-    /// - **UAV** (copters / planes / VTOLs): Loiter (hold position in air), RTL (fly home),
-    ///   Land (descend and disarm). `.land` is the canonical safe-end for an aerial vehicle.
-    ///
-    /// - **UGV / USV / UUV** (rovers / boats / subs): Park (`.holdPosition` — same autopilot
-    ///   action-hold as UAV "Loiter", relabelled because "loiter" reads as "circle in the
-    ///   air" and a stationary rover isn't loitering), RTL (drive / sail home), Idle
-    ///   (`.idle` — switch to MANUAL stick-passthrough so the operator or Paladin can
-    ///   re-take control instantly without re-engaging Offboard / GUIDED). Land is omitted
-    ///   because nothing meaningful happens when a rover or boat receives `MAV_CMD_NAV_LAND`.
-    ///
-    /// - **unknown**: fall back to the UAV menu (it's the strict superset and includes
-    ///   the safe Land option in case the vehicle turns out to be airborne).
-    private func endSessionActions(for vehicleClass: UniversalVehicleClass) -> [LiveDriveEndAction] {
+    private func universalVehicleClass(forFleetVehicleID vehicleID: String) -> UniversalVehicleClass {
+        if let vehicle = pickableVehicles.first(where: { resolvedVehicleID(for: $0) == vehicleID }) {
+            switch vehicle.domain {
+            case .aerial:
+                return .uav
+            case .ground:
+                return .ugv
+            case .marine:
+                return (vehicle.title.lowercased().contains("underwater") || vehicle.title.lowercased().contains("uuv")) ? .uuv : .usv
+            }
+        }
+        let mode = fleetLink.hubTelemetry(forVehicleID: vehicleID)?.flightMode.lowercased() ?? ""
+        if mode.contains("sub") { return .uuv }
+        if mode.contains("boat") || mode.contains("ship") { return .usv }
+        if mode.contains("rover") || mode.contains("ground") { return .ugv }
+        return .unknown
+    }
+
+    /// Safe default when auto-ending a session before a vehicle handoff (not the same as the operator menu order).
+    private func liveDriveAutoEndSessionActionForVehicleSwitch(
+        vehicleClass: UniversalVehicleClass,
+        isLiveMissionSession: Bool
+    ) -> LiveDriveEndAction? {
+        if isLiveMissionSession {
+            switch vehicleClass {
+            case .uav:
+                return LiveDriveEndAction(label: "Loiter", command: .holdPosition)
+            case .ugv, .usv, .uuv:
+                return LiveDriveEndAction(label: "Park", command: .holdPosition)
+            case .unknown:
+                return LiveDriveEndAction(label: "Loiter", command: .holdPosition)
+            }
+        }
+        return endSessionActions(for: vehicleClass, isLiveMissionSession: false).first
+    }
+
+    /// Build **End Session** / **End Mission** menu rows. Mission sessions use a shorter surface / aerial list per product spec; freestyle keeps RTL / Idle where useful.
+    private func endSessionActions(for vehicleClass: UniversalVehicleClass, isLiveMissionSession: Bool) -> [LiveDriveEndAction] {
+        if isLiveMissionSession {
+            switch vehicleClass {
+            case .uav:
+                return [
+                    LiveDriveEndAction(label: "Return to Launch", command: .returnToLaunch),
+                    LiveDriveEndAction(label: "Park", command: .land),
+                    LiveDriveEndAction(label: "Loiter", command: .holdPosition),
+                ]
+            case .ugv, .usv, .uuv:
+                return [LiveDriveEndAction(label: "Park", command: .holdPosition)]
+            case .unknown:
+                return [
+                    LiveDriveEndAction(label: "Return to Launch", command: .returnToLaunch),
+                    LiveDriveEndAction(label: "Park", command: .land),
+                    LiveDriveEndAction(label: "Loiter", command: .holdPosition),
+                ]
+            }
+        }
         switch vehicleClass {
         case .uav:
             return [
@@ -1253,22 +1705,8 @@ struct LiveDriveView: View {
     }
 
     private var selectedVehicleClass: UniversalVehicleClass {
-        if let vehicle = selectedPickableVehicle {
-            switch vehicle.domain {
-            case .aerial:
-                return .uav
-            case .ground:
-                return .ugv
-            case .marine:
-                return (vehicle.title.lowercased().contains("underwater") || vehicle.title.lowercased().contains("uuv")) ? .uuv : .usv
-            }
-        }
-        if let mode = selectedHub?.flightMode.lowercased() {
-            if mode.contains("sub") { return .uuv }
-            if mode.contains("boat") || mode.contains("ship") { return .usv }
-            if mode.contains("rover") || mode.contains("ground") { return .ugv }
-        }
-        return .unknown
+        guard let id = selectedVehicleID else { return .unknown }
+        return universalVehicleClass(forFleetVehicleID: id)
     }
 
     private func displayAltitudeText(for hub: FleetHubVehicleTelemetry) -> String {
@@ -1297,7 +1735,7 @@ private enum LiveDrivePreflightPurpose: String, Identifiable {
     }
 }
 
-private enum LiveDriveMediaTab {
+private enum LiveDriveMediaTab: Hashable {
     case map
     case camera
 }
@@ -1326,6 +1764,13 @@ enum LiveDriveInputSource: String, Equatable, CaseIterable {
         switch self {
         case .keyboard: return "Keyboard"
         case .controller: return "Controller"
+        }
+    }
+
+    var pickerSystemImage: String {
+        switch self {
+        case .keyboard: return "arrow.up.and.down.and.arrow.left.and.right"
+        case .controller: return "gamecontroller.fill"
         }
     }
 }

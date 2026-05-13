@@ -55,6 +55,9 @@ final class FleetLinkService: ObservableObject {
     @Published private(set) var vehicleStatusByVehicleID: [String: VehicleLifecycleStatus] = [:]
     @Published private(set) var isSimulateEnabled = true
 
+    /// Vehicle IDs that completed **PX4 UGV** offboard park; Mission Control may surface **Continue mission** until cleared.
+    @Published private(set) var mcrOperatorParkAwaitingContinueVehicleIDs: Set<String> = []
+
     /// Publishes intermediate and terminal events from in-flight MAVSDK Calibration
     /// plugin procedures. Layer 1 recipe runners / Layer 2 wizards / plugins subscribe
     /// here to surface progress percentages, operator prompts ("Rotate vehicle"), and
@@ -142,6 +145,7 @@ final class FleetLinkService: ObservableObject {
         liveDriveControlSessionVehicleID = nil
         bridgePhase = .inactive
         lastError = nil
+        mcrOperatorParkAwaitingContinueVehicleIDs.removeAll()
     }
 
     /// Install or clear the Live Drive control session (see `liveDriveControlSessionVehicleID`).
@@ -159,6 +163,20 @@ final class FleetLinkService: ObservableObject {
         appendVehicleLog("Live Drive control session cleared.", vehicleID: vehicleID)
     }
 
+    /// Clears Live Drive control session and MC‑R **park awaiting continue** latches after a Mission Control run
+    /// reaches **completed**, so post-run automation (SIM clean up) is not blocked by operator-session gates.
+    func clearOperatorSessionHintsAfterMissionRunCompleted() {
+        if let vid = liveDriveControlSessionVehicleID {
+            liveDriveControlSessionVehicleID = nil
+            appendVehicleLog("Live Drive control session cleared (mission run completed).", vehicleID: vid)
+        }
+        let parkedIDs = Array(mcrOperatorParkAwaitingContinueVehicleIDs)
+        mcrOperatorParkAwaitingContinueVehicleIDs.removeAll()
+        for vid in parkedIDs {
+            appendVehicleLog("MC-R operator park await-continue cleared (mission run completed).", vehicleID: vid)
+        }
+    }
+
     func applyConfiguration(_ config: FleetLinkConfiguration) {
         configuration = config
         save()
@@ -166,6 +184,59 @@ final class FleetLinkService: ObservableObject {
 
     func setSimulateEnabled(_ enabled: Bool) {
         isSimulateEnabled = enabled
+    }
+
+    /// `true` when this vehicle stream is a **Guardian-managed** built-in SITL (``applySimState`` / spawn handshake).
+    func isGuardianManagedSitlStream(vehicleID: String) -> Bool {
+        simulatedFleetVehicleIDs.contains(vehicleID)
+    }
+
+    /// Stream keys for Guardian-managed SITLs that still have an active MAVSDK session (deterministic order).
+    func guardianManagedSitlSessionVehicleIDsSorted() -> [String] {
+        sessionsByVehicleID.keys.filter { isGuardianManagedSitlStream(vehicleID: $0) }.sorted()
+    }
+
+    /// Best-effort **manual stream stop + mission pause + offboard stop** for the given stream keys (Mission Run SIM clean up Phase A).
+    ///
+    /// Mirrors the early steps of ``runParkSequence`` so motion from OFFBOARD / mission execution is damped **before**
+    /// the park recipe runs in the same async cleanup pass. Per-vehicle failures are logged; returns how many IDs were targeted.
+    @discardableResult
+    func awaitGuardianSitlMotionStopAfterMissionRunCompleted(vehicleIDs: [String]) async -> Int {
+        guard !vehicleIDs.isEmpty else { return 0 }
+        await performGuardianSitlMotionStopAfterMissionRunCompleted(vehicleIDs: vehicleIDs)
+        return vehicleIDs.count
+    }
+
+    /// Clears the **Continue mission** affordance latch for this vehicle (after the operator queues continue, or to discard stale UI).
+    func clearMcrOperatorParkAwaitingContinue(vehicleID: String) {
+        guard mcrOperatorParkAwaitingContinueVehicleIDs.contains(vehicleID) else { return }
+        var next = mcrOperatorParkAwaitingContinueVehicleIDs
+        next.remove(vehicleID)
+        mcrOperatorParkAwaitingContinueVehicleIDs = next
+    }
+
+    /// Mission Control triage phase for live roster / berth detail (PX4 UGV park latch vs on-mission heuristic).
+    func mcrOperatorVehiclePhase(vehicleID: String) -> FleetMcrOperatorVehiclePhase {
+        if mcrOperatorParkAwaitingContinueVehicleIDs.contains(vehicleID) {
+            return .operatorParkAwaitingContinue
+        }
+        guard let hub = hubTelemetryByVehicleID[vehicleID] else { return .unknown }
+        if Self.hubTelemetrySuggestsMissionExecution(hub) { return .onMission }
+        return .unknown
+    }
+
+    private static func hubTelemetrySuggestsMissionExecution(_ hub: FleetHubVehicleTelemetry) -> Bool {
+        guard hub.isArmed else { return false }
+        let mode = hub.flightMode.lowercased()
+        if mode.contains("mission") { return true }
+        if let t = hub.missionProgressTotal, let c = hub.missionProgressCurrent, t > 0, c < t { return true }
+        return false
+    }
+
+    private func recordMcrOperatorParkAwaitingContinue(vehicleID: String) {
+        var next = mcrOperatorParkAwaitingContinueVehicleIDs
+        next.insert(vehicleID)
+        mcrOperatorParkAwaitingContinueVehicleIDs = next
     }
 
     /// Read an integer autopilot parameter for a connected vehicle.
@@ -491,6 +562,92 @@ final class FleetLinkService: ObservableObject {
             state: state,
             autopilotStack: autopilotStack,
             source: source
+        )
+    }
+
+    /// Best-effort SIM pack reset after Mission Run **completed** cleanup: disable depletion, push nominal SIM battery params where applicable, patch hub **100%** remaining (Guardian SITL only).
+    func applySimBatteryFullChargeAfterRunCleanup(
+        vehicleID: String,
+        autopilotStack: FleetAutopilotStack,
+        source: String
+    ) async {
+        guard simulatedFleetVehicleIDs.contains(vehicleID) else {
+            appendVehicleLog("applySimBatteryFull skipped: not Guardian SITL [\(source)].", vehicleID: vehicleID)
+            return
+        }
+        guard sessionsByVehicleID[vehicleID] != nil else {
+            appendVehicleLog("applySimBatteryFull skipped: no session [\(source)].", vehicleID: vehicleID)
+            return
+        }
+        guard autopilotStack != .unknown else {
+            appendVehicleLog("applySimBatteryFull skipped: stack unknown [\(source)].", vehicleID: vehicleID)
+            return
+        }
+        let drainSource = "\(source).drain_off"
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            setSimBatteryDrainEnabled(vehicleID: vehicleID, enabled: false, source: drainSource) { _ in
+                cont.resume()
+            }
+        }
+        let defaults = SimSpawnDefaults.default
+        switch autopilotStack {
+        case .ardupilot:
+            await awaitSetSimStateFloatBestEffort(
+                vehicleID: vehicleID,
+                name: "SIM_BATT_CAP_AH",
+                value: 0,
+                logTag: "\(source).SIM_BATT_CAP_AH"
+            )
+            await awaitSetSimStateFloatBestEffort(
+                vehicleID: vehicleID,
+                name: "SIM_BATT_VOLTAGE",
+                value: Float(defaults.batteryVoltageV),
+                logTag: "\(source).SIM_BATT_VOLTAGE"
+            )
+        case .px4:
+            await awaitSetSimStateFloatBestEffort(
+                vehicleID: vehicleID,
+                name: "SIM_BAT_DRAIN",
+                value: 0,
+                logTag: "\(source).SIM_BAT_DRAIN"
+            )
+        case .unknown:
+            break
+        }
+        reflectSimBatteryFullChargeInHub(vehicleID: vehicleID, source: source)
+    }
+
+    private func reflectSimBatteryFullChargeInHub(vehicleID: String, source: String) {
+        guard let session = sessionsByVehicleID[vehicleID] else {
+            appendVehicleLog("reflectSimBatteryFull skipped: no session [\(source)].", vehicleID: vehicleID)
+            return
+        }
+        let lifecycle = vehicleStatusByVehicleID[vehicleID] ?? VehicleLifecycleStatus(stage: .live)
+        let existingType = vehicleModelsByVehicleID[vehicleID]?.data.vehicleType ?? .unknown
+        ensureVehicleModel(
+            vehicleID: vehicleID,
+            systemID: session.systemID,
+            vehicleType: existingType,
+            initialStatus: lifecycle
+        )
+        guard var model = vehicleModelsByVehicleID[vehicleID] else {
+            appendVehicleLog("reflectSimBatteryFull skipped: no vehicle model [\(source)].", vehicleID: vehicleID)
+            return
+        }
+        let defaults = SimSpawnDefaults.default
+        model.applyTelemetryMutation { hub in
+            hub.batteryRemainingPercent = 100
+            hub.batteryVoltageV = defaults.batteryVoltageV
+            hub.batteryCurrentA = defaults.batteryCurrentA
+        }
+        vehicleModelsByVehicleID[vehicleID] = model
+        hubTelemetryByVehicleID[vehicleID] = model.data.telemetry
+        telemetryByVehicleID[vehicleID] = model.collections.telemetrySnapshot
+        hubTelemetry = hubTelemetryByVehicleID[vehicleID]
+        telemetry = telemetryByVehicleID[vehicleID]
+        appendVehicleLog(
+            "Hub battery patched to full (SIM cleanup) [\(source)].",
+            vehicleID: vehicleID
         )
     }
 
@@ -938,6 +1095,8 @@ final class FleetLinkService: ObservableObject {
                 vehicleID: vehicleID,
                 session: session
             )
+        case .offboardStop:
+            completion = OffboardCoordinator.offboardStopCompletable(drone: session.drone)
         case .rebootAutopilot:
             completion = session.drone.action.reboot()
         }
@@ -1268,6 +1427,11 @@ final class FleetLinkService: ObservableObject {
             if tail.isEmpty { return String(describing: e.code) }
             return "\(String(describing: e.code)): \(tail)"
         }
+        if let e = error as? Mavsdk.Offboard.OffboardError {
+            let tail = e.description.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            if tail.isEmpty { return String(describing: e.code) }
+            return "\(String(describing: e.code)): \(tail)"
+        }
         return error.localizedDescription
     }
 
@@ -1324,8 +1488,8 @@ final class FleetLinkService: ObservableObject {
         return "\(detail) — Context: \(prefix)…"
     }
 
-    /// Class-aware park: stop streaming, **best-effort mission pause**, then land/surface/hold+disarm per ``UniversalVehicleClass``,
-    /// ending in ``Action/hold()`` so the autopilot is in a parked hold/loiter-style mode where supported.
+    /// Class-aware park: stop streaming, **best-effort mission pause** (skipped for PX4 UGV offboard park), then land/surface/hold+disarm per ``UniversalVehicleClass``,
+    /// ending in ``Action/hold()`` where the surface-ground path uses it (PX4 UGV offboard park omits the final hold).
     private func runParkPipeline(
         session: VehicleSession,
         vehicleID: String,
@@ -1375,19 +1539,39 @@ final class FleetLinkService: ObservableObject {
         universalClass: UniversalVehicleClass
     ) async throws {
         await stopManualControlStream(vehicleID: vehicleID)
-        await parkPauseMissionBestEffort(vehicleID: vehicleID, session: session)
+        let px4UgvOffboardPark = parkUsesPx4UgvOffboardPark(vehicleType: vehicleType, vehicleID: vehicleID)
+        if !px4UgvOffboardPark {
+            await parkPauseMissionBestEffort(vehicleID: vehicleID, session: session)
+        } else {
+            appendVehicleLog(
+                "Park: skipping mission pause for PX4 UGV offboard park (mission may keep running until continue).",
+                vehicleID: vehicleID
+            )
+        }
         switch universalClass {
         case .uuv:
             try await parkSequenceUUV(vehicleID: vehicleID, session: session)
         case .ugv, .usv:
-            try await parkSequenceSurfaceGround(
-                vehicleID: vehicleID,
-                session: session,
-                vehicleType: vehicleType
-            )
+            if px4UgvOffboardPark, universalClass == .ugv {
+                try await parkSequencePx4UgvOffboardZeroVelocityPark(vehicleID: vehicleID, session: session)
+            } else {
+                try await parkSequenceSurfaceGround(
+                    vehicleID: vehicleID,
+                    session: session,
+                    vehicleType: vehicleType
+                )
+            }
         case .uav, .unknown:
             try await parkSequenceUAVOrUnknown(vehicleID: vehicleID, session: session)
         }
+    }
+
+    private func parkUsesPx4UgvOffboardPark(vehicleType: FleetVehicleType, vehicleID: String) -> Bool {
+        guard vehicleType.universalClass == .ugv else { return false }
+        let stack = vehicleModelsByVehicleID[vehicleID]?.data.telemetry?.autopilotStack
+            ?? hubTelemetryByVehicleID[vehicleID]?.autopilotStack
+            ?? .unknown
+        return stack == .px4
     }
 
     private func parkHub(_ vehicleID: String) -> FleetHubVehicleTelemetry? {
@@ -1397,16 +1581,83 @@ final class FleetLinkService: ObservableObject {
     /// Best-effort ``Mission/pauseMission()`` before land/hold/disarm so onboard mission execution stops
     /// (same MAVSDK call as ``FleetVehicleCommand/missionPause``). Stacks with no mission or unsupported
     /// pause fail here — we log and continue so **Park** still completes.
-    private func parkPauseMissionBestEffort(vehicleID: String, session: VehicleSession) async {
+    private func parkPauseMissionBestEffort(
+        vehicleID: String,
+        session: VehicleSession,
+        logContext: String = "Park"
+    ) async {
         do {
             try await awaitCompletableForManualStream(session.drone.mission.pauseMission())
-            appendVehicleLog("Park: mission pause acknowledged.", vehicleID: vehicleID)
+            appendVehicleLog("\(logContext): mission pause acknowledged.", vehicleID: vehicleID)
         } catch {
+            let tail = logContext == "Park" ? "continuing park." : "continuing motion stop."
             appendVehicleLog(
-                "Park: mission pause skipped or failed (\(mavsdkPublicErrorDescription(error))) — continuing park.",
+                "\(logContext): mission pause skipped or failed (\(mavsdkPublicErrorDescription(error))) — \(tail)",
                 vehicleID: vehicleID
             )
         }
+    }
+
+    private func performGuardianSitlMotionStopAfterMissionRunCompleted(vehicleIDs: [String]) async {
+        for vehicleID in vehicleIDs {
+            guard let session = sessionsByVehicleID[vehicleID] else { continue }
+            let vehicleType = vehicleModelsByVehicleID[vehicleID]?.data.vehicleType ?? .unknown
+            appendVehicleLog(
+                "Mission run complete: motion-stop pass (manual stream / mission pause / offboard stop).",
+                vehicleID: vehicleID
+            )
+            await stopManualControlStream(vehicleID: vehicleID)
+            let px4UgvOffboardPark = parkUsesPx4UgvOffboardPark(vehicleType: vehicleType, vehicleID: vehicleID)
+            if !px4UgvOffboardPark {
+                await parkPauseMissionBestEffort(vehicleID: vehicleID, session: session, logContext: "Mission run complete")
+            } else {
+                appendVehicleLog(
+                    "Mission run complete: skipping mission pause (PX4 UGV offboard policy — same as park path).",
+                    vehicleID: vehicleID
+                )
+            }
+            do {
+                try await awaitCompletableForManualStream(OffboardCoordinator.offboardStopCompletable(drone: session.drone))
+                appendVehicleLog("Mission run complete: offboard stop acknowledged.", vehicleID: vehicleID)
+            } catch {
+                appendVehicleLog(
+                    "Mission run complete: offboard stop skipped or failed (\(mavsdkPublicErrorDescription(error))).",
+                    vehicleID: vehicleID
+                )
+            }
+        }
+    }
+
+    /// PX4 **UGV** park: OFFBOARD zero body-velocity brake (no `Mission.pauseMission` — see ``runParkSequence``), **no disarm** (stays armed), **no `Offboard.stop`** until continue recipe.
+    private func parkSequencePx4UgvOffboardZeroVelocityPark(vehicleID: String, session: VehicleSession) async throws {
+        appendVehicleLog("Park: PX4 UGV OFFBOARD zero-velocity path (armed hold — no disarm in this path).", vehicleID: vehicleID)
+        try await awaitCompletableForManualStream(
+            completionForSetMode(mode: .guided, vehicleID: vehicleID, session: session)
+        )
+        appendVehicleLog("Park: OFFBOARD (guided) mode step completed.", vehicleID: vehicleID)
+        try await OffboardCoordinator.runPx4ParkZeroVelocityBrakeLoop(
+            drone: session.drone,
+            awaitCompletable: { [weak self] (c: Completable) in
+                guard let self else {
+                    throw NSError(
+                        domain: "FleetLinkService",
+                        code: 93,
+                        userInfo: [NSLocalizedDescriptionKey: "Fleet link shut down during PX4 UGV park."]
+                    )
+                }
+                try await self.awaitCompletableForManualStream(c)
+            },
+            horizontalGroundSpeedMS: { [weak self] in self?.parkHub(vehicleID)?.horizontalGroundSpeedMS },
+            appendDiagnostic: { [weak self] line in
+                self?.appendVehicleLog("Park: \(line)", vehicleID: vehicleID)
+            }
+        )
+        appendVehicleLog(
+            "Park: PX4 UGV park complete — offboard still active, vehicle left armed; continue recipe runs do.offboard.stop first.",
+            vehicleID: vehicleID
+        )
+        try await Task.sleep(nanoseconds: 250_000_000)
+        recordMcrOperatorParkAwaitingContinue(vehicleID: vehicleID)
     }
 
     /// PX4 wheeled UGV (UGV-W preset): first stop-motion uses raw ``SET_MODE`` hold (catalogue ``FleetVehicleMode/hold``)
@@ -2285,6 +2536,8 @@ final class FleetLinkService: ObservableObject {
             return "setParameterInt(name=\(name) value=\(value))"
         case .setMode(let mode):
             return "setMode(\(mode.rawValue))"
+        case .offboardStop:
+            return "offboardStop"
         case .rebootAutopilot:
             return "rebootAutopilot"
         }
@@ -2565,9 +2818,168 @@ final class FleetLinkService: ObservableObject {
         return false
     }
 
+    // MARK: - PX4 move-point (OFFBOARD global setpoints)
+
+    /// Horizontal distance (m) from target before ``runPx4MovePointOffboardStreamingThenStop`` ends streaming.
+    private static let px4MovePointOffboardArrivalM: Double = 4.0
+    /// Wall-clock budget for OFFBOARD streaming while converging on the target lat/lon.
+    private static let px4MovePointOffboardTimeoutMs: Int = 180_000
+    /// PX4 expects fresh OFFBOARD setpoints at a few Hz; 10 Hz matches Live Drive headroom.
+    private static let px4MovePointOffboardSetpointIntervalMs: Int = 100
+
+    /// **PX4:** ``Action/gotoLocation`` is unreliable while **AUTO / mission** owns navigation.
+    /// Move-point instead pauses the mission, streams ``Offboard/setPositionGlobal`` in **OFFBOARD** until
+    /// hub lat/lon is within ``px4MovePointOffboardArrivalM``, then ``Offboard/stop`` so **Park** can run normally.
+    private func completionForPx4GotoCoordinateViaOffboard(
+        coord: RouteCoordinate,
+        targetAbsoluteAlt: Double,
+        yawDeg: Double,
+        vehicleID: String,
+        session: VehicleSession
+    ) -> Completable {
+        Completable.create { [weak self] completable in
+            guard let self else {
+                completable(.completed)
+                return Disposables.create()
+            }
+            let task = Task { @MainActor in
+                do {
+                    try await self.runPx4MovePointOffboardStreamingThenStop(
+                        coord: coord,
+                        targetAbsoluteAlt: targetAbsoluteAlt,
+                        yawDeg: yawDeg,
+                        vehicleID: vehicleID,
+                        session: session
+                    )
+                    completable(.completed)
+                } catch {
+                    completable(.error(error))
+                }
+            }
+            return Disposables.create { task.cancel() }
+        }
+    }
+
+    private func runPx4MovePointOffboardStreamingThenStop(
+        coord: RouteCoordinate,
+        targetAbsoluteAlt: Double,
+        yawDeg: Double,
+        vehicleID: String,
+        session: VehicleSession
+    ) async throws {
+        appendVehicleLog(
+            "PX4 move-point: best-effort mission pause before OFFBOARD global setpoint move.",
+            vehicleID: vehicleID
+        )
+        do {
+            try await awaitCompletableForManualStream(session.drone.mission.pauseMission())
+            appendVehicleLog("PX4 move-point: mission pause acknowledged.", vehicleID: vehicleID)
+        } catch {
+            appendVehicleLog(
+                "PX4 move-point: mission pause skipped (\(mavsdkPublicErrorDescription(error))) — continuing.",
+                vehicleID: vehicleID
+            )
+        }
+
+        do {
+            try await awaitCompletableForManualStream(session.drone.offboard.stop())
+            appendVehicleLog("PX4 move-point: OFFBOARD stop (pre-move) acknowledged.", vehicleID: vehicleID)
+        } catch {
+            appendVehicleLog(
+                "PX4 move-point: OFFBOARD stop (pre-move) skipped (\(mavsdkPublicErrorDescription(error))) — continuing.",
+                vehicleID: vehicleID
+            )
+        }
+
+        let positionGlobal = Offboard.PositionGlobalYaw(
+            latDeg: coord.lat,
+            lonDeg: coord.lon,
+            altM: Float(targetAbsoluteAlt),
+            yawDeg: Float(yawDeg),
+            altitudeType: .amsl
+        )
+
+        try await awaitCompletableForManualStream(
+            session.drone.offboard.setPositionGlobal(positionGlobalYaw: positionGlobal)
+        )
+        try await awaitCompletableForManualStream(session.drone.offboard.start())
+        appendVehicleLog(
+            "PX4 move-point: OFFBOARD streaming toward target (global position setpoint).",
+            vehicleID: vehicleID
+        )
+
+        var elapsedMs = 0
+        var lastProgressLogMs = 0
+        var arrived = false
+        while elapsedMs < Self.px4MovePointOffboardTimeoutMs {
+            try Task.checkCancellation()
+            try await awaitCompletableForManualStream(
+                session.drone.offboard.setPositionGlobal(positionGlobalYaw: positionGlobal)
+            )
+            try await Task.sleep(nanoseconds: UInt64(Self.px4MovePointOffboardSetpointIntervalMs) * 1_000_000)
+            elapsedMs += Self.px4MovePointOffboardSetpointIntervalMs
+
+            if let hub = hubTelemetryByVehicleID[vehicleID],
+               let lat = hub.latitudeDeg,
+               let lon = hub.longitudeDeg {
+                let d = MissionRunMovePointParkPlanner.haversineMeters(
+                    lat1: lat,
+                    lon1: lon,
+                    lat2: coord.lat,
+                    lon2: coord.lon
+                )
+                if elapsedMs - lastProgressLogMs >= 5_000 {
+                    lastProgressLogMs = elapsedMs
+                    appendVehicleLog(
+                        String(
+                            format: "PX4 move-point: ≈ %.0f m from target horizontal (elapsed %d ms).",
+                            d,
+                            elapsedMs
+                        ),
+                        vehicleID: vehicleID
+                    )
+                }
+                if d < Self.px4MovePointOffboardArrivalM {
+                    appendVehicleLog(
+                        String(format: "PX4 move-point: within %.1f m of target — ending OFFBOARD stream.", d),
+                        vehicleID: vehicleID
+                    )
+                    arrived = true
+                    break
+                }
+            }
+        }
+
+        do {
+            try await awaitCompletableForManualStream(session.drone.offboard.stop())
+            appendVehicleLog("PX4 move-point: OFFBOARD stop after move acknowledged.", vehicleID: vehicleID)
+        } catch {
+            appendVehicleLog(
+                "PX4 move-point: OFFBOARD stop after move failed (\(mavsdkPublicErrorDescription(error))).",
+                vehicleID: vehicleID
+            )
+            throw error
+        }
+
+        if !arrived {
+            throw NSError(
+                domain: "FleetLinkService",
+                code: 32,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "PX4 move-point: timed out before hub position reached the target area (check GPS / link / target)."
+                ]
+            )
+        }
+    }
+
     /// ArduPilot only honours ``Action/gotoLocation`` as external navigation when the
     /// vehicle is in **Guided**. Prepend `mode guided` for UAV / UGV / USV so move-point
     /// and similar gotos are not dropped while the stack is still in Hold / Loiter.
+    ///
+    /// **PX4:** catalogue ``FleetVehicleMode/guided`` maps to **OFFBOARD**; ``Action/gotoLocation`` alone
+    /// is a poor fit under **AUTO / mission**, so move-point uses OFFBOARD global position setpoints
+    /// (see ``completionForPx4GotoCoordinateViaOffboard``) then stops streaming before downstream **Park**.
     private func completionForGotoCoordinate(
         coord: RouteCoordinate,
         relativeAltitudeM: Double,
@@ -2590,6 +3002,16 @@ final class FleetLinkService: ObservableObject {
             absoluteAltitudeM: targetAbsoluteAlt,
             yawDeg: yawDeg
         )
+
+        if stack == .px4 {
+            return completionForPx4GotoCoordinateViaOffboard(
+                coord: coord,
+                targetAbsoluteAlt: targetAbsoluteAlt,
+                yawDeg: yawDeg,
+                vehicleID: vehicleID,
+                session: session
+            )
+        }
 
         guard stack == .ardupilot else { return gotoRx }
 
@@ -3283,6 +3705,15 @@ final class FleetLinkService: ObservableObject {
         vehicleModelsByVehicleID[vehicleID] = model
         vehicleIDBySystemID[systemID] = vehicleID
         telemetryByVehicleID[vehicleID] = model.collections.telemetrySnapshot ?? .empty
+    }
+
+    /// Seeds a **Guardian SITL** stream + hub stack for Mission Run SIM cleanup / park policy tests (no MAVSDK).
+    func seedMissionRunTestSitlCleanupStream(vehicleID: String, systemID: Int = 1, autopilotStack: FleetAutopilotStack = .px4) {
+        simulatedFleetVehicleIDs.insert(vehicleID)
+        vehicleIDBySystemID[systemID] = vehicleID
+        var hub = FleetHubVehicleTelemetry.empty
+        hub.autopilotStack = autopilotStack
+        hubTelemetryByVehicleID[vehicleID] = hub
     }
 }
 

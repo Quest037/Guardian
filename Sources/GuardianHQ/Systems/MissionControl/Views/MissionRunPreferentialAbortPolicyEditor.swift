@@ -4,15 +4,29 @@ import SwiftUI
 struct MissionRunPreferentialAbortPolicyEditor: View {
     @Binding var chain: [MissionRunAbortTactic]
     var showFootnote: Bool = true
+    /// Tighter vertical rhythm (e.g. MC‑R **Run Rules** drawer): 5pt between tactic rows and before **Add tactic**.
+    var compactVerticalRhythm: Bool = false
 
     @Environment(\.colorScheme) private var colorScheme
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
+    private var tacticListOuterSpacing: CGFloat {
+        compactVerticalRhythm ? GuardianSpacing.stackDense : GuardianSpacing.sm
+    }
+
+    private var tacticRowStackSpacing: CGFloat {
+        compactVerticalRhythm ? GuardianSpacing.stackDense : GuardianSpacing.xs
+    }
+
+    private var tacticRowVerticalPadding: CGFloat {
+        compactVerticalRhythm ? 0 : GuardianSpacing.xxs
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+        VStack(alignment: .leading, spacing: tacticListOuterSpacing) {
             ScrollView {
-                VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+                VStack(alignment: .leading, spacing: tacticRowStackSpacing) {
                     ForEach(0 ..< chain.count, id: \.self) { idx in
                         HStack(alignment: .center, spacing: GuardianSpacing.xs) {
                             VStack(spacing: 0) {
@@ -49,11 +63,11 @@ struct MissionRunPreferentialAbortPolicyEditor: View {
                             .foregroundStyle(GuardianSemanticColors.dangerForeground)
                             .guardianPointerOnHover()
                         }
-                        .padding(.vertical, GuardianSpacing.xxs)
+                        .padding(.vertical, tacticRowVerticalPadding)
                     }
                 }
             }
-            .frame(minHeight: 132, maxHeight: 260)
+            .preferentialChainScrollSizing(compactVerticalRhythm: compactVerticalRhythm)
 
             HStack(alignment: .top, spacing: GuardianSpacing.sm) {
                 Menu {
@@ -215,15 +229,28 @@ struct MissionRunOptionalPreferentialAbortPolicyEditor: View {
 struct MissionRunPreferentialCompletePolicyEditor: View {
     @Binding var chain: [MissionRunCompleteTactic]
     var showFootnote: Bool = true
+    var compactVerticalRhythm: Bool = false
 
     @Environment(\.colorScheme) private var colorScheme
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
+    private var tacticListOuterSpacing: CGFloat {
+        compactVerticalRhythm ? GuardianSpacing.stackDense : GuardianSpacing.sm
+    }
+
+    private var tacticRowStackSpacing: CGFloat {
+        compactVerticalRhythm ? GuardianSpacing.stackDense : GuardianSpacing.xs
+    }
+
+    private var tacticRowVerticalPadding: CGFloat {
+        compactVerticalRhythm ? 0 : GuardianSpacing.xxs
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+        VStack(alignment: .leading, spacing: tacticListOuterSpacing) {
             ScrollView {
-                VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+                VStack(alignment: .leading, spacing: tacticRowStackSpacing) {
                     ForEach(0 ..< chain.count, id: \.self) { idx in
                         HStack(alignment: .center, spacing: GuardianSpacing.xs) {
                             VStack(spacing: 0) {
@@ -260,11 +287,11 @@ struct MissionRunPreferentialCompletePolicyEditor: View {
                             .foregroundStyle(GuardianSemanticColors.dangerForeground)
                             .guardianPointerOnHover()
                         }
-                        .padding(.vertical, GuardianSpacing.xxs)
+                        .padding(.vertical, tacticRowVerticalPadding)
                     }
                 }
             }
-            .frame(minHeight: 132, maxHeight: 260)
+            .preferentialChainScrollSizing(compactVerticalRhythm: compactVerticalRhythm)
 
             HStack(alignment: .top, spacing: GuardianSpacing.sm) {
                 Menu {
@@ -423,15 +450,28 @@ struct MissionRunOptionalPreferentialCompletePolicyEditor: View {
 struct MissionRunPreferentialReserveSwapPolicyEditor: View {
     @Binding var chain: [MissionRunReserveSwapTactic]
     var showFootnote: Bool = true
+    var compactVerticalRhythm: Bool = false
 
     @Environment(\.colorScheme) private var colorScheme
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
+    private var tacticListOuterSpacing: CGFloat {
+        compactVerticalRhythm ? GuardianSpacing.stackDense : GuardianSpacing.sm
+    }
+
+    private var tacticRowStackSpacing: CGFloat {
+        compactVerticalRhythm ? GuardianSpacing.stackDense : GuardianSpacing.xs
+    }
+
+    private var tacticRowVerticalPadding: CGFloat {
+        compactVerticalRhythm ? 0 : GuardianSpacing.xxs
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+        VStack(alignment: .leading, spacing: tacticListOuterSpacing) {
             ScrollView {
-                VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+                VStack(alignment: .leading, spacing: tacticRowStackSpacing) {
                     ForEach(0 ..< chain.count, id: \.self) { idx in
                         HStack(alignment: .center, spacing: GuardianSpacing.xs) {
                             VStack(spacing: 0) {
@@ -468,11 +508,11 @@ struct MissionRunPreferentialReserveSwapPolicyEditor: View {
                             .foregroundStyle(GuardianSemanticColors.dangerForeground)
                             .guardianPointerOnHover()
                         }
-                        .padding(.vertical, GuardianSpacing.xxs)
+                        .padding(.vertical, tacticRowVerticalPadding)
                     }
                 }
             }
-            .frame(minHeight: 132, maxHeight: 260)
+            .preferentialChainScrollSizing(compactVerticalRhythm: compactVerticalRhythm)
 
             HStack(alignment: .top, spacing: GuardianSpacing.sm) {
                 Menu {
@@ -622,5 +662,20 @@ struct MissionRunOptionalPreferentialReserveSwapPolicyEditor: View {
                 overrideChain = MissionRunReserveSwapTactic.normalizedPreferenceChain(newValue)
             }
         )
+    }
+}
+
+// MARK: - Preferential chain scroll height
+
+/// Default editors reserve a minimum scroll height so sparse chains don’t jump layout; compact (MC‑R **Run Rules** drawer)
+/// sizes the scroll area to the tactic rows so **Add tactic** sits tight under the last step.
+fileprivate extension View {
+    @ViewBuilder
+    func preferentialChainScrollSizing(compactVerticalRhythm: Bool) -> some View {
+        if compactVerticalRhythm {
+            frame(maxHeight: 260)
+        } else {
+            frame(minHeight: 132, maxHeight: 260)
+        }
     }
 }

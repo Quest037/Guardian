@@ -286,6 +286,11 @@ struct VehiclesView: View {
         Task { @MainActor in
             await fleetLink.stopManualControlStream(vehicleID: vehicleID)
             fleetLink.clearLiveDriveControlSessionVehicleIfMatches(vehicleID: vehicleID)
+            missionControlStore.clearOperatorLiveDriveHandoffForClearedControlSessionVehicle(
+                vehicleID: vehicleID,
+                fleetLink: fleetLink,
+                sitl: sitl
+            )
             fleetLink.setCommandAuthorityGate(vehicleID: vehicleID, minimumCategory: .missionControl)
         }
         if liveDriveStore.activeControlledVehicleID == vehicleID {

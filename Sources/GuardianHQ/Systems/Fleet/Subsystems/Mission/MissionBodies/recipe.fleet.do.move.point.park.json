@@ -1,5 +1,5 @@
 {
-  "_comment": "recipe.fleet.do.move.point.park: arm-probe (verify arm path then disarm), arm for navigation, move.point, then do.park. Caller supplies lat/lon/relAlt/yaw + procedureLogSummary (MC-R copy only). Child recipe recipe.fleet.diagnose.armprobe must be registered (calibration bootstrap before mission recipes).",
+  "_comment": "recipe.fleet.do.move.point.park: arm-probe (verify arm path then disarm), arm for navigation, move.point, then do.park. PX4: move.point is implemented as OFFBOARD global setpoints after mission pause (FleetLinkService), not bare Action.gotoLocation in AUTO. Caller supplies lat/lon/relAlt/yaw + procedureLogSummary (MC-R copy only). Child recipe recipe.fleet.diagnose.armprobe must be registered (calibration bootstrap before mission recipes).",
   "entryStepID": "armProbe",
   "overallBudgetSeconds": 600,
   "steps": [

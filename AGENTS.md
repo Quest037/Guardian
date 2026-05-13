@@ -6,8 +6,10 @@ This repo keeps product and AI guardrails in **`.cursor/rules/`**. When editing 
 - **Mission Control floating reserve pool (run envelope):** ``README.md`` → **Floating reserve pool (Mission Control run)**; deferred automation in ``NEXTVERSION.md`` → **Floating reserve pool — deferred phases** (2026-05-12).
 - **Mission Control reserve swap-in (live active ↔ reserve):** backlog for arm/mission/reposition/commit pipeline, fixed `.reserve` + floating pool, triggers, and class matching — ``MissionRosterReservesToDo.md``.
 - **Mission Control operator quick commands (MC-R triage):** typed whitelist → MRE dispatch (catalogue / recipe), executor vs direct, gates — ``OperatorCommandsIssuerToDo.md``.
-- **MC-R ↔ Live Drive handoff (Engage, MRE `InLiveDrive`, Continue mission):** ``HandOffToDoList.md``.
-
+- **MC-R ↔ Live Drive handoff (Engage, assignment handoff, return — manual Continue mission):** ``README.md`` → **Live Drive control session** (freestyle & mission, SIM & live).
+- **Mission Control Run settings (app defaults vs per-run envelope):** **README** → **SIM battery drain** → **Mission Run settings — defaults vs per-run envelope** (clone at ``createRun``, never read ``GeneralSettingsStore`` from MC for those prefs). **SIM home reset on complete:** same README subsection **SIM home reset on Mission Control run complete (v1 — product locked)**.
+- **Mission Run SIM clean up (park all SITLs + optional teleport on complete):** product lock in **README** → **Mission Run SIM clean up (product lock)**. Wave concurrency for park / mission clear / battery: env ``GUARDIAN_MISSION_RUN_SIM_CLEANUP_MAX_CONCURRENT`` (see ``MissionRunSimCleanupConcurrency``).
+- **Mission task between-cycles (RTL / Loiter / Park):** missions + MCS + MCR task drawers, executor fallbacks — ``MissionTaskBetweenCyclesToDo.md``; deferred **Swap In Replacement** action — ``NEXTVERSION.md`` (2026-05-13).
 - **Theme & tokens:** `.cursor/rules/guardian-theme-tokens.mdc` — use `GuardianTheme.palette`, `GuardianSemanticColors`, `GuardianSpacing`, `GuardianTypography`, and related design-system types when they exist instead of inventing parallel styling.
 - **Shared utilities:** `.cursor/rules/global-utilities-placement.mdc` — reusable helpers for multiple systems/plugins go under `Sources/GuardianHQ/Systems/Utilities/` and the `Utilities` / `GlobalUtilities` namespace.
 - **Buttons:** `.cursor/rules/button-semantic-colors.mdc`

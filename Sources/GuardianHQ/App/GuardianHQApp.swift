@@ -132,6 +132,12 @@ struct GuardianHQApp: App {
                 let style = GuardianFeedbackSeverity(rawValue: raw ?? "") ?? .error
                 toastCenter.show(message, style: style, duration: 4.5)
             }
+            .onReceive(NotificationCenter.default.publisher(for: GuardianMissionRunSimCleanupOperatorToastNotification.name)) { note in
+                guard let message = note.userInfo?[GuardianMissionRunSimCleanupOperatorToastNotification.messageKey] as? String else { return }
+                let raw = note.userInfo?[GuardianMissionRunSimCleanupOperatorToastNotification.severityRawKey] as? String
+                let style = GuardianFeedbackSeverity(rawValue: raw ?? "") ?? .warning
+                toastCenter.show(message, style: style, duration: 4.5)
+            }
             // Must be an ancestor of ``View/withGuardianConfirmOverlayHost()`` so ``GuardianConfirmOverlayRootModifier`` can resolve ``@EnvironmentObject`` (it wraps the drawer, not the other way around).
             .environmentObject(guardianConfirmOverlayHost)
             .onChange(of: showingSplash) { stillShowingSplash in

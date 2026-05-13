@@ -112,6 +112,10 @@ enum FleetVehicleCommand: Equatable {
     /// with a `mode not supported` detail so stack converters classify the response as
     /// ``FleetCommandErrorKind/modeNotSupported``.
     case setMode(FleetVehicleMode)
+    /// Stop MAVSDK offboard setpoint streaming (`Offboard.stop()`). Catalogue:
+    /// `command.fleet.vehicle.do.offboard.stop` — used when recipes must exit offboard
+    /// after flows that intentionally keep offboard active (e.g. PX4 UGV operator park).
+    case offboardStop
     /// Reboot the autopilot (`MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`, dispatched via
     /// MAVSDK `Action.reboot()`). Heavy hammer used to clear all transient autopilot
     /// state — sticky pre-arm faults, latched failsafe acks, hung calibrations, etc.
@@ -153,6 +157,7 @@ extension FleetVehicleCommand {
         case .setParameterFloat(let name, _): return "param \(name) (float)"
         case .setParameterInt(let name, _): return "param \(name) (int)"
         case .setMode(let mode): return "set mode \(mode.rawValue)"
+        case .offboardStop: return "offboard stop"
         case .rebootAutopilot: return "reboot autopilot"
         }
     }

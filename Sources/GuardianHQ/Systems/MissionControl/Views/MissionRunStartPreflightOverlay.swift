@@ -24,6 +24,8 @@ struct MissionRunStartPreflightOverlay: View {
     /// Slots covered by header **Retry Failed** (each card shows a blocking spinner until bulk finishes).
     @State private var bulkRetryFailedCoveringAssignmentIDs: Set<UUID> = []
     @State private var vehicleIDsArmedDuringProbe: [String] = []
+    /// Short delay before roster probes start: show a blocking spinner so the overlay never feels idle.
+    @State private var preflightGateDelayActive = true
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
@@ -50,7 +52,8 @@ struct MissionRunStartPreflightOverlay: View {
     }
 
     private var retryAllFailedEnabled: Bool {
-        !initialSweepRunning
+        !preflightGateDelayActive
+            && !initialSweepRunning
             && activeRetryAssignmentIDs.isEmpty
             && bulkRetryFailedCoveringAssignmentIDs.isEmpty
             && hasFailedSlots
@@ -58,7 +61,8 @@ struct MissionRunStartPreflightOverlay: View {
     }
 
     private var closeEnabled: Bool {
-        !initialSweepRunning
+        !preflightGateDelayActive
+            && !initialSweepRunning
             && activeRetryAssignmentIDs.isEmpty
             && bulkRetryFailedCoveringAssignmentIDs.isEmpty
             && !allRequiredPassed
@@ -112,9 +116,20 @@ struct MissionRunStartPreflightOverlay: View {
             }
             .background(theme.backgroundRaised)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .overlay {
+                if preflightGateDelayActive {
+                    preflightGateDelayOverlay
+                }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task {
+            preflightGateDelayActive = true
+            // Let the overlay paint before arming probes (telemetry subscription work can lag first frame).
+            try? await Task.sleep(for: .seconds(3))
+            withAnimation(.easeOut(duration: 0.2)) {
+                preflightGateDelayActive = false
+            }
             seedRowsPending()
             await runInitialSweep()
         }
@@ -123,6 +138,25 @@ struct MissionRunStartPreflightOverlay: View {
             postVehiclePickPreflightAssignmentId = nil
             Task { await probeSingleAssignment(assignmentId: aid) }
         }
+    }
+
+    private var preflightGateDelayOverlay: some View {
+        ZStack {
+            theme.backgroundRaised.opacity(colorScheme == .dark ? 0.78 : 0.86)
+            VStack(spacing: GuardianSpacing.md) {
+                ProgressView()
+                    .controlSize(.regular)
+                Text("Preparing roster checks.")
+                    .font(GuardianTypography.font(.denseCaption12Medium))
+                    .foregroundStyle(theme.textSecondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(GuardianSpacing.lg)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Preparing roster checks")
     }
 
     private var preflightChromeHeader: some View {

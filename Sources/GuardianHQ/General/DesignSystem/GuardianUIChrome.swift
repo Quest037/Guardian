@@ -160,6 +160,128 @@ struct GuardianNeutralBorderedButton: View {
     }
 }
 
+/// Two-slot **icon-only** toolbar toggle (map/camera, keyboard/controller). Selected slot uses the primary blue
+/// glyph plus a light primary fill so the active mode reads instantly next to neutral icon buttons.
+struct GuardianToolbarDualIconModeToggle<Mode: Hashable>: View {
+    @Binding var selection: Mode
+    let leftMode: Mode
+    let leftSystemImage: String
+    let leftAccessibilityLabel: String
+    let rightMode: Mode
+    let rightSystemImage: String
+    let rightAccessibilityLabel: String
+    var isEnabled: Bool = true
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
+    private var selectedFill: Color {
+        GuardianThemeAccentStyle.badgeResolve(accent: .primary, paint: .light, colorScheme: colorScheme).fill
+    }
+
+    private var selectedForeground: Color {
+        GuardianThemeAccentStyle.buttonResolve(accent: .primary, surface: .outline, colorScheme: colorScheme).foreground
+    }
+
+    var body: some View {
+        HStack(spacing: GuardianSpacing.micro) {
+            segmentButton(
+                mode: leftMode,
+                systemImage: leftSystemImage,
+                accessibilityLabel: leftAccessibilityLabel
+            )
+            segmentButton(
+                mode: rightMode,
+                systemImage: rightSystemImage,
+                accessibilityLabel: rightAccessibilityLabel
+            )
+        }
+        .padding(GuardianSpacing.titleStackTight)
+        .background(theme.borderSubtle.opacity(0.4))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .opacity(isEnabled ? 1 : 0.45)
+        .allowsHitTesting(isEnabled)
+    }
+
+    private func segmentButton(mode: Mode, systemImage: String, accessibilityLabel: String) -> some View {
+        let isOn = selection == mode
+        return Button {
+            selection = mode
+        } label: {
+            Image(systemName: systemImage)
+                .font(GuardianTypography.font(.subsectionTitleSemibold))
+                .foregroundStyle(isOn ? selectedForeground : theme.textTertiary)
+                .frame(width: 30, height: 26)
+                .background(isOn ? selectedFill : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(GuardianPointerPlainButtonStyle())
+        .guardianPointerOnHover()
+        .accessibilityLabel(accessibilityLabel)
+    }
+}
+
+/// Label chrome for a ``Menu`` trigger that should match neutral **outline** toolbar buttons (``GuardianNeutralBorderedButton`` / ``GuardianThemedButton`` small cornered, 28pt row height).
+///
+/// Wrap the ``Menu`` with ``View/guardianStyledNeutralToolbarMenu()`` so the style stays ``borderlessButton``, the system’s extra menu disclosure is hidden when the OS supports it (macOS 14+), and this label’s stroke is not composited away by the menu host.
+///
+/// Do **not** use ``MenuStyle/button`` or ``.buttonStyle(.bordered)`` on the same control — that reintroduces system chrome.
+struct GuardianNeutralOutlinedMenuTriggerLabel: View {
+    let title: String
+    /// When `false`, omit the trailing chevron (rare; most pull-downs show the indicator).
+    var showsMenuChevron: Bool = true
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        let theme = GuardianTheme.palette(for: colorScheme)
+        let size = GuardianChromeSize.small
+        let corner: CGFloat = 8
+        let chip = RoundedRectangle(cornerRadius: corner, style: .continuous)
+
+        HStack(spacing: GuardianSpacing.xxs) {
+            Text(title)
+            if showsMenuChevron {
+                Image(systemName: "chevron.down")
+                    .font(GuardianTypography.relativeFixed(size: 9, weight: .semibold, relativeTo: .caption2))
+                    .opacity(0.85)
+            }
+        }
+        .font(size.chromeGlyphFont)
+        .foregroundStyle(theme.textPrimary)
+        .lineLimit(1)
+        .minimumScaleFactor(0.82)
+        .multilineTextAlignment(.center)
+        .padding(.horizontal, size.horizontalPadding)
+        .frame(minHeight: size.controlOuterHeight, maxHeight: size.controlOuterHeight)
+        .background(chip.fill(theme.backgroundElevated))
+        .clipShape(chip)
+        .overlay(
+            chip
+                .strokeBorder(theme.borderSubtle, lineWidth: 1.5)
+                .allowsHitTesting(false)
+        )
+        .contentShape(chip)
+        .compositingGroup()
+        .fixedSize(horizontal: true, vertical: true)
+    }
+}
+
+extension View {
+    /// Default styling for toolbar ``Menu`` triggers that use ``GuardianNeutralOutlinedMenuTriggerLabel``: ``borderlessButton`` plus hidden system menu indicator when available (removes the stray leading chevron on macOS 14+).
+    @ViewBuilder
+    func guardianStyledNeutralToolbarMenu() -> some View {
+        if #available(macOS 14.0, *) {
+            self
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+        } else {
+            self.menuStyle(.borderlessButton)
+        }
+    }
+}
+
 /// Delete / cancel row — red prominent with trash (after edit when paired).
 struct GuardianDestructiveProminentButton: View {
     let title: String

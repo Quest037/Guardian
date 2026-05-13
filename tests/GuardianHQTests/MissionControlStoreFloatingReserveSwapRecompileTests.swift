@@ -14,7 +14,7 @@ final class MissionControlStoreFloatingReserveSwapRecompileTests: XCTestCase {
             type: .mobile,
             routeMacro: RouteMacro(tasks: [task], rules: RouteRules())
         )
-        let run = controlStore.createRun(from: mission)
+        let run = controlStore.createRun(from: mission, cloningMissionRunDefaultsFrom: GeneralSettingsStore())
         XCTAssertEqual(run.status, .setup)
         XCTAssertEqual(run.sessionPhase, .draft)
 
@@ -38,7 +38,7 @@ final class MissionControlStoreFloatingReserveSwapRecompileTests: XCTestCase {
             type: .mobile,
             routeMacro: RouteMacro(tasks: [task], rules: RouteRules())
         )
-        let run = controlStore.createRun(from: mission)
+        let run = controlStore.createRun(from: mission, cloningMissionRunDefaultsFrom: GeneralSettingsStore())
         controlStore.compileMissionControlPlan(run: run, mission: mission, fleetVehicles: [])
         XCTAssertEqual(run.sessionPhase, .compiled)
 

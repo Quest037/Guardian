@@ -423,6 +423,11 @@ final class MissionRunCommandSubsystem {
             FleetRecipesCatalogueBootstrap.ensureRegistered()
             FleetMovePointParkRecipeRegistrations.registerAll()
         }
+        if name == FleetMissionRecipeRegistrations.vehicleDoParkRecipeName,
+           FleetRecipesCatalogue.shared.descriptor(for: name) == nil {
+            FleetRecipesCatalogueBootstrap.ensureRegistered()
+            FleetMissionRecipeRegistrations.registerAll()
+        }
     }
 
     private func missionRunRecipeEscalationHandler(
@@ -601,6 +606,9 @@ final class MissionRunCommandSubsystem {
             if name == FleetMovePointParkRecipeRegistrations.movePointParkRecipeName,
                let line = parameters.string(named: "procedureLogSummary") {
                 return "recipe move+park — \(line)"
+            }
+            if name == FleetMissionRecipeRegistrations.vehicleDoParkRecipeName {
+                return "recipe vehicle park (run cleanup)"
             }
             return "recipe \(name.rawValue)"
         }

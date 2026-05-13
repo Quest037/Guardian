@@ -112,6 +112,8 @@ struct GuardianRouteMapGeometry: Equatable {
     var missionPointMarkers: [GuardianMissionPointMapMarker]
     /// Mission editor: next map tap places a new mission point (mutually exclusive with route edit in UI).
     var missionPointPlacementArmed: Bool
+    /// MCS staging: **Set reserve pool home** armed — pointer + Leaflet preview (mutually exclusive with ``missionPointPlacementArmed`` in UI).
+    var mcsReservePoolHomePlacementArmed: Bool
 
     static let empty = GuardianRouteMapGeometry(
         home: nil,
@@ -124,7 +126,8 @@ struct GuardianRouteMapGeometry: Equatable {
         preserveView: true,
         isEditingTask: false,
         missionPointMarkers: [],
-        missionPointPlacementArmed: false
+        missionPointPlacementArmed: false,
+        mcsReservePoolHomePlacementArmed: false
     )
 }
 
@@ -133,6 +136,8 @@ struct GuardianMapViewportNudge: Equatable {
     enum Kind: Equatable {
         /// Leaflet `panTo` — keeps the current zoom level.
         case panRetainZoom(lat: Double, lon: Double)
+        /// Leaflet ``setView`` — pans to ``lat``/``lon`` and sets integer zoom (clamped to the map’s min/max zoom).
+        case panToZoom(lat: Double, lon: Double, zoom: Double)
         /// Fit the map to the given WGS84 points (Leaflet ``fitBounds`` via ``guardianFitBoundsForPoints``).
         case fitBounds(points: [(Double, Double)])
 
@@ -140,6 +145,8 @@ struct GuardianMapViewportNudge: Equatable {
             switch (lhs, rhs) {
             case (.panRetainZoom(let la, let lo), .panRetainZoom(let ra, let ro)):
                 return la == ra && lo == ro
+            case let (.panToZoom(la, lo, lz), .panToZoom(ra, ro, rz)):
+                return la == ra && lo == ro && lz == rz
             case (.fitBounds(let lp), .fitBounds(let rp)):
                 guard lp.count == rp.count else { return false }
                 return zip(lp, rp).allSatisfy { $0.0 == $1.0 && $0.1 == $1.1 }
@@ -208,6 +215,16 @@ final class GuardianMapModel: ObservableObject {
         guard !points.isEmpty else { return }
         viewportNudgeSequence &+= 1
         viewportNudge = GuardianMapViewportNudge(sequence: viewportNudgeSequence, kind: .fitBounds(points: points))
+    }
+
+    /// Pan to ``lat``/``lon`` and set zoom (Live Drive live-mission framing).
+    func focusMapPanToZoom(lat: Double, lon: Double, zoom: Double) {
+        guard lat.isFinite, lon.isFinite, zoom.isFinite else { return }
+        viewportNudgeSequence &+= 1
+        viewportNudge = GuardianMapViewportNudge(
+            sequence: viewportNudgeSequence,
+            kind: .panToZoom(lat: lat, lon: lon, zoom: zoom)
+        )
     }
 
     /// Toggle between OSM standard and Esri satellite tiles.
@@ -363,6 +380,7 @@ struct GuardianMapView: View {
                 isEditingTask: model.routeGeometry.isEditingTask,
                 missionPointMarkers: model.routeGeometry.missionPointMarkers,
                 missionPointPlacementArmed: model.routeGeometry.missionPointPlacementArmed,
+                mcsReservePoolHomePlacementArmed: model.routeGeometry.mcsReservePoolHomePlacementArmed,
                 contextMenuPolicy: contextMenuPolicy,
                 onMapClick: onMapClick,
                 onVehicleMarkerMoved: onVehicleMarkerMoved,

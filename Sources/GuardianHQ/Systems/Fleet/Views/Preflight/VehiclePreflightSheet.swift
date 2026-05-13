@@ -9,6 +9,8 @@ struct VehiclePreflightSheet: View {
     let controlStore: MissionControlStore
     let leaveArmed: Bool
     let autoCloseOnPass: Bool
+    /// When `true`, passes ``MissionControlStore/runSingleVehiclePreflightProbe(allowDuringLiveMission:)`` for Live Drive while the vehicle is on a mission roster.
+    let allowDuringLiveMission: Bool
     let onPassed: (() -> Void)?
 
     @Environment(\.dismiss) private var dismiss
@@ -27,6 +29,7 @@ struct VehiclePreflightSheet: View {
         controlStore: MissionControlStore,
         leaveArmed: Bool = false,
         autoCloseOnPass: Bool = false,
+        allowDuringLiveMission: Bool = false,
         onPassed: (() -> Void)? = nil
     ) {
         self.vehicleTitle = vehicleTitle
@@ -36,6 +39,7 @@ struct VehiclePreflightSheet: View {
         self.controlStore = controlStore
         self.leaveArmed = leaveArmed
         self.autoCloseOnPass = autoCloseOnPass
+        self.allowDuringLiveMission = allowDuringLiveMission
         self.onPassed = onPassed
     }
 
@@ -118,7 +122,8 @@ struct VehiclePreflightSheet: View {
             vehicleID: vehicleID,
             fleetLink: fleetLink,
             sitl: sitl,
-            leaveArmed: leaveArmed
+            leaveArmed: leaveArmed,
+            allowDuringLiveMission: allowDuringLiveMission
         )
         result = r
         probeRunning = false

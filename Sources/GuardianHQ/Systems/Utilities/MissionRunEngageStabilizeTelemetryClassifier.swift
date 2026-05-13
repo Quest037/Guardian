@@ -10,7 +10,7 @@ enum MissionRunEngageStabilizeTelemetryVerdict: Equatable, Sendable {
     case fault(reason: String)
 }
 
-/// Shared hub snapshot checks after operator **Park** / **Loiter** (Engage flow — see ``HandOffToDoList.md``).
+/// Shared hub snapshot checks after operator **Park** / **Loiter** (Engage flow — see ``README.md`` Live Drive / MC-R Engage).
 ///
 /// **Park** “on deck” heuristics align with ``FleetLinkService``’s private park wait (`hubShowsUAVOnDeckForPark`).
 /// **Loiter** accepts hold-like and common position-mode strings; horizontal / vertical rate gates are intentionally loose
@@ -116,5 +116,79 @@ enum MissionRunEngageStabilizeTelemetryClassifier {
         }
 
         return .stable
+    }
+
+    // MARK: - Live Drive (mission session start)
+
+    /// Narrow probe gate for **Live Drive → Start session** while the vehicle is still bound to a Mission Control run (HandOff §3).
+    ///
+    /// §1 class rules: **UGV / USV / UUV** require **park** telemetry stable; **UAV** accepts **loiter** *or* **park** stable.
+    /// **Unknown** class tries park first, then loiter (same as ``evaluate`` ordering for conservative UX).
+    static func evaluateLiveDriveMissionStartStabilizeGate(
+        vehicleClass: UniversalVehicleClass,
+        hub: FleetHubVehicleTelemetry?,
+        operational: FleetVehicleOperationalModel,
+        now: Date,
+        maxHubAgeSeconds: TimeInterval
+    ) -> MissionRunEngageStabilizeTelemetryVerdict {
+        switch vehicleClass {
+        case .ugv, .usv, .uuv:
+            return evaluate(
+                kind: .park,
+                hub: hub,
+                operational: operational,
+                now: now,
+                maxHubAgeSeconds: maxHubAgeSeconds
+            )
+        case .uav:
+            let loiterV = evaluate(
+                kind: .loiter,
+                hub: hub,
+                operational: operational,
+                now: now,
+                maxHubAgeSeconds: maxHubAgeSeconds
+            )
+            if case .stable = loiterV { return loiterV }
+            let parkV = evaluate(
+                kind: .park,
+                hub: hub,
+                operational: operational,
+                now: now,
+                maxHubAgeSeconds: maxHubAgeSeconds
+            )
+            if case .stable = parkV { return parkV }
+            switch (loiterV, parkV) {
+            case (.fault(let a), .fault(let b)):
+                return .fault(reason: "\(a) Checked park as well: \(b)")
+            case (.fault(let a), _):
+                return .fault(reason: a)
+            case (_, .fault(let b)):
+                return .fault(reason: b)
+            case (.pending(let a), .pending(let b)):
+                return .pending(reason: "Loiter/hold: \(a) Park: \(b)")
+            case (.pending(let a), _):
+                return .pending(reason: a)
+            case (_, .pending(let b)):
+                return .pending(reason: b)
+            default:
+                return parkV
+            }
+        case .unknown:
+            let parkV = evaluate(
+                kind: .park,
+                hub: hub,
+                operational: operational,
+                now: now,
+                maxHubAgeSeconds: maxHubAgeSeconds
+            )
+            if case .stable = parkV { return parkV }
+            return evaluate(
+                kind: .loiter,
+                hub: hub,
+                operational: operational,
+                now: now,
+                maxHubAgeSeconds: maxHubAgeSeconds
+            )
+        }
     }
 }

@@ -45,6 +45,7 @@ enum FleetMovePointParkRecipeRegistrations {
             humanLabel: "Move to point and park",
             humanDescription:
                 "Runs the catalogue arm probe (arm then disarm to verify the vehicle is arm-ready), arms again for the manoeuvre, moves to explicit latitude/longitude at the supplied relative altitude (use current vehicle AGL when resolving), then runs the park pipeline (class-aware land/surface, disarm, hold). " +
+                "On **PX4**, the move leg uses **OFFBOARD** global position setpoints (mission is paused first, streaming stops before park) so navigation works while the stack would otherwise be in **AUTO / mission** mode. " +
                 "Pass procedureLogSummary for MC-R logs (e.g. \"Move to rally point [RP:1]\").",
             parameters: [
                 FleetRecipeParameterDeclaration(

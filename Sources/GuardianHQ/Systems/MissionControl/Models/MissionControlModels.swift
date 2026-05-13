@@ -247,6 +247,20 @@ enum MissionRunCompletionKind: String, Codable, Equatable {
     case oneOffAutopilotFinished
 }
 
+extension MissionRunCompletionKind {
+    /// Policy for optional **SIM start-pose restore** after a Mission Control run (see README → SIM home reset on Mission Control run complete).
+    ///
+    /// Only **complete** / autopilot-finished outcomes qualify; **stop** outcomes do not. A missing stored kind is treated as ineligible at the call site.
+    var qualifiesForSimHomeRestoreAfterSuccessfulMissionRun: Bool {
+        switch self {
+        case .operatorCompletedImmediate, .operatorCompletedAfterCycle, .oneOffAutopilotFinished:
+            return true
+        case .operatorStoppedImmediate, .operatorStoppedAfterCycle:
+            return false
+        }
+    }
+}
+
 /// Queued “finish after this autopilot mission cycle” intent: **abort** uses abort-policy commands; **complete** uses recovery RTL wind-down.
 enum MissionRunGracefulStopKind: String, Codable, Equatable {
     case none
@@ -1258,6 +1272,10 @@ enum MissionRunCommandIssuerKey {
     static let runTeardown = "run.teardown"
     static let staging = "staging"
     static let missionExecute = "mission.execute"
+    /// Mission Run SIM cleanup — sequential ``recipe.fleet.vehicle.do.park`` after ``markCompleted`` (audit / operator prompt correlation).
+    static let runCleanupPark = "missioncontrol.run_cleanup.park"
+    /// Catalogue ``fleetVehicleDoMissionClear`` during run-complete SIM cleanup (audit).
+    static let runCleanupMissionClear = "missioncontrol.run_cleanup.mission_clear"
 }
 
 /// How a mission-run slot reaches Layer 0: ``FleetVehicleCommand`` queue, a
@@ -1343,7 +1361,7 @@ extension MissionRunFleetDispatch {
     }
 }
 
-/// Operator-selected stabilisation before a **Live Drive handoff** (``HandOffToDoList.md`` engage flow step 1).
+/// Operator-selected stabilisation before a **Live Drive handoff** (MC-R Engage — see ``README.md`` Live Drive control session).
 /// Uses the same fleet catalogue atoms as preferential abort/complete **park** / **loiter** paths.
 enum MissionRunEngageStabilizeDispatchKind: String, CaseIterable, Sendable, Equatable {
     case park
@@ -1362,6 +1380,20 @@ enum MissionRunEngageStabilizeDispatchKind: String, CaseIterable, Sendable, Equa
         case .loiter: return "Loiter"
         }
     }
+}
+
+/// Operator **continue mission** after PX4 UGV offboard park (Layer 1 recipe — see ``FleetMissionRecipeRegistrations/doContinueMissionAfterOperatorParkRecipeName``).
+enum MissionRunOperatorContinueMissionAfterParkDispatchKind: String, Sendable, Equatable {
+    case armModeMissionStart
+
+    var missionRunFleetDispatch: MissionRunFleetDispatch {
+        .recipe(
+            name: FleetMissionRecipeRegistrations.doContinueMissionAfterOperatorParkRecipeName,
+            parameters: .empty
+        )
+    }
+
+    var operatorShortLabel: String { "Continue mission" }
 }
 
 struct MissionRunIssuedCommand: Identifiable, Equatable {
@@ -1499,6 +1531,20 @@ struct MissionRunQueuedCommandBatch: Identifiable, Equatable {
         self.dispatch = dispatch
         self.commands = commands
         self.reserveSwapPostCommitAckContext = reserveSwapPostCommitAckContext
+    }
+}
+
+extension MissionRunQueuedCommandBatch {
+    /// Short dispatch label for mission logs (run-complete suppression, etc.).
+    var dispatchLogLabel: String {
+        switch dispatch {
+        case .immediate:
+            return "immediate"
+        case .at:
+            return "at"
+        case .afterMissionCycle:
+            return "after_mission_cycle"
+        }
     }
 }
 

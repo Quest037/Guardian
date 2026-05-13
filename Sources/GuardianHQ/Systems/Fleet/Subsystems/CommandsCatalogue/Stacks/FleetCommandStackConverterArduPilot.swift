@@ -89,6 +89,8 @@ struct FleetCommandStackConverterArduPilot: FleetCommandStackConverter {
             return .vehicleCommands([.returnToLaunch])
         case .fleetVehicleDoLoiter:
             return .vehicleCommands([.holdPosition])
+        case .fleetVehicleDoOffboardStop:
+            return .vehicleCommands([.offboardStop])
         case .fleetVehicleDoPark:
             return .vehicleCommands([.park])
 

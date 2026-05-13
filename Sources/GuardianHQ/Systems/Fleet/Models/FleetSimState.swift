@@ -26,4 +26,40 @@ extension FleetSimState {
         ardupilotSimBattCapAh = nil
         px4SimBatDrain = nil
     }
+
+    /// Hub pose suitable for ``FleetLinkService/applySimState`` “home restore” (lat/lon required; alt + yaw best-effort).
+    init?(simHomeRestoreSnapshotFrom hub: FleetHubVehicleTelemetry) {
+        guard let lat = hub.latitudeDeg, let lon = hub.longitudeDeg else { return nil }
+        latitudeDeg = lat
+        longitudeDeg = lon
+        absoluteAltitudeM = hub.absoluteAltM ?? hub.altitudeAmslM
+        let heading = hub.headingDeg ?? hub.yawDeg ?? 0
+        yawDeg = Float(heading)
+        batteryVoltageV = nil
+        ardupilotSimBattCapAh = nil
+        px4SimBatDrain = nil
+    }
+
+    /// Floating reserve pool “home” pose for run-complete SIM restore: prefer hub lat/lon when present; otherwise MCS bulk map home; alt/yaw follow hub when available.
+    init?(reservePoolSimHomeRestoreStartPose hub: FleetHubVehicleTelemetry?, bulkHome: RouteCoordinate?) {
+        let lat: Double
+        let lon: Double
+        if let hub, let hLat = hub.latitudeDeg, let hLon = hub.longitudeDeg {
+            lat = hLat
+            lon = hLon
+        } else if let bulk = bulkHome {
+            lat = bulk.lat
+            lon = bulk.lon
+        } else {
+            return nil
+        }
+        latitudeDeg = lat
+        longitudeDeg = lon
+        absoluteAltitudeM = hub?.absoluteAltM ?? hub?.altitudeAmslM
+        let heading = hub?.headingDeg ?? hub?.yawDeg ?? 0
+        yawDeg = Float(heading)
+        batteryVoltageV = nil
+        ardupilotSimBattCapAh = nil
+        px4SimBatDrain = nil
+    }
 }

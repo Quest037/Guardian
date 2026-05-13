@@ -14,6 +14,10 @@ struct MissionControlView: View {
 
     @State private var selectedRunID: UUID?
     @State private var showingAddRunSheet = false
+    /// Captured with ``pendingMissionControlRunID`` before ``consumeMissionControlDrillIn()`` clears the focus controller (Live Drive return / Decisions drill-in).
+    @State private var pendingPostOpenLiveMissionTaskID: UUID?
+    /// Live Drive return: open MC‑R with this roster assignment focused (vehicle overlay).
+    @State private var pendingPostOpenLiveMissionAssignmentID: UUID?
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
@@ -41,7 +45,9 @@ struct MissionControlView: View {
                             missionsProvider: { missionStore.missions }
                         )
                     },
-                    onDelete: { controlStore.deleteRun(id: $0) }
+                    onDelete: { controlStore.deleteRun(id: $0) },
+                    pendingPostOpenLiveMissionTaskID: $pendingPostOpenLiveMissionTaskID,
+                    pendingPostOpenLiveMissionAssignmentID: $pendingPostOpenLiveMissionAssignmentID
                 )
             } else {
                 missionRunGrid
@@ -49,16 +55,20 @@ struct MissionControlView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.backgroundBase)
+        .onAppear {
+            // ``MissionControlView`` is recreated when switching from Live Drive (or other tabs).
+            // Drill-in fields may already be non-nil before this instance exists, so ``onChange`` alone misses them.
+            applyPendingMissionControlDrillInFromFocusIfNeeded()
+        }
         .onChange(of: operatorPromptReviewFocus.pendingMissionControlRunID) { newRunID in
-            guard let newRunID else { return }
-            selectedRunID = newRunID
-            operatorPromptReviewFocus.consumeMissionControlDrillIn()
+            guard newRunID != nil else { return }
+            applyPendingMissionControlDrillInFromFocusIfNeeded()
         }
         .sheet(isPresented: $showingAddRunSheet) {
             AddMissionRunSheet(
                 missionStore: missionStore,
                 onCreateRun: { mission in
-                    let run = controlStore.createRun(from: mission)
+                    let run = controlStore.createRun(from: mission, cloningMissionRunDefaultsFrom: generalSettings)
                     selectedRunID = run.id
                 }
             )
@@ -95,6 +105,15 @@ struct MissionControlView: View {
     private var selectedRun: MissionRunEnvironment? {
         guard let selectedRunID else { return nil }
         return controlStore.runs.first(where: { $0.id == selectedRunID })
+    }
+
+    /// Picks up ``OperatorPromptReviewFocusController`` drill-in (e.g. Live Drive **Return to Mission**) when this view mounts or when pending ids change.
+    private func applyPendingMissionControlDrillInFromFocusIfNeeded() {
+        guard let newRunID = operatorPromptReviewFocus.pendingMissionControlRunID else { return }
+        pendingPostOpenLiveMissionTaskID = operatorPromptReviewFocus.pendingMissionControlMissionTaskID
+        pendingPostOpenLiveMissionAssignmentID = operatorPromptReviewFocus.pendingMissionControlLiveAssignmentID
+        selectedRunID = newRunID
+        operatorPromptReviewFocus.consumeMissionControlDrillIn()
     }
 
     private var missionRunGrid: some View {

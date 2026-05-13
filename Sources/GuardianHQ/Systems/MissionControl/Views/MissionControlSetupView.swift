@@ -55,6 +55,12 @@ enum MissionTaskMapColor {
     }
 }
 
+/// Timing for MCS **Set reserve pool home** staging map behaviour (`MCSReservePoolMapToDo.md`).
+private enum MCSReservePoolHomeStagingMapTiming {
+    /// Hub / digest often lag the first ``applySimState`` pass; a second fit widens bbox once markers move.
+    static let postBatchFitDelaySeconds: Double = 0.35
+}
+
 // MARK: - MC-R reserve pool mutation gates
 
 /// Pure predicates for **which** floating reserve pool berths must reject competing operator mutations
@@ -424,6 +430,7 @@ enum MissionRunSetupTab: String, CaseIterable, Identifiable, Hashable {
     case timing
     case rosters
     case rules
+    case settings
 
     var id: String { rawValue }
 
@@ -432,6 +439,7 @@ enum MissionRunSetupTab: String, CaseIterable, Identifiable, Hashable {
         case .timing: return "Timing"
         case .rosters: return "Tasks"
         case .rules: return "Rules"
+        case .settings: return "Settings"
         }
     }
 }
@@ -472,6 +480,10 @@ struct SetupStagingMapStructureIdentity: Equatable {
     let selectedTaskPathID: UUID?
     /// Which roster assignment is selected for staging-map vehicle chrome (draggable SIM, ring, tooltip).
     let selectedStagingRosterAssignmentID: UUID?
+    /// MCS reserve-pool bulk home placement arm; participates in staging map ``.task(id:)`` so Leaflet refreshes when arming/disarming.
+    let mcsReservePoolHomePlacementTaskID: UUID?
+    /// Selected floating-reserve pool berth on the MCS staging map (``taskID`` + ``slotID`` signature for ``MissionControlReservePoolMapMarkerID``).
+    let stagingReservePoolBerthSelectionSignature: String
 }
 
 /// MCS staging SITL drag: optimistic map pose until hub telemetry **stably** matches or ``MissionControlSetupSimDragOverlayPolicy/pendingSyncTimeoutSeconds`` elapses.
@@ -535,8 +547,8 @@ private struct LiveReservePoolBerthFocus: Equatable {
     let slotID: UUID
 }
 
-/// MC-R Engage: non-blocking telemetry watch after operator **Park** / **Loiter** (``MissionRunEngageStabilizeTelemetryClassifier``).
-private struct MissionLiveEngageStabilizeTelemetryWatch: Equatable {
+    /// MC-R Engage: non-blocking telemetry watch after operator **Park** / **Loiter** from the Stop Vehicle card (``MissionRunEngageStabilizeTelemetryClassifier``).
+    private struct MissionLiveEngageStabilizeTelemetryWatch: Equatable {
     let assignmentID: UUID
     let kind: MissionRunEngageStabilizeDispatchKind
     let startedAt: Date
@@ -551,6 +563,12 @@ struct MissionRunDetailView: View {
     @ObservedObject var generalSettings: GeneralSettingsStore
     @EnvironmentObject private var appDrawer: AppDrawer
     @EnvironmentObject private var toastCenter: ToastCenter
+    @EnvironmentObject private var operatorPromptCenter: OperatorPromptCenter
+    @EnvironmentObject private var operatorPromptReviewFocus: OperatorPromptReviewFocusController
+    /// When set from ``MissionControlView`` (e.g. Live Drive **Return to Mission**), opens that task triage once the run is live.
+    @Binding var pendingPostOpenLiveMissionTaskID: UUID?
+    /// When set from Live Drive **Return to Mission**, focuses this roster assignment (vehicle overlay) once MC‑R is live.
+    @Binding var pendingPostOpenLiveMissionAssignmentID: UUID?
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var bottomPromptCenter = GuardianBottomPromptCenter()
 
@@ -640,7 +658,16 @@ struct MissionRunDetailView: View {
     @State private var setupRostersMapPointsListScrollTargetRow: UUID?
     /// MCS staging map: at most one of point / vehicle / task path may be “map selected” at a time (see ``applyExclusiveMCSStagingMapSelectionForTaskPath`` / vehicle / point handlers).
     @State private var setupStagingMapSelectedTaskPathID: UUID?
-
+    /// MCS **Set reserve pool home** map mode: when non-`nil`, staging-map placement is armed for this task’s pool SIMs (``MCSReservePoolMapToDo.md``).
+    @State private var mcsReservePoolHomePlacementTaskID: UUID?
+    /// Cursor position for the pool-home preview ring (Phase C); cleared when pool-home mode disarms.
+    @State private var mcsReservePoolHomePlacementCursorCoordinate: RouteCoordinate?
+    /// MCS staging map: selected floating-reserve pool berth (SIM ring + drag); mutually exclusive with roster vehicle selection.
+    @State private var setupSelectedReservePoolTaskID: UUID?
+    @State private var setupSelectedReservePoolSlotID: UUID?
+    /// Optimistic pool SIM poses after staging-map drags until hub telemetry sustains (parallel to roster ``setupStagingSimDragCoordByAssignmentID``).
+    @State private var setupStagingReservePoolSimDragCoordByEncodedMarkerID: [String: MissionRunStagingSimDragOverlay] = [:]
+    @State private var setupStagingReservePoolSimDragTimeoutReconcileTasks: [String: Task<Void, Never>] = [:]
     /// Shared live progress / deferral values for task list rows and the in-card triage sheet.
     private struct MissionLiveTaskProgressDerived {
         let hub: FleetHubVehicleTelemetry?
@@ -672,7 +699,9 @@ struct MissionRunDetailView: View {
         onBack: @escaping () -> Void,
         onUpdate: @escaping (MissionRunEnvironment) -> Void,
         onStart: @escaping (MissionRunEnvironment) -> Void,
-        onDelete: @escaping (UUID) -> Void
+        onDelete: @escaping (UUID) -> Void,
+        pendingPostOpenLiveMissionTaskID: Binding<UUID?>,
+        pendingPostOpenLiveMissionAssignmentID: Binding<UUID?>
     ) {
         _run = ObservedObject(wrappedValue: run)
         _missionStore = ObservedObject(wrappedValue: missionStore)
@@ -680,6 +709,8 @@ struct MissionRunDetailView: View {
         _sitl = ObservedObject(wrappedValue: sitl)
         _controlStore = ObservedObject(wrappedValue: controlStore)
         _generalSettings = ObservedObject(wrappedValue: generalSettings)
+        _pendingPostOpenLiveMissionTaskID = pendingPostOpenLiveMissionTaskID
+        _pendingPostOpenLiveMissionAssignmentID = pendingPostOpenLiveMissionAssignmentID
         self.onBack = onBack
         self.onUpdate = onUpdate
         self.onStart = onStart
@@ -718,11 +749,28 @@ struct MissionRunDetailView: View {
         rosterBulkSimSpawnWorkingAssignmentId = nil
     }
 
-    /// Present the MC-R cog → mission policies + Rules-of-Engagement sidebar editor.
+    /// Present MC-R **switch.2** → app-wide Mission Run toggles (same rows as Setup → **Settings** / App Settings → Missions → Mission Run; not wrapped in a card).
+    private func presentMcrRunSettingsDrawer() {
+        let anim = rosterPickerSpring
+        appDrawer.present(
+            title: "Settings",
+            preferredWidth: 420,
+            scrimTapDismisses: true,
+            animation: anim
+        ) {
+            ScrollView {
+                mcSetupMissionRunAppSettingsMirrorFormBody
+                    .padding(GuardianSpacing.md)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+        }
+    }
+
+    /// Present the MC-R cog → mission policy chains + rules of engagement (MCS **Rules** tab content).
     private func presentRunControlsSidebar() {
         let anim = rosterPickerSpring
         appDrawer.present(
-            title: "Run controls",
+            title: "Run Rules",
             preferredWidth: 420,
             scrimTapDismisses: true,
             animation: anim
@@ -1410,8 +1458,8 @@ struct MissionRunDetailView: View {
                 unit: $taskStartDeferralPostponeUnit,
                 minimumTotalSeconds: 1,
                 maximumTotalSeconds: TimeInterval(generalSettings.missionControlPostponeStepCapSeconds),
-                numericFieldWidth: hero ? 96 : 88,
-                unitPickerWidth: hero ? 72 : 68,
+                numericFieldWidth: hero ? 96 : 22,
+                unitPickerWidth: hero ? 72 : 56,
                 controlSize: controlSize
             )
             missionDeferralAlterSoonerLaterIconButtons(controlSize: controlSize) {
@@ -1658,7 +1706,7 @@ struct MissionRunDetailView: View {
     }
 
     private func applyTaskAbortNow(task: RoutePath) {
-        run.attachServices(fleetLink: fleetLink, sitl: sitl)
+        run.attachServices(fleetLink: fleetLink, sitl: sitl, generalSettings: generalSettings)
         if run.abortMissionTask(.task(task.id)) {
             toastCenter.show("Abort issued for path \"\(task.name)\".", style: .info)
         } else {
@@ -1679,7 +1727,7 @@ struct MissionRunDetailView: View {
     }
 
     private func applyTaskCompleteNow(task: RoutePath) {
-        run.attachServices(fleetLink: fleetLink, sitl: sitl)
+        run.attachServices(fleetLink: fleetLink, sitl: sitl, generalSettings: generalSettings)
         if run.completeMissionTask(.task(task.id)) {
             toastCenter.show("Complete wind-down issued for path \"\(task.name)\".", style: .info)
         } else {
@@ -1918,7 +1966,7 @@ struct MissionRunDetailView: View {
     }
 
     private func applyAbortImmediate() {
-        run.attachServices(fleetLink: fleetLink, sitl: sitl)
+        run.attachServices(fleetLink: fleetLink, sitl: sitl, generalSettings: generalSettings)
         run.systems.scheduling.abortNow()
         onUpdate(run)
         syncRunFromStore()
@@ -1931,7 +1979,7 @@ struct MissionRunDetailView: View {
     }
 
     private func applyCompleteImmediate() {
-        run.attachServices(fleetLink: fleetLink, sitl: sitl)
+        run.attachServices(fleetLink: fleetLink, sitl: sitl, generalSettings: generalSettings)
         run.systems.scheduling.completeNow()
         onUpdate(run)
         syncRunFromStore()
@@ -1975,15 +2023,16 @@ struct MissionRunDetailView: View {
         )
     }
 
-    /// Mission Control Running owns SIM battery drain policy for this run:
-    /// running => drain on, otherwise off.
+    /// Mission Control Running applies SIM battery drain for roster SITL streams from **this run’s** ``MissionRunOperatorDisplaySettings/simBatteryDrainRateDuringRun`` while ``MissionRunStatus/running``; ``SimBatteryDrainRate/none`` keeps drain off. Not ``GeneralSettingsStore``.
     private func syncSimBatteryDrainForRunStatus() {
-        let enableDrain = (run.status == .running)
+        let rate = run.operatorDisplaySettings.simBatteryDrainRateDuringRun
+        let enableDrain = (run.status == .running) && (rate != .none)
+        let rateForWire = enableDrain ? rate : .normal
         for vehicleID in assignedSimulationVehicleIDs {
             fleetLink.setSimBatteryDrainEnabled(
                 vehicleID: vehicleID,
                 enabled: enableDrain,
-                rate: generalSettings.defaultSimBatteryDrainRate,
+                rate: rateForWire,
                 source: "missionControl.runStatus.\(run.status.rawValue)",
                 onResult: nil
             )
@@ -2074,6 +2123,20 @@ struct MissionRunDetailView: View {
         return run.assignments.filter { assignmentMatchesLiveFocus($0, mission: mission) }
     }
 
+    /// Task focus applied to the MC‑R **live overview map** only (paths, pins, vehicles, pool markers).
+    /// When **Isolate map to selected task** is off for this run, the map stays full-mission even while triage keeps a task selected.
+    private var liveOverviewMapFocusedTaskID: UUID? {
+        guard run.operatorDisplaySettings.isolateLiveMapToSelectedTask else { return nil }
+        return focusedLiveTaskID
+    }
+
+    /// Roster rows that supply **live map** vehicle markers (full roster when map isolation is off).
+    private var missionLiveMapRosterAssignments: [MissionRunAssignment] {
+        guard let mission = resolvedMission else { return Array(run.assignments) }
+        guard liveOverviewMapFocusedTaskID != nil else { return Array(run.assignments) }
+        return run.assignments.filter { assignmentMatchesLiveFocus($0, mission: mission) }
+    }
+
     /// When ``liveReserveSwapPick`` is active, pool berths (ids) that may replace the vacancy — same slice and **pool-row order** as ``MissionRunEnvironment/enumerateReserveSwapCandidates`` with default ordering (floating pool rows only).
     private var mcrLiveReserveSwapEligiblePoolSlotsOrdered: [MissionRunReservePoolSlot] {
         guard let pick = liveReserveSwapPick else { return [] }
@@ -2157,37 +2220,15 @@ struct MissionRunDetailView: View {
 
     /// Camera vs map for MC-R live console (icons only — segmented control lives in the title bar).
     private var missionLiveMediaModeSubBarToggle: some View {
-        let activeFill = theme.backgroundElevated.opacity(0.55)
-        return HStack(spacing: GuardianSpacing.micro) {
-            Button {
-                liveConsoleMediaTab = .map
-            } label: {
-                Image(systemName: "map.fill")
-                    .font(GuardianTypography.font(.subsectionTitleSemibold))
-                    .foregroundStyle(liveConsoleMediaTab == .map ? theme.textPrimary : theme.textTertiary)
-                    .frame(width: 30, height: 26)
-                    .background(liveConsoleMediaTab == .map ? activeFill : Color.clear)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            }
-            .buttonStyle(GuardianPointerPlainButtonStyle())
-            .accessibilityLabel("Map")
-
-            Button {
-                liveConsoleMediaTab = .camera
-            } label: {
-                Image(systemName: "video.fill")
-                    .font(GuardianTypography.font(.subsectionTitleSemibold))
-                    .foregroundStyle(liveConsoleMediaTab == .camera ? theme.textPrimary : theme.textTertiary)
-                    .frame(width: 30, height: 26)
-                    .background(liveConsoleMediaTab == .camera ? activeFill : Color.clear)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            }
-            .buttonStyle(GuardianPointerPlainButtonStyle())
-            .accessibilityLabel("Camera")
-        }
-        .padding(GuardianSpacing.titleStackTight)
-        .background(theme.borderSubtle.opacity(0.4))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        GuardianToolbarDualIconModeToggle(
+            selection: $liveConsoleMediaTab,
+            leftMode: .map,
+            leftSystemImage: "map.fill",
+            leftAccessibilityLabel: "Map",
+            rightMode: .camera,
+            rightSystemImage: "video.fill",
+            rightAccessibilityLabel: "Camera"
+        )
     }
 
     private var allRosterFilled: Bool {
@@ -2219,20 +2260,6 @@ struct MissionRunDetailView: View {
                 presentedRunConfirm = .deleteRun
             }
         }
-    }
-
-    /// ``Menu`` label chip aligned with ``GuardianThemedButton`` outline geometry.
-    private func runDetailToolbarMenuChip(_ title: String) -> some View {
-        Text(title)
-            .font(GuardianTypography.font(.inlineNoticeTitle))
-            .foregroundStyle(theme.textPrimary)
-            .padding(.horizontal, GuardianSpacing.denseGutter)
-            .frame(height: 28)
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(theme.borderSubtle, lineWidth: 1.5)
-            )
     }
 
     var body: some View {
@@ -2272,7 +2299,7 @@ struct MissionRunDetailView: View {
                                 }
                                 .pickerStyle(.segmented)
                                 .labelsHidden()
-                                .frame(maxWidth: 380)
+                                .frame(maxWidth: 520)
                                 .accessibilityLabel("Mission setup section")
                             }
                         }
@@ -2312,10 +2339,12 @@ struct MissionRunDetailView: View {
                                         applyCompleteAfterCycle()
                                     }
                                 } label: {
-                                    runDetailToolbarMenuChip("Stop run")
+                                    GuardianNeutralOutlinedMenuTriggerLabel(title: "Stop Run")
                                 }
-                                .menuStyle(.borderlessButton)
+                                .guardianStyledNeutralToolbarMenu()
+                                .fixedSize(horizontal: true, vertical: false)
                                 .guardianPointerOnHover()
+                                .help("Abort, complete, or wind down this run")
 
                                 GuardianNeutralBorderedButton(
                                     systemImage: liveRuntimeMissionPointsOverlayPresented
@@ -2333,8 +2362,14 @@ struct MissionRunDetailView: View {
 
                                 GuardianNeutralBorderedButton(
                                     systemImage: "gearshape",
-                                    help: "Run policies & rules of engagement",
+                                    help: "Run rules — mission policy chains and rules of engagement",
                                     action: { presentRunControlsSidebar() }
+                                )
+
+                                GuardianNeutralBorderedButton(
+                                    systemImage: "switch.2",
+                                    help: "Mission Run settings — same toggles as Setup → Settings and App Settings → Missions → Mission Run",
+                                    action: { presentMcrRunSettingsDrawer() }
                                 )
                             } else if run.status == .completed {
                                 GuardianPrimaryProminentButton(title: "Back to setup") {
@@ -2366,6 +2401,8 @@ struct MissionRunDetailView: View {
                                                 setupTimingTabContent
                                             case .rules:
                                                 setupRulesTabContent
+                                            case .settings:
+                                                setupSettingsTabContent
                                             case .rosters:
                                                 EmptyView()
                                             }
@@ -2502,7 +2539,7 @@ struct MissionRunDetailView: View {
             )
         })
         .onAppear {
-            run.attachServices(fleetLink: fleetLink, sitl: sitl)
+            run.attachServices(fleetLink: fleetLink, sitl: sitl, generalSettings: generalSettings)
             installMissionTemplatePersister()
             syncRunFromStore()
             if run.status == .setup {
@@ -2531,6 +2568,7 @@ struct MissionRunDetailView: View {
             }
         }
         .onChange(of: run.status) { newStatus in
+            disarmMCSReservePoolHomePlacement()
             syncSimBatteryDrainForRunStatus()
             if newStatus == .setup || newStatus == .completed {
                 focusLiveTask(nil)
@@ -2554,6 +2592,9 @@ struct MissionRunDetailView: View {
                 appDrawer.dismiss()
             }
         }
+        .onChange(of: mcsReservePoolHomeArmLifecycleToken) { _ in
+            syncMCSReservePoolHomePlacementWithMissionTemplateIfNeeded()
+        }
         .onChange(of: run.sessionPhase) { newPhase in
             guard run.status == .running || run.status == .paused else { return }
             if newPhase == .aborting {
@@ -2569,6 +2610,7 @@ struct MissionRunDetailView: View {
         .onChange(of: setupMainTab) { newTab in
             appDrawer.dismiss()
             if newTab != .rosters {
+                disarmMCSReservePoolHomePlacement()
                 rostersSidebarListTab = .tasks
                 clearSetupRostersMissionPointChrome()
             }
@@ -2580,6 +2622,8 @@ struct MissionRunDetailView: View {
             if newTab == .tasks {
                 appDrawer.dismiss()
                 setupRostersMissionPointDrawerEditingID = nil
+            } else {
+                disarmMCSReservePoolHomePlacement()
             }
         }
         .onChange(of: appDrawer.presented?.id) { newDrawerID in
@@ -2587,6 +2631,9 @@ struct MissionRunDetailView: View {
                 setupRostersMissionPointDrawerEditingID = nil
                 liveRuntimeMissionPointDrawerEditingID = nil
             }
+        }
+        .onChange(of: run.operatorDisplaySettings) { _ in
+            syncSimBatteryDrainForRunStatus()
         }
         .onChange(of: run.assignments) { _ in
             syncSimBatteryDrainForRunStatus()
@@ -2627,13 +2674,14 @@ struct MissionRunDetailView: View {
             }
         }
         .onDisappear {
+            disarmMCSReservePoolHomePlacement()
             appDrawer.dismiss()
             bottomPromptCenter.dismiss()
             for vehicleID in assignedSimulationVehicleIDs {
                 fleetLink.setSimBatteryDrainEnabled(
                     vehicleID: vehicleID,
                     enabled: false,
-                    rate: generalSettings.defaultSimBatteryDrainRate,
+                    rate: .normal,
                     source: "missionControl.viewDisappear",
                     onResult: nil
                 )
@@ -2750,6 +2798,52 @@ struct MissionRunDetailView: View {
             )
                 .zIndex(2)
         }
+        .onAppear {
+            operatorPromptCenter.noteMCRRunDetailViewPresented(missionRunID: run.id)
+        }
+        .onDisappear {
+            operatorPromptCenter.noteMCRRunDetailViewDismissed(missionRunID: run.id)
+        }
+        .onAppear(perform: applyPendingPostOpenLiveMissionDrillInIfNeeded)
+        .onChange(of: pendingPostOpenLiveMissionTaskID) { _ in
+            applyPendingPostOpenLiveMissionDrillInIfNeeded()
+        }
+        .onChange(of: pendingPostOpenLiveMissionAssignmentID) { _ in
+            applyPendingPostOpenLiveMissionDrillInIfNeeded()
+        }
+        .onChange(of: run.status) { _ in
+            applyPendingPostOpenLiveMissionDrillInIfNeeded()
+        }
+    }
+
+    /// Applies Live Drive / Decisions drill-in: assignment vehicle overlay first, else task triage (``MissionControlView``).
+    private func applyPendingPostOpenLiveMissionDrillInIfNeeded() {
+        guard run.status == .running || run.status == .paused || run.status == .recovery else { return }
+        if let aid = pendingPostOpenLiveMissionAssignmentID {
+            guard run.assignments.contains(where: { $0.id == aid }) else {
+                pendingPostOpenLiveMissionAssignmentID = nil
+                return
+            }
+            pendingPostOpenLiveMissionAssignmentID = nil
+            pendingPostOpenLiveMissionTaskID = nil
+            withAnimation(triageSheetSpring) {
+                liveReserveSwapPick = nil
+                liveReservePoolBrowseTaskID = nil
+                focusedLiveReservePoolBerth = nil
+                focusedLiveAssignmentID = aid
+                focusedLiveTaskID = nil
+            }
+            return
+        }
+        guard let tid = pendingPostOpenLiveMissionTaskID else { return }
+        withAnimation(triageSheetSpring) {
+            focusedLiveTaskID = tid
+            focusedLiveAssignmentID = nil
+            liveReserveSwapPick = nil
+            liveReservePoolBrowseTaskID = nil
+            focusedLiveReservePoolBerth = nil
+        }
+        pendingPostOpenLiveMissionTaskID = nil
     }
 
     /// SITL instances + aliveness — roster slots drop removed sims.
@@ -3650,26 +3744,50 @@ struct MissionRunDetailView: View {
                     missionLiveAssignmentTriageBadgesCard(assignment: assignment, rosterDevice: rosterDevice)
 
                     if missionLiveEngageStabilizeChromeEnabled(assignment: assignment) {
-                        missionLiveTriageActionRowCard(bodyCaption: "Stabilize (Live Drive prep)") {
-                            HStack(spacing: GuardianSpacing.xs) {
-                                GuardianPrimaryProminentButton(title: "Park") {
-                                    performOperatorEngageStabilize(assignment: assignment, kind: .park)
+                        let liveVid = telemetryVehicleID(for: assignment)
+                        let phase = liveVid.map { fleetLink.mcrOperatorVehiclePhase(vehicleID: $0) } ?? .unknown
+                        if phase == .operatorParkAwaitingContinue {
+                            missionLiveTriageActionRowCard(bodyCaption: "Resume after park") {
+                                GuardianPrimaryProminentButton(title: "Continue mission") {
+                                    performOperatorContinueMissionAfterPark(assignment: assignment)
                                 }
                                 .guardianPointerOnHover()
-                                .help("Send a park catalogue command to this vehicle through the mission run log.")
-                                GuardianThemedButton(
-                                    title: "Loiter",
-                                    accent: .primary,
-                                    surface: .outline,
-                                    size: .small,
-                                    shape: .cornered,
-                                    action: { performOperatorEngageStabilize(assignment: assignment, kind: .loiter) }
-                                )
-                                .guardianPointerOnHover()
-                                .help("Send a loiter / hold catalogue command to this vehicle through the mission run log.")
+                                .help("Set mission mode, arm if needed, and start mission execution on the autopilot.")
                             }
+                            missionLiveTriageActionRowCard(bodyCaption: "Live Drive") {
+                                GuardianPrimaryProminentButton(title: "Engage") {
+                                    performOperatorEngageLiveDriveFromPark(assignment: assignment)
+                                }
+                                .guardianPointerOnHover()
+                                .help("Open Live Drive for this vehicle to take manual control.")
+                            }
+                        } else {
+                            missionLiveTriageActionRowCard(bodyCaption: "Stop Vehicle") {
+                                HStack(spacing: GuardianSpacing.xs) {
+                                    GuardianPrimaryProminentButton(title: "Park") {
+                                        performOperatorEngageStabilize(assignment: assignment, kind: .park)
+                                    }
+                                    .guardianPointerOnHover()
+                                    .help("Send a park catalogue command to this vehicle through the mission run log.")
+                                    if missionLiveAssignmentTriageStabilizeOffersLoiter(
+                                        assignment: assignment,
+                                        rosterDevice: rosterDevice
+                                    ) {
+                                        GuardianThemedButton(
+                                            title: "Loiter",
+                                            accent: .primary,
+                                            surface: .outline,
+                                            size: .small,
+                                            shape: .cornered,
+                                            action: { performOperatorEngageStabilize(assignment: assignment, kind: .loiter) }
+                                        )
+                                        .guardianPointerOnHover()
+                                        .help("Send a loiter / hold catalogue command to this vehicle through the mission run log.")
+                                    }
+                                }
+                            }
+                            missionLiveEngageStabilizeTelemetryNotice(assignment: assignment)
                         }
-                        missionLiveEngageStabilizeTelemetryNotice(assignment: assignment)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -3717,26 +3835,47 @@ struct MissionRunDetailView: View {
                     missionLiveAssignmentTriageBadgesCard(assignment: syn, rosterDevice: nil)
 
                     if missionLiveEngageStabilizeChromeEnabled(assignment: syn) {
-                        missionLiveTriageActionRowCard(bodyCaption: "Stabilize (Live Drive prep)") {
-                            HStack(spacing: GuardianSpacing.xs) {
-                                GuardianPrimaryProminentButton(title: "Park") {
-                                    performOperatorEngageStabilize(assignment: syn, kind: .park)
+                        let liveVid = telemetryVehicleID(for: syn)
+                        let phase = liveVid.map { fleetLink.mcrOperatorVehiclePhase(vehicleID: $0) } ?? .unknown
+                        if phase == .operatorParkAwaitingContinue {
+                            missionLiveTriageActionRowCard(bodyCaption: "Resume after park") {
+                                GuardianPrimaryProminentButton(title: "Continue mission") {
+                                    performOperatorContinueMissionAfterPark(assignment: syn)
                                 }
                                 .guardianPointerOnHover()
-                                .help("Send a park catalogue command to this berth’s vehicle through the mission run log.")
-                                GuardianThemedButton(
-                                    title: "Loiter",
-                                    accent: .primary,
-                                    surface: .outline,
-                                    size: .small,
-                                    shape: .cornered,
-                                    action: { performOperatorEngageStabilize(assignment: syn, kind: .loiter) }
-                                )
-                                .guardianPointerOnHover()
-                                .help("Send a loiter / hold catalogue command to this berth’s vehicle through the mission run log.")
+                                .help("Set mission mode, arm if needed, and start mission execution on the autopilot.")
                             }
+                            missionLiveTriageActionRowCard(bodyCaption: "Live Drive") {
+                                GuardianPrimaryProminentButton(title: "Engage") {
+                                    performOperatorEngageLiveDriveFromPark(assignment: syn)
+                                }
+                                .guardianPointerOnHover()
+                                .help("Open Live Drive for this vehicle to take manual control.")
+                            }
+                        } else {
+                            missionLiveTriageActionRowCard(bodyCaption: "Stop Vehicle") {
+                                HStack(spacing: GuardianSpacing.xs) {
+                                    GuardianPrimaryProminentButton(title: "Park") {
+                                        performOperatorEngageStabilize(assignment: syn, kind: .park)
+                                    }
+                                    .guardianPointerOnHover()
+                                    .help("Send a park catalogue command to this berth’s vehicle through the mission run log.")
+                                    if missionLiveAssignmentTriageStabilizeOffersLoiter(assignment: syn, rosterDevice: nil) {
+                                        GuardianThemedButton(
+                                            title: "Loiter",
+                                            accent: .primary,
+                                            surface: .outline,
+                                            size: .small,
+                                            shape: .cornered,
+                                            action: { performOperatorEngageStabilize(assignment: syn, kind: .loiter) }
+                                        )
+                                        .guardianPointerOnHover()
+                                        .help("Send a loiter / hold catalogue command to this berth’s vehicle through the mission run log.")
+                                    }
+                                }
+                            }
+                            missionLiveEngageStabilizeTelemetryNotice(assignment: syn)
                         }
-                        missionLiveEngageStabilizeTelemetryNotice(assignment: syn)
                     }
 
                     if poolMutationLocked {
@@ -3864,7 +4003,7 @@ struct MissionRunDetailView: View {
         }
     }
 
-    /// Engage flow step 1 (v1): show **Park** / **Loiter** when the slot can dispatch through MRE with a live bridge link.
+    /// Engage flow step 1 (v1): show **Stop Vehicle** (Park ± Loiter by class) when the slot can dispatch through MRE with a live bridge link; after PX4 park latch, **Resume** and **Live Drive** cards appear separately.
     private func missionLiveEngageStabilizeChromeEnabled(assignment: MissionRunAssignment) -> Bool {
         guard run.status == .running || run.status == .paused || run.status == .recovery else {
             return false
@@ -3879,7 +4018,7 @@ struct MissionRunDetailView: View {
         assignment: MissionRunAssignment,
         kind: MissionRunEngageStabilizeDispatchKind
     ) {
-        run.attachServices(fleetLink: fleetLink, sitl: sitl)
+        run.attachServices(fleetLink: fleetLink, sitl: sitl, generalSettings: generalSettings)
         let event = run.issueOperatorEngageStabilizeDispatch(
             assignment: assignment,
             kind: kind,
@@ -3901,6 +4040,49 @@ struct MissionRunDetailView: View {
         case .error:
             toastCenter.show("\(label): \(event.message)", style: .error)
         }
+    }
+
+    private func performOperatorContinueMissionAfterPark(assignment: MissionRunAssignment) {
+        guard let vid = telemetryVehicleID(for: assignment) else {
+            toastCenter.show("No linked vehicle telemetry for this slot.", style: .warning)
+            return
+        }
+        run.attachServices(fleetLink: fleetLink, sitl: sitl, generalSettings: generalSettings)
+        let kind = MissionRunOperatorContinueMissionAfterParkDispatchKind.armModeMissionStart
+        let event = run.issueOperatorContinueMissionAfterParkDispatch(
+            assignment: assignment,
+            kind: kind,
+            fleetLink: fleetLink,
+            sitl: sitl
+        )
+        onUpdate(run)
+        let label = kind.operatorShortLabel
+        switch event.level {
+        case .info:
+            fleetLink.clearMcrOperatorParkAwaitingContinue(vehicleID: vid)
+            toastCenter.show("Queued \(label) for \(assignment.slotName).", style: .info)
+        case .warning:
+            toastCenter.show("\(label): \(event.message)", style: .warning)
+        case .error:
+            toastCenter.show("\(label): \(event.message)", style: .error)
+        }
+    }
+
+    private func performOperatorEngageLiveDriveFromPark(assignment: MissionRunAssignment) {
+        guard let vid = telemetryVehicleID(for: assignment) else {
+            toastCenter.show("No linked vehicle telemetry for this slot.", style: .warning)
+            return
+        }
+        guard fleetLink.mcrOperatorVehiclePhase(vehicleID: vid) == .operatorParkAwaitingContinue else {
+            toastCenter.show("Live Drive is available after park completes.", style: .info)
+            return
+        }
+        run.attachServices(fleetLink: fleetLink, sitl: sitl, generalSettings: generalSettings)
+        _ = run.cancelPendingExecutorBatchesForOperatorLiveDriveEngage(assignment: assignment)
+        run.noteOperatorLiveDriveHandoffActive(forAssignmentID: assignment.id)
+        operatorPromptReviewFocus.requestLiveDriveEngageDrillIn(vehicleID: vid, missionRunID: run.id)
+        onUpdate(run)
+        toastCenter.show("Switched to Live Drive for this vehicle.", style: .info)
     }
 
     private func clearMissionLiveEngageStabilizeTelemetryWatch() {
@@ -4016,7 +4198,7 @@ struct MissionRunDetailView: View {
         })
     }
 
-    /// MC-R assignment triage: body-only ``GuardianCard`` with capsule badges (semantic slot, neutral role + vehicle id) and a live status row from ``FleetVehicleModel/liveStatusBadgeRow`` (or the same row built from bridge hub + operational model when no stamped model exists yet): arm / motion / mode, traffic-light battery, and neutral **AGL** (bridge relative altitude) beside battery.
+    /// MC-R assignment triage: body-only ``GuardianCard`` with capsule badges (semantic slot, neutral role + vehicle id), a full-width **Mission Control operator phase** line (``FleetMcrOperatorVehiclePhase``), then live status chips from ``FleetVehicleModel/liveStatusBadgeRow`` (or hub + operational model): arm / motion / mode, battery, AGL.
     @ViewBuilder
     private func missionLiveAssignmentTriageBadgesCard(
         assignment: MissionRunAssignment,
@@ -4048,6 +4230,9 @@ struct MissionRunDetailView: View {
                             hub: fleetLink.hubTelemetry(forVehicleID: vid),
                             operational: fleetLink.vehicleOperationalModel(forVehicleID: vid)
                         )
+                    let mcrPhase = fleetLink.mcrOperatorVehiclePhase(vehicleID: vid)
+                    missionLiveAssignmentTriageMcrOperatorPhaseFullWidthBadge(phase: mcrPhase)
+                        .help("Mission Control operator phase for this bridge vehicle.")
                     HStack(alignment: .center, spacing: GuardianSpacing.xs) {
                         missionLiveAssignmentTriageActiveStateCapsuleBadge(
                             title: statusRow.arm.title,
@@ -4093,6 +4278,34 @@ struct MissionRunDetailView: View {
             .padding(.vertical, GuardianSpacing.titleStackTight)
             .background(pair.background)
             .clipShape(Capsule())
+    }
+
+    private func missionLiveAssignmentTriageMcrOperatorPhaseSemanticColors(
+        _ phase: FleetMcrOperatorVehiclePhase
+    ) -> (background: Color, foreground: Color) {
+        switch phase {
+        case .unknown:
+            return (GuardianSemanticColors.neutralBadgeBackground, GuardianSemanticColors.neutralBadgeForeground)
+        case .onMission:
+            return (GuardianSemanticColors.infoBackground, GuardianSemanticColors.infoForeground)
+        case .operatorParkAwaitingContinue:
+            return (GuardianSemanticColors.warningBackground, GuardianSemanticColors.warningForeground)
+        }
+    }
+
+    @ViewBuilder
+    private func missionLiveAssignmentTriageMcrOperatorPhaseFullWidthBadge(phase: FleetMcrOperatorVehiclePhase) -> some View {
+        let pair = missionLiveAssignmentTriageMcrOperatorPhaseSemanticColors(phase)
+        Text(phase.missionControlAssignmentTriageBadgeTitle)
+            .font(GuardianTypography.font(.denseCaption10Semibold))
+            .foregroundStyle(pair.foreground)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, GuardianSpacing.sm)
+            .padding(.vertical, GuardianSpacing.xs)
+            .background(pair.background)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     @ViewBuilder
@@ -4174,6 +4387,32 @@ struct MissionRunDetailView: View {
         }
         let tail = vid.split(separator: ":").last.map(String.init) ?? vid
         return "\(rosterDeviceClass.classCode):\(tail)"
+    }
+
+    /// Resolved granular type for triage chrome (stamped model, SITL preset, then roster template).
+    private func assignmentResolvedFleetVehicleType(
+        assignment: MissionRunAssignment,
+        rosterDevice: RosterDevice?
+    ) -> FleetVehicleType {
+        if let vid = telemetryVehicleID(for: assignment),
+           let model = fleetLink.vehicleModel(forVehicleID: vid) {
+            return model.data.vehicleType
+        }
+        if let key = assignment.attachedFleetVehicleToken,
+           let token = FleetMissionVehicleToken(storageKey: key),
+           case .sitl(let uuid) = token,
+           let inst = sitl.instances.first(where: { $0.id == uuid }) {
+            return inst.preset.fleetVehicleType
+        }
+        return rosterDevice?.vehicleClass ?? .unknown
+    }
+
+    /// **Loiter** stabilize is omitted for **UGV** assignment triage (park is sufficient).
+    private func missionLiveAssignmentTriageStabilizeOffersLoiter(
+        assignment: MissionRunAssignment,
+        rosterDevice: RosterDevice?
+    ) -> Bool {
+        assignmentResolvedFleetVehicleType(assignment: assignment, rosterDevice: rosterDevice).universalClass != .ugv
     }
 
     /// In-card triage sheet for the selected task: state, wind-down, hero progress, read-only floating reserve pool strip, sidebar-style close.
@@ -4383,12 +4622,22 @@ struct MissionRunDetailView: View {
     }
 
     private var missionLiveCameraPlaceholder: some View {
-        RoundedRectangle(cornerRadius: 10)
-            .fill(liveConsoleCardFill)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(liveConsoleCardStroke, lineWidth: 1)
-            )
+        ZStack {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(liveConsoleCardFill)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(liveConsoleCardStroke, lineWidth: 1)
+                )
+            VStack(spacing: GuardianSpacing.xs) {
+                Image(systemName: "video")
+                    .font(GuardianTypography.font(.heroGlyph30Medium))
+                    .foregroundStyle(theme.textSecondary)
+                Text("Camera view placeholder")
+                    .font(GuardianTypography.font(.subsectionTitleSemibold))
+                    .foregroundStyle(theme.textSecondary)
+            }
+        }
     }
 
     /// MC-R live map: **same shell as MCS** roster staging map (``rostersStagingMapBare``) — ``GuardianCard`` media + identical
@@ -4479,9 +4728,9 @@ struct MissionRunDetailView: View {
         )
     }
 
-    /// MC-R live map polylines: when a task is focused in triage, only that task’s path is drawn (matches roster filter).
+    /// MC-R live map polylines: when map isolation is on and a task is focused in triage, only that task’s path is drawn.
     private func liveOverviewMapTaskPathPayload(from mission: Mission) -> (coords: [[RouteCoordinate]], ids: [UUID]) {
-        if let tid = focusedLiveTaskID,
+        if let tid = liveOverviewMapFocusedTaskID,
            let task = mission.routeMacro.tasks.first(where: { $0.id == tid }) {
             return ([task.waypoints.map(\.coord)], [tid])
         }
@@ -4501,7 +4750,7 @@ struct MissionRunDetailView: View {
     private var liveOverviewReservePoolSlotTopologySignature: String {
         guard let mission = resolvedMission else { return "" }
         let taskIDs: [UUID] = {
-            if let f = focusedLiveTaskID { return [f] }
+            if let f = liveOverviewMapFocusedTaskID { return [f] }
             return mission.routeMacro.tasks.filter(\.enabled).map(\.id)
         }()
         var rows: [String] = []
@@ -4521,7 +4770,7 @@ struct MissionRunDetailView: View {
         let pathPayload = mission.map { liveOverviewMapTaskPathPayload(from: $0) }
         let points = MissionPoint.filteredForMissionControlLiveMap(
             run.runtimeMissionPoints,
-            focusedTaskID: focusedLiveTaskID
+            focusedTaskID: liveOverviewMapFocusedTaskID
         )
         let topo = points
             .map { mp in
@@ -4536,7 +4785,7 @@ struct MissionRunDetailView: View {
             homeCoord: mission?.routeMacro.home?.coord,
             allTasksCoords: pathPayload?.coords ?? [],
             taskPathIDs: pathPayload?.ids ?? [],
-            focusedTaskID: focusedLiveTaskID,
+            focusedTaskID: liveOverviewMapFocusedTaskID,
             missionPointTopologySignature: topo,
             rosterSlotBindingSignature: rosterTopo + "§pool§" + poolTopo
         )
@@ -4547,7 +4796,7 @@ struct MissionRunDetailView: View {
     private var liveOverviewMapMarkerCoordinateDigest: String {
         let pts = MissionPoint.filteredForMissionControlLiveMap(
             run.runtimeMissionPoints,
-            focusedTaskID: focusedLiveTaskID
+            focusedTaskID: liveOverviewMapFocusedTaskID
         )
             .map { mp in
                 String(format: "%@:%.5f:%.5f", mp.id.uuidString, mp.coordinate.lat, mp.coordinate.lon)
@@ -4571,7 +4820,7 @@ struct MissionRunDetailView: View {
             homeCoordinate: mission.routeMacro.home?.coord,
             taskPathCoordinates: pathPayload.coords,
             runtimeMissionPoints: run.runtimeMissionPoints,
-            focusedTaskID: focusedLiveTaskID,
+            focusedTaskID: liveOverviewMapFocusedTaskID,
             vehicleMarkerLatLon: vehicleLL
         )
         guard !pts.isEmpty else { return }
@@ -4582,7 +4831,7 @@ struct MissionRunDetailView: View {
     private func fitSetupStagingMapToVisibleMissionContent() {
         guard let mission = resolvedMission else { return }
         let taskPathCoordinates = mission.routeMacro.tasks.map { $0.waypoints.map(\.coord) }
-        let vehicleLL = setupVehicleMarkers.map { ($0.lat, $0.lon) }
+        let vehicleLL = setupStagingMapVehicleMarkers.map { ($0.lat, $0.lon) }
         let pts = MissionControlLiveMapFitCoordinates.liveOverviewMissionContentPoints(
             homeCoordinate: mission.routeMacro.home?.coord,
             taskPathCoordinates: taskPathCoordinates,
@@ -4609,7 +4858,8 @@ struct MissionRunDetailView: View {
                 preserveView: true,
                 isEditingTask: false,
                 missionPointMarkers: missionLiveMissionPointMapMarkers,
-                missionPointPlacementArmed: false
+                missionPointPlacementArmed: false,
+                mcsReservePoolHomePlacementArmed: false
             )
         } else {
             mapModel.routeGeometry = .empty
@@ -4645,7 +4895,10 @@ struct MissionRunDetailView: View {
 
     private var missionLiveMissionPointMapMarkers: [GuardianMissionPointMapMarker] {
         missionControlGuardianMissionPointMarkers(
-            from: MissionPoint.filteredForMissionControlLiveMap(run.runtimeMissionPoints, focusedTaskID: focusedLiveTaskID),
+            from: MissionPoint.filteredForMissionControlLiveMap(
+                run.runtimeMissionPoints,
+                focusedTaskID: liveOverviewMapFocusedTaskID
+            ),
             selectedMissionPointID: liveRuntimeOverviewSelectedMissionPointID
         )
     }
@@ -4688,7 +4941,7 @@ struct MissionRunDetailView: View {
     }
 
     private var missionLiveVehicleMarkers: [MapVehicleMarker] {
-        let roster = filteredLiveRosterAssignments.compactMap { assignment -> MapVehicleMarker? in
+        let roster = missionLiveMapRosterAssignments.compactMap { assignment -> MapVehicleMarker? in
             guard let vehicleID = resolvedFleetStreamVehicleID(assignment: assignment, fleetLink: fleetLink, sitl: sitl),
                   let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID),
                   let lat = hub.latitudeDeg,
@@ -4739,7 +4992,7 @@ struct MissionRunDetailView: View {
     private var missionLiveFloatingReservePoolVehicleMarkers: [MapVehicleMarker] {
         guard let mission = resolvedMission else { return [] }
         let taskIDs: [UUID] = {
-            if let f = focusedLiveTaskID { return [f] }
+            if let f = liveOverviewMapFocusedTaskID { return [f] }
             return mission.routeMacro.tasks.filter(\.enabled).map(\.id)
         }()
         var out: [MapVehicleMarker] = []
@@ -5590,8 +5843,14 @@ struct MissionRunDetailView: View {
                             ScrollView {
                                 VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                                     ForEach(liveLogEventsFiltered.suffix(80)) { event in
-                                        logEventRow(event: event)
-                                            .id(event.id)
+                                        MissionRunLiveLogEventRow(
+                                            event: event,
+                                            run: run,
+                                            mission: resolvedMission,
+                                            fleetLink: fleetLink,
+                                            sitl: sitl
+                                        )
+                                        .id(event.id)
                                     }
                                 }
                                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -5659,291 +5918,6 @@ struct MissionRunDetailView: View {
         return ([header] + body).joined(separator: "\n")
     }
 
-    private func colorFromMapHex(_ hex: String) -> Color {
-        var s = hex.trimmingCharacters(in: .whitespacesAndNewlines)
-        if s.hasPrefix("#") { s.removeFirst() }
-        guard s.count == 6, let n = UInt32(s, radix: 16) else {
-            return Color(red: 0.55, green: 0.55, blue: 0.58)
-        }
-        let r = Double((n >> 16) & 0xFF) / 255
-        let g = Double((n >> 8) & 0xFF) / 255
-        let b = Double(n & 0xFF) / 255
-        return Color(red: r, green: g, blue: b)
-    }
-
-    private func logSeverityBorderColor(_ level: MissionRunEventLevel) -> Color {
-        switch level {
-        case .info: return Color.white.opacity(0.22)
-        case .warning: return Color.orange.opacity(0.9)
-        case .error: return Color.red.opacity(0.9)
-        }
-    }
-
-    private func logEventRow(event: MissionRunEvent) -> some View {
-        let mission = resolvedMission
-        let routeTint: Color? = {
-            guard let pid = event.taskID, let mission else { return nil }
-            if let idx = mission.routeMacro.tasks.firstIndex(where: { $0.id == pid }) {
-                return MissionTaskMapColor.swiftUIColor(forTaskIndex: idx)
-            }
-            return nil
-        }()
-        let routeTextColor = routeTint ?? Color.gray.opacity(0.85)
-        let speakerColor: Color = {
-            switch event.speaker {
-            case .missionControl:
-                return theme.textPrimary
-            case .assistant:
-                return theme.textPrimary
-            case .operator:
-                return theme.textPrimary
-            case .vehicleSlot(let slot):
-                return slotSpeakerColor(slotName: slot)
-            }
-        }()
-        let bodyColor: Color = {
-            switch event.level {
-            case .info: return Color.gray.opacity(0.92)
-            case .warning: return Color.orange.opacity(0.88)
-            case .error: return Color.red.opacity(0.9)
-            }
-        }()
-
-        // Build the line as a single Text concat: [Wrapper] + [Speaker] + AttributedString(@target body)
-        // — wrapper/speaker are static metadata (no link); target + body @handles are linkable.
-        var line = Text(verbatim: "")
-        if let pl = event.resolvedTaskLogPrefix(mission: resolvedMission, assignments: run.assignments) {
-            line = line + Text(verbatim: "[\(pl)]").foregroundColor(routeTextColor)
-        }
-        line = line + speakerLogText(event.speaker, color: speakerColor)
-        line = line + Text(attributedTargetAndBody(event: event, defaultColor: bodyColor))
-
-        return HStack(alignment: .top, spacing: 0) {
-            Rectangle()
-                .fill(logSeverityBorderColor(event.level))
-                .frame(width: 3)
-            line
-                .font(GuardianTypography.font(.telemetryMono11Regular))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, GuardianSpacing.xsTight)
-                .padding(.vertical, GuardianSpacing.micro)
-        }
-        .textSelection(.enabled)
-    }
-
-    /// `[Speaker]` segment as a `Text` so it can be concatenated with the wrapper + attributed body.
-    /// Assistant display names are resolved through ``MissionRunAssistantRegistry`` so adding a new
-    /// assistant only requires a one-time profile registration — no renderer changes here.
-    private func speakerLogText(_ speaker: MissionRunEventSpeaker, color: Color) -> Text {
-        switch speaker {
-        case .missionControl:
-            return Text(verbatim: "[MissionControl]").foregroundColor(color)
-        case .assistant(let key):
-            let name = MissionRunAssistantRegistry.shared.displayName(forKey: key)
-            return Text(verbatim: "[\(name)]").foregroundColor(color)
-        case .vehicleSlot(let s):
-            return Text(verbatim: "[\(s)]").foregroundColor(color)
-        case .operator(let displayName):
-            let trimmed = displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return Text(verbatim: trimmed.isEmpty ? "[Operator]" : "[Operator][\(trimmed)]")
-                .foregroundColor(color)
-        }
-    }
-
-    /// Combined `@target body` AttributedString — structural addressee mention plus any free-form
-    /// `@handle` mentions inside the body. Each mention carries `.foregroundColor` (canonical task /
-    /// slot / role color) and a `.link` URL like `guardian://mcr/task/<uuid>` /
-    /// `guardian://mcr/slot/<uuid>` so clicks open the matching MCR overlay
-    /// (intercepted by ``handleMcrLogURL(_:)`` via `OpenURLAction`).
-    private func attributedTargetAndBody(event: MissionRunEvent, defaultColor: Color) -> AttributedString {
-        var result = AttributedString("")
-        var leadingSpace = AttributedString(" ")
-        leadingSpace.foregroundColor = defaultColor
-        result.append(leadingSpace)
-
-        let target = event.effectiveTarget
-        var mention = AttributedString("@\(mcrTargetDisplayName(target))")
-        mention.foregroundColor = mcrTargetColor(target)
-        if let url = mcrTargetLinkURL(target) {
-            mention.link = url
-        }
-        result.append(mention)
-
-        let body = " " + logTemplateRegistry.resolveDisplayBody(for: event)
-        result.append(buildAttributedBody(body, defaultColor: defaultColor))
-        return result
-    }
-
-    /// Universal `@handle` body renderer. Walks the body and turns any `@<uuid>` (preferred,
-    /// id-keyed) **or** `@<Name>` (back-compat, longest-prefix name match) substring matching a
-    /// known task or slot into a colored, clickable AttributedString span.
-    ///
-    /// Id-based path is unambiguous (no name collisions, survives renames, surfaces deletions as
-    /// `@<deleted>`) and is the canonical authoring form — catalog templates emit `@{{taskID}}` /
-    /// `@{{slotID}}` (assignment id) and the catalog `{{...}}` interpolation hands a literal UUID
-    /// string to this renderer. The name path stays as a fallback for handwritten / legacy
-    /// templates so nothing breaks during migration.
-    ///
-    /// Future MCR sites can just emit `@<id>` in their template body and this renderer will tint +
-    /// link it automatically — no changes needed at the call site or in the catalog.
-    private func buildAttributedBody(_ body: String, defaultColor: Color) -> AttributedString {
-        struct NameCandidate {
-            let name: String
-            let color: Color
-            let url: URL?
-        }
-        var nameCandidates: [NameCandidate] = []
-        if let mission = resolvedMission {
-            for (idx, task) in mission.routeMacro.tasks.enumerated() where !task.name.isEmpty {
-                nameCandidates.append(
-                    NameCandidate(
-                        name: task.name,
-                        color: MissionTaskMapColor.swiftUIColor(forTaskIndex: idx),
-                        url: URL(string: "guardian://mcr/task/\(task.id.uuidString)")
-                    )
-                )
-            }
-        }
-        for assignment in run.assignments where !assignment.slotName.isEmpty {
-            nameCandidates.append(
-                NameCandidate(
-                    name: assignment.slotName,
-                    color: slotSpeakerColor(slotName: assignment.slotName),
-                    url: URL(string: "guardian://mcr/slot/\(assignment.id.uuidString)")
-                )
-            )
-        }
-        nameCandidates.sort { $0.name.count > $1.name.count }
-
-        let mutedColor = Color.gray.opacity(0.6)
-        let deletedDisplay = "deleted"
-
-        var result = AttributedString("")
-        var i = body.startIndex
-        var pending = ""
-
-        func flushPending() {
-            if !pending.isEmpty {
-                var p = AttributedString(pending)
-                p.foregroundColor = defaultColor
-                result.append(p)
-                pending = ""
-            }
-        }
-
-        func appendMention(display: String, color: Color, url: URL?) {
-            flushPending()
-            var mention = AttributedString("@\(display)")
-            mention.foregroundColor = color
-            if let url { mention.link = url }
-            result.append(mention)
-        }
-
-        while i < body.endIndex {
-            if body[i] == "@" {
-                let after = body.index(after: i)
-
-                if let uuidEnd = body.index(after, offsetBy: 36, limitedBy: body.endIndex) {
-                    let candidate = String(body[after..<uuidEnd])
-                    if let uuid = UUID(uuidString: candidate) {
-                        if let assignment = run.assignments.first(where: { $0.id == uuid }) {
-                            appendMention(
-                                display: assignment.slotName.isEmpty
-                                    ? "slot:\(uuid.uuidString.prefix(8))"
-                                    : assignment.slotName,
-                                color: slotSpeakerColor(slotName: assignment.slotName),
-                                url: URL(string: "guardian://mcr/slot/\(uuid.uuidString)")
-                            )
-                            i = uuidEnd
-                            continue
-                        }
-                        if let mission = resolvedMission,
-                           let idx = mission.routeMacro.tasks.firstIndex(where: { $0.id == uuid }) {
-                            let task = mission.routeMacro.tasks[idx]
-                            appendMention(
-                                display: task.name.isEmpty ? "task:\(uuid.uuidString.prefix(8))" : task.name,
-                                color: MissionTaskMapColor.swiftUIColor(forTaskIndex: idx),
-                                url: URL(string: "guardian://mcr/task/\(uuid.uuidString)")
-                            )
-                            i = uuidEnd
-                            continue
-                        }
-                        appendMention(display: deletedDisplay, color: mutedColor, url: nil)
-                        i = uuidEnd
-                        continue
-                    }
-                }
-
-                let suffix = body[after...]
-                if let match = nameCandidates.first(where: { suffix.hasPrefix($0.name) }) {
-                    appendMention(display: match.name, color: match.color, url: match.url)
-                    i = body.index(i, offsetBy: match.name.count + 1)
-                    continue
-                }
-            }
-            pending.append(body[i])
-            i = body.index(after: i)
-        }
-        flushPending()
-        return result
-    }
-
-    /// Display token for an `@target` mention. Lower-case for role kinds (`missionControl`,
-    /// `operator`) so they read like handles; task / slot resolve to their current human name from
-    /// the live mission / assignment set (id-keyed for slots so renames stay live and deleted slots
-    /// surface as `slot:<short uuid>`); assistants use their registered display name from
-    /// ``MissionRunAssistantRegistry`` (lower-cased to read like a handle, e.g. `@paladin`).
-    private func mcrTargetDisplayName(_ target: MissionRunEventTarget) -> String {
-        switch target {
-        case .missionControl: return "missionControl"
-        case .assistant(let key):
-            let name = MissionRunAssistantRegistry.shared.displayName(forKey: key)
-            return name.isEmpty ? key : name.lowercased()
-        case .task(_, let name): return name
-        case .slot(let id):
-            if let name = run.assignments.first(where: { $0.id == id })?.slotName, !name.isEmpty {
-                return name
-            }
-            return "slot:\(id.uuidString.prefix(8))"
-        case .operator(let displayName):
-            let trimmed = displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return trimmed.isEmpty ? "operator" : trimmed
-        }
-    }
-
-    private func mcrTargetColor(_ target: MissionRunEventTarget) -> Color {
-        switch target {
-        case .missionControl: return theme.textPrimary
-        case .assistant: return theme.textPrimary
-        case .task(let id, _):
-            if let idx = resolvedMission?.routeMacro.tasks.firstIndex(where: { $0.id == id }) {
-                return MissionTaskMapColor.swiftUIColor(forTaskIndex: idx)
-            }
-            return Color.gray.opacity(0.85)
-        case .slot(let id):
-            if let name = run.assignments.first(where: { $0.id == id })?.slotName, !name.isEmpty {
-                return slotSpeakerColor(slotName: name)
-            }
-            return Color.gray.opacity(0.6)
-        case .operator: return theme.textPrimary
-        }
-    }
-
-    private func mcrTargetLinkURL(_ target: MissionRunEventTarget) -> URL? {
-        switch target {
-        case .missionControl, .assistant, .operator:
-            return nil
-        case .task(let id, _):
-            return URL(string: "guardian://mcr/task/\(id.uuidString)")
-        case .slot(let id):
-            return URL(string: "guardian://mcr/slot/\(id.uuidString)")
-        }
-    }
-
-    /// `OpenURLAction` handler installed on the MCR log scroll: routes `guardian://mcr/...` clicks
-    /// to the matching `focusLive*` helper so `@Alpha` opens the vehicle overlay and `@Continuous`
-    /// opens the task triage. Returns `.discarded` for unrecognized hosts so they don't leak out
-    /// to the system handler.
     private func handleMcrLogURL(_ url: URL) -> OpenURLAction.Result {
         guard url.scheme == "guardian", url.host == "mcr" else { return .discarded }
         let parts = url.pathComponents.filter { $0 != "/" }
@@ -5962,13 +5936,6 @@ struct MissionRunDetailView: View {
 
     /// Canonical color for a roster slot's speaker / mention attribution: bound vehicle map
     /// color when telemetry resolves, otherwise a neutral gray (matches the prior fallback).
-    private func slotSpeakerColor(slotName: String) -> Color {
-        guard let a = run.assignments.first(where: { $0.slotName == slotName }),
-              let vid = resolvedFleetStreamVehicleID(assignment: a, fleetLink: fleetLink, sitl: sitl)
-        else { return Color.gray.opacity(0.9) }
-        return colorFromMapHex(fleetLink.mapColorHex(forVehicleID: vid))
-    }
-
     private func copyLiveLogToPasteboard() {
         guard !liveLogEventsFiltered.isEmpty else { return }
         let pb = NSPasteboard.general
@@ -6065,6 +6032,103 @@ struct MissionRunDetailView: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
+    private var operatorMissionRunIsolateLiveMapBinding: Binding<Bool> {
+        Binding(
+            get: { run.operatorDisplaySettings.isolateLiveMapToSelectedTask },
+            set: { newValue in
+                var s = run.operatorDisplaySettings
+                s.isolateLiveMapToSelectedTask = newValue
+                run.operatorDisplaySettings = s
+                onUpdate(run)
+            }
+        )
+    }
+
+    private var operatorMissionRunResetSimOnCompleteBinding: Binding<Bool> {
+        Binding(
+            get: { run.operatorDisplaySettings.resetSimToStartPoseOnSuccessfulComplete },
+            set: { newValue in
+                var s = run.operatorDisplaySettings
+                s.resetSimToStartPoseOnSuccessfulComplete = newValue
+                run.operatorDisplaySettings = s
+                onUpdate(run)
+            }
+        )
+    }
+
+    private var operatorMissionRunSimBatteryDrainBinding: Binding<SimBatteryDrainRate> {
+        Binding(
+            get: { run.operatorDisplaySettings.simBatteryDrainRateDuringRun },
+            set: { newValue in
+                var s = run.operatorDisplaySettings
+                s.simBatteryDrainRateDuringRun = newValue
+                run.operatorDisplaySettings = s
+                onUpdate(run)
+            }
+        )
+    }
+
+    /// Per-run Mission Run settings (cloned from app defaults at run create) — MCS Setup → **Settings** card and MC‑R **Settings** drawer.
+    private var mcSetupMissionRunAppSettingsMirrorFormBody: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            mcSetupSettingsRow(
+                title: "Isolate map to selected task",
+                description:
+                    "Hide all non-task mission data from the map when a task is selected."
+            ) {
+                Toggle(
+                    "",
+                    isOn: operatorMissionRunIsolateLiveMapBinding
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .frame(minWidth: 44, alignment: .trailing)
+            }
+            mcSetupRowDivider
+            mcSetupSettingsRow(
+                title: "SIM battery drain while run executes",
+                description:
+                    "Slow, normal, fast, or none for simulated vehicles bound to this run while it is executing. None leaves pack model static."
+            ) {
+                Picker("SIM battery drain while run executes", selection: operatorMissionRunSimBatteryDrainBinding) {
+                    ForEach(SimBatteryDrainRate.missionRunPickerCases, id: \.self) { rate in
+                        Text(rate.displayName).tag(rate)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(minWidth: 160, alignment: .trailing)
+                .accessibilityLabel("SIM battery drain while run executes")
+            }
+            mcSetupRowDivider
+            mcSetupSettingsRow(
+                title: "Reset SIMs when run completes",
+                description:
+                    "Reset all SIM vehicles to their default start pose when a run completes."
+            ) {
+                Toggle(
+                    "",
+                    isOn: operatorMissionRunResetSimOnCompleteBinding
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .frame(minWidth: 44, alignment: .trailing)
+            }
+        }
+    }
+
+    /// MCS **Setup → Settings** tab: same labels as **App Settings → Missions → Mission Run**, bound to **this run’s** ``MissionRunEnvironment/operatorDisplaySettings`` (see ``SettingsView/missionsPane`` for app defaults).
+    private var setupSettingsTabContent: some View {
+        GuardianCard(
+            configuration: mcSetupGroupCardConfiguration,
+            header: { mcSetupGroupCardTitle("Settings") },
+            body: {
+                mcSetupMissionRunAppSettingsMirrorFormBody
+            }
+        )
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     private var setupRostersTabContent: some View {
         GeometryReader { geo in
             let stackVertically = geo.size.width < MissionRunPrepLayout.rostersMapAccordionStackBreakpoint
@@ -6154,6 +6218,22 @@ struct MissionRunDetailView: View {
             .fixedSize(horizontal: true, vertical: false)
 
             Spacer(minLength: GuardianSpacing.sm)
+
+            if rostersSidebarListTab == .tasks, fleetLink.isSimulateEnabled {
+                GuardianThemedButton(
+                    title: "SIM cleanup",
+                    accent: .primary,
+                    surface: .outline,
+                    size: .small,
+                    shape: .cornered,
+                    action: { requestManualMissionRunSimCleanup() }
+                )
+                .disabled(run.isMissionRunSimCleanupPassRunning)
+                .help(
+                    "Park every in-scope Guardian SIM for this run, clear uploaded missions on those vehicles, optionally restore captured start poses when \"Reset SIMs when run completes\" is on for this run, then charge SIM batteries to full. Same steps as after Mark Completed."
+                )
+                .guardianPointerOnHover()
+            }
 
             if rostersSidebarListTab == .tasks, !run.assignments.isEmpty, fleetLink.isSimulateEnabled {
                 Button {
@@ -6331,6 +6411,11 @@ struct MissionRunDetailView: View {
         let filled = indices.filter { run.assignments[$0].hasFleetOrLegacyAssignment }.count
         let emptyRosterSlotCount = indices.count - filled
         let rows = run.missionControlTaskRosterOrderedSlotAssignmentIndices(task: task, mission: mission)
+        let eligiblePoolHomeReapply = MCSReservePoolHomeStagingMapEligibility.eligibleSitlReservePoolSlotCount(
+            entries: run.reservePool(forTaskID: task.id).entries,
+            sitl: sitl,
+            fleetLink: fleetLink
+        )
         VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
             HStack(alignment: .center, spacing: GuardianSpacing.xs) {
                 Button {
@@ -6377,6 +6462,33 @@ struct MissionRunDetailView: View {
                     )
                     .help("Spawn a sim for each empty roster slot (class + default stack in Settings).")
                 }
+
+                Menu {
+                    Button {
+                        toggleMCSReservePoolHomePlacementFromTaskHeader(task: task)
+                    } label: {
+                        Label(
+                            "Set reserve pool home",
+                            systemImage: mcsReservePoolHomePlacementTaskID == task.id ? "checkmark.circle" : "mappin.and.ellipse"
+                        )
+                    }
+                    Button {
+                        reapplyMCSReservePoolBulkHomeFromOverflowMenu(task: task)
+                    } label: {
+                        Label("Reapply reserve pool home", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .disabled(run.reservePoolBulkSimHome(forTaskID: task.id) == nil || eligiblePoolHomeReapply == 0)
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
+                }
+                .menuStyle(.button)
+                .buttonStyle(.bordered)
+                .guardianPointerOnHover()
+                .controlSize(.small)
+                .disabled(!task.enabled || !fleetLink.isSimulateEnabled)
+                .opacity((!task.enabled || !fleetLink.isSimulateEnabled) ? 0.48 : 1)
+                .help(mcsReservePoolHomeOverflowMenuHelp(task: task))
             }
 
             if expanded {
@@ -6781,76 +6893,148 @@ struct MissionRunDetailView: View {
         Calendar.current.date(byAdding: .minute, value: 5, to: Date()) ?? Date().addingTimeInterval(300)
     }
 
+    private func requestManualMissionRunSimCleanup() {
+        guard run.canScheduleMissionRunSimCleanupNow() else {
+            toastCenter.show("No Guardian SITLs in scope for SIM cleanup right now.", style: .info)
+            return
+        }
+        run.scheduleMissionRunSimCleanupIfNeeded()
+    }
+
     /// Setup **Tasks** tab: staging map in a media-only ``GuardianCard`` (matches accordion column chrome).
     private var rostersStagingMapBare: some View {
         GuardianCard(
             configuration: mcSetupGroupCardConfiguration,
             media: {
-                GuardianMapView(
-                    model: mapModel,
-                    toolbar: GuardianMapToolbarOptions(
-                        mapResetAction: { _ in
-                            fitSetupStagingMapToVisibleMissionContent()
-                        }
-                    ),
-                    contextMenuPolicy: GuardianMapContextMenuPolicy(
-                        vehicleActions: [],
-                        waypointActions: [],
-                        homeActions: [],
-                        missionPointActions: rostersSidebarListTab == .points ? [.deleteMissionPoint] : []
-                    ),
-                    onMapClick: { _, _ in
-                        clearStagingSetupMapSelectionFromBackgroundTap()
-                    },
-                    onVehicleMarkerMoved: { markerID, lat, lon in
-                        applySetupMarkerDrag(markerID: markerID, lat: lat, lon: lon)
-                    },
-                    onContextAction: { event in
-                        guard rostersSidebarListTab == .points,
-                              event.markerType == .missionPoint,
-                              event.action == .deleteMissionPoint,
-                              let raw = event.markerID,
-                              let uuid = UUID(uuidString: raw)
-                        else { return }
-                        setupRostersMissionPointDeleteCandidate = MissionControlSetupRosterMissionPointDeleteCandidate(id: uuid)
-                    },
-                    onMissionPointClick: { id in
-                        toggleSetupRostersMissionPointMapSelection(missionPointID: id)
-                    },
-                    onMissionPointMoved: { id, lat, lon in
-                        persistMissionMutation { mission in
-                            guard let idx = mission.missionPoints.firstIndex(where: { $0.id == id }) else { return }
-                            mission.missionPoints[idx].coordinate.lat = lat
-                            mission.missionPoints[idx].coordinate.lon = lon
-                        }
-                    },
-                    onVehicleTap: { ev in
-                        guard let raw = ev.markerID, let aid = UUID(uuidString: raw) else { return }
-                        toggleStagingVehicleMapSelection(assignmentId: aid)
-                    },
-                    onTaskPathTap: { ev in
-                        setupStagingMapSelectedTaskPathID = ev.taskPathID
-                        setupRostersSelectedMissionPointID = nil
-                        setupSelectedAssignmentId = nil
-                        clearAllSetupStagingSimDragOverlays()
-                        dismissSetupRostersMissionPointDrawerIfNeeded()
-                    },
-                    onViewportCenterChanged: { lat, lon in
-                        setupRostersMapViewportCenter = RouteCoordinate(lat: lat, lon: lon)
+                VStack(spacing: 0) {
+                    if run.isMissionRunSimCleanupPassRunning {
+                        GuardianInlineNotice(
+                            kind: .informational,
+                            title: "Mission Control is resetting the mission run to presets",
+                            detail: "SIM cleanup is running on connected simulators. This line clears when the pass finishes.",
+                            trailing: {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                        )
+                        .padding(.horizontal, GuardianSpacing.denseGutter)
+                        .padding(.vertical, GuardianSpacing.xs)
                     }
-                )
-                .task(id: setupStagingMapStructureIdentity) {
-                    pushSetupStagingMapModelFromMissionTemplate()
-                    fitSetupStagingMapToVisibleMissionContent()
-                }
-                .onChange(of: setupStagingMapMarkerCoordinateDigest) { _ in
-                    pushSetupStagingMapMarkersOnly()
-                    reconcileSetupStagingSimDragOverlayWithHubTelemetry()
-                }
-                .onChange(of: fleetLink.hubTelemetry?.lastUpdate) { _ in
-                    reconcileSetupStagingSimDragOverlayWithHubTelemetry()
+                    if let tid = mcsReservePoolHomePlacementTaskID,
+                       let mission = resolvedMission,
+                       let task = mission.routeMacro.tasks.first(where: { $0.id == tid }) {
+                        HStack(alignment: .center, spacing: GuardianSpacing.sm) {
+                            Text(
+                                "Tap the map to place eligible reserve pool SIMs for \(task.name)."
+                            )
+                            .font(GuardianTypography.font(.denseCaption12Regular))
+                            .foregroundStyle(theme.textPrimary)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                            GuardianThemedButton(
+                                title: "Cancel",
+                                accent: .danger,
+                                surface: .outline,
+                                size: .small,
+                                shape: .cornered,
+                                action: { disarmMCSReservePoolHomePlacement() }
+                            )
+                            .guardianPointerOnHover()
+                            .help("Stop placing reserve pool home on the map")
+                        }
+                        .padding(.horizontal, GuardianSpacing.denseGutter)
+                        .padding(.vertical, GuardianSpacing.xs)
+                        .background(GuardianSemanticColors.infoBackground)
+                    }
+                    GuardianMapView(
+                        model: mapModel,
+                        toolbar: GuardianMapToolbarOptions(
+                            mapResetAction: { _ in
+                                fitSetupStagingMapToVisibleMissionContent()
+                            }
+                        ),
+                        contextMenuPolicy: GuardianMapContextMenuPolicy(
+                            vehicleActions: [],
+                            waypointActions: [],
+                            homeActions: [],
+                            missionPointActions: rostersSidebarListTab == .points ? [.deleteMissionPoint] : []
+                        ),
+                        onMapClick: { lat, lon in
+                            if mcsReservePoolHomePlacementTaskID != nil {
+                                Task { @MainActor in
+                                    await applyMCSReservePoolHomePlacementFromStagingMapClick(lat: lat, lon: lon)
+                                }
+                                return
+                            }
+                            clearStagingSetupMapSelectionFromBackgroundTap()
+                        },
+                        onVehicleMarkerMoved: { markerID, lat, lon in
+                            applySetupMarkerDrag(markerID: markerID, lat: lat, lon: lon)
+                        },
+                        onContextAction: { event in
+                            guard rostersSidebarListTab == .points,
+                                  event.markerType == .missionPoint,
+                                  event.action == .deleteMissionPoint,
+                                  let raw = event.markerID,
+                                  let uuid = UUID(uuidString: raw)
+                            else { return }
+                            setupRostersMissionPointDeleteCandidate = MissionControlSetupRosterMissionPointDeleteCandidate(id: uuid)
+                        },
+                        onMissionPointClick: { id in
+                            toggleSetupRostersMissionPointMapSelection(missionPointID: id)
+                        },
+                        onMissionPointMoved: { id, lat, lon in
+                            persistMissionMutation { mission in
+                                guard let idx = mission.missionPoints.firstIndex(where: { $0.id == id }) else { return }
+                                mission.missionPoints[idx].coordinate.lat = lat
+                                mission.missionPoints[idx].coordinate.lon = lon
+                            }
+                        },
+                        onVehicleTap: { ev in
+                            guard let raw = ev.markerID else { return }
+                            if let berth = MissionControlReservePoolMapMarkerID.decodeBerth(raw) {
+                                disarmMCSReservePoolHomePlacement()
+                                toggleStagingReservePoolBerthMapSelection(taskID: berth.taskID, slotID: berth.slotID)
+                                rosterSetupExpandedTaskIDs.insert(berth.taskID)
+                                return
+                            }
+                            guard let aid = UUID(uuidString: raw) else { return }
+                            toggleStagingVehicleMapSelection(assignmentId: aid)
+                        },
+                        onTaskPathTap: { ev in
+                            setupStagingMapSelectedTaskPathID = ev.taskPathID
+                            setupRostersSelectedMissionPointID = nil
+                            setupSelectedAssignmentId = nil
+                            clearStagingReservePoolBerthSelection()
+                            clearAllSetupStagingReservePoolSimDragOverlays()
+                            clearAllSetupStagingSimDragOverlays()
+                            dismissSetupRostersMissionPointDrawerIfNeeded()
+                            disarmMCSReservePoolHomePlacement()
+                        },
+                        onViewportCenterChanged: { lat, lon in
+                            setupRostersMapViewportCenter = RouteCoordinate(lat: lat, lon: lon)
+                        }
+                    )
+                    .task(id: setupStagingMapStructureIdentity) {
+                        pushSetupStagingMapModelFromMissionTemplate()
+                        fitSetupStagingMapToVisibleMissionContent()
+                    }
+                    .onChange(of: setupStagingMapMarkerCoordinateDigest) { _ in
+                        pushSetupStagingMapMarkersOnly()
+                        reconcileSetupStagingSimDragOverlayWithHubTelemetry()
+                    }
+                    .onChange(of: fleetLink.hubTelemetry?.lastUpdate) { _ in
+                        reconcileSetupStagingSimDragOverlayWithHubTelemetry()
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .onExitCommand {
+                    if mcsReservePoolHomePlacementTaskID != nil {
+                        disarmMCSReservePoolHomePlacement()
+                    }
+                }
             }
         )
     }
@@ -6877,8 +7061,15 @@ struct MissionRunDetailView: View {
                 selectedPointID: setupRostersSelectedMissionPointID
             ),
             selectedTaskPathID: setupStagingMapSelectedTaskPathID,
-            selectedStagingRosterAssignmentID: setupSelectedAssignmentId
+            selectedStagingRosterAssignmentID: setupSelectedAssignmentId,
+            mcsReservePoolHomePlacementTaskID: mcsReservePoolHomePlacementTaskID,
+            stagingReservePoolBerthSelectionSignature: setupSelectedReservePoolBerthSignature
         )
+    }
+
+    private var setupSelectedReservePoolBerthSignature: String {
+        guard let t = setupSelectedReservePoolTaskID, let s = setupSelectedReservePoolSlotID else { return "" }
+        return "\(t.uuidString)|\(s.uuidString)"
     }
 
     /// Quantized lat/lon for mission map points + roster vehicle markers; drives marker-only pushes without churning `.task(id:)`.
@@ -6888,22 +7079,300 @@ struct MissionRunDetailView: View {
                 String(format: "%@:%.5f:%.5f", mp.id.uuidString, mp.coordinate.lat, mp.coordinate.lon)
             }
             .joined(separator: "|")
-        let veh = setupVehicleMarkers
+        let veh = setupStagingMapVehicleMarkers
             .map { m in
                 String(format: "%@:%.5f:%.5f:%@", m.id, m.lat, m.lon, m.pendingSimSync ? "1" : "0")
             }
             .joined(separator: "|")
-        return pts + "§" + veh
+        return pts + "§" + veh + "§poolSel:" + setupSelectedReservePoolBerthSignature
     }
 
-    /// Clears mission-point / task-path / roster-vehicle map selection after a map background tap (same policy as mutual exclusivity elsewhere).
+    /// Clears mission-point / task-path / roster-vehicle / pool-berth map selection after a map background tap (same policy as mutual exclusivity elsewhere).
     private func clearStagingSetupMapSelectionFromBackgroundTap() {
+        disarmMCSReservePoolHomePlacement()
         setupRostersSelectedMissionPointID = nil
         setupStagingMapSelectedTaskPathID = nil
         setupSelectedAssignmentId = nil
-        // Do not clear SIM drag overlays here — deselection only hides ring/drag; optimistic pose + reconcile
-        // stay tied to the assignment until hub sustains or timeout.
+        clearStagingReservePoolBerthSelection()
+        // Match roster SIM drag policy: optimistic pool / roster pose overlays stay until hub sustains or timeout.
         dismissSetupRostersMissionPointDrawerIfNeeded()
+    }
+
+    /// Drives ``onChange`` so pool-home arm clears when the mission template disappears or the target task is disabled/removed (``MCSReservePoolMapToDo.md`` Phase G).
+    private var mcsReservePoolHomeArmLifecycleToken: String {
+        guard let tid = mcsReservePoolHomePlacementTaskID else { return "" }
+        guard let mission = resolvedMission else { return "lost" }
+        guard let task = mission.routeMacro.tasks.first(where: { $0.id == tid }) else { return "missing_task" }
+        return "\(mission.id.uuidString)|\(tid.uuidString)|\(task.enabled ? 1 : 0)"
+    }
+
+    private func syncMCSReservePoolHomePlacementWithMissionTemplateIfNeeded() {
+        guard mcsReservePoolHomePlacementTaskID != nil else { return }
+        guard MCSReservePoolHomePlacementTemplateGuard.shouldDisarmPoolHomeArm(
+            armedTaskID: mcsReservePoolHomePlacementTaskID,
+            mission: resolvedMission
+        ) else { return }
+        disarmMCSReservePoolHomePlacement()
+        pushSetupStagingMapMarkersOnly()
+    }
+
+    // MARK: - MCS reserve pool home (staging map)
+
+    /// Clears pool-home arm and preview cursor only (no fleet I/O).
+    private func disarmMCSReservePoolHomePlacement() {
+        mcsReservePoolHomePlacementTaskID = nil
+        mcsReservePoolHomePlacementCursorCoordinate = nil
+    }
+
+    /// Clears competing MCS staging-map chrome before arming pool-home placement (``MCSReservePoolMapToDo.md`` Phase A).
+    private func clearMCSStagingMapExclusiveSelectionForReservePoolHomeArm() {
+        setupRostersSelectedMissionPointID = nil
+        setupStagingMapSelectedTaskPathID = nil
+        setupSelectedAssignmentId = nil
+        clearStagingReservePoolBerthSelection()
+        clearAllSetupStagingSimDragOverlays()
+        clearAllSetupStagingReservePoolSimDragOverlays()
+        dismissSetupRostersMissionPointDrawerIfNeeded()
+        var geo = mapModel.routeGeometry
+        geo.missionPointPlacementArmed = false
+        mapModel.routeGeometry = geo
+    }
+
+    /// Arms **Set reserve pool home** for ``taskID`` after clearing competing map selections (no fleet I/O).
+    private func armMCSReservePoolHomePlacement(taskID: UUID) {
+        clearMCSStagingMapExclusiveSelectionForReservePoolHomeArm()
+        mcsReservePoolHomePlacementCursorCoordinate = nil
+        mcsReservePoolHomePlacementTaskID = taskID
+    }
+
+    /// Task header overflow: **Set reserve pool home** — arms staging-map pool placement, or disarms when already armed for the same task (``MCSReservePoolMapToDo.md`` Phase B).
+    private func toggleMCSReservePoolHomePlacementFromTaskHeader(task: MissionTask) {
+        guard task.enabled else { return }
+        guard fleetLink.isSimulateEnabled else {
+            toastCenter.show("Turn on simulation in Vehicles before using reserve pool map placement.", style: .warning)
+            return
+        }
+        let tid = task.id
+        if mcsReservePoolHomePlacementTaskID == tid {
+            disarmMCSReservePoolHomePlacement()
+            return
+        }
+        let n = MCSReservePoolHomeStagingMapEligibility.eligibleSitlReservePoolSlotCount(
+            entries: run.reservePool(forTaskID: tid).entries,
+            sitl: sitl,
+            fleetLink: fleetLink
+        )
+        guard n > 0 else {
+            toastCenter.show(
+                "No ready SIM reserve berths. Attach a simulator to at least one floating reserve slot, then try again.",
+                style: .warning
+            )
+            return
+        }
+        armMCSReservePoolHomePlacement(taskID: tid)
+    }
+
+    private func mcsReservePoolHomeOverflowMenuHelp(task: MissionTask) -> String {
+        if !task.enabled {
+            return "Enable this task in task settings first."
+        }
+        if !fleetLink.isSimulateEnabled {
+            return "Turn on simulation in Vehicles to use this action."
+        }
+        return "Task overflow menu — set or reapply a common map pose for floating reserve SIMs, or drag selected pool markers individually."
+    }
+
+    private func applyMCSReservePoolHomePlacementFromStagingMapClick(lat: Double, lon: Double) async {
+        guard let tid = mcsReservePoolHomePlacementTaskID else { return }
+        let taskLabel = resolvedMission?.routeMacro.tasks.first(where: { $0.id == tid })?.name
+        let sent = await applyReservePoolHomeSimBatchForTask(taskID: tid, lat: lat, lon: lon)
+        disarmMCSReservePoolHomePlacement()
+        pushSetupStagingMapModelFromMissionTemplate()
+        fitSetupStagingMapToVisibleMissionContent()
+        reconcileSetupStagingSimDragOverlayWithHubTelemetry()
+        if sent > 0 {
+            run.setReservePoolBulkSimHome(RouteCoordinate(lat: lat, lon: lon), forTaskID: tid)
+        }
+        run.systems.logging.appendLogEvent(
+            level: sent > 0 ? .info : .warning,
+            taskID: tid,
+            taskLabel: taskLabel,
+            templateKey: MissionRunLogTemplateKey.mcsReservePoolHomeMapBatch,
+            templateParams: [
+                "sent": String(sent),
+                "latDeg": String(format: "%.6f", lat),
+                "lonDeg": String(format: "%.6f", lon),
+                "modeNote": "",
+            ]
+        )
+        if sent > 0 {
+            toastCenter.show(
+                "Placement sent for \(sent) reserve pool SIM\(sent == 1 ? "" : "s"). Positions update on the map as telemetry catches up.",
+                style: .info
+            )
+            scheduleDeferredSetupStagingMapFitAfterReservePoolHomeApply()
+        } else {
+            toastCenter.show(
+                "No pool SIMs received this placement. Check that floating reserve berths still have attached simulators.",
+                style: .warning
+            )
+        }
+    }
+
+    /// Overflow **Reapply reserve pool home**: repeats the last bulk hub coordinate for any **new** eligible pool SIMs (same coordinate as last map placement).
+    private func reapplyMCSReservePoolBulkHomeFromOverflowMenu(task: MissionTask) {
+        guard task.enabled else { return }
+        guard fleetLink.isSimulateEnabled else {
+            toastCenter.show("Turn on simulation in Vehicles before using reserve pool map placement.", style: .warning)
+            return
+        }
+        guard let coord = run.reservePoolBulkSimHome(forTaskID: task.id) else {
+            toastCenter.show("Set reserve pool home on the map once first — there is no saved hub to reapply.", style: .warning)
+            return
+        }
+        let tid = task.id
+        let n = MCSReservePoolHomeStagingMapEligibility.eligibleSitlReservePoolSlotCount(
+            entries: run.reservePool(forTaskID: tid).entries,
+            sitl: sitl,
+            fleetLink: fleetLink
+        )
+        guard n > 0 else {
+            toastCenter.show(
+                "No ready SIM reserve berths. Attach a simulator to at least one floating reserve slot, then try again.",
+                style: .warning
+            )
+            return
+        }
+        let taskLabel = task.name
+        let lat = coord.lat
+        let lon = coord.lon
+        Task { @MainActor in
+            let sent = await applyReservePoolHomeSimBatchForTask(taskID: tid, lat: lat, lon: lon)
+            pushSetupStagingMapModelFromMissionTemplate()
+            fitSetupStagingMapToVisibleMissionContent()
+            reconcileSetupStagingSimDragOverlayWithHubTelemetry()
+            run.systems.logging.appendLogEvent(
+                level: sent > 0 ? .info : .warning,
+                taskID: tid,
+                taskLabel: taskLabel,
+                templateKey: MissionRunLogTemplateKey.mcsReservePoolHomeMapBatch,
+                templateParams: [
+                    "sent": String(sent),
+                    "latDeg": String(format: "%.6f", lat),
+                    "lonDeg": String(format: "%.6f", lon),
+                    "modeNote": " (reapply)",
+                ]
+            )
+            if sent > 0 {
+                toastCenter.show(
+                    "Reapplied hub to \(sent) reserve pool SIM\(sent == 1 ? "" : "s"). Positions update on the map as telemetry catches up.",
+                    style: .info
+                )
+                scheduleDeferredSetupStagingMapFitAfterReservePoolHomeApply()
+            } else {
+                toastCenter.show(
+                    "No pool SIMs received this placement. Check that floating reserve berths still have attached simulators.",
+                    style: .warning
+                )
+            }
+        }
+    }
+
+    /// Immediate fit already ran; hub-backed marker coords may update shortly after ``applySimState`` — refit once.
+    private func scheduleDeferredSetupStagingMapFitAfterReservePoolHomeApply() {
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(MCSReservePoolHomeStagingMapTiming.postBatchFitDelaySeconds))
+            guard resolvedMission != nil else { return }
+            pushSetupStagingMapModelFromMissionTemplate()
+            fitSetupStagingMapToVisibleMissionContent()
+            reconcileSetupStagingSimDragOverlayWithHubTelemetry()
+        }
+    }
+
+    /// Encoded pool marker ids eligible for bulk / reapply ``applySimState`` (stable hub + known stack).
+    private func eligibleReservePoolHomeEncodedMarkerIDs(for taskID: UUID) -> [String] {
+        var ids: [String] = []
+        for slot in run.reservePool(forTaskID: taskID).entries {
+            guard MCSReservePoolHomeStagingMapEligibility.isEligibleSitlReservePoolSlot(
+                slot: slot,
+                sitl: sitl,
+                fleetLink: fleetLink
+            ) else { continue }
+            guard let key = slot.attachedFleetVehicleToken,
+                  let token = FleetMissionVehicleToken(storageKey: key),
+                  case .sitl(let sitlInstanceID) = token,
+                  let inst = sitl.instances.first(where: { $0.id == sitlInstanceID })
+            else { continue }
+            let systemID = inst.stackInstanceIndex + 1
+            let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
+            let stack = fleetLink.hubTelemetry(forVehicleID: vehicleID)?.autopilotStack
+                ?? fleetLink.vehicleModel(forVehicleID: vehicleID)?.data.telemetry?.autopilotStack
+                ?? .unknown
+            guard stack != .unknown else { continue }
+            ids.append(MissionControlReservePoolMapMarkerID.encode(taskID: taskID, slotID: slot.id))
+        }
+        return ids
+    }
+
+    /// Sequential ``FleetLinkService/applySimState`` for each eligible pool SITL on ``taskID`` (``MCSReservePoolMapToDo.md`` Phase D).
+    /// Installs the same optimistic ``MissionRunStagingSimDragOverlay`` per berth as roster SITL drags so ``pendingSimSync`` spinners stay up until hub telemetry sustains at the target pose (not only until ``applySimState`` returns).
+    private func applyReservePoolHomeSimBatchForTask(taskID: UUID, lat: Double, lon: Double) async -> Int {
+        let encodedTargets = eligibleReservePoolHomeEncodedMarkerIDs(for: taskID)
+        let targetCoord = RouteCoordinate(lat: lat, lon: lon)
+        if !encodedTargets.isEmpty {
+            let startedAt = Date()
+            await MainActor.run {
+                for enc in encodedTargets {
+                    setupStagingReservePoolSimDragCoordByEncodedMarkerID[enc] = MissionRunStagingSimDragOverlay(
+                        coordinate: targetCoord,
+                        startedAt: startedAt,
+                        hubAgreesSince: nil
+                    )
+                    scheduleSetupStagingReservePoolSimDragTimeoutReconcile(for: enc)
+                }
+                pushSetupStagingMapMarkersOnly()
+                reconcileSetupStagingSimDragOverlayWithHubTelemetry()
+            }
+        }
+        var count = 0
+        for slot in run.reservePool(forTaskID: taskID).entries {
+            guard MCSReservePoolHomeStagingMapEligibility.isEligibleSitlReservePoolSlot(
+                slot: slot,
+                sitl: sitl,
+                fleetLink: fleetLink
+            ) else { continue }
+            guard let key = slot.attachedFleetVehicleToken,
+                  let token = FleetMissionVehicleToken(storageKey: key),
+                  case .sitl(let sitlInstanceID) = token
+            else { continue }
+            guard let inst = sitl.instances.first(where: { $0.id == sitlInstanceID }) else { continue }
+            let systemID = inst.stackInstanceIndex + 1
+            let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
+            let stack = fleetLink.hubTelemetry(forVehicleID: vehicleID)?.autopilotStack
+                ?? fleetLink.vehicleModel(forVehicleID: vehicleID)?.data.telemetry?.autopilotStack
+                ?? .unknown
+            guard stack != .unknown else { continue }
+            let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID)
+            let alt = hub?.absoluteAltM ?? hub?.altitudeAmslM
+            let yaw = Float(hub?.headingDeg ?? hub?.yawDeg ?? 0)
+            let state = FleetSimState(
+                latitudeDeg: lat,
+                longitudeDeg: lon,
+                absoluteAltitudeM: alt,
+                yawDeg: yaw,
+                batteryVoltageV: nil,
+                ardupilotSimBattCapAh: nil,
+                px4SimBatDrain: nil
+            )
+            await fleetLink.applySimState(
+                vehicleID: vehicleID,
+                state: state,
+                autopilotStack: stack,
+                source: "mcs.reserve_pool_home_map"
+            )
+            count += 1
+        }
+        return count
     }
 
     private func dismissLiveRuntimeMissionPointEditDrawerIfNeeded() {
@@ -6920,11 +7389,34 @@ struct MissionRunDetailView: View {
         dismissLiveRuntimeMissionPointEditDrawerIfNeeded()
     }
 
+    /// Roster staging map: toggle floating-reserve pool berth selection (SIM ring + drag when eligible); clears roster / point / path map selection.
+    private func toggleStagingReservePoolBerthMapSelection(taskID: UUID, slotID: UUID) {
+        disarmMCSReservePoolHomePlacement()
+        if setupSelectedReservePoolTaskID == taskID, setupSelectedReservePoolSlotID == slotID {
+            setupSelectedReservePoolTaskID = nil
+            setupSelectedReservePoolSlotID = nil
+        } else {
+            if setupSelectedReservePoolTaskID != taskID || setupSelectedReservePoolSlotID != slotID {
+                clearAllSetupStagingReservePoolSimDragOverlays()
+            }
+            setupSelectedAssignmentId = nil
+            clearAllSetupStagingSimDragOverlays()
+            setupRostersSelectedMissionPointID = nil
+            setupStagingMapSelectedTaskPathID = nil
+            dismissSetupRostersMissionPointDrawerIfNeeded()
+            setupSelectedReservePoolTaskID = taskID
+            setupSelectedReservePoolSlotID = slotID
+        }
+    }
+
     /// Roster staging map: toggle which assignment is selected for vehicle ring + SIM drag (clears point / task-path map selection).
     private func toggleStagingVehicleMapSelection(assignmentId: UUID) {
+        disarmMCSReservePoolHomePlacement()
         if setupSelectedAssignmentId == assignmentId {
             setupSelectedAssignmentId = nil
         } else {
+            clearStagingReservePoolBerthSelection()
+            clearAllSetupStagingReservePoolSimDragOverlays()
             setupRostersSelectedMissionPointID = nil
             setupStagingMapSelectedTaskPathID = nil
             dismissSetupRostersMissionPointDrawerIfNeeded()
@@ -6943,6 +7435,26 @@ struct MissionRunDetailView: View {
         let systemID = inst.stackInstanceIndex + 1
         let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
         guard let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID),
+              let lat = hub.latitudeDeg,
+              let lon = hub.longitudeDeg
+        else { return nil }
+        return RouteCoordinate(lat: lat, lon: lon)
+    }
+
+    private func stagingReservePoolHubCoordinateForEncodedPoolMarker(_ encodedMarkerID: String) -> RouteCoordinate? {
+        guard let berth = MissionControlReservePoolMapMarkerID.decodeBerth(encodedMarkerID),
+              let mission = resolvedMission,
+              let task = mission.routeMacro.tasks.first(where: { $0.id == berth.taskID }),
+              task.enabled,
+              let slot = run.reservePool(forTaskID: berth.taskID).entries.first(where: { $0.id == berth.slotID })
+        else { return nil }
+        return stagingReservePoolHubCoordinate(taskID: berth.taskID, slot: slot)
+    }
+
+    private func stagingReservePoolHubCoordinate(taskID: UUID, slot: MissionRunReservePoolSlot) -> RouteCoordinate? {
+        let syn = syntheticMissionRunAssignment(from: slot)
+        guard let vehicleID = resolvedFleetStreamVehicleID(assignment: syn, fleetLink: fleetLink, sitl: sitl),
+              let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID),
               let lat = hub.latitudeDeg,
               let lon = hub.longitudeDeg
         else { return nil }
@@ -6969,6 +7481,41 @@ struct MissionRunDetailView: View {
         setupStagingSimDragCoordByAssignmentID.removeAll()
     }
 
+    private func clearStagingReservePoolBerthSelection() {
+        setupSelectedReservePoolTaskID = nil
+        setupSelectedReservePoolSlotID = nil
+    }
+
+    private func cancelSetupStagingReservePoolSimDragTimeoutReconcileTask(for encodedMarkerID: String) {
+        setupStagingReservePoolSimDragTimeoutReconcileTasks[encodedMarkerID]?.cancel()
+        setupStagingReservePoolSimDragTimeoutReconcileTasks.removeValue(forKey: encodedMarkerID)
+    }
+
+    private func cancelAllSetupStagingReservePoolSimDragTimeoutReconcileTasks() {
+        for t in setupStagingReservePoolSimDragTimeoutReconcileTasks.values { t.cancel() }
+        setupStagingReservePoolSimDragTimeoutReconcileTasks.removeAll()
+    }
+
+    private func removeSetupStagingReservePoolSimDragOverlay(for encodedMarkerID: String) {
+        cancelSetupStagingReservePoolSimDragTimeoutReconcileTask(for: encodedMarkerID)
+        setupStagingReservePoolSimDragCoordByEncodedMarkerID.removeValue(forKey: encodedMarkerID)
+    }
+
+    private func clearAllSetupStagingReservePoolSimDragOverlays() {
+        cancelAllSetupStagingReservePoolSimDragTimeoutReconcileTasks()
+        setupStagingReservePoolSimDragCoordByEncodedMarkerID.removeAll()
+    }
+
+    private func scheduleSetupStagingReservePoolSimDragTimeoutReconcile(for encodedMarkerID: String) {
+        cancelSetupStagingReservePoolSimDragTimeoutReconcileTask(for: encodedMarkerID)
+        setupStagingReservePoolSimDragTimeoutReconcileTasks[encodedMarkerID] = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(MissionControlSetupSimDragOverlayPolicy.pendingSyncTimeoutSeconds))
+            guard !Task.isCancelled else { return }
+            reconcileSetupStagingReservePoolSimDragOverlaysWithHubTelemetry()
+            setupStagingReservePoolSimDragTimeoutReconcileTasks.removeValue(forKey: encodedMarkerID)
+        }
+    }
+
     private func scheduleSetupStagingSimDragTimeoutReconcile(for assignmentId: UUID) {
         cancelSetupStagingSimDragTimeoutReconcileTask(for: assignmentId)
         setupStagingSimDragTimeoutReconcileTasks[assignmentId] = Task { @MainActor in
@@ -6981,6 +7528,11 @@ struct MissionRunDetailView: View {
 
     /// Drops SIM drag optimistic coords once hub **stably** reflects the same pose (see ``MissionControlSetupSimDragOverlayPolicy/hubAgreesSustainSeconds``) or the pending-sync timeout elapses.
     private func reconcileSetupStagingSimDragOverlayWithHubTelemetry() {
+        reconcileSetupStagingRosterSimDragOverlaysWithHubTelemetry()
+        reconcileSetupStagingReservePoolSimDragOverlaysWithHubTelemetry()
+    }
+
+    private func reconcileSetupStagingRosterSimDragOverlaysWithHubTelemetry() {
         guard !setupStagingSimDragCoordByAssignmentID.isEmpty else { return }
         let now = Date()
         var next = setupStagingSimDragCoordByAssignmentID
@@ -7023,6 +7575,49 @@ struct MissionRunDetailView: View {
         }
     }
 
+    private func reconcileSetupStagingReservePoolSimDragOverlaysWithHubTelemetry() {
+        guard !setupStagingReservePoolSimDragCoordByEncodedMarkerID.isEmpty else { return }
+        let now = Date()
+        var next = setupStagingReservePoolSimDragCoordByEncodedMarkerID
+        var toRemove: [String] = []
+        for enc in Array(next.keys) {
+            guard var pending = next[enc] else { continue }
+            if MissionControlSetupSimDragOverlayPolicy.shouldClearOverlayByTimeout(overlayStartedAt: pending.startedAt, now: now) {
+                toRemove.append(enc)
+                continue
+            }
+            let hub = stagingReservePoolHubCoordinateForEncodedPoolMarker(enc)
+            guard let h = hub else {
+                pending.hubAgreesSince = nil
+                next[enc] = pending
+                continue
+            }
+            let matches = MissionControlSetupSimDragOverlayPolicy.hubMatches(
+                pendingCoordinate: pending.coordinate,
+                hubCoordinate: h
+            )
+            pending.hubAgreesSince = MissionControlSetupSimDragOverlayPolicy.updatedHubAgreesSince(
+                hubMatchesPending: matches,
+                previous: pending.hubAgreesSince,
+                now: now
+            )
+            if matches,
+               MissionControlSetupSimDragOverlayPolicy.isSustainedHubAgreement(hubAgreesSince: pending.hubAgreesSince, now: now)
+            {
+                toRemove.append(enc)
+            } else {
+                next[enc] = pending
+            }
+        }
+        for enc in toRemove {
+            next.removeValue(forKey: enc)
+            cancelSetupStagingReservePoolSimDragTimeoutReconcileTask(for: enc)
+        }
+        if next != setupStagingReservePoolSimDragCoordByEncodedMarkerID {
+            setupStagingReservePoolSimDragCoordByEncodedMarkerID = next
+        }
+    }
+
     private func pushSetupStagingMapModelFromMissionTemplate() {
         if let mission = resolvedMission {
             mapModel.routeGeometry = GuardianRouteMapGeometry(
@@ -7036,12 +7631,13 @@ struct MissionRunDetailView: View {
                 preserveView: true,
                 isEditingTask: false,
                 missionPointMarkers: setupStagingMissionPointMapMarkers,
-                missionPointPlacementArmed: false
+                missionPointPlacementArmed: false,
+                mcsReservePoolHomePlacementArmed: mcsReservePoolHomePlacementTaskID != nil
             )
         } else {
             mapModel.routeGeometry = .empty
         }
-        mapModel.vehicleMarkers = setupVehicleMarkers
+        mapModel.vehicleMarkers = setupStagingMapVehicleMarkers
     }
 
     private func pushSetupStagingMapMarkersOnly() {
@@ -7056,8 +7652,9 @@ struct MissionRunDetailView: View {
         }
         var geo = mapModel.routeGeometry
         geo.missionPointMarkers = setupStagingMissionPointMapMarkers
+        geo.mcsReservePoolHomePlacementArmed = mcsReservePoolHomePlacementTaskID != nil
         mapModel.routeGeometry = geo
-        mapModel.vehicleMarkers = setupVehicleMarkers
+        mapModel.vehicleMarkers = setupStagingMapVehicleMarkers
     }
 
     private var rosterMissionTemplateBinding: Binding<Mission> {
@@ -7090,6 +7687,7 @@ struct MissionRunDetailView: View {
     }
 
     private func clearSetupRostersMissionPointChrome() {
+        disarmMCSReservePoolHomePlacement()
         setupRostersSelectedMissionPointID = nil
         setupRostersMissionPointDrawerEditingID = nil
         setupRostersMissionPointDeleteCandidate = nil
@@ -7103,6 +7701,7 @@ struct MissionRunDetailView: View {
     }
 
     private func appendSetupRosterMissionPointAtViewportCenter() {
+        disarmMCSReservePoolHomePlacement()
         let coord = setupRostersMapViewportCenter ?? RouteCoordinate()
         let newID = UUID()
         persistMissionMutation { mission in
@@ -7129,6 +7728,7 @@ struct MissionRunDetailView: View {
 
     private func openSetupRostersMissionPointEditDrawer(missionPointID: UUID) {
         guard resolvedMission?.missionPoints.contains(where: { $0.id == missionPointID }) == true else { return }
+        disarmMCSReservePoolHomePlacement()
         setupSelectedAssignmentId = nil
         clearAllSetupStagingSimDragOverlays()
         setupStagingMapSelectedTaskPathID = nil
@@ -7160,6 +7760,7 @@ struct MissionRunDetailView: View {
 
     private func toggleSetupRostersMissionPointMapSelection(missionPointID: UUID) {
         guard resolvedMission?.missionPoints.contains(where: { $0.id == missionPointID }) == true else { return }
+        disarmMCSReservePoolHomePlacement()
         if setupRostersSelectedMissionPointID == missionPointID {
             setupRostersSelectedMissionPointID = nil
             if setupRostersMissionPointDrawerEditingID == missionPointID {
@@ -7168,7 +7769,9 @@ struct MissionRunDetailView: View {
             }
         } else {
             setupSelectedAssignmentId = nil
+            clearStagingReservePoolBerthSelection()
             clearAllSetupStagingSimDragOverlays()
+            clearAllSetupStagingReservePoolSimDragOverlays()
             setupStagingMapSelectedTaskPathID = nil
             if setupRostersMissionPointDrawerEditingID != nil {
                 appDrawer.dismiss()
@@ -7285,8 +7888,94 @@ struct MissionRunDetailView: View {
         }
     }
 
+    /// MCS **Rosters › Tasks** staging map: hub-backed markers for **floating reserve pool** SIMs (``MissionControlReservePoolMapMarkerID``); draggable when selected and SITL-eligible.
+    private var setupStagingFloatingReservePoolVehicleMarkers: [MapVehicleMarker] {
+        guard let mission = resolvedMission else { return [] }
+        var out: [MapVehicleMarker] = []
+        for task in mission.routeMacro.tasks where task.enabled {
+            let tid = task.id
+            let pool = run.reservePool(forTaskID: tid)
+            for slot in pool.entries {
+                guard slot.hasFleetOrLegacyBinding,
+                      let rawTok = slot.attachedFleetVehicleToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !rawTok.isEmpty
+                else { continue }
+                let encoded = MissionControlReservePoolMapMarkerID.encode(taskID: tid, slotID: slot.id)
+                let syn = syntheticMissionRunAssignment(from: slot)
+                guard let vehicleID = resolvedFleetStreamVehicleID(assignment: syn, fleetLink: fleetLink, sitl: sitl),
+                      let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID),
+                      let hubLat = hub.latitudeDeg,
+                      let hubLon = hub.longitudeDeg
+                else { continue }
+                let eligible = MCSReservePoolHomeStagingMapEligibility.isEligibleSitlReservePoolSlot(
+                    slot: slot,
+                    sitl: sitl,
+                    fleetLink: fleetLink
+                )
+                let selected = setupSelectedReservePoolTaskID == tid && setupSelectedReservePoolSlotID == slot.id
+                let colorHex = fleetLink.mapColorHex(forVehicleID: vehicleID)
+                let heading = hub.headingDeg ?? hub.yawDeg
+                let taskName = task.name
+                let poolA11y = MissionRunReserveSwapAccessibilityCopy.floatingPoolMapMarker(
+                    taskName: taskName,
+                    berthLabel: slot.label,
+                    swapPickActiveOnTask: false,
+                    markerIsEligiblePickTarget: false,
+                    browsingThisBerthOnTask: false
+                )
+                let lat: Double
+                let lon: Double
+                let pendingSimSync: Bool
+                if let optimistic = setupStagingReservePoolSimDragCoordByEncodedMarkerID[encoded] {
+                    lat = optimistic.coordinate.lat
+                    lon = optimistic.coordinate.lon
+                    let hubCoord = RouteCoordinate(lat: hubLat, lon: hubLon)
+                    let now = Date()
+                    let hubOk = MissionControlSetupSimDragOverlayPolicy.hubMatches(
+                        pendingCoordinate: optimistic.coordinate,
+                        hubCoordinate: hubCoord
+                    )
+                    let sustained = MissionControlSetupSimDragOverlayPolicy.isSustainedHubAgreement(
+                        hubAgreesSince: optimistic.hubAgreesSince,
+                        now: now
+                    )
+                    pendingSimSync = !hubOk || !sustained
+                } else {
+                    lat = hubLat
+                    lon = hubLon
+                    pendingSimSync = false
+                }
+                out.append(
+                    MapVehicleMarker(
+                        id: encoded,
+                        lat: lat,
+                        lon: lon,
+                        label: "\(slot.label) · pool",
+                        colorHex: colorHex,
+                        imageDataURL: missionControlRosterMapMarkerImageDataURL(for: syn),
+                        selected: selected,
+                        draggable: selected && eligible,
+                        headingDeg: heading,
+                        pendingSimSync: pendingSimSync,
+                        accessibilityTitle: poolA11y
+                    )
+                )
+            }
+        }
+        return out
+    }
+
+    /// Roster assignment markers plus floating-reserve pool hub markers for the MCS staging map.
+    private var setupStagingMapVehicleMarkers: [MapVehicleMarker] {
+        setupVehicleMarkers + setupStagingFloatingReservePoolVehicleMarkers
+    }
+
     /// **SITL-only:** applies dragged lat/lon to the bound sim via ``FleetLinkService/applySimState`` (SIM_OPOS_* / SIH_LOC_*).
     private func applySetupMarkerDrag(markerID: String, lat: Double, lon: Double) {
+        if let berth = MissionControlReservePoolMapMarkerID.decodeBerth(markerID) {
+            applyStagingReservePoolMarkerDrag(taskID: berth.taskID, slotID: berth.slotID, lat: lat, lon: lon)
+            return
+        }
         guard let aid = UUID(uuidString: markerID),
               let idx = run.assignments.firstIndex(where: { $0.id == aid }),
               let tokenKey = run.assignments[idx].attachedFleetVehicleToken,
@@ -7300,6 +7989,10 @@ struct MissionRunDetailView: View {
             ?? fleetLink.vehicleModel(forVehicleID: vehicleID)?.data.telemetry?.autopilotStack
             ?? .unknown
         guard stack != .unknown else { return }
+
+        disarmMCSReservePoolHomePlacement()
+        clearStagingReservePoolBerthSelection()
+        clearAllSetupStagingReservePoolSimDragOverlays()
 
         let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID)
         let alt = hub?.absoluteAltM ?? hub?.altitudeAmslM
@@ -7341,14 +8034,95 @@ struct MissionRunDetailView: View {
         }
     }
 
+    /// **Pool SITL:** staging-map drag for a selected floating-reserve berth (``MissionControlReservePoolMapMarkerID``).
+    private func applyStagingReservePoolMarkerDrag(taskID: UUID, slotID: UUID, lat: Double, lon: Double) {
+        guard let slot = run.reservePool(forTaskID: taskID).entries.first(where: { $0.id == slotID }) else { return }
+        guard MCSReservePoolHomeStagingMapEligibility.isEligibleSitlReservePoolSlot(
+            slot: slot,
+            sitl: sitl,
+            fleetLink: fleetLink
+        ) else { return }
+        guard let key = slot.attachedFleetVehicleToken,
+              let token = FleetMissionVehicleToken(storageKey: key),
+              case .sitl(let sitlInstanceID) = token,
+              let inst = sitl.instances.first(where: { $0.id == sitlInstanceID })
+        else { return }
+        let systemID = inst.stackInstanceIndex + 1
+        let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
+        let stack = fleetLink.hubTelemetry(forVehicleID: vehicleID)?.autopilotStack
+            ?? fleetLink.vehicleModel(forVehicleID: vehicleID)?.data.telemetry?.autopilotStack
+            ?? .unknown
+        guard stack != .unknown else { return }
+
+        disarmMCSReservePoolHomePlacement()
+
+        setupRostersSelectedMissionPointID = nil
+        setupStagingMapSelectedTaskPathID = nil
+        dismissSetupRostersMissionPointDrawerIfNeeded()
+        setupSelectedAssignmentId = nil
+        clearAllSetupStagingSimDragOverlays()
+
+        setupSelectedReservePoolTaskID = taskID
+        setupSelectedReservePoolSlotID = slotID
+
+        let encoded = MissionControlReservePoolMapMarkerID.encode(taskID: taskID, slotID: slotID)
+        let coord = RouteCoordinate(lat: lat, lon: lon)
+        setupStagingReservePoolSimDragCoordByEncodedMarkerID[encoded] = MissionRunStagingSimDragOverlay(
+            coordinate: coord,
+            startedAt: Date(),
+            hubAgreesSince: nil
+        )
+        scheduleSetupStagingReservePoolSimDragTimeoutReconcile(for: encoded)
+
+        let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID)
+        let alt = hub?.absoluteAltM ?? hub?.altitudeAmslM
+        let yaw = Float(hub?.headingDeg ?? hub?.yawDeg ?? 0)
+        let state = FleetSimState(
+            latitudeDeg: lat,
+            longitudeDeg: lon,
+            absoluteAltitudeM: alt,
+            yawDeg: yaw,
+            batteryVoltageV: nil,
+            ardupilotSimBattCapAh: nil,
+            px4SimBatDrain: nil
+        )
+        Task { @MainActor in
+            await fleetLink.applySimState(
+                vehicleID: vehicleID,
+                state: state,
+                autopilotStack: stack,
+                source: "mcs.reserve_pool_marker_drag"
+            )
+            reconcileSetupStagingSimDragOverlayWithHubTelemetry()
+        }
+        run.setReservePoolBulkSimHome(coord, forTaskID: taskID)
+    }
+
     private var setupMapBoundsSignature: String {
-        run.assignments
+        let roster = run.assignments
             .compactMap { assignment -> String? in
                 guard let token = assignment.attachedFleetVehicleToken else { return nil }
                 return "\(assignment.id.uuidString)|\(token)"
             }
             .sorted()
             .joined(separator: ";")
+        let pool = setupStagingReservePoolFleetBindingSignature
+        if pool.isEmpty { return roster }
+        return roster + "§pool§" + pool
+    }
+
+    /// Enabled-task floating reserve berths + fleet tokens (MCS staging map pool markers + ``setupStagingMapStructureIdentity``).
+    private var setupStagingReservePoolFleetBindingSignature: String {
+        guard let mission = resolvedMission else { return "" }
+        var rows: [String] = []
+        for task in mission.routeMacro.tasks where task.enabled {
+            let tid = task.id
+            for slot in run.reservePool(forTaskID: tid).entries.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
+                let tok = slot.attachedFleetVehicleToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                rows.append("\(tid.uuidString)|\(slot.id.uuidString)|\(tok)")
+            }
+        }
+        return rows.sorted().joined(separator: ";")
     }
 
     private var legacyUnassignedIndices: [Int] {
@@ -7483,14 +8257,24 @@ struct MissionRunDetailView: View {
             simulationImageBasenames: basenames,
             lifecycleStatus: rosterLifecycleStatus(for: syn),
             fleetDisplayShortID: fleetDisplayShortID,
-            isSelectedForSetupMap: false,
-            onSelectForSetupMap: {},
+            isSelectedForSetupMap: setupSelectedReservePoolTaskID == taskID && setupSelectedReservePoolSlotID == slot.id,
+            onSelectForSetupMap: {
+                toggleStagingReservePoolBerthMapSelection(taskID: taskID, slotID: slot.id)
+            },
             onChooseVehicle: {
                 guard taskEnabled else { return }
                 guard !mcrReservePoolSlotMutationLocked(taskID: taskID, slotID: slot.id) else {
                     toastCenter.show("This berth is busy — wait for the reserve swap or preflight on it to finish.", style: .warning)
                     return
                 }
+                disarmMCSReservePoolHomePlacement()
+                setupRostersSelectedMissionPointID = nil
+                setupStagingMapSelectedTaskPathID = nil
+                dismissSetupRostersMissionPointDrawerIfNeeded()
+                clearAllSetupStagingSimDragOverlays()
+                setupSelectedAssignmentId = nil
+                setupSelectedReservePoolTaskID = taskID
+                setupSelectedReservePoolSlotID = slot.id
                 presentReservePoolVehiclePicker(taskID: taskID, slotID: slot.id)
             },
             onRemoveVehicle: {
@@ -7612,6 +8396,14 @@ struct MissionRunDetailView: View {
             toastCenter.show("This berth is busy — wait for the reserve swap or preflight on it to finish.", style: .warning)
             return
         }
+        disarmMCSReservePoolHomePlacement()
+        setupRostersSelectedMissionPointID = nil
+        setupStagingMapSelectedTaskPathID = nil
+        dismissSetupRostersMissionPointDrawerIfNeeded()
+        clearAllSetupStagingSimDragOverlays()
+        setupSelectedAssignmentId = nil
+        setupSelectedReservePoolTaskID = taskID
+        setupSelectedReservePoolSlotID = slotID
         rosterSimSidebarSpawnPlatform = generalSettings.defaultSimulationPlatform
         let anim = rosterPickerSpring
         appDrawer.present(
@@ -7750,6 +8542,7 @@ struct MissionRunDetailView: View {
                 toggleStagingVehicleMapSelection(assignmentId: assignmentId)
             },
             onChooseVehicle: {
+                disarmMCSReservePoolHomePlacement()
                 setupRostersSelectedMissionPointID = nil
                 setupStagingMapSelectedTaskPathID = nil
                 dismissSetupRostersMissionPointDrawerIfNeeded()

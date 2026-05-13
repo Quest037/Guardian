@@ -13,7 +13,9 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             assignmentFleetBindingSignature: "",
             rosterStagingMissionPointChrome: chrome,
             selectedTaskPathID: nil,
-            selectedStagingRosterAssignmentID: nil
+            selectedStagingRosterAssignmentID: nil,
+            mcsReservePoolHomePlacementTaskID: nil,
+            stagingReservePoolBerthSelectionSignature: ""
         )
         let withPath = SetupStagingMapStructureIdentity(
             missionID: nil,
@@ -24,7 +26,9 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             assignmentFleetBindingSignature: "",
             rosterStagingMissionPointChrome: chrome,
             selectedTaskPathID: UUID(),
-            selectedStagingRosterAssignmentID: nil
+            selectedStagingRosterAssignmentID: nil,
+            mcsReservePoolHomePlacementTaskID: nil,
+            stagingReservePoolBerthSelectionSignature: ""
         )
         XCTAssertNotEqual(base, withPath)
     }
@@ -40,7 +44,9 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             assignmentFleetBindingSignature: "",
             rosterStagingMissionPointChrome: chrome,
             selectedTaskPathID: nil,
-            selectedStagingRosterAssignmentID: nil
+            selectedStagingRosterAssignmentID: nil,
+            mcsReservePoolHomePlacementTaskID: nil,
+            stagingReservePoolBerthSelectionSignature: ""
         )
         let b = SetupStagingMapStructureIdentity(
             missionID: nil,
@@ -51,7 +57,73 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             assignmentFleetBindingSignature: "",
             rosterStagingMissionPointChrome: chrome,
             selectedTaskPathID: nil,
-            selectedStagingRosterAssignmentID: UUID()
+            selectedStagingRosterAssignmentID: UUID(),
+            mcsReservePoolHomePlacementTaskID: nil,
+            stagingReservePoolBerthSelectionSignature: ""
+        )
+        XCTAssertNotEqual(a, b)
+    }
+
+    func test_mcsReservePoolHomePlacementTaskID_participatesInEquality() {
+        let chrome = MissionControlSetupRosterStagingMissionPointChrome(listTab: .tasks, selectedPointID: nil)
+        let a = SetupStagingMapStructureIdentity(
+            missionID: nil,
+            homeCoord: nil,
+            allTasksCoords: [],
+            taskPathIDs: [],
+            missionPointTopologySignature: "",
+            assignmentFleetBindingSignature: "",
+            rosterStagingMissionPointChrome: chrome,
+            selectedTaskPathID: nil,
+            selectedStagingRosterAssignmentID: nil,
+            mcsReservePoolHomePlacementTaskID: nil,
+            stagingReservePoolBerthSelectionSignature: ""
+        )
+        let b = SetupStagingMapStructureIdentity(
+            missionID: nil,
+            homeCoord: nil,
+            allTasksCoords: [],
+            taskPathIDs: [],
+            missionPointTopologySignature: "",
+            assignmentFleetBindingSignature: "",
+            rosterStagingMissionPointChrome: chrome,
+            selectedTaskPathID: nil,
+            selectedStagingRosterAssignmentID: nil,
+            mcsReservePoolHomePlacementTaskID: UUID(),
+            stagingReservePoolBerthSelectionSignature: ""
+        )
+        XCTAssertNotEqual(a, b)
+    }
+
+    func test_stagingReservePoolBerthSelectionSignature_participatesInEquality() {
+        let chrome = MissionControlSetupRosterStagingMissionPointChrome(listTab: .tasks, selectedPointID: nil)
+        let t = UUID()
+        let s = UUID()
+        let a = SetupStagingMapStructureIdentity(
+            missionID: nil,
+            homeCoord: nil,
+            allTasksCoords: [],
+            taskPathIDs: [],
+            missionPointTopologySignature: "",
+            assignmentFleetBindingSignature: "",
+            rosterStagingMissionPointChrome: chrome,
+            selectedTaskPathID: nil,
+            selectedStagingRosterAssignmentID: nil,
+            mcsReservePoolHomePlacementTaskID: nil,
+            stagingReservePoolBerthSelectionSignature: ""
+        )
+        let b = SetupStagingMapStructureIdentity(
+            missionID: nil,
+            homeCoord: nil,
+            allTasksCoords: [],
+            taskPathIDs: [],
+            missionPointTopologySignature: "",
+            assignmentFleetBindingSignature: "",
+            rosterStagingMissionPointChrome: chrome,
+            selectedTaskPathID: nil,
+            selectedStagingRosterAssignmentID: nil,
+            mcsReservePoolHomePlacementTaskID: nil,
+            stagingReservePoolBerthSelectionSignature: "\(t.uuidString)|\(s.uuidString)"
         )
         XCTAssertNotEqual(a, b)
     }

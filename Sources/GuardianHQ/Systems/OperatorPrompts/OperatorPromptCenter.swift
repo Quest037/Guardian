@@ -35,8 +35,13 @@ final class OperatorPromptCenter: ObservableObject {
 
     // MARK: Host registry (router availability)
 
-    /// Mission runs whose MC-R prompt strip is currently on-screen.
+    /// Mission runs whose MC-R prompt strip is currently on-screen (``MissionRunOperatorRecipePromptBanner/onAppear``).
     private var mcrPromptHostMissionRunIDs: Set<UUID> = []
+
+    /// Mission run id whose **MC-R run detail** chrome is mounted (``MissionRunDetailView``). Used so routing can
+    /// treat ``OperatorPromptDeliveryTarget/mcrPromptPanel`` as available **before** the bottom prompt banner’s
+    /// `onAppear` registers ``mcrPromptHostMissionRunIDs`` — recipe prompts can be created in the same frame as drill-in.
+    private var mcrRunDetailPresentedMissionRunID: UUID?
 
     /// Live Drive host: vehicle always set when active; mission run id set when that vehicle is engaged on a live run.
     private var liveDrivePromptHostVehicleID: String?
@@ -68,6 +73,7 @@ final class OperatorPromptCenter: ObservableObject {
             return true
         case .mcrPromptPanel(let missionRunID):
             return mcrPromptHostMissionRunIDs.contains(missionRunID)
+                || mcrRunDetailPresentedMissionRunID == missionRunID
         case .liveDrivePromptPanel(let runID, let vehicleID):
             guard let hostVehicle = liveDrivePromptHostVehicleID else { return false }
             if let vehicleID, vehicleID != hostVehicle { return false }
@@ -91,6 +97,19 @@ final class OperatorPromptCenter: ObservableObject {
         } else {
             mcrPromptHostMissionRunIDs.remove(missionRunID)
             clearMCRSurfacePrompts(missionRunID: missionRunID)
+        }
+    }
+
+    /// Call from ``MissionRunDetailView`` when the MC-R run chrome is on-screen so ``mcrPromptPanel`` routing matches
+    /// the drilled-in run **before** the recipe prompt banner’s `onAppear` runs.
+    func noteMCRRunDetailViewPresented(missionRunID: UUID) {
+        mcrRunDetailPresentedMissionRunID = missionRunID
+    }
+
+    /// Call from ``MissionRunDetailView`` when leaving the run; clears drill-in only when it still matches (safe across run switches).
+    func noteMCRRunDetailViewDismissed(missionRunID: UUID) {
+        if mcrRunDetailPresentedMissionRunID == missionRunID {
+            mcrRunDetailPresentedMissionRunID = nil
         }
     }
 

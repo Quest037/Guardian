@@ -852,3 +852,15 @@ extension FleetHubVehicleTelemetry {
         }
     }
 }
+
+// MARK: - Derived motion (park / triage)
+
+extension FleetHubVehicleTelemetry {
+    /// Horizontal speed (m/s) in the N–E plane (prefers fused NED, falls back to position velocity fields).
+    var horizontalGroundSpeedMS: Double? {
+        let n = velocityNorthMS ?? positionVelNorthM ?? positionVelVnMS
+        let e = velocityEastMS ?? positionVelEastM ?? positionVelVeMS
+        guard let vn = n, let ve = e else { return nil }
+        return hypot(vn, ve)
+    }
+}

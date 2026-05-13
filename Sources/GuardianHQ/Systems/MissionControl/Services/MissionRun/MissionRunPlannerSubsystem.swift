@@ -465,10 +465,12 @@ final class MissionRunPlannerSubsystem {
             environment.taskStartDelays.removeAll { $0.taskId == taskID }
             return true
         case let .replaceAssignmentVehicleToken(assignmentID, vehicleTokenKey):
+            environment.clearRosterSimStartPoseSnapshots(forAssignmentIDs: [assignmentID])
             guard let idx = environment.assignments.firstIndex(where: { $0.id == assignmentID }) else { return false }
             environment.assignments[idx].attachedFleetVehicleToken = vehicleTokenKey
             return true
         case let .updateAssignmentTask(assignmentID, taskID):
+            environment.clearRosterSimStartPoseSnapshots(forAssignmentIDs: [assignmentID])
             guard let idx = environment.assignments.firstIndex(where: { $0.id == assignmentID }) else { return false }
             environment.assignments[idx].taskId = taskID
             return true

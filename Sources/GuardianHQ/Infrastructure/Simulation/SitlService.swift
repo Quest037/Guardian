@@ -329,4 +329,23 @@ final class SitlService: ObservableObject {
         }
         return ok
     }
+
+    /// Inserts a running SITL row so ``resolvedFleetStreamVehicleID`` resolves without spawning (tests only).
+    func seedMissionRunTestSitlRunningInstance(
+        id: UUID,
+        stackInstanceIndex: Int = 0,
+        platform: SimulationPlatform = .px4,
+        preset: SimulationVehiclePreset = .uavMultirotor
+    ) {
+        instances.append(
+            SitlRunningInstance(
+                id: id,
+                platform: platform,
+                preset: preset,
+                stackInstanceIndex: stackInstanceIndex,
+                isAlive: true,
+                lastExitCode: nil
+            )
+        )
+    }
 }

@@ -72,13 +72,22 @@ final class FleetRecipesCatalogueBootstrapTests: XCTestCase {
         )
         XCTAssertEqual(
             mission.count,
-            2,
-            "Mission subsystem ships 2 recipes under fleet.do.mission.*: recipe.fleet.do.mission.upload.start and recipe.fleet.do.mission.upload.start.item for MRE post-commit handoff. Update when new mission recipes land."
+            3,
+            "Mission subsystem ships 3 recipes under fleet.do.mission.*: recipe.fleet.do.mission.upload.start, " +
+                "recipe.fleet.do.mission.upload.start.item, and recipe.fleet.do.mission.continue.after.operator.park. " +
+                "Update when new mission recipes land."
         )
         XCTAssertEqual(
             returnHomeNav.count,
             1,
             "Mission registrations also ship recipe.fleet.do.return.home under fleet.do.return.* (RTL via catalogue). Update when new return-home recipes land."
+        )
+        let vehicleDoPark = FleetRecipesCatalogue.shared
+            .descriptors(underNamespacePrefix: ["fleet", "vehicle", "do"])
+        XCTAssertEqual(
+            vehicleDoPark.count,
+            1,
+            "Mission registrations ship recipe.fleet.vehicle.do.park under fleet.vehicle.do.* (single-step park). Update when new vehicle.do recipes land."
         )
     }
 }

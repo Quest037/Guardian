@@ -80,6 +80,27 @@ final class MissionRunReservePoolTests: XCTestCase {
     }
 
     @MainActor
+    func test_update_template_prunes_reserve_pool_bulk_sim_home_for_unknown_tasks() {
+        let task = MissionTask(name: "Alpha")
+        let mission = Mission(
+            id: UUID(),
+            name: "M",
+            description: "",
+            type: .mobile,
+            routeMacro: RouteMacro(tasks: [task])
+        )
+        let run = MissionRunEnvironment(mission: mission)
+        let stale = UUID()
+        let live = task.id
+        run.setReservePoolBulkSimHome(RouteCoordinate(lat: 1, lon: 2), forTaskID: stale)
+        run.setReservePoolBulkSimHome(RouteCoordinate(lat: 3, lon: 4), forTaskID: live)
+        run.updateTemplate(mission)
+        XCTAssertNil(run.reservePoolBulkSimHome(forTaskID: stale))
+        XCTAssertEqual(run.reservePoolBulkSimHome(forTaskID: live)?.lat, 3)
+        XCTAssertEqual(run.reservePoolBulkSimHome(forTaskID: live)?.lon, 4)
+    }
+
+    @MainActor
     func test_available_reserve_pool_entries_excludes_empty_slots() {
         let task = MissionTask(name: "Alpha")
         let mission = Mission(

@@ -103,6 +103,26 @@ enum StructuredLogTemplateCatalog: Sendable {
             "Fleet command failed: {{summary}} - {{reason}}",
             mcr: "ACK fail · {{summary}} — {{reason}}"
         )
+        put(
+            MissionRunLogTemplateKey.executorPendingBatchesCancelledForLiveDriveEngage,
+            "Cleared {{removedCount}} pending executor batch(es) before Live Drive for @{{slotID}}.",
+            mcr: "Live Drive prep · cleared {{removedCount}} queued batch(es) · @{{slotID}}"
+        )
+        put(
+            MissionRunLogTemplateKey.executorPendingBatchesCancelledForRunCompleted,
+            "Cleared {{removedCount}} pending executor batch(es) after mission run completed.",
+            mcr: "Run complete · cleared {{removedCount}} queued batch(es)"
+        )
+        put(
+            MissionRunLogTemplateKey.guardianSitlMotionStopPassAfterRunCompleted,
+            "Guardian SITL motion damp after run completed ({{vehicleCount}} vehicle(s)): manual stream stop, mission pause, offboard stop (best effort).",
+            mcr: "Run complete · motion damp · {{vehicleCount}} SITL(s)"
+        )
+        put(
+            MissionRunLogTemplateKey.executorMissionStartBatchSuppressedRunCompleted,
+            "Ignored mission-start executor batch (dispatch {{dispatch}}) — mission run already completed.",
+            mcr: "Run complete · mission start batch ignored · {{dispatch}}"
+        )
 
         // Telemetry narrative
         put(
@@ -274,6 +294,11 @@ enum StructuredLogTemplateCatalog: Sendable {
             "Live vehicle staging is telemetry-driven (read-only).",
             mcr: "Live staging · telemetry only"
         )
+        put(
+            MissionRunLogTemplateKey.mcsReservePoolHomeMapBatch,
+            "Reserve pool map home (@{{taskID}}): placement requested for {{sent}} SIM(s) at {{latDeg}}°, {{lonDeg}}° (hub positions catch up asynchronously).{{modeNote}}",
+            mcr: "Pool home map · @{{taskID}} · {{sent}} SIM(s) · {{latDeg}},{{lonDeg}}{{modeNote}}"
+        )
 
         put(
             MissionRunLogTemplateKey.missionNotStartedNeedsPath,
@@ -432,6 +457,26 @@ enum StructuredLogTemplateCatalog: Sendable {
             MissionRunLogTemplateKey.lifecycleRunFailed,
             "{{detail}}",
             mcr: "{{detail}}"
+        )
+        put(
+            MissionRunLogTemplateKey.lifecycleSimHomeRestoreBatch,
+            "SIM start-pose restore after run complete ({{phase}}): applied {{applied}}, skipped {{skipped}}, {{candidates}} candidate(s).",
+            mcr: "SIM home · {{phase}} · applied {{applied}} · skipped {{skipped}} · {{candidates}} cand"
+        )
+        put(
+            MissionRunLogTemplateKey.lifecycleSimCleanupParkBatch,
+            "Run-complete SIM park cleanup: attempted {{attempted}}, succeeded {{succeeded}}, failed {{failed}}.",
+            mcr: "SIM park cleanup · ok {{succeeded}} / {{attempted}} · failed {{failed}}"
+        )
+        put(
+            MissionRunLogTemplateKey.lifecycleSimCleanupRunStarted,
+            "Run-complete SIM cleanup starting: park {{park}} vehicle(s), teleport {{teleport}}, mission/battery union {{union}}, completion {{completion}}.",
+            mcr: "SIM cleanup · start · park {{park}} · teleport {{teleport}} · union {{union}} · {{completion}}"
+        )
+        put(
+            MissionRunLogTemplateKey.lifecycleSimCleanupRunFinished,
+            "Run-complete SIM cleanup finished: park attempted {{parkAttempted}} (failed {{parkFailed}}), mission clear {{missionClear}}, roster teleport applied {{rTeleApplied}} skipped {{rTeleSkipped}}, pool teleport applied {{pTeleApplied}} skipped {{pTeleSkipped}}, battery vehicles {{battery}}.",
+            mcr: "SIM cleanup · done · park {{parkAttempted}} (fail {{parkFailed}}) · clr {{missionClear}} · r-tel {{rTeleApplied}}/{{rTeleSkipped}} · p-tel {{pTeleApplied}}/{{pTeleSkipped}} · bat {{battery}}"
         )
 
         put(

@@ -158,4 +158,42 @@ final class MissionRunEngageStabilizeTelemetryClassifierTests: XCTestCase {
         }
         XCTAssertTrue(r.contains("vertical"))
     }
+
+    func test_liveDriveMissionStartGate_ugv_matches_park_stable() {
+        var hub = FleetHubVehicleTelemetry.empty
+        hub.lastUpdate = fresh
+        hub.isArmed = false
+        hub.inAir = false
+        hub.flightMode = "FlightMode.hold"
+        let op = FleetVehicleOperationalModel(hub: hub, lifecycleStatus: nil, now: fresh)
+        let g = MissionRunEngageStabilizeTelemetryClassifier.evaluateLiveDriveMissionStartStabilizeGate(
+            vehicleClass: .ugv,
+            hub: hub,
+            operational: op,
+            now: fresh,
+            maxHubAgeSeconds: 45
+        )
+        XCTAssertEqual(g, .stable)
+    }
+
+    func test_liveDriveMissionStartGate_uav_accepts_loiter_stable_without_park_on_deck() {
+        var hub = FleetHubVehicleTelemetry.empty
+        hub.lastUpdate = fresh
+        hub.flightMode = "FlightMode.posctl"
+        hub.isArmed = true
+        hub.inAir = true
+        hub.relativeAltM = 40
+        hub.velocityDownMS = 0.1
+        hub.positionVelVnMS = 0.05
+        hub.positionVelVeMS = 0
+        let op = FleetVehicleOperationalModel(hub: hub, lifecycleStatus: nil, now: fresh)
+        let g = MissionRunEngageStabilizeTelemetryClassifier.evaluateLiveDriveMissionStartStabilizeGate(
+            vehicleClass: .uav,
+            hub: hub,
+            operational: op,
+            now: fresh,
+            maxHubAgeSeconds: 45
+        )
+        XCTAssertEqual(g, .stable)
+    }
 }

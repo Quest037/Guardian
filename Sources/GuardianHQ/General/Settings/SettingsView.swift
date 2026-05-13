@@ -58,6 +58,8 @@ struct SettingsView: View {
                     missionsPane
                 case .sims:
                     simsPane
+                case .liveDrive:
+                    liveDrivePane
                 case .controls:
                     controlsPane
                 }
@@ -201,6 +203,58 @@ struct SettingsView: View {
                         }
                     }
                 )
+
+                GuardianCard(
+                    configuration: settingsGroupCardConfiguration,
+                    header: { settingsGroupCardTitle("Mission Run") },
+                    body: {
+                        VStack(alignment: .leading, spacing: 0) {
+                            settingsRow(
+                                title: "Isolate map to selected task",
+                                description:
+                                    "Hide all non-task mission data from the map when a task is selected."
+                            ) {
+                                Toggle(
+                                    "",
+                                    isOn: $generalSettings.missionControlLiveMapHideOtherTasksOnTaskSelect
+                                )
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .frame(minWidth: 44, alignment: .trailing)
+                            }
+                            rowDivider
+                            settingsRow(
+                                title: "SIM battery drain",
+                                description:
+                                    "Simulate battery drain on SIMs during a mission run."
+                            ) {
+                                Picker("SIM battery drain", selection: $generalSettings.missionRunSimBatteryDrainRate) {
+                                    ForEach(SimBatteryDrainRate.missionRunPickerCases, id: \.self) { rate in
+                                        Text(rate.displayName).tag(rate)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .labelsHidden()
+                                .frame(minWidth: 160, alignment: .trailing)
+                                .accessibilityLabel("SIM battery drain while run executes")
+                            }
+                            rowDivider
+                            settingsRow(
+                                title: "Reset SIMs when run completes",
+                                description:
+                                    "Reset all SIM vehicles to their default start pose when a run completes."
+                            ) {
+                                Toggle(
+                                    "",
+                                    isOn: $generalSettings.missionRunResetSitlToStartPoseOnSuccessfulComplete
+                                )
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .frame(minWidth: 44, alignment: .trailing)
+                            }
+                        }
+                    }
+                )
             }
             .padding(GuardianSpacing.xl)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -312,20 +366,13 @@ struct SettingsView: View {
                                 .controlSize(.small)
                                 .frame(width: 96)
                             }
-                        }
-                    }
-                )
-
-                GuardianCard(
-                    configuration: settingsGroupCardConfiguration,
-                    header: { settingsGroupCardTitle("Battery") },
-                    body: {
-                        VStack(alignment: .leading, spacing: 0) {
+                            rowDivider
                             settingsRow(
-                                title: "Telemetry seed",
-                                description: "Seed values before the first telemetry sample arrives."
+                                title: "Battery percentage",
+                                description:
+                                    "Initial battery seed shown before the first telemetry sample arrives. Voltage and current seed the same telemetry window."
                             ) {
-                                HStack(spacing: GuardianSpacing.denseGutter) {
+                                HStack(alignment: .top, spacing: GuardianSpacing.denseGutter) {
                                     VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
                                         Text("Percent")
                                             .font(GuardianTypography.font(.formFieldLabel))
@@ -367,20 +414,35 @@ struct SettingsView: View {
                                     }
                                 }
                             }
-                            rowDivider
-                            settingsRow(
-                                title: "Drain rate",
-                                description: "Fallback when Live Drive or Mission Control enable SIM battery drain."
-                            ) {
-                                Picker("Default SIM battery drain rate", selection: $generalSettings.defaultSimBatteryDrainRate) {
-                                    ForEach(SimBatteryDrainRate.allCases) { rate in
-                                        Text(rate.displayName).tag(rate)
-                                    }
+                        }
+                    }
+                )
+            }
+            .padding(GuardianSpacing.xl)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var liveDrivePane: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: GuardianSpacing.md) {
+                GuardianCard(
+                    configuration: settingsGroupCardConfiguration,
+                    header: { settingsGroupCardTitle("SIMs") },
+                    body: {
+                        settingsRow(
+                            title: "SIM battery drain",
+                            description: "Simulate battery drain on SIMs during Live Drive freestyle sessions."
+                        ) {
+                            Picker("SIM battery drain", selection: $generalSettings.liveDriveSimBatteryDrainRate) {
+                                ForEach(SimBatteryDrainRate.missionRunPickerCases, id: \.self) { rate in
+                                    Text(rate.displayName).tag(rate)
                                 }
-                                .pickerStyle(.segmented)
-                                .labelsHidden()
-                                .frame(minWidth: 220, alignment: .trailing)
                             }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            .frame(minWidth: 160, alignment: .trailing)
+                            .accessibilityLabel("SIM battery drain during Live Drive freestyle")
                         }
                     }
                 )

@@ -28,6 +28,9 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     @Published var completionKind: MissionRunCompletionKind?
     @Published var policies: MissionRunPolicies = MissionRunPolicies()
 
+    /// Per-run Mission Control chrome and completion side-effects (cloned from app Mission Run defaults at create time).
+    @Published var operatorDisplaySettings: MissionRunOperatorDisplaySettings = .default
+
     /// Latest execution context from start/cycle ingest; required for queued dispatch and observer enqueue APIs.
     private(set) var lastExecutionContext: MissionRunExecutionContext?
 
@@ -80,6 +83,18 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     /// See **README.md** → **Floating reserve pool (Mission Control run)**.
     @Published private(set) var reservePoolByTaskID: [UUID: MissionRunReservePool] = [:]
 
+    /// Last **bulk** MCS “Set reserve pool home” lat/lon per task (run envelope). Powers **Reapply reserve pool home** without re-arming the map.
+    @Published private(set) var reservePoolBulkSimHomeByTaskID: [UUID: RouteCoordinate] = [:]
+
+    /// One-time hub-derived SIM pose per **roster** assignment, captured on the first execution start (v1 SIM home reset). Keys are ``MissionRunAssignment/id``.
+    @Published private(set) var rosterSimStartPoseSnapshotByAssignmentID: [UUID: FleetSimState] = [:]
+
+    /// Hub- or bulk-home-derived SIM pose per **floating reserve pool** slot, filled incrementally while the run executes (keys: ``MissionRunReservePoolSlot/id``).
+    @Published private(set) var reservePoolSimStartPoseSnapshotBySlotID: [UUID: FleetSimState] = [:]
+
+    /// True while ``scheduleMissionRunSimCleanupIfNeeded`` async work is in flight (run-complete hook or MCS manual run).
+    @Published private(set) var isMissionRunSimCleanupPassRunning = false
+
     /// Fleet vehicles (``FleetMissionVehicleToken/storageKey``) the operator has **written off** for reserve-pool selection for this run — **airframe** state, not slot state.
     @Published private(set) var writtenOffFleetVehicleStorageKeysForReservePool: Set<String> = []
 
@@ -95,8 +110,14 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     /// Tasks that must not receive automatic next-cycle MAVLink starts after a task-scoped wind-down.
     @Published private(set) var missionTaskAutopilotAutostartSuppressedTaskIDs: Set<UUID> = []
 
+    /// Roster / pool assignment ids for which MC‑R **Engage Live Drive** is active: manual streaming owns that
+    /// airframe, so autonomous reserve distress automation must not target that vacancy and next-cycle MAVLink
+    /// autostart must not run for the mapped mission tasks until the handoff clears (see ``unionedMissionTaskIDsSuppressingAutopilotAutostart(forMission:)``).
+    @Published private(set) var missionRunAssignmentIDsWithOperatorLiveDriveHandoff: Set<UUID> = []
+
     internal weak var fleetLink: FleetLinkService?
     internal weak var sitl: SitlService?
+    internal weak var generalSettings: GeneralSettingsStore?
     private var assistantsByKey: [String: AnyObject] = [:]
     let systems: MissionRunSystems
 
@@ -188,9 +209,38 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         refreshDerivedTaskStates()
     }
 
-    func attachServices(fleetLink: FleetLinkService, sitl: SitlService) {
+    func attachServices(fleetLink: FleetLinkService, sitl: SitlService, generalSettings: GeneralSettingsStore? = nil) {
         self.fleetLink = fleetLink
         self.sitl = sitl
+        if let generalSettings {
+            self.generalSettings = generalSettings
+        }
+    }
+
+    /// Latches ``isMissionRunSimCleanupPassRunning`` for ``scheduleMissionRunSimCleanupIfNeeded`` (same-target extensions cannot write ``private(set)`` storage).
+    internal func setMissionRunSimCleanupPassRunning(_ running: Bool) {
+        isMissionRunSimCleanupPassRunning = running
+    }
+
+    /// Whether ``scheduleMissionRunSimCleanupIfNeeded`` would schedule work (requires attached fleet + SITL services).
+    internal func canScheduleMissionRunSimCleanupNow() -> Bool {
+        guard let fleetLink, let sitl else { return false }
+        let targets = MissionRunSimCleanupParkPolicy.orderedCleanupParkTargets(
+            assignments: assignments,
+            reservePoolByTaskID: reservePoolByTaskID,
+            fleetLink: fleetLink,
+            sitl: sitl
+        )
+        let rosterSnapshots = rosterSimStartPoseSnapshotByAssignmentID
+        let poolSnapshots = reservePoolSimStartPoseSnapshotBySlotID
+        let shouldTeleport = MissionRunSimHomeRestorePolicy.shouldScheduleAfterMarkCompleted(
+            completionKind: completionKind,
+            settingsEnabled: operatorDisplaySettings.resetSimToStartPoseOnSuccessfulComplete,
+            snapshotsNonEmpty: !rosterSnapshots.isEmpty || !poolSnapshots.isEmpty,
+            hasFleetAndSitl: true
+        )
+        let motionIDs = fleetLink.guardianManagedSitlSessionVehicleIDsSorted()
+        return !(targets.isEmpty && !shouldTeleport && motionIDs.isEmpty)
     }
 
     func captureExecutionContext(_ context: MissionRunExecutionContext?) {
@@ -283,6 +333,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         if !missionTaskAbortWindDownIssuedTaskIDs.isEmpty { missionTaskAbortWindDownIssuedTaskIDs = [] }
         if !missionTaskCompleteWindDownIssuedTaskIDs.isEmpty { missionTaskCompleteWindDownIssuedTaskIDs = [] }
         if !missionTaskAutopilotAutostartSuppressedTaskIDs.isEmpty { missionTaskAutopilotAutostartSuppressedTaskIDs = [] }
+        if !missionRunAssignmentIDsWithOperatorLiveDriveHandoff.isEmpty { missionRunAssignmentIDsWithOperatorLiveDriveHandoff = [] }
         if !operatorTriageMarkedMissionTaskStateByTaskID.isEmpty { operatorTriageMarkedMissionTaskStateByTaskID = [:] }
     }
 
@@ -330,6 +381,75 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         triage.removeValue(forKey: taskID)
         operatorTriageMarkedMissionTaskStateByTaskID = triage
         refreshDerivedTaskStates()
+    }
+
+    // MARK: - MC-R → Live Drive operator handoff
+
+    /// Records that MRE must not run autonomous work against this roster / pool row while Live Drive owns its stream.
+    func noteOperatorLiveDriveHandoffActive(forAssignmentID assignmentID: UUID) {
+        guard assignments.contains(where: { $0.id == assignmentID }) else { return }
+        missionRunAssignmentIDsWithOperatorLiveDriveHandoff.insert(assignmentID)
+    }
+
+    func clearOperatorLiveDriveHandoff(forAssignmentID assignmentID: UUID) {
+        guard missionRunAssignmentIDsWithOperatorLiveDriveHandoff.contains(assignmentID) else { return }
+        var next = missionRunAssignmentIDsWithOperatorLiveDriveHandoff
+        next.remove(assignmentID)
+        missionRunAssignmentIDsWithOperatorLiveDriveHandoff = next
+    }
+
+    /// Clears every handoff marker whose roster row resolves to the same bridge ``vehicleID`` as MC‑R / Live Drive.
+    func clearOperatorLiveDriveHandoffs(matchingResolvedFleetVehicleID vehicleID: String, fleetLink: FleetLinkService, sitl: SitlService) {
+        guard !missionRunAssignmentIDsWithOperatorLiveDriveHandoff.isEmpty else { return }
+        var removals: [UUID] = []
+        for aid in missionRunAssignmentIDsWithOperatorLiveDriveHandoff {
+            guard let row = assignments.first(where: { $0.id == aid }) else {
+                removals.append(aid)
+                continue
+            }
+            if resolvedFleetStreamVehicleID(assignment: row, fleetLink: fleetLink, sitl: sitl) == vehicleID {
+                removals.append(aid)
+            }
+        }
+        guard !removals.isEmpty else { return }
+        var next = missionRunAssignmentIDsWithOperatorLiveDriveHandoff
+        for r in removals { next.remove(r) }
+        missionRunAssignmentIDsWithOperatorLiveDriveHandoff = next
+    }
+
+    /// Clears all MC‑R → Live Drive handoff markers when the run is no longer in the live envelope (e.g. completed or failed out).
+    func clearOperatorLiveDriveHandoffsWhenRunFinished() {
+        guard !missionRunAssignmentIDsWithOperatorLiveDriveHandoff.isEmpty else { return }
+        missionRunAssignmentIDsWithOperatorLiveDriveHandoff = []
+    }
+
+    /// Wind-down markers plus mission tasks implied by ``missionRunAssignmentIDsWithOperatorLiveDriveHandoff`` (executor autostart gate).
+    internal func unionedMissionTaskIDsSuppressingAutopilotAutostart(forMission mission: Mission) -> Set<UUID> {
+        var union = missionTaskAutopilotAutostartSuppressedTaskIDs
+        guard !missionRunAssignmentIDsWithOperatorLiveDriveHandoff.isEmpty else { return union }
+        for aid in missionRunAssignmentIDsWithOperatorLiveDriveHandoff {
+            union.formUnion(missionTaskIDsForOperatorLiveDriveHandoffAssignment(id: aid, mission: mission))
+        }
+        return union
+    }
+
+    private func missionTaskIDsForOperatorLiveDriveHandoffAssignment(id assignmentID: UUID, mission: Mission) -> Set<UUID> {
+        guard let assignment = assignments.first(where: { $0.id == assignmentID }) else { return [] }
+        var s = Set<UUID>()
+        if let tid = assignment.taskId {
+            s.insert(tid)
+        } else {
+            let enabled = mission.routeMacro.tasks.filter(\.enabled)
+            if enabled.count == 1, let only = enabled.first {
+                s.insert(only.id)
+            }
+        }
+        if let plan = compiledPlan {
+            for tr in plan.roleTracks where tr.assignmentID == assignmentID {
+                if let tid = tr.taskID { s.insert(tid) }
+            }
+        }
+        return s
     }
 
     /// Operator marks this task’s MC-R lifecycle label as ``.aborted`` or ``.completed``; records that choice, emits one run event, and updates abort/recovery ack sets for session bookkeeping.
@@ -514,9 +634,132 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             rosterRoleResolutionsByDeviceID = [:]
             runtimeMissionPoints = []
             reservePoolByTaskID = [:]
+            reservePoolBulkSimHomeByTaskID = [:]
+            rosterSimStartPoseSnapshotByAssignmentID = [:]
+            reservePoolSimStartPoseSnapshotBySlotID = [:]
             writtenOffFleetVehicleStorageKeysForReservePool = []
         }
+        pruneRosterSimStartPoseSnapshotsToCurrentAssignments()
+        pruneReservePoolSimStartPoseSnapshotsToCurrentSlots()
         refreshDerivedTaskStates()
+    }
+
+    // MARK: - Roster SIM start pose (run-complete home reset, v1)
+
+    private func pruneRosterSimStartPoseSnapshotsToCurrentAssignments() {
+        let valid = Set(assignments.map(\.id))
+        let pruned = rosterSimStartPoseSnapshotByAssignmentID.filter { valid.contains($0.key) }
+        guard pruned.count != rosterSimStartPoseSnapshotByAssignmentID.count else { return }
+        rosterSimStartPoseSnapshotByAssignmentID = pruned
+    }
+
+    private func pruneReservePoolSimStartPoseSnapshotsToCurrentSlots() {
+        var valid: Set<UUID> = []
+        for (_, pool) in reservePoolByTaskID {
+            for slot in pool.entries {
+                valid.insert(slot.id)
+            }
+        }
+        let pruned = reservePoolSimStartPoseSnapshotBySlotID.filter { valid.contains($0.key) }
+        guard pruned.count != reservePoolSimStartPoseSnapshotBySlotID.count else { return }
+        reservePoolSimStartPoseSnapshotBySlotID = pruned
+    }
+
+    /// Drops captured SIM poses for the given roster rows (e.g. planner fleet binding change or roster swap).
+    func clearRosterSimStartPoseSnapshots(forAssignmentIDs ids: [UUID]) {
+        guard !ids.isEmpty else { return }
+        var m = rosterSimStartPoseSnapshotByAssignmentID
+        var touched = false
+        for id in ids {
+            if m.removeValue(forKey: id) != nil { touched = true }
+        }
+        guard touched else { return }
+        rosterSimStartPoseSnapshotByAssignmentID = m
+    }
+
+    /// Drops captured pool SIM poses when a berth binding changes or the row is removed.
+    func clearReservePoolSimStartPoseSnapshots(forSlotIDs ids: [UUID]) {
+        guard !ids.isEmpty else { return }
+        var m = reservePoolSimStartPoseSnapshotBySlotID
+        var touched = false
+        for id in ids {
+            if m.removeValue(forKey: id) != nil { touched = true }
+        }
+        guard touched else { return }
+        reservePoolSimStartPoseSnapshotBySlotID = m
+    }
+
+    /// Unit tests only: replaces ``rosterSimStartPoseSnapshotByAssignmentID`` (production callers use capture / prune / clear APIs).
+    internal func unitTestingReplaceRosterSimStartPoseSnapshots(_ next: [UUID: FleetSimState]) {
+        rosterSimStartPoseSnapshotByAssignmentID = next
+    }
+
+    /// Unit tests only: replaces ``reservePoolSimStartPoseSnapshotBySlotID``.
+    internal func unitTestingReplaceReservePoolSimStartPoseSnapshots(_ next: [UUID: FleetSimState]) {
+        reservePoolSimStartPoseSnapshotBySlotID = next
+    }
+
+    /// Captures hub SIM pose per **SITL** roster binding the **first** time this run starts execution (README → SIM home reset).
+    /// Also captures **floating reserve pool** SITL poses per slot (incremental: new bindings after earlier starts still snapshot before run-complete restore).
+    func captureRosterSimStartPoseSnapshotsIfNeeded(fleetLink: FleetLinkService, sitl: SitlService) {
+        if rosterSimStartPoseSnapshotByAssignmentID.isEmpty {
+            var rosterNext: [UUID: FleetSimState] = [:]
+            for assignment in assignments {
+                guard assignment.hasFleetOrLegacyAssignment else { continue }
+                guard let raw = assignment.attachedFleetVehicleToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !raw.isEmpty,
+                      let token = FleetMissionVehicleToken(storageKey: raw),
+                      let vehicleID = resolvedFleetStreamVehicleID(token: token, fleetLink: fleetLink, sitl: sitl)
+                else { continue }
+                guard fleetLink.isGuardianManagedSitlStream(vehicleID: vehicleID) else { continue }
+                guard let hub = fleetLink.hubTelemetryByVehicleID[vehicleID],
+                      let snap = FleetSimState(simHomeRestoreSnapshotFrom: hub)
+                else { continue }
+                rosterNext[assignment.id] = snap
+            }
+            if !rosterNext.isEmpty {
+                rosterSimStartPoseSnapshotByAssignmentID = rosterNext
+            }
+        }
+
+        var poolMap = reservePoolSimStartPoseSnapshotBySlotID
+        var poolTouched = false
+        let orderedTaskIDs = reservePoolByTaskID.keys.sorted { $0.uuidString < $1.uuidString }
+        for taskID in orderedTaskIDs {
+            guard let pool = reservePoolByTaskID[taskID] else { continue }
+            let bulk = reservePoolBulkSimHomeByTaskID[taskID]
+            for slot in pool.entries {
+                guard MCSReservePoolHomeStagingMapEligibility.isEligibleSitlReservePoolSlot(
+                    slot: slot,
+                    sitl: sitl,
+                    fleetLink: fleetLink
+                ) else { continue }
+                guard poolMap[slot.id] == nil else { continue }
+                guard let raw = slot.attachedFleetVehicleToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !raw.isEmpty,
+                      let token = FleetMissionVehicleToken(storageKey: raw),
+                      let vehicleID = resolvedFleetStreamVehicleID(token: token, fleetLink: fleetLink, sitl: sitl)
+                else { continue }
+                guard fleetLink.isGuardianManagedSitlStream(vehicleID: vehicleID) else { continue }
+                let hub = fleetLink.hubTelemetryByVehicleID[vehicleID]
+                guard let snap = FleetSimState(reservePoolSimHomeRestoreStartPose: hub, bulkHome: bulk) else { continue }
+                poolMap[slot.id] = snap
+                poolTouched = true
+            }
+        }
+        if poolTouched {
+            reservePoolSimStartPoseSnapshotBySlotID = poolMap
+        }
+    }
+
+    /// Looks up a floating reserve pool slot by stable id (for SIM cleanup / restore).
+    internal func reservePoolSlot(forSlotID slotID: UUID) -> (taskID: UUID, slot: MissionRunReservePoolSlot)? {
+        for (taskID, pool) in reservePoolByTaskID {
+            if let slot = pool.entries.first(where: { $0.id == slotID }) {
+                return (taskID, slot)
+            }
+        }
+        return nil
     }
 
     // MARK: - Floating reserve pool (MCS / MRE)
@@ -525,12 +768,14 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         var next = reservePoolByTaskID
         next[taskID] = pool
         reservePoolByTaskID = next
+        pruneReservePoolSimStartPoseSnapshotsToCurrentSlots()
     }
 
     func clearReservePool(forTaskID taskID: UUID) {
         var next = reservePoolByTaskID
         next.removeValue(forKey: taskID)
         reservePoolByTaskID = next
+        pruneReservePoolSimStartPoseSnapshotsToCurrentSlots()
     }
 
     /// Appends one **slot** to the task’s pool without rewriting unrelated slots. Returns the slot’s stable ``MissionRunReservePoolSlot/id``.
@@ -551,6 +796,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         let before = pool.entries.count
         pool.entries.removeAll { $0.id == slotID }
         guard pool.entries.count != before else { return false }
+        clearReservePoolSimStartPoseSnapshots(forSlotIDs: [slotID])
         var next = reservePoolByTaskID
         if pool.entries.isEmpty {
             next.removeValue(forKey: taskID)
@@ -566,6 +812,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     func replaceReservePoolSlot(id slotID: UUID, forTaskID taskID: UUID, with replacement: MissionRunReservePoolSlot) -> Bool {
         var pool = reservePool(forTaskID: taskID)
         guard let idx = pool.entries.firstIndex(where: { $0.id == slotID }) else { return false }
+        clearReservePoolSimStartPoseSnapshots(forSlotIDs: [slotID])
         pool.entries[idx] = MissionRunReservePoolSlot(
             id: slotID,
             label: replacement.label,
@@ -1099,6 +1346,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         next[rIdx].attachedFleetVehicleToken = tVac
         next[rIdx].attachedDevice = dVac
         assignments = next
+        clearRosterSimStartPoseSnapshots(forAssignmentIDs: [vac.id, res.id])
 
         let taskLabel = template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name
         systems.logging.appendLogEvent(
@@ -1178,6 +1426,8 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         nextAssignments[idx].attachedDevice = pickSnap.attachedDevice
 
         assignments = nextAssignments
+        clearRosterSimStartPoseSnapshots(forAssignmentIDs: [assignmentID])
+        clearReservePoolSimStartPoseSnapshots(forSlotIDs: [poolSlotID])
         var nextReservePools = reservePoolByTaskID
         nextReservePools[taskID] = nextPool
         reservePoolByTaskID = nextReservePools
@@ -1448,6 +1698,19 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     private func pruneReservePoolsToMatchTasks(in mission: Mission) {
         let valid = Set(mission.routeMacro.tasks.map(\.id))
         reservePoolByTaskID = reservePoolByTaskID.filter { valid.contains($0.key) }
+        reservePoolBulkSimHomeByTaskID = reservePoolBulkSimHomeByTaskID.filter { valid.contains($0.key) }
+    }
+
+    /// Records the last **bulk** pool map home coordinate for ``taskID`` (MCS setup).
+    func setReservePoolBulkSimHome(_ coordinate: RouteCoordinate, forTaskID taskID: UUID) {
+        var next = reservePoolBulkSimHomeByTaskID
+        next[taskID] = coordinate
+        reservePoolBulkSimHomeByTaskID = next
+    }
+
+    /// Last bulk pool map home coordinate for ``taskID``, if any.
+    func reservePoolBulkSimHome(forTaskID taskID: UUID) -> RouteCoordinate? {
+        reservePoolBulkSimHomeByTaskID[taskID]
     }
 
     private enum RuntimeMissionPointsSyncReason {
@@ -1703,6 +1966,8 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
 
     /// Recomputes ``taskStateByTaskID`` from template, run status, session phase, deferrals, and cycle bookkeeping.
     func refreshDerivedTaskStates(now: Date = Date()) {
+        pruneRosterSimStartPoseSnapshotsToCurrentAssignments()
+        pruneReservePoolSimStartPoseSnapshotsToCurrentSlots()
         guard let mission = template else {
             if !taskStateByTaskID.isEmpty { taskStateByTaskID = [:] }
             if !taskAttemptingByTaskID.isEmpty { taskAttemptingByTaskID = [:] }
@@ -1873,6 +2138,129 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         return fleetLink.hubTelemetry(forVehicleID: vehicleID)
     }
 
+    /// Roster SIM teleport after park when ``MissionRunSimHomeRestorePolicy`` gates pass; skips ``skipVehicleIDs`` (e.g. park failures).
+    internal func performRosterSimHomeRestoreAfterSuccessfulCompletion(
+        snapshots: [UUID: FleetSimState],
+        fleetLink: FleetLinkService,
+        sitl: SitlService,
+        skipVehicleIDs: Set<String> = []
+    ) async -> (applied: Int, skipped: Int) {
+        var applied = 0
+        var skipped = 0
+        let ordered = snapshots.keys.sorted { $0.uuidString < $1.uuidString }
+        for assignmentID in ordered {
+            guard let state = snapshots[assignmentID],
+                  let assignment = assignments.first(where: { $0.id == assignmentID })
+            else { continue }
+            guard let vehicleID = resolvedFleetStreamVehicleID(
+                assignment: assignment,
+                fleetLink: fleetLink,
+                sitl: sitl
+            ) else {
+                skipped += 1
+                continue
+            }
+            guard fleetLink.isGuardianManagedSitlStream(vehicleID: vehicleID) else {
+                skipped += 1
+                continue
+            }
+            let stack = fleetLink.vehicleModel(forVehicleID: vehicleID)?.data.telemetry?.autopilotStack
+                ?? fleetLink.hubTelemetryByVehicleID[vehicleID]?.autopilotStack
+                ?? .unknown
+            guard stack != .unknown else {
+                skipped += 1
+                continue
+            }
+            guard !skipVehicleIDs.contains(vehicleID) else {
+                skipped += 1
+                continue
+            }
+            await fleetLink.applySimState(
+                vehicleID: vehicleID,
+                state: state,
+                autopilotStack: stack,
+                source: "missioncontrol.run_complete_sim_cleanup.teleport"
+            )
+            applied += 1
+        }
+        if !snapshots.isEmpty {
+            systems.logging.appendLogEvent(
+                level: .info,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.lifecycleSimHomeRestoreBatch,
+                templateParams: [
+                    "phase": "roster",
+                    "applied": "\(applied)",
+                    "skipped": "\(skipped)",
+                    "candidates": "\(snapshots.count)",
+                ]
+            )
+        }
+        return (applied, skipped)
+    }
+
+    /// Reserve pool SIM teleport after park when policy passes; skips ``skipVehicleIDs`` (e.g. park failures).
+    internal func performReservePoolSimHomeRestoreAfterSuccessfulCompletion(
+        snapshots: [UUID: FleetSimState],
+        fleetLink: FleetLinkService,
+        sitl: SitlService,
+        skipVehicleIDs: Set<String> = []
+    ) async -> (applied: Int, skipped: Int) {
+        var applied = 0
+        var skipped = 0
+        let ordered = snapshots.keys.sorted { $0.uuidString < $1.uuidString }
+        for slotID in ordered {
+            guard let state = snapshots[slotID],
+                  let pair = reservePoolSlot(forSlotID: slotID)
+            else { continue }
+            let assignment = MissionRunAssignment.syntheticForReservePool(slot: pair.slot)
+            guard let vehicleID = resolvedFleetStreamVehicleID(
+                assignment: assignment,
+                fleetLink: fleetLink,
+                sitl: sitl
+            ) else {
+                skipped += 1
+                continue
+            }
+            guard fleetLink.isGuardianManagedSitlStream(vehicleID: vehicleID) else {
+                skipped += 1
+                continue
+            }
+            let stack = fleetLink.vehicleModel(forVehicleID: vehicleID)?.data.telemetry?.autopilotStack
+                ?? fleetLink.hubTelemetryByVehicleID[vehicleID]?.autopilotStack
+                ?? .unknown
+            guard stack != .unknown else {
+                skipped += 1
+                continue
+            }
+            guard !skipVehicleIDs.contains(vehicleID) else {
+                skipped += 1
+                continue
+            }
+            await fleetLink.applySimState(
+                vehicleID: vehicleID,
+                state: state,
+                autopilotStack: stack,
+                source: "missioncontrol.run_complete_sim_cleanup.teleport"
+            )
+            applied += 1
+        }
+        if !snapshots.isEmpty {
+            systems.logging.appendLogEvent(
+                level: .info,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.lifecycleSimHomeRestoreBatch,
+                templateParams: [
+                    "phase": "reserve_pool",
+                    "applied": "\(applied)",
+                    "skipped": "\(skipped)",
+                    "candidates": "\(snapshots.count)",
+                ]
+            )
+        }
+        return (applied, skipped)
+    }
+
 }
 
 // MARK: - Mission Preflight (roster + floating reserve pool)
@@ -1918,5 +2306,8 @@ extension MissionRunLogTemplateKey {
     static let floatingReserveSwapEngaged = "missioncontrol.mre.reserve.swap_engaged"
     /// Fixed template reserve roster row swapped with a primary/wingman vacancy; ``templateParams``: `vacancySlot`, `vacancySlotID`, `reserveSlot`, `reserveSlotID`, `source`.
     static let fixedRosterReserveSwapEngaged = "missioncontrol.mre.reserve.fixed_roster_swap_engaged"
+
+    /// MCS staging map: operator used **Set reserve pool home**; ``templateParams``: `sent`, `latDeg`, `lonDeg` (``taskID`` injected by ``MissionRunEvent`` init).
+    static let mcsReservePoolHomeMapBatch = "missioncontrol.mcs.setup.reserve_pool_home_map_batch"
 }
 

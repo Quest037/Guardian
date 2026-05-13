@@ -18,6 +18,8 @@ extension FleetCommandName {
         FleetCommandName.literal("command.fleet.vehicle.do.disarm")
     static let fleetVehicleDoMode =
         FleetCommandName.literal("command.fleet.vehicle.do.mode")
+    static let fleetVehicleDoOffboardStop =
+        FleetCommandName.literal("command.fleet.vehicle.do.offboard.stop")
     static let fleetVehicleDoLoiter =
         FleetCommandName.literal("command.fleet.vehicle.do.loiter")
     static let fleetVehicleDoPark =
@@ -305,14 +307,29 @@ enum FleetVehicleCoreCommandRegistrations {
             riskTier: .safeInLiveMission
         ))
 
+        // do.offboard.stop — exit MAVSDK offboard setpoint streaming.
+        FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
+            name: .fleetVehicleDoOffboardStop,
+            humanLabel: "Stop offboard",
+            humanDescription:
+                "Stops MAVSDK offboard streaming (`Offboard.stop`). Dispatched as ``FleetVehicleCommand/offboardStop`` on PX4 and ArduPilot. " +
+                "Use when leaving an offboard session that was intentionally left running (e.g. PX4 UGV **Park**); the continue-mission recipe invokes this **first**, then mode/arm/start. " +
+                "If offboard was never active, the autopilot may still acknowledge or may return an error — treat as stack-dependent.",
+            declaredResponseKinds: FleetCommandDeclaredResponseKinds.standardDo.adding(
+                .autopilotBusy
+            ),
+            retryHints: .conservative,
+            riskTier: .confirmInLiveMission
+        ))
+
         // do.park — class-aware land/surface, disarm, hold (single orchestrated vehicle command).
         FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
             name: .fleetVehicleDoPark,
             humanLabel: "Park",
             humanDescription:
-                "Bring the vehicle to a safe parked state: first best-effort `Mission.pauseMission()` so onboard mission execution stops where supported, then class-specific steps — " +
+                "Bring the vehicle to a safe parked state: first best-effort `Mission.pauseMission()` so onboard mission execution stops where supported (skipped for **PX4 UGV** offboard park so the mission can be continued without re-upload), then class-specific steps — " +
                 "UAV and unknown-class targets land if airborne, then disarm and enter hold/loiter; " +
-                "UGV/USV hold to stop motion, disarm, then `Action.hold()` again for a clear parked mode (PX4 **UGV-W**: first stop uses raw `SET_MODE` hold / AUTO_LOITER like catalogue `do.mode` hold, then disarm, then a final `Action.hold()`); " +
+                "UGV/USV: **PX4** uses OFFBOARD zero body-velocity braking, then **stays armed** (no disarm in this path — zero-velocity stream stays active until continue); exit offboard via `command.fleet.vehicle.do.offboard.stop` (first step of the continue-mission recipe); other UGV/USV stacks hold to stop motion, disarm, then `Action.hold()` again for a clear parked mode (PX4 **UGV-W** preset: first stop uses raw `SET_MODE` hold / AUTO_LOITER like catalogue `do.mode` hold, then disarm, then a final `Action.hold()`); " +
                 "UUV surfaces if below the surface threshold (ArduSub `mode surface`), then disarm and hold. " +
                 "Implemented as one `FleetVehicleCommand.park` pipeline in FleetLink — not a multi-step catalogue composite.",
             declaredResponseKinds: FleetCommandDeclaredResponseKinds.standardDo.adding(

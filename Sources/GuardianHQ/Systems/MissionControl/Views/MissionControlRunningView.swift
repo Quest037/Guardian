@@ -101,7 +101,8 @@ struct LiveOverviewMapStructureIdentity: Equatable {
     let homeCoord: RouteCoordinate?
     let allTasksCoords: [[RouteCoordinate]]
     let taskPathIDs: [UUID]
-    /// When set, map vehicle markers are restricted to this task’s roster (same as MC-R roster filter).
+    /// When set, the MC‑R overview map isolates clutter to this task (paths, map pins, roster vehicles, pool rows).
+    /// Driven only by this run’s ``MissionRunEnvironment/operatorDisplaySettings/isolateLiveMapToSelectedTask`` (not ``GeneralSettingsStore``).
     let focusedTaskID: UUID?
     /// Rally / extraction pins: id, kind, closed, and map selection — not lat/lon.
     let missionPointTopologySignature: String

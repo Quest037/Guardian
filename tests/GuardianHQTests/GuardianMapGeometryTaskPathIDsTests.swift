@@ -22,7 +22,8 @@ final class GuardianMapGeometryTaskPathIDsTests: XCTestCase {
             preserveView: true,
             isEditingTask: false,
             missionPointMarkers: [],
-            missionPointPlacementArmed: false
+            missionPointPlacementArmed: false,
+            mcsReservePoolHomePlacementArmed: false
         )
         let same = GuardianRouteMapGeometry(
             home: nil,
@@ -35,7 +36,8 @@ final class GuardianMapGeometryTaskPathIDsTests: XCTestCase {
             preserveView: true,
             isEditingTask: false,
             missionPointMarkers: [],
-            missionPointPlacementArmed: false
+            missionPointPlacementArmed: false,
+            mcsReservePoolHomePlacementArmed: false
         )
         let otherID = GuardianRouteMapGeometry(
             home: nil,
@@ -48,9 +50,44 @@ final class GuardianMapGeometryTaskPathIDsTests: XCTestCase {
             preserveView: true,
             isEditingTask: false,
             missionPointMarkers: [],
-            missionPointPlacementArmed: false
+            missionPointPlacementArmed: false,
+            mcsReservePoolHomePlacementArmed: false
         )
         XCTAssertEqual(base, same)
         XCTAssertNotEqual(base, otherID)
+    }
+
+    func test_mcs_reserve_pool_home_armed_participates_in_equatable() {
+        let coord = RouteCoordinate(lat: 1, lon: 2)
+        let id = UUID()
+        let off = GuardianRouteMapGeometry(
+            home: nil,
+            allTasksCoords: [[coord]],
+            taskPathIDs: [id],
+            selectedTaskWaypoints: [],
+            selectedWaypointIndex: nil,
+            headingPreview: nil,
+            cameraPreview: nil,
+            preserveView: true,
+            isEditingTask: false,
+            missionPointMarkers: [],
+            missionPointPlacementArmed: false,
+            mcsReservePoolHomePlacementArmed: false
+        )
+        let on = GuardianRouteMapGeometry(
+            home: nil,
+            allTasksCoords: [[coord]],
+            taskPathIDs: [id],
+            selectedTaskWaypoints: [],
+            selectedWaypointIndex: nil,
+            headingPreview: nil,
+            cameraPreview: nil,
+            preserveView: true,
+            isEditingTask: false,
+            missionPointMarkers: [],
+            missionPointPlacementArmed: false,
+            mcsReservePoolHomePlacementArmed: true
+        )
+        XCTAssertNotEqual(off, on)
     }
 }

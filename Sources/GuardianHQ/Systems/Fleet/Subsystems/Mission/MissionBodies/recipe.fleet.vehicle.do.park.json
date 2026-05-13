@@ -1,0 +1,32 @@
+{
+  "_comment": "recipe.fleet.vehicle.do.park: single-step catalogue park (class-aware hold / disarm / offboard stop per stack). Intended for Mission Run cleanup and other callers that need a Layer-1 recipe shell with retries and live-mission escalation — not the full navigate-then-park flow (see recipe.fleet.do.move.point.park).",
+  "entryStepID": "park",
+  "overallBudgetSeconds": 120,
+  "steps": [
+    {
+      "kind": "invokeCommand",
+      "id": "park",
+      "command": "command.fleet.vehicle.do.park",
+      "retry": {
+        "maxAttempts": 3,
+        "delaySeconds": 0.5,
+        "retryableErrorKinds": ["autopilotBusy", "noSession", "notConnected"],
+        "retryOnTimeout": true
+      },
+      "matchers": [
+        { "when": { "kind": "success" }, "then": { "kind": "succeed" } },
+        {
+          "when": { "kind": "any" },
+          "then": {
+            "kind": "escalate",
+            "reason": {
+              "kind": "confirmation",
+              "confirmationKind": { "rawValue": "confirmInLiveMission" }
+            },
+            "allowedVerbs": ["abort", "acknowledge", "retry"]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -95,10 +95,8 @@ The controllers system is designed to allow a user to control a linked vehicle w
 
 The Live Drive system allows a user to manually take control of a connected vehicle and send it commands to do things. The user can fly UAVs, drive UGVs etc. This works for both live vehicles and SIMs. This system can be used in freestyle, or can be the way the user takes control of a vehicle in a running mission.
 
-- **LiveDrive takeover of live mission vehicle** Paladin will create a secret key for every vehicle in a mission. User can take over vehicle by inputting key and if Paladin has marked it for takeover. (So if you went cloudbased remote users could achieve this also)
-- **LiveDrive takeover of live mission vehicle:** This has been coded, it needs testing properly when Paladin is capable of handing off vehicle to user.
+
 - **LiveDrive map expansion:** Integrate CesiumJS system to offer 3D map version as well as Leaflet 2D map.
-- **LiveDrive UGV/USV/UUV RTL:** At the moment it just drives back in straight line, probably not likely to be able to achieve this. Needs consideration.
 - **Testing:** Test the LiveDrive system with all variants of both stacks to see how they work out.
 
 ## Missions
@@ -116,9 +114,7 @@ Missions are the templates created by users that involve telling one or more veh
 ### Mission Mechanics
 - **Mission Task.staggerDelay:** - Add a field (or fields) to control a tasks stagger delay between drone groups when method is staggered. (duration + time style e.g. 30+seconds, 10+mins, 1+hour)
 - **Mission Task.geofence:** - Add a geofence limit around a MissionTask to say drones cannot exit it.
-- **Mission Task.betweenCycles:** - Add a between cycles param to tell squads what to do between task cycles. These are actions.
-  - Loiter, Park, RTL, Charge, GoToStart, GoToPoint etc.
-
+- **Mission Task.betweenCycles** — `MissionTaskBetweenCyclesToDo.md` (RTL / Loiter / Park; missions + MCS + MCR task drawers; failure fallbacks).
 
 ### Mission Roster Slots
 
@@ -139,10 +135,7 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
   - Abort
 
 ### Settings
-- An object of settings for MCR to work with
-  - Map display
-    - On task select, hide other tasks (bool)
-- App level defaults on their own tab
+
 
 ### Mission Control: Simulate Mode (Paladin Only)
 - **Mission Control Simulate mode:** add a simulation mode where live vehicle(s) test-run mission paths and feed results back into route refinement via trial-and-error updates. This is run by Paladin, but with operator standing by so that they can take over if a vehicle gets stuck and reroute so that the mission paths can be updated to account for it. This is basically mission testflighting.
@@ -152,15 +145,12 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 - **Rosters:** 
   - Improve appearance of reserve pool (very tight design currently), maybe use a modal/drawer
 
-- **Settings:**
-  - Add a tab for user to control MCR settings
-
 ### Mission Control: Running
 
 - **MC-R reserve swap picker:** merit-ranked ordering (battery, proximity, link quality, etc.) for floating-pool health cards in the live roster strip; v1 uses ``enumerateReserveSwapCandidates`` order only (see ``MissionRunEnvironment/swapRosterAssignmentWithFloatingReservePoolSlot``).
 
 - **Tasks:**
-  - add functionality to tell task to complete/abort. (buggy)
+  - add functionality to tell task to complete/abort. (buggy & no callback)
 
 - **Task Controls (Sidebar):**
 
@@ -173,14 +163,9 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
   
 - **Vehicles (Sidebar):**
 
-- **Settings:**
-  - Add button in sub-bar using toggles icon
-  - open drawer
-  - allow user to manage MCR settings
-
 #### Squads
 - **Formations:** 
-  - allow user to define a formation for the Squad to use. This overrides pattern behaviour.
+  - allow user to define a formation for the Squad to use. This overrides pattern behaviour. (see ```SquadFollow&Formation.md```)
 
 ### MissionRunEnvironment
 
@@ -191,7 +176,9 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 #### Logging
 
 #### Planner
-- **MissionTask Squad Formations:** - defaults to patrol (cluster) and convoy (line), but add other formations later and allow incoming changes on the fly.
+- **MissionTask Squad Formations:** 
+  - defaults to patrol (cluster) and convoy (line), but add other formations later and allow incoming changes on the fly.
+     - (see ```SquadFollow&Formation.md```)
 
 - **MissionTask Squad StaggerDelay:** - defaults to duration to first waypoint. Other options should be possible.
  - Value from MissionTask.staggerDelay object
@@ -204,6 +191,7 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 
 - **MissionTask Squad vehicle release:** 
   - build logic for planner/operator/assistant to release a vehicle from roster slot completely. (Void the roster slot)
+    - Retain the vehicle in new MRE list (voidedVehicles) so that we can keep as map marker (different style), so we can do things like marking it as manually recovered etc.
   - this is an RoE, that can be autonomous, ask etc.
   - Note that user will likely want to swap in a reserve
 
@@ -217,9 +205,11 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
   
 - **AbortPolicy:** 
   - Trigger a task to move into aborting/aborted (buggy)
+    - Abort policy is triggered but switching from "Executing" to "Aborting" waits until vehicles have finished their abort policy. It should happen before they start. (See new attemptingStates)
 
 - **CompletePolicy:** 
   - Trigger a task to move into recovery/completed (buggy)
+    - Complete policy is triggered but switching from "Executing" to "Recovery" waits until vehicles have finished their complete policy. It should happen before they start. (See new attemptingStates)
 
 #### Logging
 
@@ -256,6 +246,7 @@ Paladin is Guardian's mission running brain. It takes a mission template into mi
 #### Paladin MissionRunAssistant
 - **On-demand vehicle telemetry queries:**
   - add a Paladin-specific active-query path so `MissionRunAssistant` can request immediate values (e.g. battery now, link health now, GPS/attitude now) rather than waiting for passive subscription refresh.
+  - Observe task states & vehicle recipes and make sure that stuck vehicles get back on task
 
 ### Paladin Fleet Domain
 
@@ -296,4 +287,3 @@ wrapper.
 
 ### Bugs
 - ArduPilot UGV fails on recipe.fleet.vehicle.do.mission.upload.start (doesn't like mission upload)
-- PX4 UGV when set to park, goes into loiter mode

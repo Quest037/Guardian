@@ -59,6 +59,7 @@ final class MissionRunExecutionSubsystem {
         environment.setMissionCycleCount(0)
         environment.systems.logging.clearState()
         environment.systems.lifecycle.markExecuting()
+        environment.captureRosterSimStartPoseSnapshotsIfNeeded(fleetLink: context.fleetLink, sitl: context.sitl)
         if environment.startedAt == nil {
             environment.startedAt = Date()
         }
@@ -285,6 +286,19 @@ final class MissionRunExecutionSubsystem {
         context: MissionRunExecutionContext,
         replacingTags: Set<MissionRunCommandQueueTag>? = nil
     ) {
+        guard let environment else { return }
+        if batch.tag == .missionStart, environment.sessionPhase == .completed {
+            environment.systems.logging.appendLogEvent(
+                level: .warning,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.executorMissionStartBatchSuppressedRunCompleted,
+                templateParams: [
+                    "dispatch": batch.dispatchLogLabel,
+                ]
+            )
+            return
+        }
+
         if let explicit = replacingTags {
             if !explicit.isEmpty {
                 _ = cancelPendingCommandBatches(tags: explicit)
@@ -1083,7 +1097,7 @@ final class MissionRunExecutionSubsystem {
         let nextPlan = planNextAutoCycleStarts(
             mission: mission,
             completedCycleTaskIDs: completedCycleTaskIDs,
-            suppressAutostartForTaskIDs: environment.missionTaskAutopilotAutostartSuppressedTaskIDs
+            suppressAutostartForTaskIDs: environment.unionedMissionTaskIDsSuppressingAutopilotAutostart(forMission: mission)
         )
         if !nextPlan.immediateTaskIDs.isEmpty || !nextPlan.delayedTaskIDs.isEmpty {
             if !nextPlan.betweenCyclesCommands.isEmpty {

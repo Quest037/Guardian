@@ -103,4 +103,66 @@ final class FleetMissionRecipeRegistrationsTests: XCTestCase {
             "Return-home recipe body must validate (bundle JSON or compiled-in): \(parseErrors)"
         )
     }
+
+    func test_registerAll_registersVehicleDoPark() {
+        FleetMissionRecipeRegistrations.registerAll()
+
+        let name = FleetMissionRecipeRegistrations.vehicleDoParkRecipeName
+        let descriptor = FleetRecipesCatalogue.shared.descriptor(for: name)
+        XCTAssertNotNil(descriptor)
+        XCTAssertEqual(descriptor?.riskTier, .confirmInLiveMission)
+        XCTAssertEqual(descriptor?.appliesToSystems, ["mission"])
+        XCTAssertTrue(descriptor?.parameters.isEmpty ?? false)
+
+        let body = descriptor?.body
+        XCTAssertEqual(body?.entryStepID.rawValue, "park")
+        XCTAssertEqual(body?.steps.count, 1)
+        XCTAssertEqual(body?.steps.map(\.id.rawValue), ["park"])
+
+        guard let descriptor else { return }
+        guard let body = descriptor.body else {
+            return XCTFail("Vehicle do.park recipe descriptor must carry a body")
+        }
+        let parseErrors = FleetRecipeBodyParser.validate(
+            body,
+            against: descriptor,
+            recipes: FleetRecipesCatalogue.shared,
+            commands: FleetCommandsCatalogue.shared
+        )
+        XCTAssertTrue(
+            parseErrors.isEmpty,
+            "Vehicle do.park recipe body must validate (bundle JSON or compiled-in): \(parseErrors)"
+        )
+    }
+
+    func test_registerAll_registersDoContinueMissionAfterOperatorPark() {
+        FleetMissionRecipeRegistrations.registerAll()
+
+        let name = FleetMissionRecipeRegistrations.doContinueMissionAfterOperatorParkRecipeName
+        let descriptor = FleetRecipesCatalogue.shared.descriptor(for: name)
+        XCTAssertNotNil(descriptor)
+        XCTAssertEqual(descriptor?.riskTier, .confirmInLiveMission)
+        XCTAssertEqual(descriptor?.appliesToSystems, ["mission"])
+        XCTAssertTrue(descriptor?.parameters.isEmpty ?? false)
+
+        let body = descriptor?.body
+        XCTAssertEqual(body?.entryStepID.rawValue, "stopOffboard")
+        XCTAssertEqual(body?.steps.count, 4)
+        XCTAssertEqual(body?.steps.map(\.id.rawValue), ["stopOffboard", "modeMission", "arm", "startMission"])
+
+        guard let descriptor else { return }
+        guard let body = descriptor.body else {
+            return XCTFail("Continue-after-park recipe descriptor must carry a body")
+        }
+        let parseErrors = FleetRecipeBodyParser.validate(
+            body,
+            against: descriptor,
+            recipes: FleetRecipesCatalogue.shared,
+            commands: FleetCommandsCatalogue.shared
+        )
+        XCTAssertTrue(
+            parseErrors.isEmpty,
+            "Continue-after-park recipe body must validate: \(parseErrors)"
+        )
+    }
 }

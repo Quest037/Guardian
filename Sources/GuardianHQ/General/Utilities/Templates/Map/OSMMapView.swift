@@ -84,6 +84,8 @@ struct OSMMapView: NSViewRepresentable {
     var isEditingTask: Bool
     var missionPointMarkers: [GuardianMissionPointMapMarker] = []
     var missionPointPlacementArmed: Bool = false
+    /// MCS staging map: reserve pool bulk-home placement mode (pointer + cursor-following preview in Leaflet).
+    var mcsReservePoolHomePlacementArmed: Bool = false
     var contextMenuPolicy: GuardianMapContextMenuPolicy
     var onMapClick: (Double, Double) -> Void
     var onVehicleMarkerMoved: (String, Double, Double) -> Void
@@ -231,7 +233,8 @@ struct OSMMapView: NSViewRepresentable {
         let contextMenuPolicyJSON = """
         {"vehicleActions":[\(contextMenuPolicy.vehicleActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"waypointActions":[\(contextMenuPolicy.waypointActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"homeActions":[\(contextMenuPolicy.homeActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"missionPointActions":[\(contextMenuPolicy.missionPointActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))]}
         """
-        let js = "setMissionData(\(homeJSON), [\(allPathsJSON)], \(taskPathIDsJSON), [\(waypointsJSON)], \(selectedWaypointIndexJS), [\(vehicleMarkersJSON)], \"\(mapStyle.rawValue)\", \(recenterNonce), \(headingPreviewJSON), \(cameraPreviewJSON), \(followedVehicleMarkerIDJSON), \(contextMenuPolicyJSON), \(preserveView ? "true" : "false"), \(isEditingTask ? "true" : "false"), \(missionPointPlacementArmed ? "true" : "false"), [\(missionPointsJSON)]);"
+        let mcsPoolHomeArmedJS = mcsReservePoolHomePlacementArmed ? "true" : "false"
+        let js = "setMissionData(\(homeJSON), [\(allPathsJSON)], \(taskPathIDsJSON), [\(waypointsJSON)], \(selectedWaypointIndexJS), [\(vehicleMarkersJSON)], \"\(mapStyle.rawValue)\", \(recenterNonce), \(headingPreviewJSON), \(cameraPreviewJSON), \(followedVehicleMarkerIDJSON), \(contextMenuPolicyJSON), \(preserveView ? "true" : "false"), \(isEditingTask ? "true" : "false"), \(missionPointPlacementArmed ? "true" : "false"), \(mcsPoolHomeArmedJS), [\(missionPointsJSON)]);"
         context.coordinator.queueMissionUpdate(script: js)
         context.coordinator.applyViewportNudge(viewportNudge, webView: webView)
     }
@@ -241,6 +244,8 @@ struct OSMMapView: NSViewRepresentable {
         switch nudge.kind {
         case let .panRetainZoom(lat, lon):
             return "guardianPanToRetainZoom(\(lat),\(lon));"
+        case let .panToZoom(lat, lon, zoom):
+            return "guardianPanToZoom(\(lat),\(lon),\(zoom));"
         case let .fitBounds(points):
             let inner = points.map { "[\($0.0),\($0.1)]" }.joined(separator: ",")
             return "guardianFitBoundsForPoints([\(inner)]);"
@@ -743,6 +748,48 @@ private extension OSMMapView {
     });
     map.on('movestart zoomstart', hideContextMenu);
 
+    /** MCS reserve pool “set home” mode: cursor-following preview circle (non-interactive). */
+    let poolHomePreviewCircle = null;
+    let mcsPoolHomeArmed = false;
+    function onPoolHomePreviewMove(e) {
+      if (!mcsPoolHomeArmed || !e || !e.latlng) return;
+      /** Pool-home preview: 5 m radius; short-dash red stroke (Leaflet `weight` = screen px). */
+      const radiusM = 5;
+      if (!poolHomePreviewCircle) {
+        poolHomePreviewCircle = L.circle(e.latlng, {
+          radius: radiusM,
+          color: '#ef4444',
+          weight: 4,
+          dashArray: '3 4',
+          fillOpacity: 0,
+          interactive: false
+        });
+        poolHomePreviewCircle.addTo(map);
+      } else {
+        poolHomePreviewCircle.setLatLng(e.latlng);
+      }
+    }
+    function setMcsPoolHomeArmed(on) {
+      const next = !!on;
+      if (mcsPoolHomeArmed === next) {
+        return;
+      }
+      mcsPoolHomeArmed = next;
+      if (!mcsPoolHomeArmed) {
+        map.off('mousemove', onPoolHomePreviewMove);
+        if (poolHomePreviewCircle) {
+          map.removeLayer(poolHomePreviewCircle);
+          poolHomePreviewCircle = null;
+        }
+      } else {
+        map.on('mousemove', onPoolHomePreviewMove);
+        try {
+          const c = map.getCenter();
+          onPoolHomePreviewMove({ latlng: c });
+        } catch (e) {}
+      }
+    }
+
     let viewportCenterDebounce = null;
     function emitViewportCenter() {
       if (viewportCenterDebounce) clearTimeout(viewportCenterDebounce);
@@ -929,6 +976,15 @@ private extension OSMMapView {
     function guardianPanToRetainZoom(lat, lon) {
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
       map.panTo([lat, lon], { animate: true, duration: 0.28 });
+    }
+
+    function guardianPanToZoom(lat, lon, zoom) {
+      if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(zoom)) return;
+      const z = Math.round(zoom);
+      const minZ = map.getMinZoom();
+      const maxZ = map.getMaxZoom();
+      const clamped = Math.min(Math.max(z, minZ), maxZ);
+      map.setView([lat, lon], clamped, { animate: true, duration: 0.28 });
     }
 
     /** Fit map to WGS84 pairs `[[lat,lon],…]` — padding + max zoom aligned with ``setMissionData`` recenter paths. */
@@ -1228,7 +1284,7 @@ private extension OSMMapView {
       }
     }
 
-    function setMissionData(home, allTasksCoords, taskPathIds, selectedWaypoints, selectedWaypointIndex, missionVehicleMarkers, mapStyle, recenterNonce, headingPreview, cameraPreview, followVehicleMarkerID, menuPolicy, preserveView, isEditingTask, missionPointPlacementArmed, missionPointMarkersArg) {
+    function setMissionData(home, allTasksCoords, taskPathIds, selectedWaypoints, selectedWaypointIndex, missionVehicleMarkers, mapStyle, recenterNonce, headingPreview, cameraPreview, followVehicleMarkerID, menuPolicy, preserveView, isEditingTask, missionPointPlacementArmed, mcsReservePoolHomePlacementArmed, missionPointMarkersArg) {
       const geometryTasks = (allTasksCoords || []).filter(path => path && path.length > 0);
       const fullMissionSig = JSON.stringify({
         home: home,
@@ -1246,6 +1302,7 @@ private extension OSMMapView {
         preserveView: !!preserveView,
         isEditingTask: !!isEditingTask,
         missionPointPlacementArmed: !!missionPointPlacementArmed,
+        mcsReservePoolHomePlacementArmed: !!mcsReservePoolHomePlacementArmed,
         missionPoints: missionPointMarkersArg || []
       });
       if (fullMissionSig === state.lastFullMissionSig) {
@@ -1265,7 +1322,8 @@ private extension OSMMapView {
         menuPolicy: menuPolicy || {},
         preserveView: !!preserveView,
         isEditingTask: !!isEditingTask,
-        missionPointPlacementArmed: !!missionPointPlacementArmed
+        missionPointPlacementArmed: !!missionPointPlacementArmed,
+        mcsReservePoolHomePlacementArmed: !!mcsReservePoolHomePlacementArmed
       });
       const canPatchMarkersOnly = state.lastStructureSig !== null && structureSig === state.lastStructureSig;
 
@@ -1273,7 +1331,8 @@ private extension OSMMapView {
         followedVehicleMarkerID = followVehicleMarkerID || null;
         contextMenuPolicy = menuPolicy || { vehicleActions: [], waypointActions: [], homeActions: [], missionPointActions: [] };
         applyStyle(mapStyle);
-        map.getContainer().style.cursor = (isEditingTask || missionPointPlacementArmed) ? 'pointer' : '';
+        map.getContainer().style.cursor = (isEditingTask || missionPointPlacementArmed || mcsReservePoolHomePlacementArmed) ? 'pointer' : '';
+        setMcsPoolHomeArmed(!!mcsReservePoolHomePlacementArmed);
 
         const points = [];
         if (home) {
@@ -1348,7 +1407,8 @@ private extension OSMMapView {
         map.removeLayer(m);
       }
       applyStyle(mapStyle);
-      map.getContainer().style.cursor = (isEditingTask || missionPointPlacementArmed) ? 'pointer' : '';
+      map.getContainer().style.cursor = (isEditingTask || missionPointPlacementArmed || mcsReservePoolHomePlacementArmed) ? 'pointer' : '';
+      setMcsPoolHomeArmed(!!mcsReservePoolHomePlacementArmed);
 
       const points = [];
       const dataSignature = JSON.stringify({

@@ -50,6 +50,8 @@ enum MainSidebarLaunchMode: String, Codable, CaseIterable, Identifiable {
 }
 
 enum SimBatteryDrainRate: String, Codable, CaseIterable, Identifiable {
+    /// No timed / integrator drain model while a Mission Control run enables SIM drain (see ``MissionRunOperatorDisplaySettings/simBatteryDrainRateDuringRun``).
+    case none
     case slow
     case normal
     case fast
@@ -58,15 +60,20 @@ enum SimBatteryDrainRate: String, Codable, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
+        case .none: return "None"
         case .slow: return "Slow"
         case .normal: return "Normal"
         case .fast: return "Fast"
         }
     }
 
+    /// Picker order for **Settings → Missions → Mission Run**, **Settings → Live Drive → SIMs**, Live Drive SIM drawer, and per-run Mission Control settings (None + rates).
+    static var missionRunPickerCases: [SimBatteryDrainRate] { [.none, .slow, .normal, .fast] }
+
     /// PX4 `SIM_BAT_DRAIN`: full-discharge time in seconds **while armed** (`0` disables). Disarmed = always 100% in stock PX4 SITL.
     var px4FullDischargeSeconds: Float {
         switch self {
+        case .none: return 0
         case .slow: return 3600
         case .normal: return 1800
         case .fast: return 900
@@ -77,6 +84,7 @@ enum SimBatteryDrainRate: String, Codable, CaseIterable, Identifiable {
     /// Smaller pack drains faster for the same current draw profile.
     var ardupilotCapacityAh: Float {
         switch self {
+        case .none: return 0
         case .slow: return 10.0
         case .normal: return 5.0
         case .fast: return 2.5
@@ -141,6 +149,8 @@ struct SimSpawnDefaults: Equatable, Codable {
 final class GeneralSettingsStore: ObservableObject {
     private static let defaultsKey = "guardian.generalSettings.v1"
 
+    private let persistenceUserDefaults: UserDefaults
+
     /// Allowed range for ``missionControlPostponeStepCapSeconds`` (1 min … 48 h).
     static let minMissionPostponeStepCapSeconds = 60
     static let maxMissionPostponeStepCapSeconds = 48 * 3600
@@ -193,10 +203,10 @@ final class GeneralSettingsStore: ObservableObject {
         }
     }
 
-    /// Default simulated battery drain rate used by LD/MC-R when enabling drain.
-    @Published var defaultSimBatteryDrainRate: SimBatteryDrainRate {
+    /// **Live Drive** freestyle SIM battery drain (None / Slow / Normal / Fast). Applied when a freestyle control session starts and from the Live Drive SIM settings drawer. Mission Control **running** uses ``missionRunSimBatteryDrainRate`` / per-run ``MissionRunOperatorDisplaySettings/simBatteryDrainRateDuringRun``.
+    @Published var liveDriveSimBatteryDrainRate: SimBatteryDrainRate {
         didSet {
-            guard defaultSimBatteryDrainRate != oldValue else { return }
+            guard liveDriveSimBatteryDrainRate != oldValue else { return }
             save()
         }
     }
@@ -210,6 +220,30 @@ final class GeneralSettingsStore: ObservableObject {
                 return
             }
             guard missionControlPostponeStepCapSeconds != oldValue else { return }
+            save()
+        }
+    }
+
+    /// When a task is selected on the Mission Control **running** map, hide other tasks’ route geometry and non-selected vehicle clutter (default on).
+    @Published var missionControlLiveMapHideOtherTasksOnTaskSelect: Bool {
+        didSet {
+            guard missionControlLiveMapHideOtherTasksOnTaskSelect != oldValue else { return }
+            save()
+        }
+    }
+
+    /// Mission Control **SITL reset on successful run completion** (default off, persisted). When on, qualifying run completions restore roster SITL poses from the run’s captured snapshots (see README SIM home reset).
+    @Published var missionRunResetSitlToStartPoseOnSuccessfulComplete: Bool {
+        didSet {
+            guard missionRunResetSitlToStartPoseOnSuccessfulComplete != oldValue else { return }
+            save()
+        }
+    }
+
+    /// Default **SIM battery drain while a Mission Control run is executing** (slow / normal / fast / none). New runs copy this into ``MissionRunOperatorDisplaySettings/simBatteryDrainRateDuringRun``; MC‑R applies it to roster SITL streams — not ``liveDriveSimBatteryDrainRate`` (Live Drive settings).
+    @Published var missionRunSimBatteryDrainRate: SimBatteryDrainRate {
+        didSet {
+            guard missionRunSimBatteryDrainRate != oldValue else { return }
             save()
         }
     }
@@ -236,16 +270,22 @@ final class GeneralSettingsStore: ObservableObject {
     }
 
     init(userDefaults: UserDefaults = .standard) {
+        persistenceUserDefaults = userDefaults
         if let loaded = Self.load(from: userDefaults) {
             defaultSimulationPlatform = loaded.defaultSimulationPlatform
             defaultMapTileStyle = loaded.defaultMapTileStyle ?? .standard
             logRetentionProfile = loaded.logRetentionProfile ?? .default
             appearanceMode = loaded.appearanceMode ?? .system
             mainSidebarLaunchMode = loaded.mainSidebarLaunchMode ?? .collapsed
-            defaultSimBatteryDrainRate = loaded.defaultSimBatteryDrainRate ?? .normal
+            liveDriveSimBatteryDrainRate = loaded.liveDriveSimBatteryDrainRate
+                ?? loaded.defaultSimBatteryDrainRate
+                ?? .normal
             missionControlPostponeStepCapSeconds = Self.clampMissionPostponeStepCapSeconds(
                 loaded.missionControlPostponeStepCapSeconds ?? MissionDelayPolicy.defaultOperatorPostponeStepCapSeconds
             )
+            missionControlLiveMapHideOtherTasksOnTaskSelect = loaded.missionControlLiveMapHideOtherTasksOnTaskSelect ?? true
+            missionRunResetSitlToStartPoseOnSuccessfulComplete = loaded.missionRunResetSitlToStartPoseOnSuccessfulComplete ?? false
+            missionRunSimBatteryDrainRate = loaded.missionRunSimBatteryDrainRate ?? .normal
             simSpawnDefaults = loaded.simSpawnDefaults ?? .default
             callsign = loaded.callsign ?? ""
         } else {
@@ -254,8 +294,11 @@ final class GeneralSettingsStore: ObservableObject {
             logRetentionProfile = .default
             appearanceMode = .system
             mainSidebarLaunchMode = .collapsed
-            defaultSimBatteryDrainRate = .normal
+            liveDriveSimBatteryDrainRate = .normal
             missionControlPostponeStepCapSeconds = MissionDelayPolicy.defaultOperatorPostponeStepCapSeconds
+            missionControlLiveMapHideOtherTasksOnTaskSelect = true
+            missionRunResetSitlToStartPoseOnSuccessfulComplete = false
+            missionRunSimBatteryDrainRate = .normal
             simSpawnDefaults = .default
             callsign = ""
         }
@@ -265,20 +308,24 @@ final class GeneralSettingsStore: ObservableObject {
         min(maxMissionPostponeStepCapSeconds, max(minMissionPostponeStepCapSeconds, seconds))
     }
 
-    private func save(userDefaults: UserDefaults = .standard) {
+    private func save() {
         let snapshot = Snapshot(
             defaultSimulationPlatform: defaultSimulationPlatform,
             defaultMapTileStyle: defaultMapTileStyle,
             logRetentionProfile: logRetentionProfile,
             appearanceMode: appearanceMode,
             mainSidebarLaunchMode: mainSidebarLaunchMode,
-            defaultSimBatteryDrainRate: defaultSimBatteryDrainRate,
+            liveDriveSimBatteryDrainRate: liveDriveSimBatteryDrainRate,
+            defaultSimBatteryDrainRate: nil,
             missionControlPostponeStepCapSeconds: missionControlPostponeStepCapSeconds,
+            missionControlLiveMapHideOtherTasksOnTaskSelect: missionControlLiveMapHideOtherTasksOnTaskSelect,
+            missionRunResetSitlToStartPoseOnSuccessfulComplete: missionRunResetSitlToStartPoseOnSuccessfulComplete,
+            missionRunSimBatteryDrainRate: missionRunSimBatteryDrainRate,
             simSpawnDefaults: simSpawnDefaults,
             callsign: callsign
         )
         if let data = try? JSONEncoder().encode(snapshot) {
-            userDefaults.set(data, forKey: Self.defaultsKey)
+            persistenceUserDefaults.set(data, forKey: Self.defaultsKey)
         }
     }
 
@@ -297,10 +344,18 @@ final class GeneralSettingsStore: ObservableObject {
         var appearanceMode: AppAppearanceMode?
         /// Omitted in older saves; treated as `.collapsed`.
         var mainSidebarLaunchMode: MainSidebarLaunchMode?
-        /// Omitted in older saves; treated as `.normal`.
+        /// Omitted in older saves; treated as `.normal` after legacy migration.
+        var liveDriveSimBatteryDrainRate: SimBatteryDrainRate?
+        /// Legacy persisted key (former Settings → SIMs drain). Migrated into ``liveDriveSimBatteryDrainRate`` when present; omitted on new saves.
         var defaultSimBatteryDrainRate: SimBatteryDrainRate?
         /// Omitted in older saves; treated as ``MissionDelayPolicy/defaultOperatorPostponeStepCapSeconds``.
         var missionControlPostponeStepCapSeconds: Int?
+        /// Omitted in older saves; treated as `true`.
+        var missionControlLiveMapHideOtherTasksOnTaskSelect: Bool?
+        /// Omitted in older saves; treated as `false`. Drives MC‑R SIM reset-on-complete (README → **SIM home reset on Mission Control run complete**).
+        var missionRunResetSitlToStartPoseOnSuccessfulComplete: Bool?
+        /// Omitted in older saves; treated as `.normal`. Seeds new runs’ ``MissionRunOperatorDisplaySettings/simBatteryDrainRateDuringRun``.
+        var missionRunSimBatteryDrainRate: SimBatteryDrainRate?
         /// Omitted in older saves; treated as `.default`.
         var simSpawnDefaults: SimSpawnDefaults?
         /// Omitted in older saves; treated as empty string.

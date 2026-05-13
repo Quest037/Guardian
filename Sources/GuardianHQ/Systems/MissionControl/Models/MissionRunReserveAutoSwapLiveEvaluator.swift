@@ -28,6 +28,7 @@ enum MissionRunReserveAutoSwapLiveEvaluator {
         let tid = task.id
         for assignment in run.assignments {
             guard run.missionControlAssignmentBelongsToTask(assignment, task: task, mission: mission) else { continue }
+            guard !run.missionRunAssignmentIDsWithOperatorLiveDriveHandoff.contains(assignment.id) else { continue }
             guard assignment.hasFleetOrLegacyAssignment else { continue }
             if let rosterDevice = mission.rosterDevices.first(where: { $0.id == assignment.rosterDeviceId }),
                rosterDevice.slot == .reserve {

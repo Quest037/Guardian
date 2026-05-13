@@ -34,7 +34,7 @@ final class MissionControlStore: ObservableObject {
         runEnvironment(for: runID)?.systems.scheduling.setDeferredOneOffExecution(nil)
     }
 
-    func createRun(from mission: Mission) -> MissionRunEnvironment {
+    func createRun(from mission: Mission, cloningMissionRunDefaultsFrom appMissionRunDefaults: GeneralSettingsStore) -> MissionRunEnvironment {
         var assignments: [MissionRunAssignment] = []
         for path in mission.routeMacro.tasks {
             for deviceId in path.rosterDeviceIds {
@@ -61,6 +61,11 @@ final class MissionControlStore: ObservableObject {
             missionId: mission.id,
             missionName: mission.name,
             assignments: assignments
+        )
+        run.operatorDisplaySettings = MissionRunOperatorDisplaySettings(
+            isolateLiveMapToSelectedTask: appMissionRunDefaults.missionControlLiveMapHideOtherTasksOnTaskSelect,
+            resetSimToStartPoseOnSuccessfulComplete: appMissionRunDefaults.missionRunResetSitlToStartPoseOnSuccessfulComplete,
+            simBatteryDrainRateDuringRun: appMissionRunDefaults.missionRunSimBatteryDrainRate
         )
         /// The convenience initializer seeds a **placeholder** ``MissionRunEnvironment/template`` (empty tasks).
         /// Hydrate from the source ``Mission`` so task-scoped policy APIs (abort / complete chain overrides) can
@@ -356,6 +361,19 @@ final class MissionControlStore: ObservableObject {
             }
         }
         return nil
+    }
+
+    /// Clears MC‑R → Live Drive handoff markers for any run whose roster row for that vehicle still matches `vehicleID`.
+    /// Call after ``FleetLinkService/clearLiveDriveControlSessionVehicleIfMatches`` (or equivalent teardown) so MRE autonomous paths resume.
+    func clearOperatorLiveDriveHandoffForClearedControlSessionVehicle(
+        vehicleID: String,
+        fleetLink: FleetLinkService,
+        sitl: SitlService
+    ) {
+        for run in runs {
+            run.clearOperatorLiveDriveHandoffs(matchingResolvedFleetVehicleID: vehicleID, fleetLink: fleetLink, sitl: sitl)
+        }
+        objectWillChange.send()
     }
 
     private func isVehicleSimulationStream(vehicleID: String, fleetLink: FleetLinkService, sitl: SitlService) -> Bool {

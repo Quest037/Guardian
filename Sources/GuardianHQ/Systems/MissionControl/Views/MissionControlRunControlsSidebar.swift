@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// MC-R cog → mission-level policies + Rules-of-Engagement editor.
+/// MC-R **Run Rules** drawer: mission-level policy chains + rules-of-engagement editor.
 ///
 /// All edits route through ``MissionRunEnvironment``'s policy APIs as the local operator
 /// (``MissionRunPolicyEditCredential/localOperator``). The host wraps this view in
@@ -43,7 +43,11 @@ struct MissionRunControlsSidebarView: View {
                 Text("Abort preference chain")
                     .font(GuardianTypography.font(.disclosureRowTitle))
                     .foregroundStyle(theme.textPrimary)
-                MissionRunPreferentialAbortPolicyEditor(chain: missionAbortPreferenceChainBinding, showFootnote: true)
+                MissionRunPreferentialAbortPolicyEditor(
+                    chain: missionAbortPreferenceChainBinding,
+                    showFootnote: false,
+                    compactVerticalRhythm: true
+                )
             }
             .padding(.vertical, GuardianSpacing.xs)
 
@@ -53,7 +57,11 @@ struct MissionRunControlsSidebarView: View {
                 Text("Complete preference chain")
                     .font(GuardianTypography.font(.disclosureRowTitle))
                     .foregroundStyle(theme.textPrimary)
-                MissionRunPreferentialCompletePolicyEditor(chain: missionCompletePreferenceChainBinding, showFootnote: true)
+                MissionRunPreferentialCompletePolicyEditor(
+                    chain: missionCompletePreferenceChainBinding,
+                    showFootnote: false,
+                    compactVerticalRhythm: true
+                )
             }
             .padding(.vertical, GuardianSpacing.xs)
 
@@ -63,14 +71,15 @@ struct MissionRunControlsSidebarView: View {
                 Text("Reserve swap preference chain")
                     .font(GuardianTypography.font(.disclosureRowTitle))
                     .foregroundStyle(theme.textPrimary)
-                MissionRunPreferentialReserveSwapPolicyEditor(chain: missionReserveSwapPreferenceChainBinding, showFootnote: true)
+                MissionRunPreferentialReserveSwapPolicyEditor(
+                    chain: missionReserveSwapPreferenceChainBinding,
+                    showFootnote: false,
+                    compactVerticalRhythm: true
+                )
             }
             .padding(.vertical, GuardianSpacing.xs)
         }
-        .padding(GuardianSpacing.cardBodyInset)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(theme.backgroundRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
     private var engagementSection: some View {
@@ -97,10 +106,7 @@ struct MissionRunControlsSidebarView: View {
                 .padding(.vertical, GuardianSpacing.xs)
             }
         }
-        .padding(GuardianSpacing.cardBodyInset)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(theme.backgroundRaised)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
     // MARK: - Helpers

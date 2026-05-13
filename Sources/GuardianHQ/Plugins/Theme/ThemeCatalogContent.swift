@@ -25,6 +25,8 @@ struct ThemeCatalogContent: View {
     @State private var stepperValue = 2
     @State private var sliderValue = 0.42
     @State private var menuPick = "TCP"
+    @State private var themeCatalogMapCamPick: ThemeCatalogMapCam = .map
+    @State private var themeCatalogInputPick: ThemeCatalogInputPick = .keyboard
     @State private var showSampleSheet = false
 
     @State private var fleetTableRows: [ThemeFleetTableRow] = ThemeFleetTableRow.samples
@@ -1284,6 +1286,45 @@ struct ThemeCatalogContent: View {
                     GuardianNeutralBorderedButton(systemImage: "gearshape", help: "Settings") {}
                 }
 
+                ThemeCatalogSubheading("Toolbar icon pair · GuardianToolbarDualIconModeToggle")
+                Text("Map/camera and keyboard/controller sub-bars: selected slot uses primary blue + light fill.")
+                    .font(GuardianTypography.font(.denseFootnoteRegular))
+                    .foregroundStyle(theme.textSecondary)
+                HStack(spacing: GuardianSpacing.denseGutter) {
+                    GuardianToolbarDualIconModeToggle(
+                        selection: $themeCatalogMapCamPick,
+                        leftMode: .map,
+                        leftSystemImage: "map.fill",
+                        leftAccessibilityLabel: "Map",
+                        rightMode: .camera,
+                        rightSystemImage: "video.fill",
+                        rightAccessibilityLabel: "Camera"
+                    )
+                    GuardianToolbarDualIconModeToggle(
+                        selection: $themeCatalogInputPick,
+                        leftMode: .keyboard,
+                        leftSystemImage: "arrow.up.and.down.and.arrow.left.and.right",
+                        leftAccessibilityLabel: "Keyboard",
+                        rightMode: .controller,
+                        rightSystemImage: "gamecontroller.fill",
+                        rightAccessibilityLabel: "Controller"
+                    )
+                }
+
+                ThemeCatalogSubheading("Menu trigger (neutral outline) · GuardianNeutralOutlinedMenuTriggerLabel")
+                Text("Use as the `label:` of a Menu with `.guardianStyledNeutralToolbarMenu()` (borderless + hides the system menu indicator on macOS 14+) so the chip matches adjacent neutral outline toolbar buttons. Do not use `.menuStyle(.button)` or `.buttonStyle(.bordered)` here.")
+                    .font(GuardianTypography.font(.denseFootnoteRegular))
+                    .foregroundStyle(theme.textSecondary)
+                Menu {
+                    Button("Abort", role: .destructive) {}
+                    Button("Complete") {}
+                } label: {
+                    GuardianNeutralOutlinedMenuTriggerLabel(title: "Stop Run")
+                }
+                .guardianStyledNeutralToolbarMenu()
+                .fixedSize(horizontal: true, vertical: false)
+                .guardianPointerOnHover()
+
                 ThemeCatalogSubheading("Edit before delete (icon row rule)")
                 GuardianEditThenDeleteIconRow(onEdit: {}, onDelete: {})
                 Text("Edit uses the pencil icon with a blue tint; delete uses the trash icon with a red tint and appears after edit.")
@@ -1292,7 +1333,7 @@ struct ThemeCatalogContent: View {
             }
             .guardianInsetCard()
 
-            ThemeAPICaption("GuardianThemedButton · GuardianThemedButtonStrip · GuardianChromeSurface · GuardianChromeSize · GuardianChromeShape")
+            ThemeAPICaption("GuardianThemedButton · GuardianThemedButtonStrip · GuardianToolbarDualIconModeToggle · GuardianNeutralOutlinedMenuTriggerLabel · guardianStyledNeutralToolbarMenu() · GuardianChromeSurface · GuardianChromeSize · GuardianChromeShape")
         }
     }
 
@@ -2252,6 +2293,14 @@ private struct ThemeFleetTableRow: Identifiable {
         ThemeFleetTableRow(vehicle: "Vector S", stack: "ArduPilot", link: "TCP", state: "Sim", badgeTone: .warning),
         ThemeFleetTableRow(vehicle: "Halo Q", stack: "PX4", link: "Serial", state: "Idle", badgeTone: .neutral),
     ]
+}
+
+private enum ThemeCatalogMapCam: Hashable {
+    case map, camera
+}
+
+private enum ThemeCatalogInputPick: Hashable {
+    case keyboard, controller
 }
 
 private extension GuardianThemeAccent {

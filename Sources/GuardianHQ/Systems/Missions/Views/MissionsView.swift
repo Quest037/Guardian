@@ -1742,7 +1742,8 @@ private struct MissionWorkspaceView: View {
                             preserveView: editingTaskIndex != nil,
                             isEditingTask: editingTaskIndex != nil,
                             missionPointMarkers: missionPointMapMarkers,
-                            missionPointPlacementArmed: missionPointPlacementArmed
+                            missionPointPlacementArmed: missionPointPlacementArmed,
+                            mcsReservePoolHomePlacementArmed: false
                         )
                     }
                     .frame(width: mapWidth)

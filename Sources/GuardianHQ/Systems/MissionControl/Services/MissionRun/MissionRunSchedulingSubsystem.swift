@@ -206,8 +206,7 @@ final class MissionRunSchedulingSubsystem {
     func cancelAllScheduledTasks() {
         cancelScheduledMissionCycle()
         cancelScheduledTaskMissionStarts()
-        deferredOneOffStartTask?.cancel()
-        deferredOneOffStartTask = nil
+        clearDeferredOneOffExecution()
     }
 
     func skipMissionTaskStartDeferral(taskID: UUID) {

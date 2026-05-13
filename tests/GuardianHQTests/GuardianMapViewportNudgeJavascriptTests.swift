@@ -12,4 +12,9 @@ final class GuardianMapViewportNudgeJavascriptTests: XCTestCase {
         let n = GuardianMapViewportNudge(sequence: 2, kind: .fitBounds(points: [(1, 2), (3, 4)]))
         XCTAssertEqual(OSMMapView.javascriptExpression(for: n), "guardianFitBoundsForPoints([[1.0,2.0],[3.0,4.0]]);")
     }
+
+    func test_javascriptExpression_panToZoom() {
+        let n = GuardianMapViewportNudge(sequence: 3, kind: .panToZoom(lat: -37.8, lon: 145.0, zoom: 15))
+        XCTAssertEqual(OSMMapView.javascriptExpression(for: n), "guardianPanToZoom(-37.8,145.0,15.0);")
+    }
 }

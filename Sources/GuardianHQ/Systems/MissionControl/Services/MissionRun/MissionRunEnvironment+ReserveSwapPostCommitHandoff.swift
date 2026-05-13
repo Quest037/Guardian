@@ -13,10 +13,21 @@ extension MissionRunEnvironment {
         correlation: MissionRunReserveRecipeRunnerCorrelation,
         triggerSource: String
     ) {
+        let floatingPool: MissionRunReservePool?
+        let floatingSlotID: UUID?
+        if let slotID = correlation.reservePoolSlotID {
+            floatingPool = reservePool(forTaskID: correlation.missionTaskID)
+            floatingSlotID = slotID
+        } else {
+            floatingPool = nil
+            floatingSlotID = nil
+        }
         let outcome = MissionRunReserveSwapPostCommitStreamResolver.resolve(
             assignments: assignments,
             vacancyAssignmentID: correlation.vacancyAssignmentID,
-            displacedStreamAssignmentID: correlation.reserveStreamAssignmentID
+            displacedStreamAssignmentID: correlation.reserveStreamAssignmentID,
+            floatingReservePool: floatingPool,
+            floatingReservePoolSlotID: floatingSlotID
         )
         switch outcome {
         case .resolved(let snap):
@@ -99,7 +110,17 @@ extension MissionRunEnvironment {
             return
         }
 
-        let displacedRow = assignments.first(where: { $0.id == correlation.reserveStreamAssignmentID })
+        let displacedRow: MissionRunAssignment?
+        if let slotID = correlation.reservePoolSlotID {
+            let pool = reservePool(forTaskID: correlation.missionTaskID)
+            if let slot = pool.entries.first(where: { $0.id == slotID }) {
+                displacedRow = MissionRunAssignment.syntheticForReservePool(slot: slot)
+            } else {
+                displacedRow = nil
+            }
+        } else {
+            displacedRow = assignments.first(where: { $0.id == correlation.reserveStreamAssignmentID })
+        }
         var commands: [MissionRunIssuedCommand] = []
 
         if let displacedRow,
@@ -108,7 +129,7 @@ extension MissionRunEnvironment {
                issuerKey: MissionRunCommandIssuerKey.plannerReserveSwapPostCommit
            ) {
             commands.append(clear)
-        } else if assignments.contains(where: { $0.id == correlation.reserveStreamAssignmentID }) {
+        } else if displacedRow != nil {
             appendReserveSwapPipelinePhaseLog(
                 phase: .displacedMissionClear,
                 passed: true,
@@ -294,9 +315,16 @@ extension MissionRunEnvironment {
         )
         let noneOnly = normalizedChain.count == 1 && normalizedChain[0].kind == .none
 
-        let wind = systems.executor.buildReserveSwapPolicyWindDownCommands(
-            limitedToAssignmentIDs: [displacedRow.id]
-        )
+        let wind: [MissionRunIssuedCommand]
+        if assignments.contains(where: { $0.id == displacedRow.id }) {
+            wind = systems.executor.buildReserveSwapPolicyWindDownCommands(
+                limitedToAssignmentIDs: Set([displacedRow.id])
+            )
+        } else if let one = systems.executor.buildReserveSwapPolicyWindDownCommand(forExplicitAssignment: displacedRow) {
+            wind = [one]
+        } else {
+            wind = []
+        }
         if let cmd = wind.first {
             commands.append(cmd)
             let detail: String

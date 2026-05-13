@@ -18,6 +18,7 @@ enum MissionRunPaladinReserveSwapProposalPolicy {
         case notOnSameEnabledTask
         case missingFleetTokenOnPrimary
         case missingFleetTokenOnReserve
+        case reserveSwapBlockedBySessionPhase
     }
 
     /// Validates both assignments, shared task path, roster roles, and fleet token presence.
@@ -28,6 +29,9 @@ enum MissionRunPaladinReserveSwapProposalPolicy {
         primaryAssignmentID: UUID,
         reserveAssignmentID: UUID
     ) -> Result<(task: MissionTask, primary: MissionRunAssignment, reserve: MissionRunAssignment), Failure> {
+        guard MissionRunReserveSwapSessionPhasePolicy.allowsReserveSwapMutation(sessionPhase: run.sessionPhase) else {
+            return .failure(.reserveSwapBlockedBySessionPhase)
+        }
         guard let primary = run.assignments.first(where: { $0.id == primaryAssignmentID }),
               let reserve = run.assignments.first(where: { $0.id == reserveAssignmentID })
         else { return .failure(.assignmentsNotFound) }

@@ -14,6 +14,7 @@
 ## Performance & diagnostics
 
 - **GuardianHQ CPU with SITL (Xcode process gauges):** With SITL running, Xcode shows the app jumping from ~idle (~4%) to **100%+** CPU (multi-core % is normal above 100%). Explore/debug: distinguish **burst vs sustained** load, **GuardianHQ vs separate sim child processes**, and hot paths (MAVLink / MAVSDK handling, Combine or Rx delivery, **main-thread** work, SwiftUI invalidation, logging). Use Instruments (Time Profiler, Main Thread Checker as needed) and capture what is expected under telemetry volume vs worth optimising.
+- Look at splitting MissionControlSetupView into smaller focused files
 
 ## Plugins System
 
@@ -129,10 +130,7 @@ Mission Control is the system where mission templates are run by the Paladin sys
 Mission Control includes Setup, Running, Recovery Completed as the main four states. It will also have a Simulation mode, where Paladin runs a mission template in a headless environment and reports back on its feasibility.
 
 ### Policies
-- **Structure:**
-  - Drive policies from **FleetCommandsCatalogue / recipes** where a mission verb maps
-    to a catalogue entry (preferential abort/complete + between-cycles dispatch: README
-    **Fleet Commands & Recipes** → Mission / MRE policy dispatch).
+
 
 ### Rules of Engagement
 - **Rules:**
@@ -152,7 +150,7 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 
 ### Mission Control: Setup
 - **Rosters:** 
-  - **Live reserve swap-in** (replace active primary/wingman with reserve from **pool or fixed `.reserve` slot**): arm/calibrate, mission upload/resume, reposition, roster commit, disposition of replaced aircraft, map UX, class matching, escalation + manual + auto triggers — **`MissionRosterReservesToDo.md`**.
+  - Improve appearance of reserve pool (very tight design currently), maybe use a modal/drawer
 
 - **Settings:**
   - Add a tab for user to control MCR settings
@@ -163,7 +161,6 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 
 - **Tasks:**
   - add functionality to tell task to complete/abort. (buggy)
-  - add functionality to let user manage task controls (policies etc.)
 
 - **Task Controls (Sidebar):**
 
@@ -189,13 +186,6 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 
 #### Executor
 
-- **MRE → `FleetCommandsCatalogue` + `FleetRecipeRunner`:** preferential abort/complete
-  tactics (non–map-point) and between-cycles shaping route through catalogue + runner
-  (README **Fleet Commands & Recipes** → Mission / MRE policy dispatch;
-  `MissionRunRecipeOperatorPromptBridge` for in-run recipe escalations). Mission
-  upload→arm→start runs through `recipe.fleet.do.mission.upload.start`. Further
-  operator-prompt unification: `NEXTVERSION.md` (**Vehicle Inspector recipe wizard** — Revisit + Stage E).
-
 #### Commander
 
 #### Logging
@@ -206,9 +196,7 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 - **MissionTask Squad StaggerDelay:** - defaults to duration to first waypoint. Other options should be possible.
  - Value from MissionTask.staggerDelay object
  - Message from previous squad (squad primary radios in, next squad triggered) (fallback needed)
-
-- **MissionTask Squad vehicle replacement:** 
-  - build logic for swap in  a reserve to primary/wingman (same macro logic, different micro logic)
+ - Operator triggered (not for continuous cycles)
 
 - **MissionTask Squad vehicle promotion:** 
   - build logic for wingman to be promoted to leader, and squad to update accordingly.
@@ -217,6 +205,7 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 - **MissionTask Squad vehicle release:** 
   - build logic for planner/operator/assistant to release a vehicle from roster slot completely. (Void the roster slot)
   - this is an RoE, that can be autonomous, ask etc.
+  - Note that user will likely want to swap in a reserve
 
 - **Testing:** - test working with RoE.
 - **Testing:** - test working with prompts.
@@ -304,3 +293,7 @@ wrapper.
 - Cause-chain rendering (top-level summary + nested causes, expandable in UI).
 - Persistence: new logs use the `GuardianError`-shape; legacy plain-string log entries
   stay read-only.
+
+### Bugs
+- ArduPilot UGV fails on recipe.fleet.vehicle.do.mission.upload.start (doesn't like mission upload)
+- PX4 UGV when set to park, goes into loiter mode

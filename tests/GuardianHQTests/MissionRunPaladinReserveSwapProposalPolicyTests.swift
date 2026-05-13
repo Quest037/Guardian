@@ -113,4 +113,43 @@ final class MissionRunPaladinReserveSwapProposalPolicyTests: XCTestCase {
         }
         XCTAssertEqual(failure, .reserveNotTemplateReserveRow)
     }
+
+    func test_evaluate_failure_whenSessionPhaseBlocksReserveSwap() {
+        let mission = sampleMission()
+        let tid = mission.routeMacro.tasks[0].id
+        let primaryDevice = mission.rosterDevices.first { $0.slot == .primary }!
+        let reserveDevice = mission.rosterDevices.first { $0.slot == .reserve }!
+
+        let primaryAssignment = MissionRunAssignment(
+            taskId: tid,
+            rosterDeviceId: primaryDevice.id,
+            slotName: primaryDevice.name,
+            attachedFleetVehicleToken: "fleet:sim:alpha"
+        )
+        let reserveAssignment = MissionRunAssignment(
+            taskId: tid,
+            rosterDeviceId: reserveDevice.id,
+            slotName: reserveDevice.name,
+            attachedFleetVehicleToken: "fleet:sim:bravo"
+        )
+        let run = MissionRunEnvironment(
+            missionId: mission.id,
+            missionName: mission.name,
+            assignments: [primaryAssignment, reserveAssignment]
+        )
+        run.updateTemplate(mission)
+        run.setSessionPhase(.recovery)
+
+        let result = MissionRunPaladinReserveSwapProposalPolicy.evaluate(
+            run: run,
+            mission: mission,
+            primaryAssignmentID: primaryAssignment.id,
+            reserveAssignmentID: reserveAssignment.id
+        )
+        guard case .failure(let failure) = result else {
+            return XCTFail("Expected failure, got \(result)")
+        }
+        XCTAssertEqual(failure, .reserveSwapBlockedBySessionPhase)
+    }
 }
+

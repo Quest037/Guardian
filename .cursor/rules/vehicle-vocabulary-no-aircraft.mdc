@@ -1,0 +1,21 @@
+---
+description: Use vehicle/drone vocabulary, not "aircraft", when discussing Guardian fleet topics
+alwaysApply: true
+---
+
+# Vehicle vocabulary (no “aircraft”)
+
+Guardian targets **UAV, UGV, USV, and UUV** — not crewed aviation only.
+
+When writing or discussing **vehicles** in this repo (operator-facing copy, docs, comments, commit messages, AI replies about product behavior):
+
+- **Do not** use **“aircraft”** as a generic term for a fleet unit, roster binding, or live platform.
+- **Prefer:** **vehicle**, **drone** (when the context is clearly an aerial UAV), or **class-specific** wording (**UAV**, **UGV**, **USV**, **UUV**, **multicopter**, **rover**, **boat**, etc.) when it improves clarity.
+- For mixed or unknown class, default to **vehicle** rather than “aircraft.”
+
+**Exceptions (do not force rewrites):**
+
+- **Existing identifiers** in code (`aircraft` in symbol names, MAVLink/vendor strings, template keys, log keys) — leave as-is unless you are already changing that surface for another reason; apply this rule to **new** names and **new** operator-visible strings.
+- **Quoted third-party** specs, regulatory text, or SDK docs that use “aircraft” verbatim.
+
+**UI / operator strings:** Prefer neutral fleet language aligned with roster and fleet models (e.g. “vehicle”, “this drone”, “ground vehicle”) so copy stays accurate across domains.

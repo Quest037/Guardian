@@ -45,21 +45,37 @@ enum MissionRunReserveSwapPostCommitStreamResolver: Sendable {
     }
 
     /// - Parameters:
-    ///   - displacedStreamAssignmentId: Row that still carries the **former** active after swap (``MissionRunReserveRecipeRunnerCorrelation/reserveStreamAssignmentID``).
+    ///   - displacedStreamAssignmentID: For fixed template reserve, the bench ``.reserve`` assignment id; for floating pool, equals the pool berth ``MissionRunReservePoolSlot/id`` (same as ``MissionRunReserveRecipeRunnerCorrelation/reservePoolSlotID`` when set).
+    ///   - floatingReservePool: When ``floatingReservePoolSlotID`` is non-nil, the displaced fleet binding is read from this pool’s matching entry instead of ``assignments``.
+    ///   - floatingReservePoolSlotID: When non-nil, selects the **floating** displaced stream (pool berth); when nil, the displaced stream is resolved from ``assignments`` only.
     static func resolve(
         assignments: [MissionRunAssignment],
         vacancyAssignmentID: UUID,
-        displacedStreamAssignmentID: UUID
+        displacedStreamAssignmentID: UUID,
+        floatingReservePool: MissionRunReservePool? = nil,
+        floatingReservePoolSlotID: UUID? = nil
     ) -> MissionRunReserveSwapPostCommitResolveOutcome {
         guard let vacancy = assignments.first(where: { $0.id == vacancyAssignmentID }) else {
             return .missingVacancyAssignment
         }
-        guard let displaced = assignments.first(where: { $0.id == displacedStreamAssignmentID }) else {
-            return .missingDisplacedStreamAssignment
-        }
         let vacKey = normaliseFleetStorageKey(vacancy.attachedFleetVehicleToken)
-        let disKey = normaliseFleetStorageKey(displaced.attachedFleetVehicleToken)
         if vacKey.isEmpty { return .vacancyFleetTokenMissing }
+
+        let disKey: String
+        if let poolSlotID = floatingReservePoolSlotID {
+            guard let pool = floatingReservePool else {
+                return .missingDisplacedStreamAssignment
+            }
+            guard let slot = pool.entries.first(where: { $0.id == poolSlotID }) else {
+                return .missingDisplacedStreamAssignment
+            }
+            disKey = normaliseFleetStorageKey(slot.attachedFleetVehicleToken)
+        } else {
+            guard let displaced = assignments.first(where: { $0.id == displacedStreamAssignmentID }) else {
+                return .missingDisplacedStreamAssignment
+            }
+            disKey = normaliseFleetStorageKey(displaced.attachedFleetVehicleToken)
+        }
         if disKey.isEmpty { return .displacedFleetTokenMissing }
         if vacKey == disKey { return .identicalFleetBindingsAfterCommit }
         return .resolved(

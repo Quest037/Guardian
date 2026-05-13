@@ -68,6 +68,45 @@ final class MissionRunFixedRosterReserveSwapTests: XCTestCase {
         XCTAssertTrue(keys.contains(MissionRunReserveSwapPhaseLogTemplateKey.templateKey(phase: .rosterCommit, passed: true)))
     }
 
+    func test_swap_blockedBySessionPhase_when_run_in_recovery() {
+        let mission = sampleMission()
+        let tid = mission.routeMacro.tasks[0].id
+        let primaryDevice = mission.rosterDevices.first { $0.slot == .primary }!
+        let reserveDevice = mission.rosterDevices.first { $0.slot == .reserve }!
+
+        let primaryAssignment = MissionRunAssignment(
+            taskId: tid,
+            rosterDeviceId: primaryDevice.id,
+            slotName: primaryDevice.name,
+            attachedFleetVehicleToken: "fleet:sim:alpha"
+        )
+        let reserveAssignment = MissionRunAssignment(
+            taskId: tid,
+            rosterDeviceId: reserveDevice.id,
+            slotName: reserveDevice.name,
+            attachedFleetVehicleToken: "fleet:sim:bravo"
+        )
+        let run = MissionRunEnvironment(
+            missionId: mission.id,
+            missionName: mission.name,
+            assignments: [primaryAssignment, reserveAssignment]
+        )
+        run.updateTemplate(mission)
+        run.setSessionPhase(.aborting)
+
+        let outcome = run.swapRosterVacancyWithFixedTemplateReserveAssignment(
+            vacancyAssignmentID: primaryAssignment.id,
+            reserveAssignmentID: reserveAssignment.id,
+            taskID: tid,
+            triggerSource: "test.fixedRosterSwap.blockedPhase"
+        )
+        XCTAssertEqual(outcome, .blockedBySessionPhase)
+        let p = run.assignments.first { $0.id == primaryAssignment.id }!
+        let r = run.assignments.first { $0.id == reserveAssignment.id }!
+        XCTAssertEqual(p.attachedFleetVehicleToken, "fleet:sim:alpha")
+        XCTAssertEqual(r.attachedFleetVehicleToken, "fleet:sim:bravo")
+    }
+
     func test_swap_reserveNotEligible_whenReserveIsWingman() {
         let tid = UUID()
         let primaryDevice = RosterDevice(name: "Lead", role: .none, slot: .primary)

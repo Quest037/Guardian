@@ -1324,7 +1324,7 @@ final class FleetLinkService: ObservableObject {
         return "\(detail) — Context: \(prefix)…"
     }
 
-    /// Class-aware park: stop streaming, then land/surface/hold+disarm per ``UniversalVehicleClass``,
+    /// Class-aware park: stop streaming, **best-effort mission pause**, then land/surface/hold+disarm per ``UniversalVehicleClass``,
     /// ending in ``Action/hold()`` so the autopilot is in a parked hold/loiter-style mode where supported.
     private func runParkPipeline(
         session: VehicleSession,
@@ -1345,6 +1345,7 @@ final class FleetLinkService: ObservableObject {
                 try await self.runParkSequence(
                     vehicleID: vehicleID,
                     session: session,
+                    vehicleType: vehicleType,
                     universalClass: universal
                 )
                 self.markVehicleCommand(vehicleID: vehicleID, commandID: commandID, status: .succeeded)
@@ -1370,14 +1371,20 @@ final class FleetLinkService: ObservableObject {
     private func runParkSequence(
         vehicleID: String,
         session: VehicleSession,
+        vehicleType: FleetVehicleType,
         universalClass: UniversalVehicleClass
     ) async throws {
         await stopManualControlStream(vehicleID: vehicleID)
+        await parkPauseMissionBestEffort(vehicleID: vehicleID, session: session)
         switch universalClass {
         case .uuv:
             try await parkSequenceUUV(vehicleID: vehicleID, session: session)
         case .ugv, .usv:
-            try await parkSequenceSurfaceGround(vehicleID: vehicleID, session: session)
+            try await parkSequenceSurfaceGround(
+                vehicleID: vehicleID,
+                session: session,
+                vehicleType: vehicleType
+            )
         case .uav, .unknown:
             try await parkSequenceUAVOrUnknown(vehicleID: vehicleID, session: session)
         }
@@ -1387,6 +1394,31 @@ final class FleetLinkService: ObservableObject {
         hubTelemetryByVehicleID[vehicleID]
     }
 
+    /// Best-effort ``Mission/pauseMission()`` before land/hold/disarm so onboard mission execution stops
+    /// (same MAVSDK call as ``FleetVehicleCommand/missionPause``). Stacks with no mission or unsupported
+    /// pause fail here — we log and continue so **Park** still completes.
+    private func parkPauseMissionBestEffort(vehicleID: String, session: VehicleSession) async {
+        do {
+            try await awaitCompletableForManualStream(session.drone.mission.pauseMission())
+            appendVehicleLog("Park: mission pause acknowledged.", vehicleID: vehicleID)
+        } catch {
+            appendVehicleLog(
+                "Park: mission pause skipped or failed (\(mavsdkPublicErrorDescription(error))) — continuing park.",
+                vehicleID: vehicleID
+            )
+        }
+    }
+
+    /// PX4 wheeled UGV (UGV-W preset): first stop-motion uses raw ``SET_MODE`` hold (catalogue ``FleetVehicleMode/hold``)
+    /// instead of ``Action/hold()`` alone — experimentally some rover builds track QGC-style mode entry better.
+    private func parkShouldUsePx4SetModeHoldForFirstSurfaceStop(vehicleType: FleetVehicleType, vehicleID: String) -> Bool {
+        guard vehicleType == .ugvWheeled else { return false }
+        let stack = vehicleModelsByVehicleID[vehicleID]?.data.telemetry?.autopilotStack
+            ?? hubTelemetryByVehicleID[vehicleID]?.autopilotStack
+            ?? .unknown
+        return stack == .px4
+    }
+
     /// UGV / USV: stop motion (hold), disarm, then hold again for a clear parked mode.
     ///
     /// **Always issues `Action.disarm()` after hold** — PX4 / MAVSDK rovers often stay armed in
@@ -1394,15 +1426,42 @@ final class FleetLinkService: ObservableObject {
     /// until the next telemetry tick. Gating disarm on `isArmed == true` skipped the real disarm
     /// while the vehicle was still armed on the wire (same rationale as
     /// ``awaitLiveDriveSurfaceParkHoldAndDisarm(vehicleID:)``).
-    private func parkSequenceSurfaceGround(vehicleID: String, session: VehicleSession) async throws {
-        do {
-            try await awaitCompletableForManualStream(session.drone.action.hold())
-            appendVehicleLog("Park: hold acknowledged (stop motion).", vehicleID: vehicleID)
-        } catch {
-            appendVehicleLog(
-                "Park: hold failed (\(mavsdkPublicErrorDescription(error))); continuing to disarm.",
-                vehicleID: vehicleID
-            )
+    private func parkSequenceSurfaceGround(
+        vehicleID: String,
+        session: VehicleSession,
+        vehicleType: FleetVehicleType
+    ) async throws {
+        if parkShouldUsePx4SetModeHoldForFirstSurfaceStop(vehicleType: vehicleType, vehicleID: vehicleID) {
+            do {
+                try await awaitCompletableForManualStream(
+                    completionForSetMode(mode: .hold, vehicleID: vehicleID, session: session)
+                )
+                appendVehicleLog("Park: PX4 UGV-W SET_MODE hold (first stop) step completed.", vehicleID: vehicleID)
+            } catch {
+                appendVehicleLog(
+                    "Park: PX4 UGV-W SET_MODE hold failed (\(mavsdkPublicErrorDescription(error))) — trying Action.hold().",
+                    vehicleID: vehicleID
+                )
+                do {
+                    try await awaitCompletableForManualStream(session.drone.action.hold())
+                    appendVehicleLog("Park: Action.hold fallback acknowledged (stop motion).", vehicleID: vehicleID)
+                } catch {
+                    appendVehicleLog(
+                        "Park: Action.hold fallback failed (\(mavsdkPublicErrorDescription(error))); continuing to disarm.",
+                        vehicleID: vehicleID
+                    )
+                }
+            }
+        } else {
+            do {
+                try await awaitCompletableForManualStream(session.drone.action.hold())
+                appendVehicleLog("Park: hold acknowledged (stop motion).", vehicleID: vehicleID)
+            } catch {
+                appendVehicleLog(
+                    "Park: hold failed (\(mavsdkPublicErrorDescription(error))); continuing to disarm.",
+                    vehicleID: vehicleID
+                )
+            }
         }
         try await Task.sleep(nanoseconds: 250_000_000)
         let hubArmed = parkHub(vehicleID)?.isArmed

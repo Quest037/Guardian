@@ -928,6 +928,9 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         triggerSource: String = "operator.missionControlSetup",
         rankingPolicy: MissionRunReserveSwapRankingPolicy = .uniformRandom
     ) -> MissionRunFloatingReserveSwapOutcome {
+        guard MissionRunReserveSwapSessionPhasePolicy.allowsReserveSwapMutation(sessionPhase: sessionPhase) else {
+            return .blockedBySessionPhase
+        }
         guard let idx = assignments.firstIndex(where: { $0.id == assignmentID }) else {
             return .assignmentNotFound
         }
@@ -991,6 +994,9 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         poolSlotID: UUID,
         triggerSource: String = "operator.missionControlRunning.reserveSwap"
     ) -> MissionRunFloatingReserveSwapOutcome {
+        guard MissionRunReserveSwapSessionPhasePolicy.allowsReserveSwapMutation(sessionPhase: sessionPhase) else {
+            return .blockedBySessionPhase
+        }
         guard let idx = assignments.firstIndex(where: { $0.id == assignmentID }) else {
             return .assignmentNotFound
         }
@@ -1046,6 +1052,9 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         taskID: UUID,
         triggerSource: String = "missionControl.reserve.fixedRosterSwap"
     ) -> MissionRunFixedRosterReserveSwapOutcome {
+        guard MissionRunReserveSwapSessionPhasePolicy.allowsReserveSwapMutation(sessionPhase: sessionPhase) else {
+            return .blockedBySessionPhase
+        }
         guard let vIdx = assignments.firstIndex(where: { $0.id == vacancyAssignmentID }) else {
             return .assignmentNotFound
         }

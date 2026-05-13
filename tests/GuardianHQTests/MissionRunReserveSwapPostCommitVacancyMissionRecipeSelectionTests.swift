@@ -33,7 +33,17 @@ final class MissionRunReserveSwapPostCommitVacancyMissionRecipeSelectionTests: X
                 hubMissionProgressCurrent: 3,
                 hubMissionProgressTotal: nil
             ),
-            3
+            2
+        )
+    }
+
+    func test_handoffMissionStartItemIndex_curOneMapsToZero() {
+        XCTAssertEqual(
+            MissionRunReserveSwapPostCommitVacancyMissionRecipeSelection.handoffMissionStartItemIndex(
+                hubMissionProgressCurrent: 1,
+                hubMissionProgressTotal: 10
+            ),
+            0
         )
     }
 
@@ -53,7 +63,7 @@ final class MissionRunReserveSwapPostCommitVacancyMissionRecipeSelectionTests: X
                 hubMissionProgressCurrent: 2,
                 hubMissionProgressTotal: 10
             ),
-            2
+            1
         )
     }
 }

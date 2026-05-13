@@ -310,8 +310,10 @@ enum FleetVehicleCoreCommandRegistrations {
             name: .fleetVehicleDoPark,
             humanLabel: "Park",
             humanDescription:
-                "Bring the vehicle to a safe parked state: UAV and unknown-class targets land if airborne, then disarm and enter hold/loiter; " +
-                "UGV/USV hold to stop motion, disarm, then hold again; UUV surfaces if below the surface threshold (ArduSub `mode surface`), then disarm and hold. " +
+                "Bring the vehicle to a safe parked state: first best-effort `Mission.pauseMission()` so onboard mission execution stops where supported, then class-specific steps — " +
+                "UAV and unknown-class targets land if airborne, then disarm and enter hold/loiter; " +
+                "UGV/USV hold to stop motion, disarm, then `Action.hold()` again for a clear parked mode (PX4 **UGV-W**: first stop uses raw `SET_MODE` hold / AUTO_LOITER like catalogue `do.mode` hold, then disarm, then a final `Action.hold()`); " +
+                "UUV surfaces if below the surface threshold (ArduSub `mode surface`), then disarm and hold. " +
                 "Implemented as one `FleetVehicleCommand.park` pipeline in FleetLink — not a multi-step catalogue composite.",
             declaredResponseKinds: FleetCommandDeclaredResponseKinds.standardDo.adding(
                 .modeNotSupported, .autopilotBusy

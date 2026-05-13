@@ -1343,6 +1343,27 @@ extension MissionRunFleetDispatch {
     }
 }
 
+/// Operator-selected stabilisation before a **Live Drive handoff** (``HandOffToDoList.md`` engage flow step 1).
+/// Uses the same fleet catalogue atoms as preferential abort/complete **park** / **loiter** paths.
+enum MissionRunEngageStabilizeDispatchKind: String, CaseIterable, Sendable, Equatable {
+    case park
+    case loiter
+
+    var missionRunFleetDispatch: MissionRunFleetDispatch {
+        switch self {
+        case .park: return .catalogue(name: .fleetVehicleDoPark, parameters: .empty)
+        case .loiter: return .catalogue(name: .fleetVehicleDoLoiter, parameters: .empty)
+        }
+    }
+
+    var operatorShortLabel: String {
+        switch self {
+        case .park: return "Park"
+        case .loiter: return "Loiter"
+        }
+    }
+}
+
 struct MissionRunIssuedCommand: Identifiable, Equatable {
     let id: UUID
     let assignmentID: UUID
@@ -1710,6 +1731,8 @@ enum MissionRunReserveSwapOperatorCopy {
         "Reserve swap handoff: wind-down on the former active failed — check the mission log."
     static let toastReserveSwapPickRejectedStale = "Reserve swap aborted: that aircraft is no longer eligible (duplicate binding, written off, or operational state changed). Refresh the roster and pool."
     static let toastPoolBerthNotAvailableForRosterSlot = "That pool berth is not available for this roster slot."
+    static let toastReserveSwapBlockedSessionPhase =
+        "Reserve swaps are unavailable while this run is in recovery, completed, aborting, or aborted."
     static let toastNoLiveReserveAutoSwapSkipped = "No live link for this reserve — auto-swap skipped."
     static let toastReserveAutoSwapSkippedPreflight = "Reserve auto-swap skipped — reserve aircraft did not pass preflight."
     static let toastFixedReserveNotAvailableForRosterSlot = "That fixed reserve row is not available for this roster slot."
@@ -1733,6 +1756,7 @@ enum MissionRunReserveSwapOperatorCopy {
         case .poolClearFailed: return "Pool clear failed after commit attempt."
         case .pickRejectedDuplicateOrStaleBinding: return "Pre-commit dedupe or operational gate rejected pick."
         case .poolSlotNotEligible: return "Pool berth not in enumerated candidates for this vacancy."
+        case .blockedBySessionPhase: return "Reserve swap blocked — run session is not accepting roster reserve swaps."
         }
     }
 
@@ -1745,6 +1769,7 @@ enum MissionRunReserveSwapOperatorCopy {
         case .reserveNotEligibleForVacancy: return "Fixed reserve row not eligible for this vacancy."
         case .identicalFleetBindingNoOp: return "Identical fleet binding — no-op."
         case .pickRejectedDuplicateOrStaleBinding: return "Pre-commit dedupe or operational gate rejected pick."
+        case .blockedBySessionPhase: return "Reserve swap blocked — run session is not accepting roster reserve swaps."
         }
     }
 

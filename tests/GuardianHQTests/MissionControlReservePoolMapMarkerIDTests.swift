@@ -10,6 +10,9 @@ final class MissionControlReservePoolMapMarkerIDTests: XCTestCase {
         let slot = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
         let raw = MissionControlReservePoolMapMarkerID.encode(taskID: task, slotID: slot)
         XCTAssertEqual(MissionControlReservePoolMapMarkerID.decodeTaskID(raw), task)
+        let decoded = MissionControlReservePoolMapMarkerID.decodeBerth(raw)
+        XCTAssertEqual(decoded?.taskID, task)
+        XCTAssertEqual(decoded?.slotID, slot)
     }
 
     func test_decode_returns_nil_for_roster_uuid_string() {

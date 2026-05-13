@@ -115,4 +115,53 @@ final class MissionRunFloatingReserveTargetedPoolSwapTests: XCTestCase {
         )
         XCTAssertEqual(out, .poolSlotNotEligible)
     }
+
+    func test_targeted_pool_swap_returns_blockedBySessionPhase_when_session_completed() {
+        let task = MissionTask(name: "Alpha")
+        let rd = UUID()
+        let mission = Mission(
+            id: UUID(),
+            name: "M",
+            description: "",
+            type: .mobile,
+            rosterDevices: [RosterDevice(id: rd, name: "P1", vehicleClass: .uavCopter)],
+            routeMacro: RouteMacro(tasks: [task])
+        )
+        let assignID = UUID()
+        let roster = MissionRunAssignment(
+            id: assignID,
+            taskId: task.id,
+            rosterDeviceId: rd,
+            slotName: "Primary",
+            attachedDevice: "LEGACY",
+            attachedFleetVehicleToken: nil
+        )
+        let fleet = FleetLinkService()
+        let sitl = SitlService()
+        sitl.attachFleetLink(fleet)
+        fleet.seedMissionRunTestLiveVehicle(vehicleID: "sysid:9", vehicleType: .uavCopter)
+        let run = MissionRunEnvironment(mission: mission, assignments: [roster])
+        run.attachServices(fleetLink: fleet, sitl: sitl)
+        let tid = task.id
+        let poolSlotID = UUID(uuidString: "00000000-0000-0000-0000-0000000000E1")!
+        run.setReservePool(
+            MissionRunReservePool(entries: [
+                MissionRunReservePoolSlot(
+                    id: poolSlotID,
+                    label: "P1",
+                    attachedFleetVehicleToken: "live",
+                    attachedDevice: ""
+                ),
+            ]),
+            forTaskID: tid
+        )
+        run.setSessionPhase(.completed)
+        let out = run.swapRosterAssignmentWithFloatingReservePoolSlot(
+            assignmentID: assignID,
+            taskID: tid,
+            poolSlotID: poolSlotID,
+            triggerSource: "test"
+        )
+        XCTAssertEqual(out, .blockedBySessionPhase)
+    }
 }

@@ -62,4 +62,18 @@ final class FleetVehicleDoParkCommandTests: XCTestCase {
         XCTAssertEqual(d?.riskTier, .confirmInLiveMission)
         XCTAssertTrue(d?.parameters.isEmpty ?? false)
     }
+
+    func test_doPark_descriptor_documents_mission_pause() {
+        let d = FleetCommandsCatalogue.shared.descriptor(for: .fleetVehicleDoPark)
+        let text = d?.humanDescription.lowercased() ?? ""
+        XCTAssertTrue(text.contains("pause"), "Park catalogue copy should mention mission pause before class-specific steps")
+    }
+
+    func test_doPark_descriptor_documents_px4_ugv_w_set_mode_hold_first_stop() {
+        let d = FleetCommandsCatalogue.shared.descriptor(for: .fleetVehicleDoPark)
+        let text = d?.humanDescription.lowercased() ?? ""
+        XCTAssertTrue(text.contains("ugv-w"), "Park catalogue copy should document PX4 UGV-W first-stop behaviour")
+        XCTAssertTrue(text.contains("set_mode"), "Park catalogue copy should mention SET_MODE for the first hold on that path")
+        XCTAssertFalse(text.contains("manual"), "Park should not document a manual pre-step")
+    }
 }

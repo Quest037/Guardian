@@ -18,25 +18,7 @@ private func operationalModelForPolicyTest(
 
 final class MissionLiveVehicleHealthCardReservePoolPickerPolicyTests: XCTestCase {
 
-    func test_console_hides_battery_without_telemetry_age_even_when_percent_known() {
-        let m = operationalModelForPolicyTest(
-            telemetryAgeS: nil,
-            battery: FleetVehicleOperationalModel.BatterySummary(
-                percent0to100: 42,
-                voltageV: nil,
-                currentA: nil,
-                etaSeconds: nil
-            )
-        )
-        XCTAssertFalse(
-            MissionLiveVehicleHealthCardReservePoolPickerPolicy.showCompactBattery(
-                vehicleModel: m,
-                reservePoolPickerChrome: false
-            )
-        )
-    }
-
-    func test_pool_picker_shows_battery_when_percent_known_without_telemetry_age() {
+    func test_shows_compact_battery_when_percent_known_without_telemetry_age() {
         let m = operationalModelForPolicyTest(
             telemetryAgeS: nil,
             battery: FleetVehicleOperationalModel.BatterySummary(
@@ -47,14 +29,11 @@ final class MissionLiveVehicleHealthCardReservePoolPickerPolicyTests: XCTestCase
             )
         )
         XCTAssertTrue(
-            MissionLiveVehicleHealthCardReservePoolPickerPolicy.showCompactBattery(
-                vehicleModel: m,
-                reservePoolPickerChrome: true
-            )
+            MissionLiveVehicleHealthCardReservePoolPickerPolicy.showCompactBattery(vehicleModel: m)
         )
     }
 
-    func test_pool_picker_shows_battery_when_only_telemetry_age_known() {
+    func test_shows_compact_battery_when_only_telemetry_age_known() {
         let m = operationalModelForPolicyTest(
             telemetryAgeS: 1.0,
             battery: FleetVehicleOperationalModel.BatterySummary(
@@ -65,28 +44,7 @@ final class MissionLiveVehicleHealthCardReservePoolPickerPolicyTests: XCTestCase
             )
         )
         XCTAssertTrue(
-            MissionLiveVehicleHealthCardReservePoolPickerPolicy.showCompactBattery(
-                vehicleModel: m,
-                reservePoolPickerChrome: true
-            )
-        )
-    }
-
-    func test_console_shows_battery_when_telemetry_age_known() {
-        let m = operationalModelForPolicyTest(
-            telemetryAgeS: 1.0,
-            battery: FleetVehicleOperationalModel.BatterySummary(
-                percent0to100: nil,
-                voltageV: nil,
-                currentA: nil,
-                etaSeconds: nil
-            )
-        )
-        XCTAssertTrue(
-            MissionLiveVehicleHealthCardReservePoolPickerPolicy.showCompactBattery(
-                vehicleModel: m,
-                reservePoolPickerChrome: false
-            )
+            MissionLiveVehicleHealthCardReservePoolPickerPolicy.showCompactBattery(vehicleModel: m)
         )
     }
 
@@ -101,16 +59,7 @@ final class MissionLiveVehicleHealthCardReservePoolPickerPolicyTests: XCTestCase
             )
         )
         XCTAssertFalse(
-            MissionLiveVehicleHealthCardReservePoolPickerPolicy.showCompactBattery(
-                vehicleModel: m,
-                reservePoolPickerChrome: false
-            )
-        )
-        XCTAssertFalse(
-            MissionLiveVehicleHealthCardReservePoolPickerPolicy.showCompactBattery(
-                vehicleModel: m,
-                reservePoolPickerChrome: true
-            )
+            MissionLiveVehicleHealthCardReservePoolPickerPolicy.showCompactBattery(vehicleModel: m)
         )
     }
 

@@ -47,14 +47,11 @@ struct MissionControlRosterSlotAttentionCapsule: View {
     }
 }
 
-/// Battery visibility rules for ``MissionLiveVehicleHealthCard`` when MC-R **floating reserve pool** picker chrome is on.
+/// Layout helpers for ``MissionLiveVehicleHealthCard`` (MC-R live console roster rows and floating reserve pool picker).
 enum MissionLiveVehicleHealthCardReservePoolPickerPolicy {
-    /// MC-R console cards show the battery icon only when hub telemetry has a known age; the pool picker also shows it when **percent** is known (e.g. stale hub slice) so operators can triage candidates.
-    static func showCompactBattery(vehicleModel: FleetVehicleOperationalModel, reservePoolPickerChrome: Bool) -> Bool {
-        if reservePoolPickerChrome {
-            return vehicleModel.battery.percent0to100 != nil || vehicleModel.telemetryAgeS != nil
-        }
-        return vehicleModel.telemetryAgeS != nil
+    /// MC-R health cards show the compact battery row when **percent** or **telemetry age** is known (same rule for roster and reserve pool strip).
+    static func showCompactBattery(vehicleModel: FleetVehicleOperationalModel) -> Bool {
+        vehicleModel.battery.percent0to100 != nil || vehicleModel.telemetryAgeS != nil
     }
 
     /// When the bracketed fleet short id already embeds ``FleetVehicleType/classCode`` (e.g. `[UGV-W:2]`), the neutral class pill beside the title is redundant in pool picker chrome.
@@ -135,7 +132,7 @@ struct MissionLiveVehicleHealthCard: View {
     var onTap: (() -> Void)?
     /// Worst merged slot attention for this roster row (MC-R live console); `nil` hides the pill.
     var slotAttention: (severity: GuardianFeedbackSeverity, title: String)? = nil
-    /// When true (MC-R **reserve pool swap** pick list): neutral **class** capsule, battery when percent or telemetry age is known, and percent text beside the battery icon.
+    /// When true (MC-R **reserve pool swap** pick list): neutral **class** capsule beside the title when the bracketed id does not already encode class.
     var reservePoolPickerChrome: Bool = false
     /// Overrides button `.help` when set (e.g. reserve **browse** vs swap **pick**).
     var tapHelp: String? = nil
@@ -151,10 +148,7 @@ struct MissionLiveVehicleHealthCard: View {
     private var cardStrokeNeutral: Color { theme.borderSubtle }
 
     private var showCompactBattery: Bool {
-        MissionLiveVehicleHealthCardReservePoolPickerPolicy.showCompactBattery(
-            vehicleModel: vehicleModel,
-            reservePoolPickerChrome: reservePoolPickerChrome
-        )
+        MissionLiveVehicleHealthCardReservePoolPickerPolicy.showCompactBattery(vehicleModel: vehicleModel)
     }
 
     private var resolvedTapHelp: String {
@@ -234,13 +228,11 @@ struct MissionLiveVehicleHealthCard: View {
                             Image(systemName: batterySymbol)
                                 .font(GuardianTypography.font(.denseCaption10Semibold))
                                 .foregroundStyle(vehicleModel.battery.trafficBand.trafficLightIconTint)
-                            if reservePoolPickerChrome {
-                                Text(vehicleModel.battery.compactPercentLabel)
-                                    .font(GuardianTypography.font(.denseCaption10Semibold))
-                                    .foregroundStyle(theme.textSecondary)
-                                    .monospacedDigit()
-                                    .lineLimit(1)
-                            }
+                            Text(vehicleModel.battery.compactPercentLabel)
+                                .font(GuardianTypography.font(.denseCaption10Semibold))
+                                .foregroundStyle(theme.textSecondary)
+                                .monospacedDigit()
+                                .lineLimit(1)
                         }
                         .help(batteryHoverText)
                     }

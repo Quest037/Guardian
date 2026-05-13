@@ -116,6 +116,8 @@ enum MissionRunFloatingReserveSwapOutcome: Equatable, Sendable {
     case poolSlotNotEligible
     /// Clearing the drawn pool berth failed after a successful return-to-pool (extremely rare); state may be inconsistent — operator should refresh the run.
     case poolClearFailed
+    /// Session is in recovery, completed, aborting, or aborted — roster / pool reserve swap mutations are locked.
+    case blockedBySessionPhase
 }
 
 /// Result of ``MissionRunEnvironment/swapRosterVacancyWithFixedTemplateReserveAssignment(vacancyAssignmentID:reserveAssignmentID:taskID:triggerSource:)``.
@@ -133,6 +135,8 @@ enum MissionRunFixedRosterReserveSwapOutcome: Equatable, Sendable {
     case identicalFleetBindingNoOp
     /// Last-moment dedupe / operational / written-off re-check failed — no mutations.
     case pickRejectedDuplicateOrStaleBinding
+    /// Session is in recovery, completed, aborting, or aborted — roster reserve swap mutations are locked.
+    case blockedBySessionPhase
 }
 
 /// One **replace-aircraft** option for a roster vacancy: floating pool berth or template **reserve** row on the same task.

@@ -172,6 +172,21 @@ final class FleetVehicleLiveStatusBadgeRowTests: XCTestCase {
         XCTAssertFalse(FleetVehicleLiveStatusBadgeRow.isHoldLikeFlightMode(humanized: "Offboard", rawFlightMode: "FlightMode.offboard"))
     }
 
+    func test_isEngageLoiterLikeFlightMode_includes_hold_and_posctl() {
+        XCTAssertTrue(
+            FleetVehicleLiveStatusBadgeRow.isEngageLoiterLikeFlightMode(humanized: "Hold", rawFlightMode: "FlightMode.hold")
+        )
+        XCTAssertTrue(
+            FleetVehicleLiveStatusBadgeRow.isEngageLoiterLikeFlightMode(humanized: "Posctl", rawFlightMode: "FlightMode.posctl")
+        )
+        XCTAssertTrue(
+            FleetVehicleLiveStatusBadgeRow.isEngageLoiterLikeFlightMode(humanized: "Loiter", rawFlightMode: "LOITER")
+        )
+        XCTAssertFalse(
+            FleetVehicleLiveStatusBadgeRow.isEngageLoiterLikeFlightMode(humanized: "Offboard", rawFlightMode: "FlightMode.offboard")
+        )
+    }
+
     func test_fleet_vehicle_model_liveStatusBadgeRow_matches_init() {
         var model = FleetVehicleModel(vehicleID: "sysid:7")
         model.applyTelemetryMutation { hub in

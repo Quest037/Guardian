@@ -105,4 +105,17 @@ extension FleetVehicleLiveStatusBadgeRow {
         if u.contains("HOLD_") { return true }
         return false
     }
+
+    /// Engage Live Drive **Loiter** stabilize: hold-like modes plus common position / loiter labels from MAVSDK / ArduPilot / PX4 strings.
+    static func isEngageLoiterLikeFlightMode(humanized: String, rawFlightMode: String) -> Bool {
+        if isHoldLikeFlightMode(humanized: humanized, rawFlightMode: rawFlightMode) { return true }
+        let raw = rawFlightMode.trimmingCharacters(in: .whitespacesAndNewlines)
+        let u = raw.uppercased()
+        if u.isEmpty || u == "—" { return false }
+        let tokens = [
+            "LOITER", "POSCTL", "ALTCTL", "POSHOLD", "ALTHOLD", "ALT_HOLD",
+            "CIRCLE", "ORBIT", "QLOITER",
+        ]
+        return tokens.contains { u.contains($0) }
+    }
 }

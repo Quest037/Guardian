@@ -768,6 +768,7 @@ final class MissionControlStore: ObservableObject {
         case .reserveNotEligibleForVacancy: return "reserveNotEligibleForVacancy"
         case .identicalFleetBindingNoOp: return "identicalFleetBindingNoOp"
         case .pickRejectedDuplicateOrStaleBinding: return "pickRejectedDuplicateOrStaleBinding"
+        case .blockedBySessionPhase: return "blockedBySessionPhase"
         }
     }
 

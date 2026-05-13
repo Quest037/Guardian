@@ -700,6 +700,22 @@ final class MissionRunExecutionSubsystem {
         return out
     }
 
+    /// Single-assignment reserve-swap wind-down for a row that may **not** appear in ``environment.assignments`` (e.g. synthetic pool berth from ``MissionRunAssignment/syntheticForReservePool``).
+    func buildReserveSwapPolicyWindDownCommand(forExplicitAssignment assignment: MissionRunAssignment) -> MissionRunIssuedCommand? {
+        guard let environment, let mission = environment.template else { return nil }
+        return Self.optimisticReserveSwapIssuedCommand(
+            assignment: assignment,
+            preferenceChain: MissionRunReserveSwapTactic.normalizedPreferenceChain(
+                MissionRunPolicyResolution.resolvedReserveSwapPreferenceChain(
+                    assignment: assignment,
+                    mission: mission
+                )
+            ),
+            environment: environment,
+            mission: mission
+        )
+    }
+
     private static func optimisticReserveSwapIssuedCommand(
         assignment: MissionRunAssignment,
         preferenceChain: [MissionRunReserveSwapTactic],

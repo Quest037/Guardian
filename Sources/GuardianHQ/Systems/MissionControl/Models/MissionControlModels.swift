@@ -54,39 +54,52 @@ enum MissionTaskState: String, Codable, CaseIterable, Equatable, Hashable {
     }
 }
 
-/// In-flight **intent** for a task’s abort or complete/recovery protocol — distinct from settled ``MissionTaskState``
-/// (see ``MissionRunEnvironment/taskAttemptingByTaskID``, recomputed in ``MissionRunEnvironment/refreshDerivedTaskStates()``).
+/// Mission Control **intent** for mission-end protocol on a task — distinct from settled ``MissionTaskState``.
 ///
-/// v1 derives this only from per-task orchestration flags (issued wind-down + graceful **pending**). When per-slot
-/// evidence exists (``TaskRosterAssignmentStatesToDo.md`` §3+), clearing rules may split from ``MissionTaskState``.
-enum MissionTaskAttemptState: String, Codable, CaseIterable, Equatable, Hashable {
-    /// Abort-policy wind-down **commands were dispatched** for this task; operator / future slot rollup not finished.
-    case abortWindDownIssued
-    /// Complete-policy recovery wind-down **was dispatched**; recovery acknowledgement not finished.
-    case recoveryWindDownIssued
-    /// **Abort after this autopilot cycle** is scheduled; dispatch has not run yet.
-    case abortWindDownScheduledAfterCycle
-    /// **Complete after this cycle** is scheduled; dispatch has not run yet.
-    case recoveryWindDownScheduledAfterCycle
+/// Set **before** fleet wind-down commands are issued (``MissionRunEnvironment/noteMissionTaskEndAttempt(_:forTaskID:)``),
+/// and cleared when operator triage, §3 slot-evidence auto mission-end ack, per-task restart, or scoped orchestration reset
+/// resolves that intent. **After-cycle scheduling** uses ``MissionRunEnvironment/pendingMissionTaskGracefulWindDownKindByTaskID``
+/// only (not attempting). Published UI map: ``MissionRunEnvironment/taskAttemptingByTaskID`` (refreshed with settled state).
+enum MissionTaskAttemptState: String, Equatable, Hashable, CaseIterable {
+    /// MC is driving this task into **abort** mission-end protocol (fleet may still be working or may have reported failure).
+    case abortMissionEnd = "abortMissionEnd"
+    /// MC is driving this task into **recovery** (complete-policy) mission-end protocol.
+    case recoveryMissionEnd = "recoveryMissionEnd"
 
     /// Short operator-facing title (MC-R / banners).
     var displayTitle: String {
         switch self {
-        case .abortWindDownIssued:
-            return "Abort wind-down in progress"
-        case .recoveryWindDownIssued:
-            return "Recovery wind-down in progress"
-        case .abortWindDownScheduledAfterCycle:
-            return "Abort scheduled after this cycle"
-        case .recoveryWindDownScheduledAfterCycle:
-            return "Complete scheduled after this cycle"
+        case .abortMissionEnd:
+            return "Abort protocol in progress"
+        case .recoveryMissionEnd:
+            return "Recovery protocol in progress"
         }
+    }
+}
+
+extension MissionTaskAttemptState: Codable {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        let raw = try c.decode(String.self)
+        switch raw {
+        case MissionTaskAttemptState.abortMissionEnd.rawValue, "abortWindDownIssued", "abortWindDownScheduledAfterCycle":
+            self = .abortMissionEnd
+        case MissionTaskAttemptState.recoveryMissionEnd.rawValue, "recoveryWindDownIssued", "recoveryWindDownScheduledAfterCycle":
+            self = .recoveryMissionEnd
+        default:
+            throw DecodingError.dataCorruptedError(in: c, debugDescription: "Unknown MissionTaskAttemptState raw value \(raw)")
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(rawValue)
     }
 }
 
 /// Per-roster-slot mission orchestration progress within a run (``TaskRosterAssignmentStatesToDo.md`` §2).
 ///
-/// Values persist on ``MissionRunAssignment/slotLifecycleLanes`` (README **Roster slot state storage** — option **(a)** on-row). Operator-facing roster chip copy is ``displayTitle`` (**v1 UX lock**); revisit when §3 evidence surfaces ship.
+/// Values persist on ``MissionRunAssignment/slotLifecycleLanes`` (README **Roster slot state storage** — option **(a)** on-row). Operator-facing roster chip **title** is ``displayTitle`` (**v1 UX lock**); pointer-hover / VoiceOver detail is ``rosterSlotChipHelp`` (full sentence per state; ``blockedNoVehicle`` includes the written-off distinction).
 enum MissionRunAssignmentSlotState: String, Codable, CaseIterable, Equatable, Hashable {
     case idle
     case staging
@@ -108,11 +121,39 @@ enum MissionRunAssignmentSlotState: String, Codable, CaseIterable, Equatable, Ha
         case .betweenCycles: return "Between cycles"
         case .policyAborting: return "Abort in progress"
         case .policyCompleting: return "Recovery in progress"
-        case .policySucceeded: return "Policy complete"
-        case .policyFailed: return "Policy failed"
+        case .policySucceeded: return "End protocol succeeded"
+        case .policyFailed: return "End protocol failed"
         case .blockedNoVehicle: return "No vehicle bound"
         case .notApplicableEmptySlot: return "Empty slot"
         case .supersededReassigned: return "Reassigned"
+        }
+    }
+
+    /// Pointer-hover / VoiceOver hint for MC-R / MCS roster slot chip (``MissionControlRosterSlotAttentionCapsule``). Chip title stays ``displayTitle`` (v1 lock).
+    var rosterSlotChipHelp: String {
+        switch self {
+        case .idle:
+            return "Slot orchestration is idle on this row — no issued policy step is active right now."
+        case .staging:
+            return "This roster row is staging before mission commands dispatch."
+        case .executingMission:
+            return "Mission commands are active on this roster binding."
+        case .betweenCycles:
+            return "Between mission cycles on this row — idle until the next dispatch or operator action."
+        case .policyAborting:
+            return "Abort policy is executing — watch fleet acks and triage until this row settles."
+        case .policyCompleting:
+            return "Complete or recovery policy is executing on this row — wait for fleet confirmation."
+        case .policySucceeded:
+            return "This roster row’s mission-end protocol finished successfully — hub evidence matches success."
+        case .policyFailed:
+            return "This roster row’s mission-end protocol reported a failure — open triage and check fleet responses."
+        case .blockedNoVehicle:
+            return "This row has no usable vehicle binding for mission policy on the roster — slot orchestration evidence. That is separate from marking a vehicle written off for this run’s floating reserve pool; written off only excludes that vehicle from pool draws and swap picks."
+        case .notApplicableEmptySlot:
+            return "This template row has no roster binding — it does not carry live mission policy until you assign a vehicle."
+        case .supersededReassigned:
+            return "This binding was replaced by a reassignment — use the active roster row for this task."
         }
     }
 }
@@ -202,16 +243,16 @@ enum MissionRunAssignmentSlotLaneMerge {
 /// Roll-up helpers for MC-R task rows (worst slot attention across bound roster rows).
 enum MissionControlAssignmentSlotRosterAttention {
     /// Picks the highest-precedence ``GuardianFeedbackSeverity`` among assignments’ merged slot states (for a compact task-row chip).
-    static func worstAmong(assignments: [MissionRunAssignment]) -> (severity: GuardianFeedbackSeverity, title: String)? {
+    static func worstAmong(assignments: [MissionRunAssignment]) -> (severity: GuardianFeedbackSeverity, title: String, help: String)? {
         var bestRank = -1
-        var picked: (GuardianFeedbackSeverity, String)?
+        var picked: (GuardianFeedbackSeverity, String, String)?
         for a in assignments {
             let merged = MissionRunAssignmentSlotLaneMerge.preferredDisplayState(lanes: a.effectiveSlotLifecycleLanes)
             guard let sev = merged.missionControlRosterBadgeSeverity else { continue }
             let r = rank(sev)
             if r > bestRank {
                 bestRank = r
-                picked = (sev, merged.displayTitle)
+                picked = (sev, merged.displayTitle, merged.rosterSlotChipHelp)
             }
         }
         return picked
@@ -235,6 +276,11 @@ enum MissionRunStatus: String, Codable, CaseIterable, Identifiable {
     case completed
 
     var id: String { rawValue }
+
+    /// When true, Mission Control applies this run’s per-run SIM battery drain rate to roster SITL streams (see ``MissionControlSetupView/syncSimBatteryDrainForRunStatus``).
+    var appliesMissionRunSimBatteryDrainFromOperatorSettings: Bool {
+        self == .running || self == .recovery
+    }
 }
 
 /// How the run reached **completed** status (for Mission Control report).
@@ -1367,8 +1413,6 @@ enum MissionRunCommandIssuerKey {
     /// Issuer key for post–swap-in catalogue steps on the displaced stream (distinct audit trail from whole-run abort).
     static let plannerReserveSwapPostCommit = "planner.reserveSwapPostCommit"
     static let runTeardown = "run.teardown"
-    /// Catalogue ``fleetVehicleDoGeofenceClear`` paired with implicit run-end RTL (``MissionRunExecutionSubsystem/issueReturnToLaunchForAllAssignments``).
-    static let runTeardownGeofenceClear = "run.teardown.geofence_clear"
     static let staging = "staging"
     static let missionExecute = "mission.execute"
     /// Between-cycles **fallback** fleet dispatch after the operator-selected primary between-cycles command fails (see ``MissionRunFleetDispatch/betweenCyclesFailureFallbackDispatch``).
@@ -1379,6 +1423,8 @@ enum MissionRunCommandIssuerKey {
     static let runCleanupMissionClear = "missioncontrol.run_cleanup.mission_clear"
     /// Catalogue ``fleetVehicleDoGeofenceClear`` during run-complete SIM cleanup (audit).
     static let runCleanupGeofenceClear = "missioncontrol.run_cleanup.geofence_clear"
+    /// MC-R **Fences** triage: push resolved template geofences to every bound roster vehicle (Layer 1 recipes).
+    static let mcrLiveGeofenceFleetPush = "missioncontrol.mcr.live_geofence_fleet_push"
 }
 
 /// How a mission-run slot reaches Layer 0: ``FleetVehicleCommand`` queue, a
@@ -1910,9 +1956,9 @@ enum MissionRunReserveSwapOperatorCopy {
     static let toastNoEligibleFloatingReserveForTask = "No eligible floating reserve for this task."
     static let toastRosterSlotNotFoundOnRun = "Roster slot not found on this run."
     static let toastRosterSlotNotOnSelectedTask = "This roster slot is not on the selected task."
-    static let toastEveryPoolAircraftMatchesRosterBinding = "Every pool aircraft on this task already matches this roster fleet binding."
+    static let toastEveryPoolAircraftMatchesRosterBinding = "Every pool vehicle on this task already matches this roster fleet binding."
     static let toastNoPoolClassMatchForRosterSlot = "No floating reserve on this task matches this roster slot’s vehicle class."
-    static let toastReserveSwapReturnRejectedPrefix = "Reserve swap aborted — the roster aircraft cannot occupy the pool berth:"
+    static let toastReserveSwapReturnRejectedPrefix = "Reserve swap aborted — the roster vehicle cannot occupy the pool berth:"
     static let toastReserveSwapPoolClearFailed = "Reserve swap could not clear the pool berth. Check the mission log for this run."
     /// Post-commit handoff: displaced stream mission clear failed at the fleet layer (roster already committed).
     static let toastReserveSwapPostCommitDisplacedMissionClearFailed =
@@ -1923,15 +1969,15 @@ enum MissionRunReserveSwapOperatorCopy {
     /// Post-commit handoff: displaced wind-down catalogue or recipe failed.
     static let toastReserveSwapPostCommitDisplacedWindDownFailed =
         "Reserve swap handoff: wind-down on the former active failed — check the mission log."
-    static let toastReserveSwapPickRejectedStale = "Reserve swap aborted: that aircraft is no longer eligible (duplicate binding, written off, or operational state changed). Refresh the roster and pool."
+    static let toastReserveSwapPickRejectedStale = "Reserve swap aborted: that vehicle is no longer eligible (duplicate binding, written off for floating reserve on this run, or operational state changed). Refresh the roster and pool."
     static let toastPoolBerthNotAvailableForRosterSlot = "That pool berth is not available for this roster slot."
     static let toastReserveSwapBlockedSessionPhase =
         "Reserve swaps are unavailable while this run is in recovery, completed, aborting, or aborted."
     static let toastNoLiveReserveAutoSwapSkipped = "No live link for this reserve — auto-swap skipped."
-    static let toastReserveAutoSwapSkippedPreflight = "Reserve auto-swap skipped — reserve aircraft did not pass preflight."
+    static let toastReserveAutoSwapSkippedPreflight = "Reserve auto-swap skipped — reserve vehicle did not pass preflight."
     static let toastFixedReserveNotAvailableForRosterSlot = "That fixed reserve row is not available for this roster slot."
     static let toastEveryReserveMatchesRosterBinding = "Every reserve on this task already matches this roster fleet binding."
-    static let toastReserveAutoSwapAbortedPickRejected = "Reserve auto-swap aborted: that aircraft is no longer eligible (duplicate binding, written off, or operational state changed)."
+    static let toastReserveAutoSwapAbortedPickRejected = "Reserve auto-swap aborted: that vehicle is no longer eligible (duplicate binding, written off for floating reserve on this run, or operational state changed)."
 
     static func toastReserveSwapReturnRejected(_ outcome: MissionRunReservePoolReturnAssignmentOutcome) -> String {
         "\(toastReserveSwapReturnRejectedPrefix) \(reservePoolReturnRejectionSummary(outcome))"
@@ -1970,10 +2016,10 @@ enum MissionRunReserveSwapOperatorCopy {
     private static func reservePoolReturnRejectionSummary(_ r: MissionRunReservePoolReturnAssignmentOutcome) -> String {
         switch r {
         case .rejectedNoBinding: return "no binding"
-        case .rejectedFleetVehicleWrittenOff: return "aircraft written off for this run’s pool"
+        case .rejectedFleetVehicleWrittenOff: return "vehicle written off for this run’s floating reserve pool"
         case .rejectedFleetContextUnavailable: return "fleet link unavailable"
         case .rejectedFleetVehicleUnresolved: return "vehicle not resolved"
-        case .rejectedVehicleNotOperational: return "aircraft not operational"
+        case .rejectedVehicleNotOperational: return "vehicle not operational"
         case .rejectedBatteryCritical: return "battery critical"
         case .appended, .mergedExisting: return "unexpected"
         }

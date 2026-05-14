@@ -1,6 +1,6 @@
 import Foundation
 
-/// Wave size for run-complete SIM cleanup awaits that can safely overlap **per vehicle** (park recipe, mission clear, battery patch).
+/// Wave size for run-complete SIM cleanup awaits that can safely overlap **per vehicle** (SIM kill, mission clear, geofence clear, battery patch).
 ///
 /// **Override for experiments / CI:** set environment variable ``envKey`` to a decimal integer ≥ 1 (values above ``resolvedWaveCap`` are clamped). Unset or invalid → ``defaultMaxConcurrentPerWave``.
 enum MissionRunSimCleanupConcurrency {

@@ -1,11 +1,11 @@
 import Foundation
 
-/// Vehicle selection for Mission Run **completed** SIM cleanup — sequential ``recipe.fleet.vehicle.do.park`` (see README).
+/// Vehicle selection for Mission Run **completed** SIM cleanup union (roster + eligible reserve pool rows); ordering matches the former park pass (see README SIM cleanup).
 @MainActor
 enum MissionRunSimCleanupParkPolicy {
     /// Roster rows in ``assignments`` order, then floating reserve pool slots (task id ascending, slot id ascending within each task).
     ///
-    /// Dedupes by resolved ``vehicleID`` so the same SITL is parked once. Only **SITL** fleet tokens with a running instance,
+    /// Dedupes by resolved ``vehicleID`` so the same SITL appears once. Only **SITL** fleet tokens with a running instance,
     /// Guardian-managed stream, and non-unknown autopilot stack (same spirit as roster SIM home restore + pool staging eligibility).
     static func orderedCleanupParkTargets(
         assignments: [MissionRunAssignment],

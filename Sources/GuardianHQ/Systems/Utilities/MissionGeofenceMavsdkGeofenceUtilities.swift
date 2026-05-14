@@ -1,99 +1,155 @@
 import Foundation
 import Mavsdk
 
-/// Converts ``MissionGeofence`` regions into MAVSDK ``Geofence`` polygons for fleet upload.
+/// Converts ``MissionGeofence`` regions into MAVSDK ``Geofence/GeofenceData`` (polygons + circles) and fleet
+/// ``FleetVehicleCommandGeofenceUploadPayload`` rows for ``geofencePolygonsJSON``.
 ///
-/// **Circles** are approximated as regular horizontal polygons (24 edges) using the same
-/// spherical offset model as ``FleetCommandStackConverterShared`` move helpers — adequate
-/// for tactical fence radii. **Polygons** reuse template vertices; rings are closed when the
-/// first and last vertex differ.
+/// **Circles** are sent as MAVSDK **circle** primitives (center + radius metres), not polygon rings.
+/// **Polygons** reuse template vertices; a repeated closing corner matching the first point is **dropped**
+/// before upload so consecutive duplicate coordinates are not sent.
+///
+/// Fleet geofence JSON carries **horizontal geometry only** for both **polygons** and **circles** (no altitude envelope on the wire).
 enum MissionGeofenceMavsdkGeofenceUtilities: Sendable {
 
-    private static let earthRadiusM = 6_371_000.0
-    private static let circleSegments = 24
-
-    /// Builds MAVSDK polygons, **skipping** shapes that cannot be represented (too few vertices,
-    /// degenerate circle radius).
+    /// Builds MAVSDK polygons for **polygon** fences only (one entry per valid polygon).
     static func mavsdkPolygons(forGeofences fences: [MissionGeofence]) -> [Mavsdk.Geofence.Polygon] {
+        geofencePolygonPayloads(forGeofences: fences).map(\.mavsdkPolygon)
+    }
+
+    /// Builds MAVSDK circles for **circle** fences only.
+    static func mavsdkCircles(forGeofences fences: [MissionGeofence]) -> [Mavsdk.Geofence.Circle] {
+        geofenceCirclePayloads(forGeofences: fences).map(\.mavsdkCircle)
+    }
+
+    /// Fleet polygon payloads (horizontal geometry for the fleet wire).
+    static func geofencePolygonPayloads(forGeofences fences: [MissionGeofence]) -> [FleetVehicleCommandGeofencePolygonPayload] {
         let geom = MissionGeofenceGeometryUtilities()
-        var out: [Mavsdk.Geofence.Polygon] = []
+        var out: [FleetVehicleCommandGeofencePolygonPayload] = []
         out.reserveCapacity(fences.count)
-        for fence in fences {
-            switch fence.shape {
-            case .polygon:
-                if geom.polygonHasInsufficientVertices(fence.polygonVertices) { continue }
-                var pts = fence.polygonVertices.map {
-                    Mavsdk.Geofence.Point(latitudeDeg: $0.lat, longitudeDeg: $0.lon)
-                }
-                if let first = pts.first, let last = pts.last,
-                   (abs(first.latitudeDeg - last.latitudeDeg) > 1e-9 || abs(first.longitudeDeg - last.longitudeDeg) > 1e-9) {
-                    pts.append(first)
-                }
-                out.append(Mavsdk.Geofence.Polygon(points: pts, fenceType: fence.mavsdkFenceType))
-            case .circle:
-                let r = fence.circleRadiusMeters
-                guard r >= 1 else { continue }
-                let center = fence.circleCenter
-                let points = circleApproximationPoints(center: center, radiusM: r, segments: circleSegments)
-                guard points.count >= 3 else { continue }
-                out.append(Mavsdk.Geofence.Polygon(points: points, fenceType: fence.mavsdkFenceType))
-            }
+        for fence in fences where fence.shape == .polygon {
+            guard let poly = mavsdkPolygon(from: fence, geom: geom) else { continue }
+            out.append(FleetVehicleCommandGeofencePolygonPayload(mavsdk: poly))
         }
         return out
     }
 
-    /// JSON array string accepted by ``FleetVehicleCommandGeofencePolygonPayload/decodePolygons(fromJSON:)``.
-    static func encodeGeofencePolygonsJSON(forGeofences fences: [MissionGeofence]) throws -> String {
-        let polys = mavsdkPolygons(forGeofences: fences)
-        return try FleetVehicleCommandGeofencePolygonPayload.encodePolygonsToJSON(polygons: polys)
-    }
-
-    private static func circleApproximationPoints(
-        center: RouteCoordinate,
-        radiusM: Double,
-        segments: Int
-    ) -> [Mavsdk.Geofence.Point] {
-        guard segments >= 3 else { return [] }
-        var pts: [Mavsdk.Geofence.Point] = []
-        pts.reserveCapacity(segments)
-        for k in 0..<segments {
-            let bearingDeg = Double(k) * 360.0 / Double(segments)
-            let (lat, lon) = offsetLatLon(
-                latitudeDeg: center.lat,
-                longitudeDeg: center.lon,
-                distanceM: radiusM,
-                bearingDeg: bearingDeg
-            )
-            pts.append(Mavsdk.Geofence.Point(latitudeDeg: lat, longitudeDeg: lon))
+    /// Fleet circle payloads (center + radius; horizontal geometry for the fleet wire).
+    static func geofenceCirclePayloads(forGeofences fences: [MissionGeofence]) -> [FleetVehicleCommandGeofenceCirclePayload] {
+        var out: [FleetVehicleCommandGeofenceCirclePayload] = []
+        out.reserveCapacity(fences.count)
+        for fence in fences where fence.shape == .circle {
+            guard let row = geofenceCirclePayload(from: fence) else { continue }
+            out.append(row)
         }
-        return pts
+        return out
     }
 
-    /// Spherical great-circle offset (same construction as ``FleetCommandStackConverterShared``).
-    private static func offsetLatLon(
-        latitudeDeg: Double,
-        longitudeDeg: Double,
-        distanceM: Double,
-        bearingDeg: Double
-    ) -> (lat: Double, lon: Double) {
-        let bearingRad = bearingDeg * .pi / 180
-        let lat1 = latitudeDeg * .pi / 180
-        let lon1 = longitudeDeg * .pi / 180
-        let angularDistance = distanceM / earthRadiusM
-        let lat2 = asin(
-            sin(lat1) * cos(angularDistance)
-                + cos(lat1) * sin(angularDistance) * cos(bearingRad)
+    /// Combined wire payload for fleet ``geofencePolygonsJSON`` (polygons + circles).
+    static func geofenceUploadPayload(forGeofences fences: [MissionGeofence]) -> FleetVehicleCommandGeofenceUploadPayload {
+        FleetVehicleCommandGeofenceUploadPayload(
+            polygons: geofencePolygonPayloads(forGeofences: fences),
+            circles: geofenceCirclePayloads(forGeofences: fences)
         )
-        let lon2 = lon1 + atan2(
-            sin(bearingRad) * sin(angularDistance) * cos(lat1),
-            cos(angularDistance) - sin(lat1) * sin(lat2)
+    }
+
+    /// JSON string for ``geofencePolygonsJSON`` (object with `polygons` and `circles` arrays).
+    static func encodeGeofencePolygonsJSON(forGeofences fences: [MissionGeofence]) throws -> String {
+        try geofenceUploadPayload(forGeofences: fences).encodeToJSON()
+    }
+
+    /// Chooses the lat/lon point used for ``fencesFilteredForPX4GeofenceUpload``.
+    ///
+    /// PX4 validates **inclusion** fences against the autopilot’s **current home** (e.g. SIH / spawn),
+    /// which can differ slightly from the mission template’s ``RouteMacro/home`` used when authoring.
+    /// When hub telemetry reports ``FleetHubVehicleTelemetry/homeLatitudeDeg`` and ``homeLongitudeDeg``,
+    /// those take precedence; otherwise the route macro home is used.
+    static func px4GeofenceFilterHome(routeMacroHome: RouteCoordinate?, hub: FleetHubVehicleTelemetry?) -> RouteCoordinate? {
+        guard let hub else { return routeMacroHome }
+        if let lat = hub.homeLatitudeDeg, let lon = hub.homeLongitudeDeg {
+            return RouteCoordinate(lat: lat, lon: lon)
+        }
+        return routeMacroHome
+    }
+
+    /// PX4 commonly rejects **inclusion** geofences that do not contain the mission home (RTL anchor).
+    /// Exclusion fences are left unchanged. When `home` is `nil`, returns the input list and zero omissions.
+    static func fencesFilteredForPX4GeofenceUpload(fences: [MissionGeofence], home: RouteCoordinate?) -> ([MissionGeofence], omittedInclusionCount: Int) {
+        guard let home else { return (fences, 0) }
+        let geom = MissionGeofenceGeometryUtilities()
+        var out: [MissionGeofence] = []
+        out.reserveCapacity(fences.count)
+        var omitted = 0
+        for fence in fences {
+            if fence.boundary == .exclusion {
+                out.append(fence)
+                continue
+            }
+            if px4InclusionFenceContainsHome(fence, home: home, geom: geom) {
+                out.append(fence)
+            } else {
+                omitted += 1
+            }
+        }
+        return (out, omitted)
+    }
+
+    private static func px4InclusionFenceContainsHome(_ fence: MissionGeofence, home: RouteCoordinate, geom: MissionGeofenceGeometryUtilities) -> Bool {
+        switch fence.shape {
+        case .circle:
+            let r = fence.circleRadiusMeters
+            guard r >= 1 else { return false }
+            let d = MissionTelemetryGeo.horizontalDistanceM(
+                lat1: fence.circleCenter.lat,
+                lon1: fence.circleCenter.lon,
+                lat2: home.lat,
+                lon2: home.lon
+            )
+            return d <= r + 0.5
+        case .polygon:
+            guard !geom.polygonHasInsufficientVertices(fence.polygonVertices) else { return false }
+            return geom.pointInsidePolygonHorizontallyWGS84(point: home, polygonVertices: fence.polygonVertices)
+        }
+    }
+
+    private static func mavsdkPolygon(from fence: MissionGeofence, geom: MissionGeofenceGeometryUtilities) -> Mavsdk.Geofence.Polygon? {
+        guard fence.shape == .polygon else { return nil }
+        if geom.polygonHasInsufficientVertices(fence.polygonVertices) { return nil }
+        var pts = fence.polygonVertices.map {
+            Mavsdk.Geofence.Point(latitudeDeg: $0.lat, longitudeDeg: $0.lon)
+        }
+        pts = Self.mavsdkFenceOpenRingPoints(pts)
+        guard pts.count >= 3 else { return nil }
+        return Mavsdk.Geofence.Polygon(points: pts, fenceType: fence.mavsdkFenceType)
+    }
+
+    private static func geofenceCirclePayload(from fence: MissionGeofence) -> FleetVehicleCommandGeofenceCirclePayload? {
+        guard fence.shape == .circle else { return nil }
+        let r = fence.circleRadiusMeters
+        guard r >= 1 else { return nil }
+        let c = fence.circleCenter
+        return FleetVehicleCommandGeofenceCirclePayload(
+            fenceType: fence.boundary == .inclusion ? "inclusion" : "exclusion",
+            latitudeDeg: c.lat,
+            longitudeDeg: c.lon,
+            radiusMeters: r
         )
-        return (lat: lat2 * 180 / .pi, lon: lon2 * 180 / .pi)
+    }
+
+    /// MAVSDK ``assemble_items`` encodes each vertex as a fence mission item with ``param1`` = full point count;
+    /// the geofence polygon must not repeat the first coordinate as the last (duplicate consecutive vertex).
+    private static func mavsdkFenceOpenRingPoints(_ points: [Mavsdk.Geofence.Point]) -> [Mavsdk.Geofence.Point] {
+        guard points.count >= 2 else { return points }
+        var out = points
+        while out.count >= 2, let f = out.first, let l = out.last,
+              abs(f.latitudeDeg - l.latitudeDeg) <= 1e-9, abs(f.longitudeDeg - l.longitudeDeg) <= 1e-9 {
+            out.removeLast()
+        }
+        return out
     }
 }
 
 private extension MissionGeofence {
-    var mavsdkFenceType: Mavsdk.Geofence.Polygon.FenceType {
+    var mavsdkFenceType: Mavsdk.Geofence.FenceType {
         switch boundary {
         case .inclusion: return .inclusion
         case .exclusion: return .exclusion

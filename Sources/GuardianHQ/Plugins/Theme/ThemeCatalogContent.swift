@@ -1010,6 +1010,12 @@ struct ThemeCatalogContent: View {
                     semanticSwatch("Success stroke", GuardianSemanticColors.successStroke, GuardianSemanticColors.successBackground)
                     semanticSwatch("Warning stroke", GuardianSemanticColors.warningStroke, GuardianSemanticColors.warningBackground)
                 }
+                Text(
+                    "MC-R task triage **slot blocker** rows (automatic protocol confirmation wait list) use ``MissionRunSlotAutoAckBlockerTriageChrome`` — leading rails, row washes, and merged-state labels map roster chip severity into these semantic fills and strokes, with ``GuardianThemePalette/borderSubtle`` / ``textSecondary`` as neutral anchors."
+                )
+                .font(GuardianTypography.font(.denseFootnoteRegular))
+                .foregroundStyle(theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
                 Divider().opacity(0.25)
                 Text("Extended accents (also on ``GuardianThemeAccent``) — use for badges/buttons via the theme, not one-off colors.")
                     .font(GuardianTypography.font(.denseFootnoteRegular))
@@ -1022,7 +1028,7 @@ struct ThemeCatalogContent: View {
                 }
             }
             .guardianInsetCard()
-            ThemeAPICaption("GuardianSemanticColors · GuardianThemeAccent")
+            ThemeAPICaption("GuardianSemanticColors · GuardianThemeAccent · MissionRunSlotAutoAckBlockerTriageChrome")
         }
     }
 

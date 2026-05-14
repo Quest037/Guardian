@@ -240,10 +240,10 @@ final class MissionRunPlannerSubsystem {
         )
     }
 
-    /// Catalogue ``fleetVehicleDoGeofenceClear`` for one assignment — run teardown and SIM cleanup use the same shape.
+    /// Catalogue ``fleetVehicleDoGeofenceClear`` for one assignment (run-complete SIM cleanup passes ``MissionRunCommandIssuerKey/runCleanupGeofenceClear``).
     static func catalogueGeofenceClearCommand(
         forAssignment assignment: MissionRunAssignment,
-        issuerKey: String = MissionRunCommandIssuerKey.runTeardownGeofenceClear
+        issuerKey: String = MissionRunCommandIssuerKey.runCleanupGeofenceClear
     ) -> MissionRunIssuedCommand? {
         guard let tokenKey = assignment.attachedFleetVehicleToken,
               FleetMissionVehicleToken(storageKey: tokenKey) != nil

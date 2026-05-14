@@ -70,13 +70,13 @@ struct MissionRunStartPreflightOverlay: View {
 
     private var footerSummary: (icon: String, title: String, tint: Color)? {
         if initialSweepRunning || !activeRetryAssignmentIDs.isEmpty || !bulkRetryFailedCoveringAssignmentIDs.isEmpty {
-            return ("ellipsis.circle", "Running arm checks on roster aircraft…", GuardianSemanticColors.infoForeground)
+            return ("ellipsis.circle", "Running arm checks on roster vehicles", GuardianSemanticColors.infoForeground)
         }
         if allRequiredPassed {
             return ("checkmark.circle.fill", "All checks passed — starting run…", GuardianSemanticColors.successStroke)
         }
         if flattenedTargets.contains(where: { rowByAssignmentID[$0.assignment.id]?.phase == .failed }) {
-            return ("exclamationmark.triangle.fill", "One or more aircraft failed — triage below, then retry or swap.", GuardianSemanticColors.warningStroke)
+            return ("exclamationmark.triangle.fill", "One or more vehicles failed — triage below, then retry or swap.", GuardianSemanticColors.warningStroke)
         }
         return nil
     }

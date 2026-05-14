@@ -77,7 +77,9 @@ final class FleetRecipeOutcomeMissionRunGeofenceExecutorLogAttributionTests: XCT
     func test_geofenceExecutorTemplateKeys_registeredInStructuredCatalog() {
         for key in [
             MissionRunLogTemplateKey.missionGeofencePolygonsEncodeFailed,
+            MissionRunLogTemplateKey.missionGeofencePx4InclusionFencesOmitted,
             MissionRunLogTemplateKey.missionRunGeofenceFleetAckFailed,
+            MissionRunLogTemplateKey.recipeFleetOutcomeTraceMismatch,
         ] {
             XCTAssertNotNil(StructuredLogTemplateCatalog.pattern(forKey: key, presentation: .plainExport), key)
             XCTAssertNotNil(StructuredLogTemplateCatalog.pattern(forKey: key, presentation: .missionControlRoom), key)

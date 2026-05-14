@@ -7,7 +7,8 @@ import Foundation
 ///
 /// ``MissionRunEnvironment/swapRosterAssignmentWithRandomFloatingReserve`` mutates ``assignments`` in place
 /// (same ``MissionRunAssignment/id``, new ``attachedFleetVehicleToken``) and calls ``refreshDerivedTaskStates``.
-/// It does **not** reset ``taskCyclesCompletedByTaskID``, ``cyclesCompleted``, ``activeCycleTaskIDs``, or the
+/// It does **not** reset ``taskCyclesCompletedByTaskID``, ``cyclesCompleted``, ``activeCycleTaskIDs``, per-task
+/// ``finishedMissionCycleVehicleIDsByTaskID``, or the
 /// executor command queue — those are intentional so a mid-mission swap does not fabricate a fresh “cycle zero”.
 enum MissionRunReserveSwapMidCycleExecutionInvariantPolicy: Sendable {
 

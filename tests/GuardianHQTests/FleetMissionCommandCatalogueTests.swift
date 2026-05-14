@@ -91,7 +91,7 @@ final class FleetMissionCommandCatalogueTests: XCTestCase {
         )
     }
 
-    func test_translate_mission_upload_with_geofence_prefixes_upload() throws {
+    func test_translate_mission_upload_with_geofence_runs_mission_clear_then_geofence() throws {
         let item = FleetVehicleCommandMissionItemPayload(
             latitudeDeg: -33.0,
             longitudeDeg: 151.0,
@@ -132,14 +132,20 @@ final class FleetMissionCommandCatalogueTests: XCTestCase {
         guard case .vehicleCommands(let cmds) = t else {
             return XCTFail("expected .vehicleCommands")
         }
-        guard case .uploadGeofence(let polys) = cmds.first else {
-            return XCTFail("expected geofence upload first, got \(String(describing: cmds.first))")
-        }
-        XCTAssertEqual(polys.count, 1)
-        guard case .uploadMission(let items) = cmds.last else {
-            return XCTFail("expected mission upload last")
+        XCTAssertEqual(cmds.count, 3)
+        guard case .uploadMission(let items) = cmds[0] else {
+            return XCTFail("expected mission upload first, got \(String(describing: cmds[0]))")
         }
         XCTAssertEqual(items.count, 1)
+        guard case .clearGeofence = cmds[1] else {
+            return XCTFail("expected clear geofence between mission and fence upload, got \(String(describing: cmds[1]))")
+        }
+        guard case .uploadGeofence(let wire) = cmds[2] else {
+            return XCTFail("expected geofence upload last, got \(String(describing: cmds[2]))")
+        }
+        XCTAssertEqual(wire.polygons.count, 1)
+        XCTAssertTrue(wire.circles.isEmpty)
+        XCTAssertEqual(wire.polygons[0].mavsdkPolygon.points.count, 3)
     }
 
     func test_translate_geofence_clear_emits_clear() {

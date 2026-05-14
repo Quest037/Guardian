@@ -25,6 +25,12 @@ final class MissionRunReserveSwapOperatorCopyTests: XCTestCase {
         XCTAssertTrue(s.contains("battery critical"))
     }
 
+    func test_toast_reserve_swap_return_rejected_written_off_mentions_floating_reserve_pool() {
+        let s = MissionRunReserveSwapOperatorCopy.toastReserveSwapReturnRejected(.rejectedFleetVehicleWrittenOff(storageKey: "tok"))
+        XCTAssertTrue(s.contains("floating reserve pool"))
+        XCTAssertTrue(s.contains("vehicle"))
+    }
+
     func test_post_commit_handoff_failure_toasts_are_non_empty() {
         XCTAssertFalse(MissionRunReserveSwapOperatorCopy.toastReserveSwapPostCommitDisplacedMissionClearFailed.isEmpty)
         XCTAssertFalse(MissionRunReserveSwapOperatorCopy.toastReserveSwapPostCommitVacancyMissionHandoffFailed.isEmpty)

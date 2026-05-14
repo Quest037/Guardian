@@ -308,7 +308,7 @@ private struct MissionRunOperatorRecipePromptExpiryModifier: ViewModifier {
                 let ns = UInt64(min(delay, 24 * 3600) * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: ns)
             }
-            await MainActor.run {
+            _ = await MainActor.run {
                 OperatorPromptCenter.shared.resolveExpiry(for: event)
             }
         }

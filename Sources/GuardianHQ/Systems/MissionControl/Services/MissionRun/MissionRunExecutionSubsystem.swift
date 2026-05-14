@@ -50,6 +50,9 @@ final class MissionRunExecutionSubsystem {
         clearCommandQueue()
         environment.captureExecutionContext(context)
         environment.clearMissionTaskScopedOrchestrationState()
+        environment.clearTaskMissionEndRecoveryAcknowledgements()
+        environment.clearTaskMissionEndAbortAcknowledgements()
+        environment.clearAssignmentSlotLifecycleLanesOnAllRows()
         environment.clearFinishedMissionCycleVehicleIDs()
         environment.clearActiveCycleTasks()
         environment.clearTaskCycleCompletionCounts()
@@ -148,7 +151,7 @@ final class MissionRunExecutionSubsystem {
     ) -> Bool {
         guard let environment else { return false }
         if environment.taskStateByTaskID[taskID] == .executing { return false }
-        environment.systems.scheduling.registerDeferredTaskStartTask(nil, forTaskID: taskID)
+        environment.systems.scheduling.cancelDeferredTaskMissionStartWaiter(forTaskID: taskID)
         environment.systems.scheduling.clearMissionTaskStartDeferral(forTaskID: taskID)
         guard environment.status == .running else { return false }
         guard let mission = context.missionProvider() else {
@@ -586,14 +589,6 @@ final class MissionRunExecutionSubsystem {
             guard let key = assignment.attachedFleetVehicleToken,
                   FleetMissionVehicleToken(storageKey: key) != nil
             else { continue }
-            if let clearGeofence = MissionRunPlannerSubsystem.catalogueGeofenceClearCommand(
-                forAssignment: assignment,
-                issuerKey: MissionRunCommandIssuerKey.runTeardownGeofenceClear
-            ) {
-                environment.appendEvent(
-                    environment.systems.commands.dispatchCommand(clearGeofence, fleetLink: fleetLink, sitl: sitl)
-                )
-            }
             let issued = MissionRunIssuedCommand(
                 assignmentID: assignment.id,
                 slotName: assignment.slotName,
@@ -856,6 +851,15 @@ final class MissionRunExecutionSubsystem {
         environment.captureExecutionContext(context)
         let taskLabel = environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name ?? taskID.uuidString
         let taskLabelForLog = environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name
+        environment.systems.logging.appendLogEvent(
+            level: .info,
+            taskID: taskID,
+            taskLabel: taskLabelForLog,
+            speaker: .missionControl,
+            templateKey: MissionRunLogTemplateKey.missionTaskAbortEndAttemptNoted,
+            templateParams: ["task": taskLabel]
+        )
+        environment.noteMissionTaskEndAttempt(.abortMissionEnd, forTaskID: taskID)
         if Self.commandsContainCatalogueMissionClear(commands) {
             Task { @MainActor [weak self] in
                 guard let self, let environment = self.environment else { return }
@@ -916,14 +920,24 @@ final class MissionRunExecutionSubsystem {
             return false
         }
         environment.captureExecutionContext(context)
-        dispatchCommands(windDown, context: context)
-        environment.markMissionTaskCompleteWindDownIssued(forTaskID: taskID)
-        environment.systems.scheduling.cancelScheduledTaskMissionStarts(forTaskID: taskID)
         let taskLabel = environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name ?? taskID.uuidString
+        let taskLabelForLog = environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name
         environment.systems.logging.appendLogEvent(
             level: .info,
             taskID: taskID,
-            taskLabel: environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name,
+            taskLabel: taskLabelForLog,
+            speaker: .missionControl,
+            templateKey: MissionRunLogTemplateKey.missionTaskRecoveryEndAttemptNoted,
+            templateParams: ["task": taskLabel]
+        )
+        environment.noteMissionTaskEndAttempt(.recoveryMissionEnd, forTaskID: taskID)
+        dispatchCommands(windDown, context: context)
+        environment.markMissionTaskCompleteWindDownIssued(forTaskID: taskID)
+        environment.systems.scheduling.cancelScheduledTaskMissionStarts(forTaskID: taskID)
+        environment.systems.logging.appendLogEvent(
+            level: .info,
+            taskID: taskID,
+            taskLabel: taskLabelForLog,
             speaker: .missionControl,
             templateKey: MissionRunLogTemplateKey.missionTaskCompleteNowDispatched,
             templateParams: ["task": taskLabel]
@@ -931,7 +945,10 @@ final class MissionRunExecutionSubsystem {
         return true
     }
 
-    private func deliverPendingMissionTaskGracefulWindDownsIfNeeded(
+    /// Delivers queued per-task abort/complete wind-downs for any of ``completedCycleTaskIDs`` that have
+    /// ``MissionRunEnvironment/pendingMissionTaskGracefulWindDownKindByTaskID`` set (including whole-run graceful
+    /// armings, which seed one pending row per task).
+    internal func deliverPendingMissionTaskGracefulWindDownsIfNeeded(
         completedCycleTaskIDs: Set<UUID>,
         context: MissionRunExecutionContext
     ) {
@@ -960,6 +977,7 @@ final class MissionRunExecutionSubsystem {
                 }
                 let label = environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name ?? taskID.uuidString
                 let taskLabelForLog = environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name
+                environment.noteMissionTaskEndAttempt(.abortMissionEnd, forTaskID: taskID)
                 if Self.commandsContainCatalogueMissionClear(commands) {
                     Task { @MainActor [weak self] in
                         guard let self, let environment = self.environment else { return }
@@ -1000,6 +1018,7 @@ final class MissionRunExecutionSubsystem {
                     )
                     continue
                 }
+                environment.noteMissionTaskEndAttempt(.recoveryMissionEnd, forTaskID: taskID)
                 dispatchCommands(windDown, context: context)
                 environment.markMissionTaskCompleteWindDownIssued(forTaskID: taskID)
                 environment.systems.scheduling.cancelScheduledTaskMissionStarts(forTaskID: taskID)
@@ -1022,123 +1041,95 @@ final class MissionRunExecutionSubsystem {
     ) -> MissionRunExecutionDecision {
         guard let environment, environment.status == .running else { return .noOp }
         guard let mission = context.missionProvider() else { return .noOp }
-        let activeMissionVehicleIDs = activePrimaryMissionVehicleIDs(
-            mission: mission,
-            restrictToTaskIDs: environment.activeCycleTaskIDs,
-            fleetLink: context.fleetLink,
-            sitl: context.sitl
-        )
-        guard activeMissionVehicleIDs.contains(vehicleID) else { return .noOp }
-        environment.markFinishedMissionCycleVehicleID(vehicleID)
-        let allActiveCyclesFinished = !activeMissionVehicleIDs.isEmpty
-            && activeMissionVehicleIDs.isSubset(of: environment.finishedMissionCycleVehicleIDs)
-        guard allActiveCyclesFinished else { return .progressed }
-        environment.setMissionCycleCount(environment.cyclesCompleted + 1)
-        let completedCycleTaskIDs = environment.activeCycleTaskIDs
-        environment.clearFinishedMissionCycleVehicleIDs()
-        environment.clearActiveCycleTasks()
-        environment.recordTaskCycleCompletions(forTaskIDs: completedCycleTaskIDs)
 
-        if environment.gracefulStopKind != .none {
-            let toDeliver = extractAfterMissionCycleBatchesFromQueue()
-            let commandCount = toDeliver.reduce(0) { $0 + $1.commands.count }
-            let hadQueuedWindDownCommands = commandCount > 0
-            let stopKind = environment.gracefulStopKind
-            let needsClearBarrier = toDeliver.contains { Self.commandsContainCatalogueMissionClear($0.commands) }
-            if needsClearBarrier {
-                Task { @MainActor [weak self] in
-                    guard let self, self.environment != nil else { return }
-                    for batch in toDeliver {
-                        await self.dispatchCommandsRespectingMissionClearBarrier(batch.commands, context: context)
-                    }
-                    if stopKind == .abortAfterCycle {
-                        self.completeRun(
-                            context: context,
-                            templateKey: MissionRunLogTemplateKey.runGracefulAfterCycle,
-                            kind: .operatorStoppedAfterCycle,
-                            skipImplicitReturnToLaunch: hadQueuedWindDownCommands,
-                            operatorWindDown: .abortProtocolPhase
-                        )
-                    } else {
-                        self.completeRun(
-                            context: context,
-                            templateKey: MissionRunLogTemplateKey.runCompleteWindDownAfterCycle,
-                            kind: .operatorCompletedAfterCycle,
-                            skipImplicitReturnToLaunch: hadQueuedWindDownCommands,
-                            operatorWindDown: .recoveryPhase
-                        )
-                    }
-                }
-                return .progressed
+        let activeTasks = environment.activeCycleTaskIDs
+        guard !activeTasks.isEmpty else { return .noOp }
+
+        var touchesActiveTask = false
+        for taskID in activeTasks {
+            let expectedForTask = activePrimaryMissionVehicleIDs(
+                mission: mission,
+                restrictToTaskIDs: Set([taskID]),
+                fleetLink: context.fleetLink,
+                sitl: context.sitl
+            )
+            if expectedForTask.contains(vehicleID) {
+                touchesActiveTask = true
+                break
             }
-            for batch in toDeliver {
-                dispatchCommands(batch.commands, context: context)
-            }
-            let resultKind: MissionRunCompletionKind
-            if stopKind == .abortAfterCycle {
-                completeRun(
-                    context: context,
-                    templateKey: MissionRunLogTemplateKey.runGracefulAfterCycle,
-                    kind: .operatorStoppedAfterCycle,
-                    skipImplicitReturnToLaunch: hadQueuedWindDownCommands,
-                    operatorWindDown: .abortProtocolPhase
-                )
-                resultKind = .operatorStoppedAfterCycle
-            } else {
-                completeRun(
-                    context: context,
-                    templateKey: MissionRunLogTemplateKey.runCompleteWindDownAfterCycle,
-                    kind: .operatorCompletedAfterCycle,
-                    skipImplicitReturnToLaunch: hadQueuedWindDownCommands,
-                    operatorWindDown: .recoveryPhase
-                )
-                resultKind = .operatorCompletedAfterCycle
-            }
-            return .completed(resultKind)
+        }
+        guard touchesActiveTask else { return .noOp }
+
+        var newlyCompletedTaskIDs: Set<UUID> = []
+        for taskID in activeTasks {
+            let expectedForTask = activePrimaryMissionVehicleIDs(
+                mission: mission,
+                restrictToTaskIDs: Set([taskID]),
+                fleetLink: context.fleetLink,
+                sitl: context.sitl
+            )
+            guard !expectedForTask.isEmpty, expectedForTask.contains(vehicleID) else { continue }
+            environment.markFinishedMissionCycleVehicleID(vehicleID, forTaskID: taskID)
+            let recorded = environment.finishedMissionCycleVehicleIDsByTaskID[taskID] ?? []
+            guard expectedForTask.isSubset(of: recorded) else { continue }
+            newlyCompletedTaskIDs.insert(taskID)
         }
 
+        guard !newlyCompletedTaskIDs.isEmpty else { return .progressed }
+
+        environment.setMissionCycleCount(environment.cyclesCompleted + newlyCompletedTaskIDs.count)
+        for taskID in newlyCompletedTaskIDs {
+            environment.clearFinishedMissionCycleVehicleIDs(forTaskID: taskID)
+            environment.removeTaskFromActiveCycle(taskID)
+        }
+        environment.recordTaskCycleCompletions(forTaskIDs: newlyCompletedTaskIDs)
+
         deliverPendingMissionTaskGracefulWindDownsIfNeeded(
-            completedCycleTaskIDs: completedCycleTaskIDs,
+            completedCycleTaskIDs: newlyCompletedTaskIDs,
             context: context
         )
 
-        let nextPlan = planNextAutoCycleStarts(
-            mission: mission,
-            completedCycleTaskIDs: completedCycleTaskIDs,
-            suppressAutostartForTaskIDs: environment.unionedMissionTaskIDsSuppressingAutopilotAutostart(forMission: mission)
-        )
-        if !nextPlan.immediateTaskIDs.isEmpty || !nextPlan.delayedTaskIDs.isEmpty {
-            if !nextPlan.betweenCyclesCommands.isEmpty {
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    guard self.environment != nil else { return }
-                    for issued in nextPlan.betweenCyclesCommands {
-                        await self.dispatchBetweenCyclesIssuedCommandWithOptionalFallback(issued, context: context)
+        let autoCycleRestartSuppressedForMissionEndWindDown =
+            environment.shouldSuppressBetweenCycleAutostartForMissionEndWindDown()
+        if !autoCycleRestartSuppressedForMissionEndWindDown {
+            let nextPlan = planNextAutoCycleStarts(
+                mission: mission,
+                completedCycleTaskIDs: newlyCompletedTaskIDs,
+                suppressAutostartForTaskIDs: environment.unionedMissionTaskIDsSuppressingAutopilotAutostart(forMission: mission)
+            )
+            if !nextPlan.immediateTaskIDs.isEmpty || !nextPlan.delayedTaskIDs.isEmpty {
+                if !nextPlan.betweenCyclesCommands.isEmpty {
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        guard self.environment != nil else { return }
+                        for issued in nextPlan.betweenCyclesCommands {
+                            await self.dispatchBetweenCyclesIssuedCommandWithOptionalFallback(issued, context: context)
+                        }
+                        self.startPlannedImmediateCycleTasks(
+                            immediateTaskIDs: nextPlan.immediateTaskIDs,
+                            mission: mission,
+                            context: context
+                        )
+                        self.scheduleAutoCycleDelayedStartsForPlannedCycle(
+                            delayedTaskIDs: nextPlan.delayedTaskIDs,
+                            mission: mission,
+                            context: context
+                        )
                     }
-                    self.startPlannedImmediateCycleTasks(
-                        immediateTaskIDs: nextPlan.immediateTaskIDs,
-                        mission: mission,
-                        context: context
-                    )
-                    self.scheduleAutoCycleDelayedStartsForPlannedCycle(
-                        delayedTaskIDs: nextPlan.delayedTaskIDs,
-                        mission: mission,
-                        context: context
-                    )
+                    return .progressed
                 }
+                startPlannedImmediateCycleTasks(
+                    immediateTaskIDs: nextPlan.immediateTaskIDs,
+                    mission: mission,
+                    context: context
+                )
+                scheduleAutoCycleDelayedStartsForPlannedCycle(
+                    delayedTaskIDs: nextPlan.delayedTaskIDs,
+                    mission: mission,
+                    context: context
+                )
                 return .progressed
             }
-            startPlannedImmediateCycleTasks(
-                immediateTaskIDs: nextPlan.immediateTaskIDs,
-                mission: mission,
-                context: context
-            )
-            scheduleAutoCycleDelayedStartsForPlannedCycle(
-                delayedTaskIDs: nextPlan.delayedTaskIDs,
-                mission: mission,
-                context: context
-            )
-            return .progressed
         }
 
         if !missionHasOnlyBoundedTasks(mission) {
@@ -1147,17 +1138,112 @@ final class MissionRunExecutionSubsystem {
                 speaker: .missionControl,
                 templateKey: MissionRunLogTemplateKey.missionRunningUnboundedRegularity
             )
+            // Whole-run “after cycle” uses ``gracefulStopKind``; per-task graceful complete also suppresses autostart
+            // via issued/pending markers — do **not** treat the latter as “last autopilot cycle for the whole run”.
+            if environment.gracefulStopKind != .none,
+               autoCycleRestartSuppressedForMissionEndWindDown,
+               environment.activeCycleTaskIDs.isEmpty {
+                return finalizeWholeRunGracefulAfterLastAutopilotCycle(context: context)
+            }
             return .progressed
         }
 
+        if !autoCycleRestartSuppressedForMissionEndWindDown {
+            if allBoundedRepeatingTasksFinishedWithNoActiveInFlightCycle(environment: environment, mission: mission) {
+                completeRun(
+                    context: context,
+                    templateKey: MissionRunLogTemplateKey.runOneOffFinished,
+                    kind: .oneOffAutopilotFinished,
+                    skipImplicitReturnToLaunch: false,
+                    operatorWindDown: .recoveryPhase
+                )
+                return .completed(.oneOffAutopilotFinished)
+            }
+        } else if environment.gracefulStopKind != .none, environment.activeCycleTaskIDs.isEmpty {
+            return finalizeWholeRunGracefulAfterLastAutopilotCycle(context: context)
+        }
+
+        return .progressed
+    }
+
+    /// Whole-run “after cycle” stop: once no task is still inside an in-flight autopilot cycle, end the run the same way
+    /// the legacy single queued batch did (optional mission-clear barrier, then ``completeRun``).
+    private func finalizeWholeRunGracefulAfterLastAutopilotCycle(
+        context: MissionRunExecutionContext
+    ) -> MissionRunExecutionDecision {
+        guard let environment else { return .progressed }
+        let toDeliver = extractAfterMissionCycleBatchesFromQueue()
+        let commandCount = toDeliver.reduce(0) { $0 + $1.commands.count }
+        let hadQueuedWindDownCommands = commandCount > 0
+        let stopKind = environment.gracefulStopKind
+        let needsClearBarrier = toDeliver.contains { Self.commandsContainCatalogueMissionClear($0.commands) }
+        if needsClearBarrier {
+            Task { @MainActor [weak self] in
+                guard let self, self.environment != nil else { return }
+                for batch in toDeliver {
+                    await self.dispatchCommandsRespectingMissionClearBarrier(batch.commands, context: context)
+                }
+                if stopKind == .abortAfterCycle {
+                    self.completeRun(
+                        context: context,
+                        templateKey: MissionRunLogTemplateKey.runGracefulAfterCycle,
+                        kind: .operatorStoppedAfterCycle,
+                        skipImplicitReturnToLaunch: hadQueuedWindDownCommands,
+                        operatorWindDown: .abortProtocolPhase
+                    )
+                } else {
+                    self.completeRun(
+                        context: context,
+                        templateKey: MissionRunLogTemplateKey.runCompleteWindDownAfterCycle,
+                        kind: .operatorCompletedAfterCycle,
+                        skipImplicitReturnToLaunch: hadQueuedWindDownCommands,
+                        operatorWindDown: .recoveryPhase
+                    )
+                }
+            }
+            return .progressed
+        }
+        for batch in toDeliver {
+            dispatchCommands(batch.commands, context: context)
+        }
+        if stopKind == .abortAfterCycle {
+            completeRun(
+                context: context,
+                templateKey: MissionRunLogTemplateKey.runGracefulAfterCycle,
+                kind: .operatorStoppedAfterCycle,
+                skipImplicitReturnToLaunch: hadQueuedWindDownCommands,
+                operatorWindDown: .abortProtocolPhase
+            )
+            return .completed(.operatorStoppedAfterCycle)
+        }
         completeRun(
             context: context,
-            templateKey: MissionRunLogTemplateKey.runOneOffFinished,
-            kind: .oneOffAutopilotFinished,
-            skipImplicitReturnToLaunch: false,
+            templateKey: MissionRunLogTemplateKey.runCompleteWindDownAfterCycle,
+            kind: .operatorCompletedAfterCycle,
+            skipImplicitReturnToLaunch: hadQueuedWindDownCommands,
             operatorWindDown: .recoveryPhase
         )
-        return .completed(.oneOffAutopilotFinished)
+        return .completed(.operatorCompletedAfterCycle)
+    }
+
+    /// True when every enabled task is a **finite** continuous / continuous-with-delay path, every such task has reached
+    /// its configured cycle cap, and no task is still in the in-flight autopilot cycle set (others may be in deferral).
+    private func allBoundedRepeatingTasksFinishedWithNoActiveInFlightCycle(
+        environment: MissionRunEnvironment,
+        mission: Mission
+    ) -> Bool {
+        guard missionHasOnlyBoundedTasks(mission) else { return false }
+        guard environment.activeCycleTaskIDs.isEmpty else { return false }
+        for task in mission.routeMacro.tasks where task.enabled {
+            switch task.regularity {
+            case .continuous, .continuousWithDelay:
+                let done = environment.taskCyclesCompletedByTaskID[task.id] ?? 0
+                if done < task.cycles { return false }
+            case .onceAtStart, .operatorTriggered:
+                break
+            }
+        }
+        return true
     }
 
     private func missionHasOnlyBoundedTasks(_ mission: Mission) -> Bool {
@@ -1521,6 +1607,8 @@ final class MissionRunExecutionSubsystem {
 
     private func buildPrimaryMissionPass(mission: Mission, explicitTaskId: UUID? = nil) -> TaskMissionLaunchPass {
         guard let environment else { return TaskMissionLaunchPass(events: [], immediateCommands: [], queuedBatches: []) }
+        let fleetLink = environment.fleetLink
+        let sitl = environment.sitl
         var events: [MissionRunEvent] = []
         var immediateCommands: [MissionRunIssuedCommand] = []
         var queuedBatches: [MissionRunQueuedCommandBatch] = []
@@ -1584,8 +1672,40 @@ final class MissionRunExecutionSubsystem {
             }
             let geofencePolygonsJSON: String
             do {
+                let hubForPx4Filter: FleetHubVehicleTelemetry? = {
+                    guard let fleetLink, let sitl,
+                          let token = FleetMissionVehicleToken(storageKey: tokenKey),
+                          let vehicleID = resolvedFleetStreamVehicleID(token: token, fleetLink: fleetLink, sitl: sitl)
+                    else { return nil }
+                    return fleetLink.hubTelemetry(forVehicleID: vehicleID)
+                }()
+                let px4FilterHome = MissionGeofenceMavsdkGeofenceUtilities.px4GeofenceFilterHome(
+                    routeMacroHome: mission.routeMacro.home?.coord,
+                    hub: hubForPx4Filter
+                )
+                let (geofencesForPx4, omittedPx4Inclusions) = MissionGeofenceMavsdkGeofenceUtilities.fencesFilteredForPX4GeofenceUpload(
+                    fences: squad.effectiveGeofencesForSquad,
+                    home: px4FilterHome
+                )
+                if omittedPx4Inclusions > 0 {
+                    let pc = MissionControlTaskTagName.taskContext(for: squad.squad.primaryAssignment, mission: mission)
+                    events.append(
+                        MissionRunEvent(
+                            level: .warning,
+                            taskID: pc?.id,
+                            taskLabel: pc?.label,
+                            speaker: .missionControl,
+                            templateKey: MissionRunLogTemplateKey.missionGeofencePx4InclusionFencesOmitted,
+                            templateParams: [
+                                "count": String(omittedPx4Inclusions),
+                                "slot": squad.squad.primaryAssignment.slotName,
+                                "slotID": squad.squad.primaryAssignment.id.uuidString,
+                            ]
+                        )
+                    )
+                }
                 geofencePolygonsJSON = try MissionGeofenceMavsdkGeofenceUtilities.encodeGeofencePolygonsJSON(
-                    forGeofences: squad.effectiveGeofencesForSquad
+                    forGeofences: geofencesForPx4
                 )
             } catch {
                 let pc = MissionControlTaskTagName.taskContext(for: squad.squad.primaryAssignment, mission: mission)
@@ -1746,6 +1866,7 @@ extension MissionRunLogTemplateKey {
     static let missionNotStartedNoPrimaries = "missioncontrol.mre.mission.not_started_no_primaries"
     static let missionPlanItemsEncodeFailed = "missioncontrol.mre.mission.plan_items_encode_failed"
     static let missionGeofencePolygonsEncodeFailed = "missioncontrol.mre.mission.geofence_polygons_encode_failed"
+    static let missionGeofencePx4InclusionFencesOmitted = "missioncontrol.mre.mission.geofence_px4_inclusion_fences_omitted"
     static let missionExecuting = "missioncontrol.mre.mission.executing"
     static let startMissionTaskSkippedPhase = "missioncontrol.mre.mission.start_skipped_phase"
     static let startMissionTaskNoDispatchContext = "missioncontrol.mre.mission.start_no_dispatch_context"
@@ -1758,7 +1879,9 @@ extension MissionRunLogTemplateKey {
     static let missionTaskAbortGracefulSkippedNoSlots = "missioncontrol.mre.mission.task_abort_graceful_skipped_no_slots"
     static let missionTaskCompleteGracefulSkippedNoSlots = "missioncontrol.mre.mission.task_complete_graceful_skipped_no_slots"
     static let missionTaskAbortSkippedNoCommands = "missioncontrol.mre.mission.task_abort_skipped_no_commands"
+    static let missionTaskAbortEndAttemptNoted = "missioncontrol.mre.mission.task_abort_end_attempt_noted"
     static let missionTaskCompleteSkippedNoCommands = "missioncontrol.mre.mission.task_complete_skipped_no_commands"
+    static let missionTaskRecoveryEndAttemptNoted = "missioncontrol.mre.mission.task_recovery_end_attempt_noted"
     static let missionTaskAbortNowDispatched = "missioncontrol.mre.mission.task_abort_now_dispatched"
     static let missionTaskCompleteNowDispatched = "missioncontrol.mre.mission.task_complete_now_dispatched"
     static let missionTaskAbortGracefulSkippedNoCommands = "missioncontrol.mre.mission.task_abort_graceful_skipped_no_commands"

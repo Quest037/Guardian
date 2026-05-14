@@ -135,6 +135,24 @@ struct MissionWorkspaceGeofenceEditDrawer: View {
                             }
                         }
 
+                        VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+                            Text("Altitude envelope")
+                                .font(GuardianTypography.font(.subsectionTitleSemibold))
+                                .foregroundStyle(theme.textPrimary)
+                            Text(
+                                "Vertical band for this fence (meters). Stored on the fence, not the whole mission."
+                            )
+                            .font(GuardianTypography.font(.denseCaption12Regular))
+                            .foregroundStyle(theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                            MissionGeofenceAltitudeEnvelopeSection(
+                                fence: fb,
+                                formLabelColumn: formLabelColumn
+                            )
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
                         GuardianLabeledFormField(
                             label: "Scope",
                             subtitle: "Mission-wide applies to every task; task-scoped applies only while that task runs.",

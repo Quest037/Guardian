@@ -90,7 +90,7 @@ struct PaladinIssuedCommand: Equatable {
 }
 
 @MainActor
-/// Per-run Mission Control assistant. Task **attempting** (``MissionRunEnvironment/taskAttemptingByTaskID`` / ``MissionTaskAttemptState``) co-refreshes with ``taskStateByTaskID``; read that map when Paladin needs protocol intent distinct from settled ``MissionTaskState``.
+/// Per-run Mission Control assistant. Task **attempting** (``MissionRunEnvironment/taskAttemptingByTaskID`` / ``MissionTaskAttemptState``) mirrors ``taskMissionEndAttemptByTaskID`` (set before wind-down dispatch); read that map when Paladin needs protocol intent distinct from settled ``MissionTaskState``.
 final class PaladinMissionAssistant {
     /// RGB card **background** for Paladin-originated **operator prompts** (MC-R / Decisions). Owned by the plugin — Mission Control must never hardcode this value.
     nonisolated static let operatorPromptCardBackgroundHex6 = "b996d3"

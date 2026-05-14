@@ -11,6 +11,38 @@ struct MissionGeofenceGeometryUtilities: Sendable {
         vertices.count < 3
     }
 
+    /// Horizontal **point-in-polygon** on a small AOI: projects to a local tangent plane (centroid origin), then ray-casts.
+    ///
+    /// - Note: Duplicate closing vertex (first == last) is treated as one corner; an open ring is closed implicitly for edge tests.
+    func pointInsidePolygonHorizontallyWGS84(point: RouteCoordinate, polygonVertices: [RouteCoordinate]) -> Bool {
+        guard polygonVertices.count >= 3 else { return false }
+        let lat0 = polygonVertices.map(\.lat).reduce(0, +) / Double(polygonVertices.count)
+        let lon0 = polygonVertices.map(\.lon).reduce(0, +) / Double(polygonVertices.count)
+        let mPerLon = Self.earthMetersPerDegreeLat * cos(lat0 * .pi / 180.0)
+        func toXY(_ v: RouteCoordinate) -> (x: Double, y: Double) {
+            ((v.lon - lon0) * mPerLon, (v.lat - lat0) * Self.earthMetersPerDegreeLat)
+        }
+        let ring = polygonVertices.map(toXY)
+        let p = toXY(point)
+        let n = ring.count
+        var inside = false
+        var j = n - 1
+        for i in 0..<n {
+            let xi = ring[i].x, yi = ring[i].y
+            let xj = ring[j].x, yj = ring[j].y
+            let dy = yj - yi
+            if abs(dy) < 1e-18 {
+                j = i
+                continue
+            }
+            if (yi > p.y) != (yj > p.y), p.x < (xj - xi) * (p.y - yi) / dy + xi {
+                inside.toggle()
+            }
+            j = i
+        }
+        return inside
+    }
+
     /// `true` when **non-adjacent** edges intersect in the local meter plane (bow-tie / hourglass rings).
     ///
     /// - Returns `false` when there are fewer than three vertices.

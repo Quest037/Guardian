@@ -155,6 +155,13 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
   - Functionality to select a new vehicle for a roster slot (empty)
   - Functionality to switch a vehicle for a roster slot
 
+- **Squads:**
+  - Permanent Delay (delay squads cycles permanently until manually restated)
+
+- **MissionCleanUp:**
+  - Prompts firing after mission has moved into .setup again
+    - I understand why this is happening, but it's not ideal
+
 #### Squads
 - **Formations:** 
   - allow user to define a formation for the Squad to use. This overrides pattern behaviour. (see ```SquadFollow&Formation.md```)

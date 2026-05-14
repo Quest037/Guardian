@@ -3,6 +3,11 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+private struct MissionControlGridDeleteRunCandidate: Identifiable, Equatable {
+    let id: UUID
+    let missionName: String
+}
+
 struct MissionControlView: View {
     @ObservedObject var missionStore: MissionStore
     @ObservedObject var controlStore: MissionControlStore
@@ -14,6 +19,7 @@ struct MissionControlView: View {
 
     @State private var selectedRunID: UUID?
     @State private var showingAddRunSheet = false
+    @State private var gridDeleteConfirm: MissionControlGridDeleteRunCandidate?
     /// Captured with ``pendingMissionControlRunID`` before ``consumeMissionControlDrillIn()`` clears the focus controller (Live Drive return / Decisions drill-in).
     @State private var pendingPostOpenLiveMissionTaskID: UUID?
     /// Live Drive return: open MC‑R with this roster assignment focused (vehicle overlay).
@@ -36,7 +42,7 @@ struct MissionControlView: View {
                     onUpdate: { controlStore.updateRun($0) },
                     onStart: { run in
                         controlStore.updateRun(run)
-                        let mission = missionStore.missions.first { $0.id == run.missionId }
+                        let mission = run.template ?? missionStore.missions.first { $0.id == run.missionId }
                         controlStore.startRun(
                             id: run.id,
                             mission: mission,
@@ -45,7 +51,14 @@ struct MissionControlView: View {
                             missionsProvider: { missionStore.missions }
                         )
                     },
-                    onDelete: { controlStore.deleteRun(id: $0) },
+                    onDelete: { id in
+                        await controlStore.deleteRun(
+                            id: id,
+                            fleetLink: fleetLink,
+                            sitl: sitl,
+                            generalSettings: generalSettings
+                        )
+                    },
                     pendingPostOpenLiveMissionTaskID: $pendingPostOpenLiveMissionTaskID,
                     pendingPostOpenLiveMissionAssignmentID: $pendingPostOpenLiveMissionAssignmentID
                 )
@@ -55,6 +68,30 @@ struct MissionControlView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.backgroundBase)
+        .guardianConfirmOverlay(item: $gridDeleteConfirm, dialog: { candidate in
+            GuardianConfirmDanger(
+                title: "Delete “\(candidate.missionName)”?",
+                message: "Removes the run from Mission Control. Linked simulators and mission state are cleared when needed. The mission template is not deleted.",
+                cancelTitle: "Cancel",
+                confirmTitle: "Delete run",
+                onCancel: { gridDeleteConfirm = nil },
+                onConfirm: {
+                    let runID = candidate.id
+                    gridDeleteConfirm = nil
+                    Task { @MainActor in
+                        await controlStore.deleteRun(
+                            id: runID,
+                            fleetLink: fleetLink,
+                            sitl: sitl,
+                            generalSettings: generalSettings
+                        )
+                        if selectedRunID == runID {
+                            selectedRunID = nil
+                        }
+                    }
+                }
+            )
+        })
         .onAppear {
             // ``MissionControlView`` is recreated when switching from Live Drive (or other tabs).
             // Drill-in fields may already be non-nil before this instance exists, so ``onChange`` alone misses them.
@@ -144,16 +181,39 @@ struct MissionControlView: View {
                         spacing: GuardianSpacing.sm
                     ) {
                         ForEach(controlStore.runs) { run in
-                            Button {
-                                selectedRunID = run.id
-                            } label: {
+                            ZStack(alignment: .topTrailing) {
                                 MissionRunCard(
                                     run: run,
-                                    mission: missionStore.missions.first { $0.id == run.missionId },
+                                    mission: run.template ?? missionStore.missions.first { $0.id == run.missionId },
                                     isSelected: selectedRunID == run.id
                                 )
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    selectedRunID = run.id
+                                }
+
+                                GuardianThemedButton(
+                                    accent: .danger,
+                                    surface: .outline,
+                                    size: .small,
+                                    shape: .cornered,
+                                    contentSizing: .squareToolbarCell,
+                                    action: {
+                                        gridDeleteConfirm = MissionControlGridDeleteRunCandidate(
+                                            id: run.id,
+                                            missionName: run.missionName
+                                        )
+                                    },
+                                    label: {
+                                        Image(systemName: "trash")
+                                            .font(GuardianTypography.font(.sectionHeadingSemibold))
+                                    }
+                                )
+                                .help("Delete run")
+                                .accessibilityLabel("Delete run")
+                                .guardianPointerOnHover()
+                                .padding(GuardianSpacing.xs)
                             }
-                            .buttonStyle(GuardianPointerPlainButtonStyle())
                         }
                     }
                     .padding(GuardianSpacing.md)

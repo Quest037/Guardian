@@ -378,6 +378,7 @@ struct GuardianMapView: View {
     var onGeofencePolygonVertexMoved: (UUID, Int, Double, Double) -> Void
     var onGeofencePolygonTranslated: (UUID, Double, Double) -> Void
     var onGeofencePolygonEdgeInsert: (UUID, Int, Double, Double) -> Void
+    var onGeofencePolygonVertexDelete: (UUID, Int) -> Void
 
     init(
         model: GuardianMapModel,
@@ -405,7 +406,8 @@ struct GuardianMapView: View {
         onGeofenceCircleRadiusMoved: @escaping (UUID, Double) -> Void = { _, _ in },
         onGeofencePolygonVertexMoved: @escaping (UUID, Int, Double, Double) -> Void = { _, _, _, _ in },
         onGeofencePolygonTranslated: @escaping (UUID, Double, Double) -> Void = { _, _, _ in },
-        onGeofencePolygonEdgeInsert: @escaping (UUID, Int, Double, Double) -> Void = { _, _, _, _ in }
+        onGeofencePolygonEdgeInsert: @escaping (UUID, Int, Double, Double) -> Void = { _, _, _, _ in },
+        onGeofencePolygonVertexDelete: @escaping (UUID, Int) -> Void = { _, _ in }
     ) {
         self.model = model
         self.toolbar = toolbar
@@ -433,6 +435,7 @@ struct GuardianMapView: View {
         self.onGeofencePolygonVertexMoved = onGeofencePolygonVertexMoved
         self.onGeofencePolygonTranslated = onGeofencePolygonTranslated
         self.onGeofencePolygonEdgeInsert = onGeofencePolygonEdgeInsert
+        self.onGeofencePolygonVertexDelete = onGeofencePolygonVertexDelete
     }
 
     var body: some View {
@@ -481,7 +484,8 @@ struct GuardianMapView: View {
                 onGeofenceCircleRadiusMoved: onGeofenceCircleRadiusMoved,
                 onGeofencePolygonVertexMoved: onGeofencePolygonVertexMoved,
                 onGeofencePolygonTranslated: onGeofencePolygonTranslated,
-                onGeofencePolygonEdgeInsert: onGeofencePolygonEdgeInsert
+                onGeofencePolygonEdgeInsert: onGeofencePolygonEdgeInsert,
+                onGeofencePolygonVertexDelete: onGeofencePolygonVertexDelete
             )
 
             if toolbar.hasAnyVisibleButton {
@@ -641,17 +645,19 @@ extension Mission {
     /// - When ``respectMapTaskIsolation`` is true and ``MissionRunOperatorDisplaySettings/isolateLiveMapToSelectedTask`` is on, draws **mission-level** fences plus only the **focused** task’s fences; if no task is focused, mission-level only.
     /// - When isolation is off or ``respectMapTaskIsolation`` is false, draws mission-level plus **all** task fences.
     /// - When ``run`` is non-`nil`, merges **run-only** augmentation after template geometry: ``MissionRunPolicies/missionGeofenceAugmentation`` (mission-wide), ``MissionRunEnvironment/taskGeofenceAugmentationsByTaskID`` (per task), and ``MissionRunAssignmentPolicies/geofenceAugmentation`` for roster rows mapped to each task (union of all slots on that task).
+    /// - Parameter mapSelectionFenceID: When non-`nil`, marks that template or augmentation fence as the authoring selection on the map (Mission workspace / MCS staging).
     @MainActor
     func geofenceGuardianMapOverlaysForMissionControl(
         operatorSettings: MissionRunOperatorDisplaySettings,
         mapFocusedTaskID: UUID?,
         respectMapTaskIsolation: Bool = true,
-        run: MissionRunEnvironment? = nil
+        run: MissionRunEnvironment? = nil,
+        mapSelectionFenceID: UUID? = nil
     ) -> [GuardianGeofenceMapOverlay] {
         guard operatorSettings.showMissionGeofencesOnMap else { return [] }
         let missionWideAug = run?.policies.missionGeofenceAugmentation ?? []
         let missionBase = missionGeofences + missionWideAug
-        let missionPart = missionBase.compactMap { $0.asGuardianMapOverlay(mapSelectionFenceID: nil) }
+        let missionPart = missionBase.compactMap { $0.asGuardianMapOverlay(mapSelectionFenceID: mapSelectionFenceID) }
 
         func slotAugmentationUnion(forTaskID taskID: UUID) -> [MissionGeofence] {
             guard let run else { return [] }
@@ -669,11 +675,11 @@ extension Mission {
                 return missionPart
             }
             let taskBody = task.geofences + (perTaskRunAug[tid] ?? []) + slotAugmentationUnion(forTaskID: tid)
-            return missionPart + taskBody.compactMap { $0.asGuardianMapOverlay(mapSelectionFenceID: nil) }
+            return missionPart + taskBody.compactMap { $0.asGuardianMapOverlay(mapSelectionFenceID: mapSelectionFenceID) }
         }
         let allTaskFences = routeMacro.tasks.flatMap { t in
             t.geofences + (perTaskRunAug[t.id] ?? []) + slotAugmentationUnion(forTaskID: t.id)
         }
-        return missionPart + allTaskFences.compactMap { $0.asGuardianMapOverlay(mapSelectionFenceID: nil) }
+        return missionPart + allTaskFences.compactMap { $0.asGuardianMapOverlay(mapSelectionFenceID: mapSelectionFenceID) }
     }
 }

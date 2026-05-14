@@ -496,8 +496,8 @@ enum FleetVehicleCoreCommandRegistrations {
         // Mission items are passed through as a JSON string under `missionItemsJSON`
         // because the catalogue's parameter schema only supports scalar values. The
         // shared converter helper decodes the JSON into `[Mavsdk.Mission.MissionItem]`
-        // and the stack converters produce `[.uploadMission(items:)]`, optionally
-        // prefixed by `[.uploadGeofence(polygons:)]` when `geofencePolygonsJSON` is present
+        // and the stack converters produce `[.uploadMission(items:)]`, optionally followed by
+        // `[.clearGeofence, .uploadGeofence(_:)]` when `geofencePolygonsJSON` is present
         // and decodes to a non-empty polygon list.
         //
         // Scope: this command is the **upload step only** (mirrors MAVSDK
@@ -507,7 +507,7 @@ enum FleetVehicleCoreCommandRegistrations {
         FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
             name: .fleetVehicleDoMissionUpload,
             humanLabel: "Upload mission",
-            humanDescription: "Upload a list of mission items to the autopilot's Mission plugin and reset the current item to the first waypoint. Atomic upload only — does not arm or start the mission. Optional `geofencePolygonsJSON` (same shape as `do.geofence.upload`) uploads geofences **before** the mission when non-empty.",
+            humanDescription: "Upload a list of mission items to the autopilot's Mission plugin and reset the current item to the first waypoint. Atomic upload only — does not arm or start the mission. Optional `geofencePolygonsJSON` (same shapes as `do.geofence.upload`: legacy polygon array or `{ \"polygons\", \"circles\" }`, horizontal geometry only) clears any existing onboard geofence plan then uploads the new geofence plan **after** a successful mission upload when non-empty.",
             parameters: [
                 FleetCommandParameterDeclaration(
                     name: "missionItemsJSON",
@@ -519,7 +519,7 @@ enum FleetVehicleCoreCommandRegistrations {
                     name: "geofencePolygonsJSON",
                     type: .string,
                     required: false,
-                    humanLabel: "Geofence polygons (JSON array)"
+                    humanLabel: "Geofence plan (JSON: polygons and/or circles)"
                 ),
             ],
             declaredResponseKinds: FleetCommandDeclaredResponseKinds.standardDo.adding(
@@ -538,13 +538,13 @@ enum FleetVehicleCoreCommandRegistrations {
         FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
             name: .fleetVehicleDoGeofenceUpload,
             humanLabel: "Upload geofence",
-            humanDescription: "Upload geofence polygons to the autopilot (`Geofence.uploadGeofence`). Replaces the onboard geofence plan. Pass polygons as JSON array under `geofencePolygonsJSON` (same encoding as the optional companion field on `do.mission.upload`).",
+            humanDescription: "Upload geofence plan to the autopilot (`Geofence.uploadGeofence` with `GeofenceData`). Replaces the onboard geofence plan. Pass JSON under `geofencePolygonsJSON`: legacy array of polygon-only objects, or an object `{ \"polygons\": [...], \"circles\": [...] }`. Each polygon has `fence_type` and `points`; each circle has `fence_type`, `latitude_deg`, `longitude_deg`, and `radius_meters` (horizontal geometry only).",
             parameters: [
                 FleetCommandParameterDeclaration(
                     name: "geofencePolygonsJSON",
                     type: .string,
                     required: true,
-                    humanLabel: "Geofence polygons (JSON array)"
+                    humanLabel: "Geofence plan (JSON: polygons and/or circles)"
                 ),
             ],
             declaredResponseKinds: kinds,
@@ -706,7 +706,7 @@ enum FleetVehicleCoreCommandRegistrations {
         FleetCommandsCatalogue.shared.register(FleetCommandDescriptor(
             name: .fleetVehicleDoMissionUploadStart,
             humanLabel: "Upload, arm, then start mission",
-            humanDescription: "Composite: uploads `missionItemsJSON` (and optional `geofencePolygonsJSON` on the upload child), arms (`do.arm`), then starts mission execution (`do.mission.start`). Same parameters as upload — extra keys are ignored by the arm step.",
+            humanDescription: "Composite: uploads `missionItemsJSON` (and optional `geofencePolygonsJSON` on the upload child — **mission items first, then clear geofence, then upload geofence** inside `do.mission.upload`), arms (`do.arm`), then starts mission execution (`do.mission.start`). Same parameters as upload — extra keys are ignored by the arm step.",
             parameters: [
                 FleetCommandParameterDeclaration(
                     name: "missionItemsJSON",

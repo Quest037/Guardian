@@ -208,6 +208,13 @@ struct MissionControlRosterSlotCard: View {
                     .font(GuardianTypography.font(.denseCaption10Regular))
                     .foregroundStyle(theme.textSecondary)
                     .lineLimit(2)
+                if missionControlShowsSlotStateBadge {
+                    Text("No vehicle on this row — use Choose or Sim to bind this slot for mission policy while the run is live.")
+                        .font(GuardianTypography.font(.denseCaption10Regular))
+                        .foregroundStyle(theme.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityLabel("Empty roster slot: bind a fleet vehicle or simulator for mission policy during this live run.")
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -261,7 +268,12 @@ struct MissionControlRosterSlotCard: View {
                         .lineLimit(2)
                     if missionControlShowsSlotStateBadge,
                        let sev = missionControlMergedSlotDisplayState.missionControlRosterBadgeSeverity {
-                        MissionControlRosterSlotAttentionCapsule(severity: sev, title: missionControlMergedSlotDisplayState.displayTitle)
+                        MissionControlRosterSlotAttentionCapsule(
+                            severity: sev,
+                            title: missionControlMergedSlotDisplayState.displayTitle,
+                            help: missionControlMergedSlotDisplayState.rosterSlotChipHelp,
+                            compactMetrics: false
+                        )
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -448,16 +460,22 @@ enum MissionRunSetupTab: String, CaseIterable, Identifiable, Hashable {
 enum MissionControlSetupRostersSidebarTab: String, CaseIterable, Identifiable {
     case tasks
     case points
+    case fences
     var id: String { rawValue }
     var title: String {
         switch self {
         case .tasks: "Tasks"
         case .points: "Points"
+        case .fences: "Fences"
         }
     }
 }
 
 /// Inputs that affect roster staging map mission-point chrome (toolbar arm, hit testing, geometry placement flag).
+///
+/// **Geofence selection / template topology / “show fences”** intentionally **omit** here so add/delete/edit fence
+/// and fence list selection do not cancel the staging map ``.task(id:)`` (which would refit bounds and reset the map).
+/// Those drive ``setupStagingMapMarkerCoordinateDigest`` → ``pushSetupStagingMapMarkersOnly()`` instead.
 struct MissionControlSetupRosterStagingMissionPointChrome: Equatable {
     let listTab: MissionControlSetupRostersSidebarTab
     let selectedPointID: UUID?
@@ -466,6 +484,9 @@ struct MissionControlSetupRosterStagingMissionPointChrome: Equatable {
 /// Stable inputs for ``MissionRunDetailView`` staging map `.task(id:)` — **excludes** live lat/lon so fleet
 /// telemetry / ``FleetLinkService/applySimState`` cannot invalidate the task every frame (which breaks Leaflet drag
 /// and triggers “onChange … multiple times per frame”). Coordinate-only updates use ``setupStagingMapMarkerCoordinateDigest``.
+///
+/// **Geofence template topology, run augmentation topology, fence selection, fences visibility, and geofence coordinates**
+/// are excluded so MCS fence edits use marker-only pushes (preserve map zoom/pan). See ``setupStagingMapMarkerCoordinateDigest``.
 struct SetupStagingMapStructureIdentity: Equatable {
     let missionID: UUID?
     let homeCoord: RouteCoordinate?
@@ -484,10 +505,6 @@ struct SetupStagingMapStructureIdentity: Equatable {
     let mcsReservePoolHomePlacementTaskID: UUID?
     /// Selected floating-reserve pool berth on the MCS staging map (``taskID`` + ``slotID`` signature for ``MissionControlReservePoolMapMarkerID``).
     let stagingReservePoolBerthSelectionSignature: String
-    /// Mirrors ``MissionRunOperatorDisplaySettings/showMissionGeofencesOnMap`` for staging geofence layers.
-    let showMissionGeofencesOnMap: Bool
-    let missionGeofenceTemplateTopologySignature: String
-    let missionControlRunGeofenceAugmentationTopologySignature: String
 }
 
 /// MCS staging SITL drag: optimistic map pose until hub telemetry **stably** matches or ``MissionControlSetupSimDragOverlayPolicy/pendingSyncTimeoutSeconds`` elapses.
@@ -502,13 +519,21 @@ private struct MissionControlSetupRosterMissionPointDeleteCandidate: Identifiabl
     let id: UUID
 }
 
+private struct MissionControlSetupRosterGeofenceDeleteCandidate: Identifiable, Equatable {
+    let id: UUID
+}
+
+private struct MissionControlLiveRuntimeGeofenceDeleteCandidate: Identifiable, Equatable {
+    let id: UUID
+}
+
 /// MC Setup roster: confirm before bulk-spawn SIMs (one task or entire mission).
 enum MissionRunBulkSpawnSimsConfirmKind: Equatable {
     case singleTask(UUID)
     case allMissionSlots
 }
 
-/// While a bulk spawn is running, all wands stay disabled and one slot shows the spinner.
+/// While a bulk spawn is running, all spawn controls stay disabled and one slot shows the spinner.
 enum MissionRunBulkSimSpawnBusyKind: Equatable {
     case singleTask(UUID)
     case allMissionSlots
@@ -523,6 +548,8 @@ private enum MissionRunPresentedConfirm: Identifiable, Equatable {
     case bulkSpawnSims(MissionRunBulkSpawnSimsConfirmKind)
     /// MC-R: confirm floating **pool** berth chosen in ``liveReserveSwapPick`` before ``MissionRunEnvironment/swapRosterAssignmentWithFloatingReservePoolSlot``.
     case reserveSwapPoolPick(vacancyAssignmentID: UUID, taskID: UUID, poolSlotID: UUID)
+    /// MCS: bind a fleet row whose granular class does not match the template slot under ``FleetVehicleSubstitutionPolicy/missionRunReserveSwap``.
+    case rosterVehicleClassMismatchBind(assignmentId: UUID, vehicleTokenKey: String)
 
     var id: String {
         switch self {
@@ -536,6 +563,8 @@ private enum MissionRunPresentedConfirm: Identifiable, Equatable {
             }
         case .reserveSwapPoolPick(let vacancy, let task, let slot):
             "reserveSwap.\(vacancy.uuidString).\(task.uuidString).\(slot.uuidString)"
+        case .rosterVehicleClassMismatchBind(let assignmentId, let vehicleTokenKey):
+            "rosterClassMismatch.\(assignmentId.uuidString).\(vehicleTokenKey)"
         }
     }
 }
@@ -549,13 +578,6 @@ private struct LiveReserveSwapPickContext: Equatable {
 private struct LiveReservePoolBerthFocus: Equatable {
     let taskID: UUID
     let slotID: UUID
-}
-
-    /// MC-R Engage: non-blocking telemetry watch after operator **Park** / **Loiter** from the Stop Vehicle card (``MissionRunEngageStabilizeTelemetryClassifier``).
-    private struct MissionLiveEngageStabilizeTelemetryWatch: Equatable {
-    let assignmentID: UUID
-    let kind: MissionRunEngageStabilizeDispatchKind
-    let startedAt: Date
 }
 
 struct MissionRunDetailView: View {
@@ -581,7 +603,7 @@ struct MissionRunDetailView: View {
     let onBack: () -> Void
     let onUpdate: (MissionRunEnvironment) -> Void
     let onStart: (MissionRunEnvironment) -> Void
-    let onDelete: (UUID) -> Void
+    let onDelete: (UUID) async -> Void
 
     @State private var setupSelectedAssignmentId: UUID?
     /// MCS staging SITL: operator-dragged lat/lon applied **synchronously** to the map payload so Leaflet is not
@@ -613,6 +635,17 @@ struct MissionRunDetailView: View {
     /// Bumps after adding a map point so the overlay list scrolls that row into view.
     @State private var liveRuntimeMapPointsListScrollEpoch: UInt = 0
     @State private var liveRuntimeMapPointsListScrollTargetRow: UUID?
+    /// MC-R §4.2b: **Fences** triage sheet (above map points). While ``liveRuntimeGeofenceDraftMission`` is set, list + live map
+    /// preview that draft; **Apply** commits template geofences to the run and dispatches one fleet upload pass.
+    @State private var liveRuntimeGeofencesOverlayPresented = false
+    @State private var liveRuntimeGeofenceDrawerEditingID: UUID?
+    @State private var liveRuntimeGeofencesListScrollEpoch: UInt = 0
+    @State private var liveRuntimeGeofencesListScrollTargetRow: UUID?
+    /// Full mission snapshot for MC‑R fence **draft** editing (`nil` = not editing; triage/map use committed ``resolvedMission``).
+    @State private var liveRuntimeGeofenceDraftMission: Mission?
+    /// MC‑R live map: selected **draft** template geofence for map authoring (handles) while editing.
+    @State private var liveRuntimeGeofenceMapSelectedFenceID: UUID?
+    @State private var liveRuntimeGeofenceDeleteCandidate: MissionControlLiveRuntimeGeofenceDeleteCandidate?
     /// MC-R: when true, log card body shrinks to one line so the live map column gains height. Defaults collapsed.
     @State private var liveLogPanelCollapsed = true
     /// User dismissed the recovery status anchored prompt for this visit (does not change MRE).
@@ -660,6 +693,11 @@ struct MissionRunDetailView: View {
     @State private var setupRostersMissionPointDeleteCandidate: MissionControlSetupRosterMissionPointDeleteCandidate?
     @State private var setupRostersMapPointsListScrollEpoch: UInt = 0
     @State private var setupRostersMapPointsListScrollTargetRow: UUID?
+    @State private var setupRostersSelectedGeofenceID: UUID?
+    @State private var setupRostersGeofenceDrawerEditingID: UUID?
+    @State private var setupRostersGeofenceDeleteCandidate: MissionControlSetupRosterGeofenceDeleteCandidate?
+    @State private var setupRostersFencesListScrollEpoch: UInt = 0
+    @State private var setupRostersFencesListScrollTargetRow: UUID?
     /// MCS staging map: at most one of point / vehicle / task path may be “map selected” at a time (see ``applyExclusiveMCSStagingMapSelectionForTaskPath`` / vehicle / point handlers).
     @State private var setupStagingMapSelectedTaskPathID: UUID?
     /// MCS **Set reserve pool home** map mode: when non-`nil`, staging-map placement is armed for this task’s pool SIMs (``MCSReservePoolMapToDo.md``).
@@ -672,6 +710,13 @@ struct MissionRunDetailView: View {
     /// Optimistic pool SIM poses after staging-map drags until hub telemetry sustains (parallel to roster ``setupStagingSimDragCoordByAssignmentID``).
     @State private var setupStagingReservePoolSimDragCoordByEncodedMarkerID: [String: MissionRunStagingSimDragOverlay] = [:]
     @State private var setupStagingReservePoolSimDragTimeoutReconcileTasks: [String: Task<Void, Never>] = [:]
+    /// MC-R Engage: non-blocking telemetry watch after operator **Park** / **Loiter** from the Stop Vehicle card (``MissionRunEngageStabilizeTelemetryClassifier``).
+    private struct MissionLiveEngageStabilizeTelemetryWatch: Equatable {
+        let assignmentID: UUID
+        let kind: MissionRunEngageStabilizeDispatchKind
+        let startedAt: Date
+    }
+
     /// Shared live progress / deferral values for task list rows and the in-card triage sheet.
     private struct MissionLiveTaskProgressDerived {
         let hub: FleetHubVehicleTelemetry?
@@ -703,7 +748,7 @@ struct MissionRunDetailView: View {
         onBack: @escaping () -> Void,
         onUpdate: @escaping (MissionRunEnvironment) -> Void,
         onStart: @escaping (MissionRunEnvironment) -> Void,
-        onDelete: @escaping (UUID) -> Void,
+        onDelete: @escaping (UUID) async -> Void,
         pendingPostOpenLiveMissionTaskID: Binding<UUID?>,
         pendingPostOpenLiveMissionAssignmentID: Binding<UUID?>
     ) {
@@ -809,7 +854,16 @@ struct MissionRunDetailView: View {
                 rowIsEnabled: { rosterPickDisabledReason($0, assignmentId: assignmentId) == nil },
                 rowDisabledReason: { rosterPickDisabledReason($0, assignmentId: assignmentId) },
                 onSelect: { v in
+                    if rosterAssignmentVehicleRequiresClassMismatchConfirm(pickable: v, assignmentId: assignmentId) {
+                        presentedRunConfirm = .rosterVehicleClassMismatchBind(
+                            assignmentId: assignmentId,
+                            vehicleTokenKey: v.token.storageKey
+                        )
+                        return
+                    }
                     applyFleetVehicle(v, assignmentId: assignmentId)
+                    syncRunFromStore()
+                    onUpdate(run)
                     onVehicleApplied?()
                     appDrawer.dismiss(animation: anim)
                 },
@@ -864,10 +918,22 @@ struct MissionRunDetailView: View {
                         isSimulation: true
                     )
                     if rosterPickDisabledReason(pickable, assignmentId: assignmentId) == nil {
-                        applyFleetVehicle(pickable, assignmentId: assignmentId)
-                        onUpdate(run)
-                        appDrawer.dismiss(animation: anim)
-                        Task { await clearRosterBulkSimSpawnWorkingAfterLayoutCatchup() }
+                        if rosterAssignmentVehicleRequiresClassMismatchConfirm(
+                            pickable: pickable,
+                            assignmentId: assignmentId
+                        ) {
+                            rosterBulkSimSpawnWorkingAssignmentId = nil
+                            appDrawer.dismiss(animation: anim)
+                            presentedRunConfirm = .rosterVehicleClassMismatchBind(
+                                assignmentId: assignmentId,
+                                vehicleTokenKey: pickable.token.storageKey
+                            )
+                        } else {
+                            applyFleetVehicle(pickable, assignmentId: assignmentId)
+                            onUpdate(run)
+                            appDrawer.dismiss(animation: anim)
+                            Task { await clearRosterBulkSimSpawnWorkingAfterLayoutCatchup() }
+                        }
                     } else {
                         rosterBulkSimSpawnWorkingAssignmentId = nil
                         appDrawer.dismiss(animation: anim)
@@ -933,9 +999,6 @@ struct MissionRunDetailView: View {
                     onChange: {
                         syncRunFromStore()
                         onUpdate(run)
-                    },
-                    onRecompilePlanForGeofenceAugmentationPolicy: {
-                        recompilePlanAfterGeofenceAugmentationPolicyEdit()
                     }
                 )
             }
@@ -1054,7 +1117,7 @@ struct MissionRunDetailView: View {
 
     /// Recompiles the Mission Control plan so per-task planning fences and squad MAVLink fence lists match run geofence augmentation.
     private func recompilePlanAfterGeofenceAugmentationPolicyEdit() {
-        guard let mission = missionStore.missions.first(where: { $0.id == run.missionId }) else { return }
+        guard let mission = run.template ?? missionStore.missions.first(where: { $0.id == run.missionId }) else { return }
         let fleet = buildMissionPickableVehicles(fleetLink: fleetLink, sitl: sitl)
         controlStore.recompileMissionControlPlanAfterGeofenceAugmentationPolicyChange(
             run: run,
@@ -1085,15 +1148,17 @@ struct MissionRunDetailView: View {
                 case .deleteRun:
                     GuardianConfirmDanger(
                         title: "Delete “\(run.missionName)”?",
-                        message: "This removes the run from Mission Control. The mission template is not deleted.",
+                        message: "Removes the run from Mission Control. Linked simulators and mission state are cleared when needed. The mission template is not deleted.",
                         cancelTitle: "Cancel",
                         confirmTitle: "Delete run",
                         onCancel: { presentedRunConfirm = nil },
                         onConfirm: {
                             let id = run.id
                             presentedRunConfirm = nil
-                            onDelete(id)
-                            onBack()
+                            Task { @MainActor in
+                                await onDelete(id)
+                                onBack()
+                            }
                         }
                     )
                 case .skipScheduledMissionStart:
@@ -1176,6 +1241,25 @@ struct MissionRunDetailView: View {
                             }
                         }
                     )
+                case .rosterVehicleClassMismatchBind(let assignmentId, let vehicleTokenKey):
+                    GuardianConfirm(
+                        title: "Different Vehicle Class",
+                        message: "This vehicle's class doesn't match the recommended one. Are you sure you want to use it?",
+                        cancelTitle: "Cancel",
+                        confirmTitle: "Use it",
+                        onCancel: { presentedRunConfirm = nil },
+                        onConfirm: {
+                            presentedRunConfirm = nil
+                            let anim = rosterPickerSpring
+                            guard let pickable = missionPickableFleetVehicle(forStorageKey: vehicleTokenKey) else { return }
+                            guard rosterPickDisabledReason(pickable, assignmentId: assignmentId) == nil else { return }
+                            applyFleetVehicle(pickable, assignmentId: assignmentId)
+                            syncRunFromStore()
+                            onUpdate(run)
+                            appDrawer.dismiss(animation: anim)
+                            Task { await clearRosterBulkSimSpawnWorkingAfterLayoutCatchup() }
+                        }
+                    )
                 }
         }
     }
@@ -1189,14 +1273,20 @@ struct MissionRunDetailView: View {
 
     private func missionLiveTaskStateForeground(_ state: MissionTaskState) -> Color {
         switch state {
-        case .compiling, .ready: return theme.textSecondary
-        case .staging: return Color.cyan.opacity(0.95)
-        case .executing: return Color.green.opacity(0.92)
-        case .between: return Color.orange.opacity(0.9)
-        case .recovery: return Color.orange.opacity(0.95)
-        case .aborting: return Color.red.opacity(0.88)
-        case .aborted: return Color.red.opacity(0.92)
-        case .completed: return Color.blue.opacity(0.9)
+        case .compiling, .ready:
+            return theme.textSecondary
+        case .staging:
+            return GuardianSemanticColors.infoForeground
+        case .executing:
+            return GuardianSemanticColors.successForeground
+        case .between:
+            return GuardianSemanticColors.warningForeground
+        case .recovery:
+            return GuardianSemanticColors.infoForeground
+        case .aborting, .aborted:
+            return GuardianSemanticColors.dangerForeground
+        case .completed:
+            return GuardianSemanticColors.successForeground
         }
     }
 
@@ -1209,10 +1299,10 @@ struct MissionRunDetailView: View {
             .foregroundStyle(missionLiveTaskStateForeground(state))
             .background(
                 Capsule()
-                    .fill(Color.primary.opacity(0.06))
+                    .fill(theme.backgroundElevated)
                     .overlay(
                         Capsule()
-                            .strokeBorder(missionLiveTaskStateForeground(state).opacity(0.35), lineWidth: 1)
+                            .strokeBorder(missionLiveTaskStateForeground(state).opacity(0.4), lineWidth: 1)
                     )
             )
     }
@@ -1232,12 +1322,121 @@ struct MissionRunDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(Color.primary.opacity(0.05))
+                .fill(theme.backgroundElevated)
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
                         .strokeBorder(missionLiveTaskStateForeground(state).opacity(0.32), lineWidth: 1)
                 )
         )
+    }
+
+    /// Second line under the settled ``MissionTaskState`` chip when ``MissionRunEnvironment/taskAttemptingByTaskID`` is non-nil (MC-led mission-end intent from ``taskMissionEndAttemptByTaskID``).
+    @ViewBuilder
+    private func missionLiveTaskAttemptIntentLine(_ attempt: MissionTaskAttemptState) -> some View {
+        Text(attempt.displayTitle)
+            .font(GuardianTypography.font(.denseCaption12Regular))
+            .foregroundStyle(theme.textSecondary)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityLabel("Wind-down intent: \(attempt.displayTitle)")
+    }
+
+    /// While abort or complete wind-down is **issued**, §3 automatic mission-end ack waits on a per-intent rollup on **every**
+    /// bound roster row (strict **success** for abort; **settled** outcomes for complete — see ``MissionRunSlotEvidenceAutoMissionEndAckRules``); hide once the operator pins manual triage.
+    private func missionLiveTaskShowsAutoAckSlotBlockers(for task: RoutePath) -> Bool {
+        guard run.operatorTriageMarkedMissionTaskStateByTaskID[task.id] == nil else { return false }
+        let abortIssued = run.missionTaskAbortWindDownIssuedTaskIDs.contains(task.id)
+        let completeIssued = run.missionTaskCompleteWindDownIssuedTaskIDs.contains(task.id)
+        guard abortIssued || completeIssued else { return false }
+        let bound = run.assignmentsBoundToMissionTask(taskID: task.id)
+        guard !bound.isEmpty else { return false }
+        if abortIssued {
+            return !MissionRunSlotEvidenceAutoMissionEndAckRules.allBoundRosterRowsPolicySucceeded(bound)
+        }
+        return !MissionRunSlotEvidenceAutoMissionEndAckRules.allBoundRosterRowsSatisfiedForCompleteMissionEndAutoAck(bound)
+    }
+
+    /// MC-R task triage: which roster rows still block automatic protocol confirmation (§3 slot rollup).
+    @ViewBuilder
+    private func missionLiveTaskAutoAckSlotBlockersSection(task: RoutePath, showManualTriageHint: Bool) -> some View {
+        let bound = run.assignmentsBoundToMissionTask(taskID: task.id)
+        let abortIssued = run.missionTaskAbortWindDownIssuedTaskIDs.contains(task.id)
+        let blockers = abortIssued
+            ? MissionRunSlotEvidenceAutoMissionEndAckRules.boundRosterRowsBlockingAutoMissionEndAck(bound)
+            : MissionRunSlotEvidenceAutoMissionEndAckRules.boundRosterRowsBlockingCompleteMissionEndAutoAck(bound)
+        if blockers.isEmpty {
+            EmptyView()
+        } else {
+            VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
+                Text("Automatic protocol confirmation waits on every roster slot below to settle (each slot must leave in-progress policy states).")
+                    .font(GuardianTypography.font(.denseCaption12Regular))
+                    .foregroundStyle(theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(blockers, id: \.assignmentID) { snap in
+                    HStack(alignment: .center, spacing: GuardianSpacing.xsTight) {
+                        RoundedRectangle(cornerRadius: 2, style: .continuous)
+                            .fill(
+                                MissionRunSlotAutoAckBlockerTriageChrome.railColor(
+                                    for: snap.mergedState,
+                                    neutralRail: theme.borderSubtle
+                                )
+                            )
+                            .frame(width: 4)
+                            .accessibilityHidden(true)
+                        HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.xsTight) {
+                            Text(snap.slotName)
+                                .font(GuardianTypography.font(.denseCaption12Medium))
+                                .foregroundStyle(theme.textPrimary)
+                                .lineLimit(2)
+                            Text("—")
+                                .font(GuardianTypography.font(.denseCaption10Regular))
+                                .foregroundStyle(theme.textTertiary)
+                            Text(snap.mergedState.displayTitle)
+                                .font(GuardianTypography.font(.denseCaption12Medium))
+                                .foregroundStyle(
+                                    MissionRunSlotAutoAckBlockerTriageChrome.labelForeground(
+                                        for: snap.mergedState,
+                                        neutralText: theme.textSecondary
+                                    )
+                                )
+                                .lineLimit(2)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(.vertical, GuardianSpacing.xxs)
+                    .padding(.horizontal, GuardianSpacing.xxs)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(MissionRunSlotAutoAckBlockerTriageChrome.rowHighlightFill(for: snap.mergedState))
+                    )
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("\(snap.slotName), merged slot state \(snap.mergedState.displayTitle)")
+                }
+                if showManualTriageHint {
+                    Text(
+                        "If you must record the outcome before every row reaches policy complete, use the confirmation control below — that records manual triage on this task."
+                    )
+                    .font(GuardianTypography.font(.denseCaption10Regular))
+                    .foregroundStyle(theme.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.horizontal, GuardianSpacing.denseGutter)
+            .padding(.vertical, GuardianSpacing.xsTight)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(theme.backgroundElevated)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .strokeBorder(theme.borderSubtle, lineWidth: 1)
+                    )
+            )
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(
+                "Task \(task.name): automatic protocol confirmation waits on \(blockers.count) roster slot\(blockers.count == 1 ? "" : "s") before policy complete on every row."
+            )
+        }
     }
 
     private func missionLiveTaskEndProtocolAcknowledgementVisible(for task: RoutePath) -> Bool {
@@ -1375,9 +1574,7 @@ struct MissionRunDetailView: View {
         let barFraction: Double
         let barTint: Color
         if inTaskStartDeferral, let def = taskStartDef {
-            let remaining = def.startAt.timeIntervalSince(now)
-            let elapsed = def.totalDelay - max(0, remaining)
-            barFraction = def.totalDelay > 0 ? min(1, max(0, elapsed / def.totalDelay)) : 1
+            barFraction = missionLiveTaskStartDeferralBarFraction(taskStartDef: def, now: now)
             barTint = Color.cyan.opacity(0.78)
         } else {
             barFraction = missionFraction
@@ -1473,9 +1670,12 @@ struct MissionRunDetailView: View {
         task: RoutePath,
         taskStartDefForControls: MissionTaskStartDeferral,
         now: Date,
-        hero: Bool
+        hero: Bool,
+        /// When `hero` is true but this is set, keep triage-sized controls while matching the **tasks list** alter numeric + unit widths.
+        listAlterNumericWidths: Bool = false
     ) -> some View {
         let controlSize: ControlSize = hero ? .regular : .small
+        let useListNumericSizing = !hero || listAlterNumericWidths
         HStack(alignment: .center, spacing: hero ? GuardianSpacing.denseGutter : GuardianSpacing.xs) {
             Spacer(minLength: 0)
             MissionDelayPostponeValueUnitRow(
@@ -1484,8 +1684,8 @@ struct MissionRunDetailView: View {
                 unit: $taskStartDeferralPostponeUnit,
                 minimumTotalSeconds: 1,
                 maximumTotalSeconds: TimeInterval(generalSettings.missionControlPostponeStepCapSeconds),
-                numericFieldWidth: hero ? 96 : 22,
-                unitPickerWidth: hero ? 72 : 56,
+                numericFieldWidth: useListNumericSizing ? 22 : 96,
+                unitPickerWidth: useListNumericSizing ? 56 : 72,
                 controlSize: controlSize
             )
             missionDeferralAlterSoonerLaterIconButtons(controlSize: controlSize) {
@@ -1797,7 +1997,8 @@ struct MissionRunDetailView: View {
                     task: task,
                     taskStartDefForControls: taskStartDefForControls,
                     now: now,
-                    hero: true
+                    hero: true,
+                    listAlterNumericWidths: true
                 )
                 .padding(.top, GuardianSpacing.xxs)
             } else if showMissionTaskTrigger(for: task) {
@@ -1883,7 +2084,8 @@ struct MissionRunDetailView: View {
                         task: task,
                         taskStartDefForControls: taskStartDefForControls,
                         now: now,
-                        hero: true
+                        hero: true,
+                        listAlterNumericWidths: true
                     )
                     .padding(.top, GuardianSpacing.xxs)
                 } else if showMissionTaskTrigger(for: task) {
@@ -1901,15 +2103,14 @@ struct MissionRunDetailView: View {
     private func refreshVehicleVoiceNarrativeFromTelemetry() {
         syncRunFromStore()
         guard run.status == .running || run.status == .paused else { return }
-        let mission = missionStore.missions.first { $0.id == run.missionId }
         run.systems.logging.ingestVehicleTelemetryNarrative(
-            mission: mission,
+            mission: resolvedMission,
             fleetLink: fleetLink,
             sitl: sitl
         )
     }
 
-    /// MC-R: when telemetry / logs show distress on a **primary or wingman** roster aircraft and a class-matched
+    /// MC-R: when telemetry / logs show distress on a **primary or wingman** roster vehicles and a class-matched
     /// floating reserve exists on the focused task, surface a debounced toast pointing operators at **Swap in reserve**.
     ///
     /// When ``MissionRunEngagementAction/swapInReserve`` is **autonomous** and exactly **one** reserve swap candidate
@@ -2049,10 +2250,10 @@ struct MissionRunDetailView: View {
         )
     }
 
-    /// Mission Control Running applies SIM battery drain for roster SITL streams from **this run’s** ``MissionRunOperatorDisplaySettings/simBatteryDrainRateDuringRun`` while ``MissionRunStatus/running``; ``SimBatteryDrainRate/none`` keeps drain off. Not ``GeneralSettingsStore``.
+    /// Mission Control applies SIM battery drain for roster SITL streams from **this run’s** ``MissionRunOperatorDisplaySettings/simBatteryDrainRateDuringRun`` while ``MissionRunStatus/running`` **or** ``MissionRunStatus/recovery`` (recovery wind-down does not force drain off). ``SimBatteryDrainRate/none`` keeps drain off. Not ``GeneralSettingsStore``.
     private func syncSimBatteryDrainForRunStatus() {
         let rate = run.operatorDisplaySettings.simBatteryDrainRateDuringRun
-        let enableDrain = (run.status == .running) && (rate != .none)
+        let enableDrain = run.status.appliesMissionRunSimBatteryDrainFromOperatorSettings && (rate != .none)
         let rateForWire = enableDrain ? rate : .normal
         for vehicleID in assignedSimulationVehicleIDs {
             fleetLink.setSimBatteryDrainEnabled(
@@ -2065,8 +2266,179 @@ struct MissionRunDetailView: View {
         }
     }
 
+    /// Mission snapshot for this run: **forked template on the run** (MCS / MC‑R edits), falling back to the
+    /// catalog ``MissionStore`` row only when the run has not hydrated a template yet.
     private var resolvedMission: Mission? {
-        missionStore.missions.first { $0.id == run.missionId }
+        run.template ?? missionStore.missions.first { $0.id == run.missionId }
+    }
+
+    private var liveRuntimeGeofenceTriageSourceMission: Mission? {
+        liveRuntimeGeofenceDraftMission ?? resolvedMission
+    }
+
+    /// Quantizes draft geofence geometry so ``liveOverviewMapStructureIdentity`` refreshes live map overlays while editing.
+    private func liveRuntimeGeofenceGeometryDigest(_ mission: Mission) -> String {
+        var parts: [String] = []
+        for g in mission.missionGeofences {
+            parts.append(
+                "m:\(g.id.uuidString);\(g.shape.rawValue);\(g.boundary.rawValue);\(g.polygonVertices.count);\(g.circleCenter.lat),\(g.circleCenter.lon);\(g.circleRadiusMeters)"
+            )
+            for v in g.polygonVertices {
+                parts.append("\(v.lat),\(v.lon)")
+            }
+        }
+        for t in mission.routeMacro.tasks {
+            for g in t.geofences {
+                parts.append(
+                    "t:\(t.id.uuidString);\(g.id.uuidString);\(g.shape.rawValue);\(g.boundary.rawValue);\(g.polygonVertices.count);\(g.circleCenter.lat),\(g.circleCenter.lon);\(g.circleRadiusMeters)"
+                )
+                for v in g.polygonVertices {
+                    parts.append("\(v.lat),\(v.lon)")
+                }
+            }
+        }
+        return parts.joined(separator: "|")
+    }
+
+    /// Mission snapshot for live map geofence overlays while a draft is active (template fences only; run augmentations unchanged).
+    private func missionMergingLiveGeofenceDraftForLiveMapDisplay(base: Mission) -> Mission {
+        guard let draft = liveRuntimeGeofenceDraftMission else { return base }
+        var merged = base
+        merged.missionGeofences = draft.missionGeofences
+        for ti in merged.routeMacro.tasks.indices {
+            let tid = merged.routeMacro.tasks[ti].id
+            if let dti = draft.routeMacro.tasks.firstIndex(where: { $0.id == tid }) {
+                merged.routeMacro.tasks[ti].geofences = draft.routeMacro.tasks[dti].geofences
+            }
+        }
+        return merged
+    }
+
+    @discardableResult
+    private func mutateLiveRuntimeGeofenceDraft(_ mutate: (inout Mission) -> Void) -> Bool {
+        guard var d = liveRuntimeGeofenceDraftMission else { return false }
+        mutate(&d)
+        if let msg = Utilities.mission.templateGeofences.inclusionConstraintViolationMessage(for: d) {
+            toastCenter.show(msg, style: .error)
+            return false
+        }
+        liveRuntimeGeofenceDraftMission = d
+        return true
+    }
+
+    private func liveRuntimeDraftTemplateContainsFenceID(_ id: UUID) -> Bool {
+        guard let d = liveRuntimeGeofenceDraftMission else { return false }
+        if d.missionGeofences.contains(where: { $0.id == id }) { return true }
+        return d.routeMacro.tasks.contains { $0.geofences.contains { $0.id == id } }
+    }
+
+    /// Map drag / handle edits for MC‑R fence draft (same geometry rules as MCS staging ``mutateSetupRosterMissionGeofenceFromMap``).
+    private func mutateLiveRuntimeGeofenceFromMap(id: UUID, _ update: (inout MissionGeofence) -> Void) {
+        guard mutateLiveRuntimeGeofenceDraft({ mission in
+            if let i = mission.missionGeofences.firstIndex(where: { $0.id == id }) {
+                update(&mission.missionGeofences[i])
+                return
+            }
+            for ti in mission.routeMacro.tasks.indices {
+                if let fi = mission.routeMacro.tasks[ti].geofences.firstIndex(where: { $0.id == id }) {
+                    update(&mission.routeMacro.tasks[ti].geofences[fi])
+                    return
+                }
+            }
+        }) else { return }
+        pushLiveOverviewMapModelFromMission()
+    }
+
+    private func mutateLiveRuntimeGeofenceFromMapAfterCurrentUIUpdate(id: UUID, _ update: @escaping (inout MissionGeofence) -> Void) {
+        DispatchQueue.main.async {
+            self.mutateLiveRuntimeGeofenceFromMap(id: id, update)
+        }
+    }
+
+    private func toggleLiveRuntimeGeofenceMapSelection(fenceID: UUID) {
+        guard liveRuntimeGeofenceDraftMission != nil else { return }
+        guard liveRuntimeDraftTemplateContainsFenceID(fenceID) else { return }
+        if liveRuntimeGeofenceMapSelectedFenceID == fenceID {
+            liveRuntimeGeofenceMapSelectedFenceID = nil
+            if liveRuntimeGeofenceDrawerEditingID == fenceID {
+                liveRuntimeGeofenceDrawerEditingID = nil
+                appDrawer.dismiss()
+            }
+        } else {
+            liveRuntimeOverviewSelectedMissionPointID = nil
+            if liveRuntimeGeofenceDrawerEditingID != nil {
+                appDrawer.dismiss()
+                liveRuntimeGeofenceDrawerEditingID = nil
+            }
+            liveRuntimeGeofenceMapSelectedFenceID = fenceID
+            liveRuntimeGeofencesListScrollTargetRow = fenceID
+            liveRuntimeGeofencesListScrollEpoch &+= 1
+            withAnimation(triageSheetSpring) {
+                liveRuntimeGeofencesOverlayPresented = true
+            }
+        }
+        pushLiveOverviewMapModelFromMission()
+    }
+
+    private func beginLiveRuntimeGeofenceDraftSession() {
+        guard liveRuntimeGeofenceDraftMission == nil else { return }
+        guard let m = resolvedMission else {
+            toastCenter.show("No mission template for this run.", style: .warning)
+            return
+        }
+        liveRuntimeGeofenceDraftMission = m
+        liveRuntimeGeofenceMapSelectedFenceID = nil
+        pushLiveOverviewMapModelFromMission()
+    }
+
+    private func cancelLiveRuntimeGeofenceDraftSession() {
+        liveRuntimeGeofenceDraftMission = nil
+        liveRuntimeGeofenceMapSelectedFenceID = nil
+        dismissLiveRuntimeGeofenceDrawerIfNeeded()
+        liveRuntimeGeofenceDeleteCandidate = nil
+        pushLiveOverviewMapModelFromMission()
+    }
+
+    private func applyLiveRuntimeGeofenceDraftSession() {
+        guard let draft = liveRuntimeGeofenceDraftMission else { return }
+        if let msg = Utilities.mission.templateGeofences.inclusionConstraintViolationMessage(for: draft) {
+            toastCenter.show(msg, style: .error)
+            return
+        }
+        guard persistMissionMutation({ mission in
+            mission.missionGeofences = draft.missionGeofences
+            for ti in mission.routeMacro.tasks.indices {
+                let tid = mission.routeMacro.tasks[ti].id
+                if let dti = draft.routeMacro.tasks.firstIndex(where: { $0.id == tid }) {
+                    mission.routeMacro.tasks[ti].geofences = draft.routeMacro.tasks[dti].geofences
+                }
+            }
+        }) else { return }
+        liveRuntimeGeofenceDraftMission = nil
+        liveRuntimeGeofenceMapSelectedFenceID = nil
+        dismissLiveRuntimeGeofenceDrawerIfNeeded()
+        liveRuntimeGeofenceDeleteCandidate = nil
+        enqueuePushMcrLiveGeofencesToFleet()
+        pushLiveOverviewMapModelFromMission()
+    }
+
+    private var liveRuntimeGeofenceDraftBinding: Binding<Mission> {
+        Binding(
+            get: {
+                liveRuntimeGeofenceDraftMission
+                    ?? resolvedMission
+                    ?? Mission(id: run.missionId, name: "", description: "", type: .mobile)
+            },
+            set: { newValue in
+                guard liveRuntimeGeofenceDraftMission != nil else { return }
+                if let msg = Utilities.mission.templateGeofences.inclusionConstraintViolationMessage(for: newValue) {
+                    toastCenter.show(msg, style: .error)
+                    return
+                }
+                liveRuntimeGeofenceDraftMission = newValue
+                pushLiveOverviewMapModelFromMission()
+            }
+        )
     }
 
     /// Fleet stream id for the assignment bound to this task (legacy single-task runs may use a nil `taskId` slot).
@@ -2377,11 +2749,27 @@ struct MissionRunDetailView: View {
                                         ? "mappin.circle.fill"
                                         : "mappin.and.ellipse",
                                     help: liveRuntimeMissionPointsOverlayPresented
-                                        ? "Hide map points panel on the Tasks card"
-                                        : "Runtime map points — shows the Tasks card panel to list or manage points for this run only (not saved to the mission file on disk)",
+                                        ? "Hide rally points panel"
+                                        : "Manage rally points",
                                     action: {
                                         withAnimation(triageSheetSpring) {
-                                            liveRuntimeMissionPointsOverlayPresented.toggle()
+                                            let next = !liveRuntimeMissionPointsOverlayPresented
+                                            liveRuntimeGeofencesOverlayPresented = false
+                                            liveRuntimeMissionPointsOverlayPresented = next
+                                        }
+                                    }
+                                )
+
+                                GuardianNeutralBorderedButton(
+                                    systemImage: "location.viewfinder",
+                                    help: liveRuntimeGeofencesOverlayPresented
+                                        ? "Hide geofences panel"
+                                        : "Manage mission geofences",
+                                    action: {
+                                        withAnimation(triageSheetSpring) {
+                                            let next = !liveRuntimeGeofencesOverlayPresented
+                                            liveRuntimeMissionPointsOverlayPresented = false
+                                            liveRuntimeGeofencesOverlayPresented = next
                                         }
                                     }
                                 )
@@ -2460,6 +2848,7 @@ struct MissionRunDetailView: View {
                             .onChange(of: fleetLink.hubTelemetry?.lastUpdate) { _ in
                                 refreshVehicleVoiceNarrativeFromTelemetry()
                                 evaluateReserveAutoSuggestFromLiveSignalsIfNeeded()
+                                run.applySlotPolicyPullConformanceFromHubIfNeeded()
                             }
                             .onChange(of: liveMissionProgressPulseDate) { _ in
                                 refreshVehicleVoiceNarrativeFromTelemetry()
@@ -2564,6 +2953,69 @@ struct MissionRunDetailView: View {
                 }
             )
         })
+        .guardianConfirmOverlay(item: $setupRostersGeofenceDeleteCandidate, dialog: { candidate in
+            GuardianConfirmDanger(
+                title: "Delete fence?",
+                message: "This removes the fence from the mission template.",
+                cancelTitle: "Cancel",
+                confirmTitle: "Delete",
+                onCancel: { setupRostersGeofenceDeleteCandidate = nil },
+                onConfirm: {
+                    guard persistMissionMutation({ mission in
+                        mission.missionGeofences.removeAll { $0.id == candidate.id }
+                        for ti in mission.routeMacro.tasks.indices {
+                            mission.routeMacro.tasks[ti].geofences.removeAll { $0.id == candidate.id }
+                        }
+                    }) else {
+                        setupRostersGeofenceDeleteCandidate = nil
+                        return
+                    }
+                    if setupRostersSelectedGeofenceID == candidate.id {
+                        setupRostersSelectedGeofenceID = nil
+                    }
+                    if setupRostersGeofenceDrawerEditingID == candidate.id {
+                        setupRostersGeofenceDrawerEditingID = nil
+                        appDrawer.dismiss()
+                    }
+                    setupRostersGeofenceDeleteCandidate = nil
+                    toastCenter.show("Fence removed", style: .success)
+                }
+            )
+        })
+        .guardianConfirmOverlay(item: $liveRuntimeGeofenceDeleteCandidate, dialog: { candidate in
+            GuardianConfirmDanger(
+                title: "Delete fence?",
+                message: "Removes this fence from your draft. Nothing is sent to vehicles until you tap Apply.",
+                cancelTitle: "Cancel",
+                confirmTitle: "Delete",
+                onCancel: { liveRuntimeGeofenceDeleteCandidate = nil },
+                onConfirm: {
+                    guard liveRuntimeGeofenceDraftMission != nil else {
+                        liveRuntimeGeofenceDeleteCandidate = nil
+                        return
+                    }
+                    guard mutateLiveRuntimeGeofenceDraft({ mission in
+                        mission.missionGeofences.removeAll { $0.id == candidate.id }
+                        for ti in mission.routeMacro.tasks.indices {
+                            mission.routeMacro.tasks[ti].geofences.removeAll { $0.id == candidate.id }
+                        }
+                    }) else {
+                        liveRuntimeGeofenceDeleteCandidate = nil
+                        return
+                    }
+                    if liveRuntimeGeofenceMapSelectedFenceID == candidate.id {
+                        liveRuntimeGeofenceMapSelectedFenceID = nil
+                    }
+                    if liveRuntimeGeofenceDrawerEditingID == candidate.id {
+                        liveRuntimeGeofenceDrawerEditingID = nil
+                        appDrawer.dismiss()
+                    }
+                    liveRuntimeGeofenceDeleteCandidate = nil
+                    pushLiveOverviewMapModelFromMission()
+                    toastCenter.show("Fence removed from draft.", style: .success)
+                }
+            )
+        })
         .onAppear {
             run.attachServices(fleetLink: fleetLink, sitl: sitl, generalSettings: generalSettings)
             installMissionTemplatePersister()
@@ -2648,14 +3100,35 @@ struct MissionRunDetailView: View {
             if newTab == .tasks {
                 appDrawer.dismiss()
                 setupRostersMissionPointDrawerEditingID = nil
+                setupRostersGeofenceDrawerEditingID = nil
             } else {
                 disarmMCSReservePoolHomePlacement()
+            }
+            switch newTab {
+            case .tasks:
+                dismissSetupRostersGeofenceDrawerIfNeeded()
+                clearSetupRostersGeofenceChrome()
+            case .points:
+                dismissSetupRostersGeofenceDrawerIfNeeded()
+                clearSetupRostersGeofenceChrome()
+            case .fences:
+                setupRostersSelectedMissionPointID = nil
+                setupRostersMissionPointDeleteCandidate = nil
+                setupStagingMapSelectedTaskPathID = nil
+                dismissSetupRostersMissionPointDrawerIfNeeded()
             }
         }
         .onChange(of: appDrawer.presented?.id) { newDrawerID in
             if newDrawerID == nil {
                 setupRostersMissionPointDrawerEditingID = nil
                 liveRuntimeMissionPointDrawerEditingID = nil
+                setupRostersGeofenceDrawerEditingID = nil
+                liveRuntimeGeofenceDrawerEditingID = nil
+            }
+        }
+        .onChange(of: liveRuntimeGeofencesOverlayPresented) { shown in
+            if !shown {
+                cancelLiveRuntimeGeofenceDraftSession()
             }
         }
         .onChange(of: run.operatorDisplaySettings) { _ in
@@ -3107,8 +3580,12 @@ struct MissionRunDetailView: View {
     }
 
     private func clearLiveRuntimeMissionPointsOverlayChrome() {
+        cancelLiveRuntimeGeofenceDraftSession()
         liveRuntimeMissionPointsOverlayPresented = false
+        liveRuntimeGeofencesOverlayPresented = false
         liveRuntimeMissionPointDrawerEditingID = nil
+        liveRuntimeGeofenceDrawerEditingID = nil
+        liveRuntimeGeofenceDeleteCandidate = nil
         liveRuntimeMissionMapViewportCenter = nil
         liveRuntimeOverviewSelectedMissionPointID = nil
     }
@@ -3217,6 +3694,376 @@ struct MissionRunDetailView: View {
             .transition(.move(edge: .bottom).combined(with: .opacity))
             .zIndex(3)
         }
+    }
+
+    private var missionLiveTriageGeofenceRows: [(fence: MissionGeofence, placement: MissionGeofenceTemplatePlacement)] {
+        guard let m = liveRuntimeGeofenceTriageSourceMission else { return [] }
+        var rows: [(fence: MissionGeofence, placement: MissionGeofenceTemplatePlacement)] = []
+        for g in m.missionGeofences {
+            rows.append((fence: g, placement: .missionWide))
+        }
+        let tasks: [MissionTask]
+        if let tid = focusedLiveTaskID {
+            tasks = m.routeMacro.tasks.filter { $0.id == tid }
+        } else {
+            tasks = m.routeMacro.tasks
+        }
+        for t in tasks {
+            for g in t.geofences {
+                rows.append((fence: g, placement: .taskScoped(t.id)))
+            }
+        }
+        return rows.sorted(by: { lhs, rhs in
+            let ln = lhs.fence.name.localizedCaseInsensitiveCompare(rhs.fence.name)
+            if ln != .orderedSame { return ln == .orderedAscending }
+            return lhs.fence.id.uuidString < rhs.fence.id.uuidString
+        })
+    }
+
+    private func liveRuntimeGeofencePlacementLabel(_ placement: MissionGeofenceTemplatePlacement) -> String {
+        switch placement {
+        case .missionWide:
+            return "Mission-wide"
+        case .taskScoped(let taskID):
+            let name = liveRuntimeGeofenceTriageSourceMission?.routeMacro.tasks.first(where: { $0.id == taskID })?.name
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return name.isEmpty ? "Task" : name
+        }
+    }
+
+    @ViewBuilder
+    private var missionLiveRuntimeGeofencesOverlay: some View {
+        if liveRuntimeGeofencesOverlayPresented {
+            let draftActive = liveRuntimeGeofenceDraftMission != nil
+            VStack(alignment: .leading, spacing: 0) {
+                missionLiveOverlayHeader(
+                    title: "Fences",
+                    subtitle: nil,
+                    titleMuted: false
+                ) {
+                    HStack(spacing: GuardianSpacing.xs) {
+                        if draftActive {
+                            GuardianThemedButton(
+                                accent: .primary,
+                                surface: .solid,
+                                size: .small,
+                                shape: .cornered,
+                                contentSizing: .squareToolbarCell,
+                                action: { applyLiveRuntimeGeofenceDraftSession() },
+                                label: {
+                                    Image(systemName: "checkmark")
+                                        .font(GuardianTypography.font(.sectionHeadingSemibold))
+                                }
+                            )
+                            .accessibilityLabel("Apply")
+                            .help("Save fence changes to this run and send the geofence set to bound vehicles.")
+                            .guardianPointerOnHover()
+
+                            GuardianThemedButton(
+                                accent: .danger,
+                                surface: .outline,
+                                size: .small,
+                                shape: .cornered,
+                                contentSizing: .squareToolbarCell,
+                                action: { cancelLiveRuntimeGeofenceDraftSession() },
+                                label: {
+                                    Image(systemName: "xmark")
+                                        .font(GuardianTypography.font(.sectionHeadingSemibold))
+                                }
+                            )
+                            .accessibilityLabel("Cancel")
+                            .help("Discard this editing session without changing vehicles.")
+                            .guardianPointerOnHover()
+
+                            missionLiveOverlayHeaderGlyphButton(
+                                systemImage: "hexagon",
+                                help: "Add polygon fence at the live map centre (or mission home)"
+                            ) {
+                                appendLiveRuntimeGeofencePolygonAtMapCentre()
+                            }
+                            missionLiveOverlayHeaderGlyphButton(
+                                systemImage: "circle.fill",
+                                help: "Add circular fence at the live map centre (or mission home)"
+                            ) {
+                                appendLiveRuntimeGeofenceCircleAtMapCentre()
+                            }
+                        } else {
+                            missionLiveOverlayHeaderGlyphButton(
+                                systemImage: "pencil",
+                                help: "Edit a draft copy of template fences and map preview; Apply commits and sends to bound vehicles."
+                            ) {
+                                beginLiveRuntimeGeofenceDraftSession()
+                            }
+                            .accessibilityLabel("Edit fences")
+                        }
+
+                        missionLiveSidebarStyleCloseButton {
+                            withAnimation(triageSheetSpring) {
+                                liveRuntimeGeofencesOverlayPresented = false
+                            }
+                        }
+                    }
+                }
+
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.md) {
+                            if missionLiveTriageGeofenceRows.isEmpty {
+                                Text("No fences match the current task filter.")
+                                    .font(GuardianTypography.font(.denseCaption12Regular))
+                                    .foregroundStyle(theme.textTertiary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            } else {
+                                ForEach(Array(missionLiveTriageGeofenceRows.enumerated()), id: \.element.fence.id) { _, row in
+                                    missionLiveRuntimeGeofenceRow(fence: row.fence, placement: row.placement)
+                                        .id(row.fence.id)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, GuardianCardLayout.defaultBodyPadding)
+                        .padding(.vertical, GuardianSpacing.denseGutter)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                    }
+                    .onChange(of: liveRuntimeGeofencesListScrollEpoch) { _ in
+                        guard let id = liveRuntimeGeofencesListScrollTargetRow else { return }
+                        DispatchQueue.main.async {
+                            withAnimation(.easeOut(duration: 0.22)) {
+                                proxy.scrollTo(id, anchor: .center)
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(theme.backgroundRaised)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .zIndex(4)
+        }
+    }
+
+    @ViewBuilder
+    private func missionLiveRuntimeGeofenceRow(fence: MissionGeofence, placement: MissionGeofenceTemplatePlacement) -> some View {
+        let draftActive = liveRuntimeGeofenceDraftMission != nil
+        let rowSelected = draftActive && liveRuntimeGeofenceMapSelectedFenceID == fence.id
+        GuardianCard(
+            configuration: GuardianCardConfiguration(
+                border: rowSelected ? .primary : .subtle,
+                cornerRadius: GuardianCardLayout.cornerRadius,
+                bodyPadding: GuardianSpacing.cardBodyInset
+            ),
+            body: {
+                VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+                    HStack(alignment: .center, spacing: GuardianSpacing.sm) {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.micro) {
+                            Text(fence.name.isEmpty ? "Untitled fence" : fence.name)
+                                .font(GuardianTypography.font(.subsectionTitleSemibold))
+                                .foregroundStyle(theme.textPrimary)
+                                .lineLimit(2)
+                            Text("\(fence.shape.rawValue.capitalized) · \(liveRuntimeGeofencePlacementLabel(placement))")
+                                .font(GuardianTypography.font(.denseCaption12Regular))
+                                .foregroundStyle(theme.textSecondary)
+                                .lineLimit(2)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        GuardianThemedButton(
+                            accent: .primary,
+                            surface: .outline,
+                            size: .small,
+                            shape: .cornered,
+                            contentSizing: .squareToolbarCell,
+                            action: { focusLiveMapOnGeofenceTriage(fence: fence) },
+                            label: {
+                                Image(systemName: "mappin.and.ellipse")
+                                    .font(GuardianTypography.font(.sectionHeadingSemibold))
+                            }
+                        )
+                        .help("Fit map to this fence")
+
+                        if draftActive {
+                            GuardianThemedButton(
+                                accent: .primary,
+                                surface: .outline,
+                                size: .small,
+                                shape: .cornered,
+                                contentSizing: .squareToolbarCell,
+                                action: { openLiveRuntimeGeofenceEditDrawer(fenceID: fence.id) },
+                                label: {
+                                    Image(systemName: "pencil")
+                                        .font(GuardianTypography.font(.sectionHeadingSemibold))
+                                }
+                            )
+                            .help("Edit fence")
+
+                            GuardianThemedButton(
+                                accent: .danger,
+                                surface: .outline,
+                                size: .small,
+                                shape: .cornered,
+                                contentSizing: .squareToolbarCell,
+                                action: { liveRuntimeGeofenceDeleteCandidate = MissionControlLiveRuntimeGeofenceDeleteCandidate(id: fence.id) },
+                                label: {
+                                    Image(systemName: "trash")
+                                        .font(GuardianTypography.font(.sectionHeadingSemibold))
+                                }
+                            )
+                            .help("Delete fence")
+                        }
+                    }
+                }
+            }
+        )
+    }
+
+    private func enqueuePushMcrLiveGeofencesToFleet() {
+        Task {
+            await pushMcrLiveGeofencesToFleetAfterMutation()
+        }
+    }
+
+    private func pushMcrLiveGeofencesToFleetAfterMutation() async {
+        guard run.status == .running || run.status == .paused || run.status == .recovery else { return }
+        let (attempted, succeeded) = await run.mcrUploadResolvedGeofencesToAllFleetAssignments(
+            fleetLink: fleetLink,
+            sitl: sitl
+        )
+        if attempted == 0 {
+            toastCenter.show("No roster vehicles are bound to push geofences to.", style: .warning)
+            return
+        }
+        if succeeded == attempted {
+            toastCenter.show(
+                "Geofence update sent to \(succeeded) vehicle slot\(succeeded == 1 ? "" : "s").",
+                style: .success
+            )
+        } else {
+            toastCenter.show(
+                "Geofence update partially failed: \(succeeded) of \(attempted) slots acknowledged.",
+                style: .warning
+            )
+        }
+    }
+
+    private func dismissLiveRuntimeGeofenceDrawerIfNeeded() {
+        guard liveRuntimeGeofenceDrawerEditingID != nil else { return }
+        liveRuntimeGeofenceDrawerEditingID = nil
+        appDrawer.dismiss()
+    }
+
+    private func openLiveRuntimeGeofenceEditDrawer(fenceID: UUID) {
+        guard liveRuntimeGeofenceDraftMission != nil else { return }
+        let exists = liveRuntimeGeofenceDraftMission.map { m in
+            m.missionGeofences.contains(where: { $0.id == fenceID })
+                || m.routeMacro.tasks.contains { $0.geofences.contains { $0.id == fenceID } }
+        } ?? false
+        guard exists else { return }
+        liveRuntimeGeofenceDrawerEditingID = fenceID
+        liveRuntimeGeofenceMapSelectedFenceID = fenceID
+        appDrawer.present(title: "Edit fence", preferredWidth: 400, scrimTapDismisses: true) {
+            MissionWorkspaceGeofenceEditDrawer(
+                fenceID: fenceID,
+                mission: liveRuntimeGeofenceDraftBinding,
+                onMovePlacement: { placement in moveLiveRuntimeGeofenceTemplateToPlacement(fenceID: fenceID, target: placement) },
+                persist: {
+                    pushLiveOverviewMapModelFromMission()
+                }
+            )
+        }
+    }
+
+    private func moveLiveRuntimeGeofenceTemplateToPlacement(fenceID: UUID, target: MissionGeofenceTemplatePlacement) {
+        guard mutateLiveRuntimeGeofenceDraft({ mission in
+            var fence: MissionGeofence?
+            if let i = mission.missionGeofences.firstIndex(where: { $0.id == fenceID }) {
+                fence = mission.missionGeofences.remove(at: i)
+            } else {
+                for ti in mission.routeMacro.tasks.indices {
+                    if let fi = mission.routeMacro.tasks[ti].geofences.firstIndex(where: { $0.id == fenceID }) {
+                        fence = mission.routeMacro.tasks[ti].geofences.remove(at: fi)
+                        break
+                    }
+                }
+            }
+            guard let f = fence else { return }
+            switch target {
+            case .missionWide:
+                mission.missionGeofences.append(f)
+            case .taskScoped(let taskUUID):
+                if let ti = mission.routeMacro.tasks.firstIndex(where: { $0.id == taskUUID }) {
+                    mission.routeMacro.tasks[ti].geofences.append(f)
+                } else {
+                    mission.missionGeofences.append(f)
+                }
+            }
+        }) else { return }
+        pushLiveOverviewMapModelFromMission()
+    }
+
+    private func appendLiveRuntimeGeofencePolygonAtMapCentre() {
+        guard liveRuntimeGeofenceDraftMission != nil else {
+            toastCenter.show("Tap Edit fences first.", style: .warning)
+            return
+        }
+        guard resolvedMission != nil else {
+            toastCenter.show("No mission template for this run.", style: .warning)
+            return
+        }
+        let coord = liveRuntimeMissionMapViewportCenter
+            ?? resolvedMission?.routeMacro.home?.coord
+            ?? RouteCoordinate()
+        let newID = UUID()
+        guard mutateLiveRuntimeGeofenceDraft({ mission in
+            if let tid = focusedLiveTaskID, let ti = mission.routeMacro.tasks.firstIndex(where: { $0.id == tid }) {
+                let n = mission.routeMacro.tasks[ti].geofences.count + 1
+                var fence = MissionGeofence.newPolygon(name: "Task fence \(n)", around: coord)
+                fence.id = newID
+                mission.routeMacro.tasks[ti].geofences.append(fence)
+            } else {
+                let n = mission.missionGeofences.count + 1
+                var fence = MissionGeofence.newPolygon(name: "Mission fence \(n)", around: coord)
+                fence.id = newID
+                mission.missionGeofences.append(fence)
+            }
+        }) else { return }
+        liveRuntimeGeofencesListScrollTargetRow = newID
+        liveRuntimeGeofencesListScrollEpoch &+= 1
+        liveRuntimeGeofenceMapSelectedFenceID = newID
+        pushLiveOverviewMapModelFromMission()
+        toastCenter.show("Fence added to draft.", style: .success)
+    }
+
+    private func appendLiveRuntimeGeofenceCircleAtMapCentre() {
+        guard liveRuntimeGeofenceDraftMission != nil else {
+            toastCenter.show("Tap Edit fences first.", style: .warning)
+            return
+        }
+        guard resolvedMission != nil else {
+            toastCenter.show("No mission template for this run.", style: .warning)
+            return
+        }
+        let coord = liveRuntimeMissionMapViewportCenter
+            ?? resolvedMission?.routeMacro.home?.coord
+            ?? RouteCoordinate()
+        let newID = UUID()
+        guard mutateLiveRuntimeGeofenceDraft({ mission in
+            if let tid = focusedLiveTaskID, let ti = mission.routeMacro.tasks.firstIndex(where: { $0.id == tid }) {
+                let n = mission.routeMacro.tasks[ti].geofences.count + 1
+                var fence = MissionGeofence.newCircle(name: "Task fence \(n)", center: coord)
+                fence.id = newID
+                mission.routeMacro.tasks[ti].geofences.append(fence)
+            } else {
+                let n = mission.missionGeofences.count + 1
+                var fence = MissionGeofence.newCircle(name: "Mission fence \(n)", center: coord)
+                fence.id = newID
+                mission.missionGeofences.append(fence)
+            }
+        }) else { return }
+        liveRuntimeGeofencesListScrollTargetRow = newID
+        liveRuntimeGeofencesListScrollEpoch &+= 1
+        liveRuntimeGeofenceMapSelectedFenceID = newID
+        pushLiveOverviewMapModelFromMission()
+        toastCenter.show("Fence added to draft.", style: .success)
     }
 
     @ViewBuilder
@@ -3452,7 +4299,7 @@ struct MissionRunDetailView: View {
         .spring(response: 0.42, dampingFraction: 0.86)
     }
 
-    /// Right column: ``GuardianCard`` with **Tasks** header; ``fullCardOverlay`` stacks **Task triage → Assignment (vehicle) → Reserve berth → Map points** (bottom → top). ``zIndex`` must stay ordered so map points stay above in-flight sheets.
+    /// Right column: ``GuardianCard`` with **Tasks** header; ``fullCardOverlay`` stacks **Task triage → Assignment (vehicle) → Reserve berth → Map points → Fences** (bottom → top). ``zIndex`` keeps **Fences** above map points.
     private var missionLiveTasksSideCard: some View {
         GuardianCard(
             configuration: mcSetupGroupCardConfiguration,
@@ -3467,6 +4314,7 @@ struct MissionRunDetailView: View {
                     missionLiveVehicleOverlay
                     missionLiveReservePoolBerthOverlay
                     missionLiveRuntimeMissionPointsOverlay
+                    missionLiveRuntimeGeofencesOverlay
                 }
             }
         )
@@ -3604,19 +4452,75 @@ struct MissionRunDetailView: View {
         mapModel.focusMapPanRetainZoom(lat: lat, lon: lon)
     }
 
+    private func focusLiveMapOnGeofenceTriage(fence: MissionGeofence) {
+        let coords = MissionControlLiveMapFitCoordinates.geofenceFitCoordinates(fence)
+        guard !coords.isEmpty else {
+            toastCenter.show("This fence has no valid coordinates to show on the map.", style: .info)
+            return
+        }
+        liveConsoleMediaTab = .map
+        mapModel.focusMapFitBounds(points: coords)
+    }
+
+    /// MC-R Tasks card: surface active task-path or whole-run abort/complete wind-down so operators see progress after triage or run menu actions.
+    private func missionLiveTasksWindDownNoticeFlags() -> (abort: Bool, complete: Bool) {
+        switch run.status {
+        case .running, .paused, .recovery:
+            break
+        default:
+            return (false, false)
+        }
+        let runAbortGraceful = run.gracefulStopKind == .abortAfterCycle
+        let runCompleteGraceful = run.gracefulStopKind == .completeAfterCycle
+        let taskAbortGraceful = run.pendingMissionTaskGracefulWindDownKindByTaskID.values.contains(.abortAfterCycle)
+        let taskCompleteGraceful = run.pendingMissionTaskGracefulWindDownKindByTaskID.values.contains(.completeAfterCycle)
+        let taskAbortIssued = !run.missionTaskAbortWindDownIssuedTaskIDs.isEmpty
+        let taskCompleteIssued = !run.missionTaskCompleteWindDownIssuedTaskIDs.isEmpty
+        return (
+            runAbortGraceful || taskAbortGraceful || taskAbortIssued,
+            runCompleteGraceful || taskCompleteGraceful || taskCompleteIssued
+        )
+    }
+
+    @ViewBuilder
+    private func missionLiveTasksWindDownNoticeBlock() -> some View {
+        let flags = missionLiveTasksWindDownNoticeFlags()
+        if flags.abort || flags.complete {
+            VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+                if flags.abort {
+                    GuardianInlineNotice(
+                        kind: .danger,
+                        title: "Abort underway",
+                        detail: "Fleet wind-down for abort is dispatching or waiting on end-of-cycle steps on a task path or for the whole run."
+                    )
+                }
+                if flags.complete {
+                    GuardianInlineNotice(
+                        kind: .success,
+                        title: "Complete underway",
+                        detail: "Fleet wind-down for completion is dispatching or waiting on end-of-cycle steps on a task path or for the whole run."
+                    )
+                }
+            }
+        }
+    }
+
     @ViewBuilder
     private var missionLiveTasksBaseLayer: some View {
         if let mission = resolvedMission {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: GuardianSpacing.cardBodyInset) {
-                    if run.status == .running,
-                       !run.taskStartDeferralByTaskID.isEmpty
-                    {
-                        TimelineView(.periodic(from: .now, by: 0.25)) { context in
-                            missionLiveTaskProgressList(mission: mission, now: context.date)
+                VStack(alignment: .leading, spacing: GuardianSpacing.cardBodyInset) {
+                    missionLiveTasksWindDownNoticeBlock()
+                    LazyVStack(alignment: .leading, spacing: GuardianSpacing.cardBodyInset) {
+                        if run.status == .running,
+                           !run.taskStartDeferralByTaskID.isEmpty
+                        {
+                            TimelineView(.periodic(from: .now, by: 0.25)) { context in
+                                missionLiveTaskProgressList(mission: mission, now: context.date)
+                            }
+                        } else {
+                            missionLiveTaskProgressList(mission: mission, now: Date())
                         }
-                    } else {
-                        missionLiveTaskProgressList(mission: mission, now: Date())
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -3954,7 +4858,7 @@ struct MissionRunDetailView: View {
                                 )
                                 .disabled(reservePoolBerthPreflightBusy || poolMutationLocked)
                                 .guardianPointerOnHover()
-                                .help("Remove the bound aircraft from this berth.")
+                                .help("Remove the bound vehicles from this berth.")
                             }
                         }
                     } else {
@@ -4483,6 +5387,17 @@ struct MissionRunDetailView: View {
             VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
                 missionLiveTaskStateBanner(run.taskStateByTaskID[task.id] ?? .ready)
                     .padding(.top, GuardianSpacing.denseGutter)
+                if let attempting = run.taskAttemptingByTaskID[task.id] {
+                    missionLiveTaskAttemptIntentLine(attempting)
+                        .padding(.horizontal, GuardianSpacing.denseGutter)
+                }
+
+                if missionLiveTaskShowsAutoAckSlotBlockers(for: task) {
+                    missionLiveTaskAutoAckSlotBlockersSection(
+                        task: task,
+                        showManualTriageHint: missionLiveTaskEndProtocolAcknowledgementVisible(for: task)
+                    )
+                }
 
                 missionLiveTaskEndProtocolAcknowledgementBlock(task: task, compact: false)
 
@@ -4531,7 +5446,7 @@ struct MissionRunDetailView: View {
     }
 
     /// Worst merged slot-state attention across this task’s roster rows (MC-R task list chip).
-    private func missionLiveTaskSlotAttention(for task: RoutePath, mission: Mission) -> (severity: GuardianFeedbackSeverity, title: String)? {
+    private func missionLiveTaskSlotAttention(for task: RoutePath, mission: Mission) -> (severity: GuardianFeedbackSeverity, title: String, help: String)? {
         guard run.status == .running || run.status == .paused || run.status == .recovery else { return nil }
         let rows = run.assignments.filter { run.missionControlAssignmentBelongsToTask($0, task: task, mission: mission) }
         return MissionControlAssignmentSlotRosterAttention.worstAmong(assignments: rows)
@@ -4539,51 +5454,110 @@ struct MissionRunDetailView: View {
 
     private func missionLiveTaskProgressRow(task: RoutePath, taskIndex: Int, mission: Mission, now: Date) -> some View {
         let d = missionLiveTaskProgressDerived(task: task, taskIndex: taskIndex, mission: mission, now: now)
-        return VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
-            Button {
-                focusLiveTask(task.id)
-            } label: {
-                VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
-                    HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.xsTight) {
-                        missionLiveTaskStateBadge(run.taskStateByTaskID[task.id] ?? .ready)
-                        missionLiveTaskTitleRow(task: task)
-                        Spacer(minLength: GuardianSpacing.xsTight)
-                        if let slotAttention = missionLiveTaskSlotAttention(for: task, mission: mission) {
-                            MissionControlRosterSlotAttentionCapsule(
-                                severity: slotAttention.severity,
-                                title: slotAttention.title
+        let missionBarFraction = missionLiveTaskFraction(task: task, taskActiveInCycle: d.taskActiveInCycle, hub: d.hub)
+        let missionBarTint = task.enabled ? d.tint : Color.gray.opacity(0.35)
+        return GuardianCard(
+            configuration: GuardianCardConfiguration(
+                border: .subtle,
+                cornerRadius: GuardianCardLayout.cornerRadius,
+                bodyPadding: GuardianSpacing.cardBodyInset
+            ),
+            body: {
+                VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+                    Button {
+                        focusLiveTask(task.id)
+                    } label: {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+                            HStack(alignment: .center, spacing: GuardianSpacing.xsTight) {
+                                Text(task.name)
+                                    .font(GuardianTypography.font(.formFieldLabel))
+                                    .foregroundStyle(task.enabled ? theme.textPrimary : theme.textSecondary)
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.leading)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                                HStack(spacing: GuardianSpacing.xsTight) {
+                                    missionLiveTaskStateBadge(run.taskStateByTaskID[task.id] ?? .ready)
+                                    if let slotAttention = missionLiveTaskSlotAttention(for: task, mission: mission) {
+                                        MissionControlRosterSlotAttentionCapsule(
+                                            severity: slotAttention.severity,
+                                            title: slotAttention.title,
+                                            help: slotAttention.help,
+                                            compactMetrics: true
+                                        )
+                                        .fixedSize(horizontal: true, vertical: false)
+                                    }
+                                }
+                                .fixedSize(horizontal: true, vertical: false)
+                            }
+
+                            if let attempting = run.taskAttemptingByTaskID[task.id] {
+                                missionLiveTaskAttemptIntentLine(attempting)
+                            }
+
+                            missionLiveTaskTriageCycleWaypointCounterRow(task: task, derived: d)
+
+                            missionLiveAnimatedProgressBar(
+                                fraction: missionBarFraction,
+                                tint: missionBarTint
                             )
                         }
-                        Spacer(minLength: GuardianSpacing.xsTight)
-                        missionLiveTaskProgressCounterGroup(task: task, derived: d, now: now, hero: false)
+                        .contentShape(Rectangle())
                     }
-                    missionLiveAnimatedProgressBar(
-                        fraction: d.barFraction,
-                        tint: d.barTint
-                    )
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(GuardianPointerPlainButtonStyle())
-            .help("Open task triage")
+                    .buttonStyle(GuardianPointerPlainButtonStyle())
+                    .help("Open task triage")
 
-            if d.inTaskStartDeferral, let taskStartDefForControls = d.taskStartDef {
-                missionLiveTaskProgressDeferralControls(
-                    task: task,
-                    taskStartDefForControls: taskStartDefForControls,
-                    now: now,
-                    hero: false
-                )
-            } else if showMissionTaskTrigger(for: task) {
-                HStack {
-                    Spacer(minLength: 0)
-                    missionLiveTaskProgressTriggerControl(task: task, hero: false)
+                    if d.inTaskStartDeferral, let taskStartDef = d.taskStartDef {
+                        VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+                            Divider()
+                            Text(
+                                formattedTaskStartDeferralStatus(
+                                    remaining: max(0, taskStartDef.startAt.timeIntervalSince(now)),
+                                    totalDelay: taskStartDef.totalDelay
+                                )
+                            )
+                            .font(GuardianTypography.font(.telemetryMono10Regular))
+                            .foregroundStyle(Color.cyan.opacity(0.9))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                            missionLiveAnimatedProgressBar(
+                                fraction: missionLiveTaskStartDeferralBarFraction(
+                                    taskStartDef: taskStartDef,
+                                    now: now
+                                ),
+                                tint: Color.cyan.opacity(0.78)
+                            )
+                        }
+                    }
+
+                    if d.inTaskStartDeferral, let taskStartDefForControls = d.taskStartDef {
+                        missionLiveTaskProgressDeferralControls(
+                            task: task,
+                            taskStartDefForControls: taskStartDefForControls,
+                            now: now,
+                            hero: false
+                        )
+                    } else if showMissionTaskTrigger(for: task) {
+                        HStack {
+                            Spacer(minLength: 0)
+                            missionLiveTaskProgressTriggerControl(task: task, hero: false)
+                        }
+                    } else if missionLiveTaskEndProtocolAcknowledgementVisible(for: task) {
+                        missionLiveTaskEndProtocolAcknowledgementBlock(task: task, compact: true)
+                    }
                 }
-            } else if missionLiveTaskEndProtocolAcknowledgementVisible(for: task) {
-                missionLiveTaskEndProtocolAcknowledgementBlock(task: task, compact: true)
             }
+        )
+    }
+
+    /// Filled fraction for the **scheduled start** countdown bar (``MissionTaskStartDeferral``).
+    private func missionLiveTaskStartDeferralBarFraction(taskStartDef: MissionTaskStartDeferral, now: Date) -> Double {
+        let remaining = taskStartDef.startAt.timeIntervalSince(now)
+        let elapsed = taskStartDef.totalDelay - max(0, remaining)
+        if taskStartDef.totalDelay > 0 {
+            return min(1, max(0, elapsed / taskStartDef.totalDelay))
         }
-        .padding(.vertical, GuardianSpacing.xxs)
+        return 1
     }
 
     /// Live progress caption while a task awaits its initial MAVLink mission start (see ``MissionTaskStartDeferral``).
@@ -4599,21 +5573,6 @@ struct MissionRunDetailView: View {
         let s = secs % 60
         let clock = String(format: "%d:%02d", m, s)
         return "\(clock) until mission start"
-    }
-
-    @ViewBuilder
-    private func missionLiveTaskTitleRow(task: RoutePath) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.xxs) {
-            Text(task.name)
-                .font(GuardianTypography.font(.formFieldLabel))
-                .foregroundStyle(task.enabled ? theme.textPrimary : theme.textSecondary)
-            if task.enabled, task.regularity == .continuous || task.regularity == .continuousWithDelay {
-                let done = run.taskCyclesCompletedByTaskID[task.id] ?? 0
-                Text(task.cycles > 0 ? "(\(done)/\(task.cycles))" : "(\(done)/∞)")
-                    .font(GuardianTypography.font(.denseCaption10Medium))
-                    .foregroundStyle(theme.textSecondary)
-            }
-        }
     }
 
     private func missionLiveTaskFraction(task: RoutePath, taskActiveInCycle: Bool, hub: FleetHubVehicleTelemetry?) -> Double {
@@ -4709,11 +5668,13 @@ struct MissionRunDetailView: View {
                         toggleLiveRuntimeMissionPointSelectionFromMapPin(id)
                     },
                     onMissionPointMoved: { id, lat, lon in
-                        _ = run.applyRuntimeMissionPointUpdate(id: id, source: "operator") {
-                            $0.coordinate.lat = lat
-                            $0.coordinate.lon = lon
+                        DispatchQueue.main.async {
+                            _ = run.applyRuntimeMissionPointUpdate(id: id, source: "operator") {
+                                $0.coordinate.lat = lat
+                                $0.coordinate.lon = lon
+                            }
+                            onUpdate(run)
                         }
-                        onUpdate(run)
                     },
                     onVehicleTap: { ev in
                         guard let raw = ev.markerID else { return }
@@ -4732,6 +5693,83 @@ struct MissionRunDetailView: View {
                     },
                     onViewportCenterChanged: { lat, lon in
                         liveRuntimeMissionMapViewportCenter = RouteCoordinate(lat: lat, lon: lon)
+                    },
+                    onGeofenceClick: { id in
+                        toggleLiveRuntimeGeofenceMapSelection(fenceID: id)
+                    },
+                    onGeofenceCircleCenterMoved: { id, lat, lon in
+                        guard liveRuntimeGeofenceDraftMission != nil else { return }
+                        mutateLiveRuntimeGeofenceFromMapAfterCurrentUIUpdate(id: id) {
+                            $0.circleCenter.lat = lat
+                            $0.circleCenter.lon = lon
+                        }
+                    },
+                    onGeofenceCircleRadiusMoved: { id, radiusM in
+                        guard liveRuntimeGeofenceDraftMission != nil else { return }
+                        mutateLiveRuntimeGeofenceFromMapAfterCurrentUIUpdate(id: id) {
+                            $0.circleRadiusMeters = max(1, radiusM)
+                        }
+                    },
+                    onGeofencePolygonVertexMoved: { id, idx, lat, lon in
+                        guard liveRuntimeGeofenceDraftMission != nil else { return }
+                        mutateLiveRuntimeGeofenceFromMapAfterCurrentUIUpdate(id: id) { g in
+                            guard g.shape == .polygon, g.polygonVertices.indices.contains(idx) else { return }
+                            g.polygonVertices[idx].lat = lat
+                            g.polygonVertices[idx].lon = lon
+                        }
+                    },
+                    onGeofencePolygonTranslated: { id, dLat, dLon in
+                        guard liveRuntimeGeofenceDraftMission != nil else { return }
+                        mutateLiveRuntimeGeofenceFromMapAfterCurrentUIUpdate(id: id) { g in
+                            guard g.shape == .polygon else { return }
+                            for i in g.polygonVertices.indices {
+                                g.polygonVertices[i].lat += dLat
+                                g.polygonVertices[i].lon += dLon
+                            }
+                        }
+                    },
+                    onGeofencePolygonEdgeInsert: { id, afterIndex, lat, lon in
+                        guard liveRuntimeGeofenceDraftMission != nil else { return }
+                        mutateLiveRuntimeGeofenceFromMapAfterCurrentUIUpdate(id: id) { g in
+                            guard g.shape == .polygon else { return }
+                            var v = g.polygonVertices
+                            let n = v.count
+                            guard n >= 3, afterIndex >= 0, afterIndex < n else { return }
+                            let insertAt = afterIndex + 1
+                            let coord = RouteCoordinate(lat: lat, lon: lon)
+                            if insertAt >= n {
+                                v.append(coord)
+                            } else {
+                                v.insert(coord, at: insertAt)
+                            }
+                            g.polygonVertices = v
+                        }
+                    },
+                    onGeofencePolygonVertexDelete: { id, idx in
+                        guard liveRuntimeGeofenceDraftMission != nil else { return }
+                        let vertexCount: Int = {
+                            guard let mission = liveRuntimeGeofenceDraftMission else { return 0 }
+                            if let i = mission.missionGeofences.firstIndex(where: { $0.id == id }) {
+                                return mission.missionGeofences[i].polygonVertices.count
+                            }
+                            for t in mission.routeMacro.tasks {
+                                if let fi = t.geofences.firstIndex(where: { $0.id == id }) {
+                                    return t.geofences[fi].polygonVertices.count
+                                }
+                            }
+                            return 0
+                        }()
+                        guard vertexCount > 3 else {
+                            toastCenter.show("A polygon fence needs at least three markers.", style: .warning)
+                            return
+                        }
+                        DispatchQueue.main.async {
+                            self.mutateLiveRuntimeGeofenceFromMap(id: id) { g in
+                                guard g.shape == .polygon, g.polygonVertices.count > 3, g.polygonVertices.indices.contains(idx) else { return }
+                                g.polygonVertices.remove(at: idx)
+                            }
+                            self.toastCenter.show("Marker removed", style: .success)
+                        }
                     }
                 )
                 .task(id: liveOverviewMapStructureIdentity) {
@@ -4820,6 +5858,14 @@ struct MissionRunDetailView: View {
         )
     }
 
+    /// MC‑R live map: draft geofence geometry + selection (drives ``liveOverviewMapMarkerCoordinateDigest`` / marker-only pushes — not ``liveOverviewMapStructureIdentity`` — so handle drags do not refit the map; mirrors MCS ``setupStagingMapMarkerCoordinateDigest`` fence segment).
+    private var liveRuntimeMcrLiveMapGeofenceAuthoringDigest: String {
+        let act = liveRuntimeGeofenceDraftMission != nil ? "1" : "0"
+        let sel = liveRuntimeGeofenceMapSelectedFenceID?.uuidString ?? "none"
+        let geo = liveRuntimeGeofenceDraftMission.map { liveRuntimeGeofenceGeometryDigest($0) } ?? ""
+        return "\(act)|\(sel)|\(geo)"
+    }
+
     /// Quantized live coordinates for roster vehicles + runtime map points; drives marker-only pushes
     /// without invalidating ``liveOverviewMapStructureIdentity`` on every hub sample.
     private var liveOverviewMapMarkerCoordinateDigest: String {
@@ -4837,7 +5883,7 @@ struct MissionRunDetailView: View {
                 return String(format: "%@:%.5f:%.5f:%.2f", m.id, m.lat, m.lon, heading)
             }
             .joined(separator: "|")
-        return pts + "§" + veh
+        return pts + "§" + veh + "§mcrGf§" + liveRuntimeMcrLiveMapGeofenceAuthoringDigest
     }
 
     /// Fits the MC-R live overview map to home, visible paths, runtime map points, and **current** vehicle markers (``mapModel/focusMapFitBounds`` — not ``recenterNonce`` / default world zoom).
@@ -4876,6 +5922,7 @@ struct MissionRunDetailView: View {
     private func pushLiveOverviewMapModelFromMission() {
         if let mission = resolvedMission {
             let pathPayload = liveOverviewMapTaskPathPayload(from: mission)
+            let mapMission = missionMergingLiveGeofenceDraftForLiveMapDisplay(base: mission)
             mapModel.routeGeometry = GuardianRouteMapGeometry(
                 home: mission.routeMacro.home,
                 allTasksCoords: pathPayload.coords,
@@ -4889,13 +5936,14 @@ struct MissionRunDetailView: View {
                 missionPointMarkers: missionLiveMissionPointMapMarkers,
                 missionPointPlacementArmed: false,
                 mcsReservePoolHomePlacementArmed: false,
-                geofenceOverlays: mission.geofenceGuardianMapOverlaysForMissionControl(
+                geofenceOverlays: mapMission.geofenceGuardianMapOverlaysForMissionControl(
                     operatorSettings: run.operatorDisplaySettings,
                     mapFocusedTaskID: liveOverviewMapFocusedTaskID,
                     respectMapTaskIsolation: true,
-                    run: run
+                    run: run,
+                    mapSelectionFenceID: liveRuntimeGeofenceDraftMission != nil ? liveRuntimeGeofenceMapSelectedFenceID : nil
                 ),
-                geofenceMapLayerPointerSelectsFence: false
+                geofenceMapLayerPointerSelectsFence: liveRuntimeGeofenceDraftMission != nil
             )
         } else {
             mapModel.routeGeometry = .empty
@@ -4921,6 +5969,15 @@ struct MissionRunDetailView: View {
         }
         var geo = mapModel.routeGeometry
         geo.missionPointMarkers = missionLiveMissionPointMapMarkers
+        let mapMission = missionMergingLiveGeofenceDraftForLiveMapDisplay(base: mission)
+        geo.geofenceOverlays = mapMission.geofenceGuardianMapOverlaysForMissionControl(
+            operatorSettings: run.operatorDisplaySettings,
+            mapFocusedTaskID: liveOverviewMapFocusedTaskID,
+            respectMapTaskIsolation: true,
+            run: run,
+            mapSelectionFenceID: liveRuntimeGeofenceDraftMission != nil ? liveRuntimeGeofenceMapSelectedFenceID : nil
+        )
+        geo.geofenceMapLayerPointerSelectsFence = liveRuntimeGeofenceDraftMission != nil
         mapModel.routeGeometry = geo
         mapModel.vehicleMarkers = missionLiveVehicleMarkers
         if let followID = mapModel.followedVehicleMarkerID,
@@ -5024,7 +6081,7 @@ struct MissionRunDetailView: View {
         return roster + missionLiveFloatingReservePoolVehicleMarkers
     }
 
-    /// MC-R live map: hub positions for **floating reserve** aircraft (fleet token + live telemetry only).
+    /// MC-R live map: hub positions for **floating reserve** vehicles (fleet token + live telemetry only).
     private var missionLiveFloatingReservePoolVehicleMarkers: [MapVehicleMarker] {
         guard let mission = resolvedMission else { return [] }
         let taskIDs: [UUID] = {
@@ -5266,8 +6323,8 @@ struct MissionRunDetailView: View {
         let bracketed = shortRaw.isEmpty ? "—" : "[\(shortRaw)]"
         let missionLiveShowsSlotBadge = run.status == .running || run.status == .paused || run.status == .recovery
         let mergedSlot = MissionRunAssignmentSlotLaneMerge.preferredDisplayState(lanes: assignment.effectiveSlotLifecycleLanes)
-        let slotAttention: (GuardianFeedbackSeverity, String)? = missionLiveShowsSlotBadge
-            ? mergedSlot.missionControlRosterBadgeSeverity.map { ($0, mergedSlot.displayTitle) }
+        let slotAttention: (GuardianFeedbackSeverity, String, String)? = missionLiveShowsSlotBadge
+            ? mergedSlot.missionControlRosterBadgeSeverity.map { ($0, mergedSlot.displayTitle, mergedSlot.rosterSlotChipHelp) }
             : nil
         let reserveSwapStripAccessibilitySummary: String? = {
             guard let pick = liveReserveSwapPick,
@@ -5449,7 +6506,7 @@ struct MissionRunDetailView: View {
                 s += "\n" + r.steps.map { "• \($0)" }.joined(separator: "\n")
             }
         }
-        s += "\n\nUse Cancel to leave the swap, Switch to pick another pool row, or Inspect to open Vehicle Inspector. Tap the same pool row again to retry after fixing the aircraft."
+        s += "\n\nUse Cancel to leave the swap, Switch to pick another pool row, or Inspect to open Vehicle Inspector. Tap the same pool row again to retry after fixing the vehicle."
         return s
     }
 
@@ -6242,6 +7299,8 @@ struct MissionRunDetailView: View {
                                     }
                                 case .points:
                                     mcsRosterMissionPointsListScroll(mission: mission)
+                                case .fences:
+                                    mcsRosterGeofencesListScroll(mission: mission)
                                 }
                             } else {
                                 missionMissingTemplateRosterFallback
@@ -6251,6 +7310,14 @@ struct MissionRunDetailView: View {
                     }
                     .onChange(of: setupRostersMapPointsListScrollEpoch) { _ in
                         guard let id = setupRostersMapPointsListScrollTargetRow else { return }
+                        DispatchQueue.main.async {
+                            withAnimation(.easeOut(duration: 0.22)) {
+                                proxy.scrollTo(id, anchor: .center)
+                            }
+                        }
+                    }
+                    .onChange(of: setupRostersFencesListScrollEpoch) { _ in
+                        guard let id = setupRostersFencesListScrollTargetRow else { return }
                         DispatchQueue.main.async {
                             withAnimation(.easeOut(duration: 0.22)) {
                                 proxy.scrollTo(id, anchor: .center)
@@ -6275,26 +7342,27 @@ struct MissionRunDetailView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
-                .frame(maxWidth: 240)
+                .frame(maxWidth: 360)
             }
             .fixedSize(horizontal: true, vertical: false)
 
             Spacer(minLength: GuardianSpacing.sm)
 
             if rostersSidebarListTab == .tasks, fleetLink.isSimulateEnabled {
-                GuardianThemedButton(
-                    title: "SIM cleanup",
-                    accent: .primary,
-                    surface: .outline,
-                    size: .small,
-                    shape: .cornered,
-                    action: { requestManualMissionRunSimCleanup() }
-                )
+                Button {
+                    requestManualMissionRunSimCleanup()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
+                }
+                .buttonStyle(.bordered)
+                .guardianPointerOnHover()
+                .controlSize(.small)
                 .disabled(run.isMissionRunSimCleanupPassRunning)
+                .accessibilityLabel("SIM cleanup")
                 .help(
                     "Park every in-scope Guardian SIM for this run, clear uploaded missions on those vehicles, optionally restore captured start poses when \"Reset SIMs when run completes\" is on for this run, then charge SIM batteries to full. Same steps as after Mark Completed."
                 )
-                .guardianPointerOnHover()
             }
 
             if rostersSidebarListTab == .tasks, !run.assignments.isEmpty, fleetLink.isSimulateEnabled {
@@ -6304,9 +7372,11 @@ struct MissionRunDetailView: View {
                     Image(systemName: "wand.and.stars")
                         .font(GuardianTypography.font(.subsectionTitleSemibold))
                 }
-                .buttonStyle(.bordered).guardianPointerOnHover()
+                .buttonStyle(.bordered)
+                .guardianPointerOnHover()
                 .controlSize(.small)
                 .disabled(emptyAll == 0 || bulkSpawnSimsConfirmIsActive || busy)
+                .accessibilityLabel("Spawn simulators for all empty roster slots")
                 .help(
                     "Spawn a sim for every empty roster slot in this mission (all tasks and the mission roster, if any). Uses each slot’s class and your default stack and spawn location from Settings."
                 )
@@ -6317,6 +7387,20 @@ struct MissionRunDetailView: View {
                     appendSetupRosterMissionPointAtViewportCenter()
                 }
                 .guardianPointerOnHover()
+            }
+
+            if rostersSidebarListTab == .fences {
+                HStack(spacing: GuardianSpacing.xs) {
+                    GuardianPrimaryProminentButton(title: "Polygon") {
+                        appendSetupRosterGeofencePolygonAtViewportCenter()
+                    }
+                    .guardianPointerOnHover()
+                    GuardianPrimaryProminentButton(title: "Circle") {
+                        appendSetupRosterGeofenceCircleAtViewportCenter()
+                    }
+                    .guardianPointerOnHover()
+                }
+                .fixedSize()
             }
         }
         .padding(.horizontal, GuardianSpacing.denseGutter)
@@ -6403,6 +7487,120 @@ struct MissionRunDetailView: View {
         .contentShape(Rectangle())
         .onTapGesture {
             toggleSetupRostersMissionPointMapSelection(missionPointID: mp.id)
+        }
+        .overlay {
+            if sel {
+                RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous)
+                    .strokeBorder(GuardianSemanticColors.infoForeground.opacity(0.45), lineWidth: 2)
+            }
+        }
+    }
+
+    /// Mission-wide fences first (template order), then each task’s fences in route order — one flat list for MCS.
+    private func mcsRosterGeofenceListEntries(mission: Mission) -> [(fence: MissionGeofence, scopeLine: String)] {
+        var rows: [(fence: MissionGeofence, scopeLine: String)] = []
+        for f in mission.missionGeofences {
+            rows.append((f, "Mission-wide"))
+        }
+        for t in mission.routeMacro.tasks {
+            let trimmed = t.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let taskLabel = trimmed.isEmpty ? "Task" : trimmed
+            for f in t.geofences {
+                rows.append((f, taskLabel))
+            }
+        }
+        return rows
+    }
+
+    @ViewBuilder
+    private func mcsRosterGeofencesListScroll(mission: Mission) -> some View {
+        let entries = mcsRosterGeofenceListEntries(mission: mission)
+        VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+            if entries.isEmpty {
+                Text("No fences on this mission yet.")
+                    .font(GuardianTypography.font(.denseCaption12Regular))
+                    .foregroundStyle(theme.textTertiary)
+            } else {
+                ForEach(entries, id: \.fence.id) { entry in
+                    mcsRosterGeofenceListRow(scopeLabel: entry.scopeLine, fence: entry.fence)
+                        .id(entry.fence.id)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func mcsRosterGeofenceListRow(scopeLabel: String, fence: MissionGeofence) -> some View {
+        let fenceID = fence.id
+        let sel = setupRostersSelectedGeofenceID == fenceID
+        GuardianCard(
+            configuration: GuardianCardConfiguration(
+                border: .subtle,
+                cornerRadius: GuardianCardLayout.cornerRadius,
+                bodyPadding: GuardianSpacing.cardBodyInset
+            ),
+            body: {
+                HStack(alignment: .center, spacing: GuardianSpacing.sm) {
+                    VStack(alignment: .leading, spacing: GuardianSpacing.micro) {
+                        Text(fence.name.isEmpty ? "Untitled fence" : fence.name)
+                            .font(GuardianTypography.font(.subsectionTitleSemibold))
+                            .foregroundStyle(theme.textPrimary)
+                            .lineLimit(2)
+                        HStack(spacing: GuardianSpacing.xs) {
+                            Text(scopeLabel)
+                                .font(GuardianTypography.font(.denseCaption12Regular))
+                                .foregroundStyle(theme.textTertiary)
+                            Text("·")
+                                .foregroundStyle(theme.textTertiary)
+                            Text(fence.shape.displayTitle)
+                                .font(GuardianTypography.font(.denseCaption12Regular))
+                                .foregroundStyle(theme.textSecondary)
+                            Text("·")
+                                .foregroundStyle(theme.textTertiary)
+                            Text(fence.boundary.displayTitle)
+                                .font(GuardianTypography.font(.denseCaption12Regular))
+                                .foregroundStyle(theme.textSecondary)
+                        }
+                        .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    GuardianThemedButton(
+                        accent: .primary,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        contentSizing: .squareToolbarCell,
+                        action: { toggleSetupRostersGeofenceEditDrawer(fenceID: fenceID) },
+                        label: {
+                            Image(systemName: "pencil")
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
+                        }
+                    )
+                    .help("Open or close edit drawer")
+
+                    GuardianThemedButton(
+                        accent: .danger,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        contentSizing: .squareToolbarCell,
+                        action: {
+                            setupRostersGeofenceDeleteCandidate = MissionControlSetupRosterGeofenceDeleteCandidate(id: fenceID)
+                        },
+                        label: {
+                            Image(systemName: "trash")
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
+                        }
+                    )
+                    .help("Delete fence")
+                }
+            }
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            toggleSetupRostersGeofenceMapSelection(fenceID: fenceID)
         }
         .overlay {
             if sel {
@@ -6515,13 +7713,15 @@ struct MissionRunDetailView: View {
                         Image(systemName: "wand.and.stars")
                             .font(GuardianTypography.font(.subsectionTitleSemibold))
                     }
-                    .buttonStyle(.bordered).guardianPointerOnHover()
+                    .buttonStyle(.bordered)
+                    .guardianPointerOnHover()
                     .controlSize(.small)
                     .disabled(
                         emptyRosterSlotCount == 0
                             || bulkSpawnSimsConfirmIsActive
                             || rosterBulkSimSpawnBusy != nil
                     )
+                    .accessibilityLabel("Spawn simulators for empty roster slots in this task")
                     .help("Spawn a sim for each empty roster slot (class + default stack in Settings).")
                 }
 
@@ -6658,9 +7858,12 @@ struct MissionRunDetailView: View {
                         MissionRunPreferentialReserveSwapPolicyEditor(chain: missionReserveSwapPreferenceChainBinding, showFootnote: true)
                         mcSetupRowDivider
                         MissionRunGeofenceAugmentationRunPolicySidebarSection(
+                            run: run,
+                            scope: .missionWide,
                             title: "Mission run geofence augmentation",
-                            caption: "Additional fences merge after every task’s template fences for this run. v1 is additive only—clear removes mission-wide run-only extras; edit fence shapes on the mission Geofences tab.",
-                            fenceCount: run.policies.missionGeofenceAugmentation.count,
+                            caption: "Additional fences merge after every task’s template fences for this run. v1 is additive only—clear removes mission-wide run-only extras. Edit fence shapes on the mission Geofences tab; edit altitude envelopes below.",
+                            credential: localOperatorCredential,
+                            onRecompilePlanForGeofenceAugmentationPolicy: recompilePlanAfterGeofenceAugmentationPolicyEdit,
                             onClear: {
                                 _ = run.updateMissionGeofenceAugmentation([], credential: localOperatorCredential)
                                 recompilePlanAfterGeofenceAugmentationPolicyEdit()
@@ -6732,29 +7935,45 @@ struct MissionRunDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func persistMissionMutation(_ mutate: (inout Mission) -> Void) {
-        guard var mission = missionStore.missions.first(where: { $0.id == run.missionId }) else { return }
+    @discardableResult
+    private func persistMissionMutation(_ mutate: (inout Mission) -> Void) -> Bool {
+        guard var mission = run.template ?? missionStore.missions.first(where: { $0.id == run.missionId }) else { return false }
         mutate(&mission)
-        missionStore.updateMission(mission)
-        if let fresh = missionStore.missions.first(where: { $0.id == mission.id }) {
-            run.updateTemplate(fresh)
-        } else {
-            run.updateTemplate(mission)
+        if let msg = Utilities.mission.templateGeofences.inclusionConstraintViolationMessage(for: mission) {
+            toastCenter.show(msg, style: .error)
+            return false
         }
+        run.updateTemplate(mission)
         onUpdate(run)
+        return true
     }
 
-    /// Wires the MRE template persister so mission / task **template** policy edits routed through
-    /// ``MissionRunEnvironment`` policy APIs (cog sidebar, assistants) survive a refresh by writing through
-    /// to the ``MissionStore``. Called from ``MissionRunDetailView`` ``onAppear`` for both **MCS** (setup) and **MC‑R** (running).
+    /// ``GuardianMapView`` drag / handle callbacks can fire while SwiftUI is still applying a view update; deferring one turn
+    /// avoids “Publishing changes from within view updates” when ``persistMissionMutation`` touches ``MissionRunEnvironment``.
+    private func persistMissionMutationAfterCurrentUIUpdate(_ mutate: @escaping (inout Mission) -> Void) {
+        DispatchQueue.main.async {
+            _ = self.persistMissionMutation(mutate)
+        }
+    }
+
+    private func mutateSetupRosterMissionGeofenceFromMapAfterCurrentUIUpdate(
+        id: UUID,
+        _ update: @escaping (inout MissionGeofence) -> Void
+    ) {
+        DispatchQueue.main.async {
+            self.mutateSetupRosterMissionGeofenceFromMap(id: id, update)
+        }
+    }
+
+    /// Wires the MRE template persister so **Mission/routeMacro** policy edits (cog sidebar, assistants) commit to
+    /// this run’s forked ``MissionRunEnvironment/template`` only — **not** ``MissionStore`` (catalog templates are
+    /// edited in the Missions workspace). Called from ``MissionRunDetailView`` ``onAppear`` for **MCS** and **MC‑R**.
     private func installMissionTemplatePersister() {
-        run.missionTemplatePersister = { [weak missionStore, weak run] mission in
-            guard let missionStore else { return }
-            missionStore.updateMission(mission)
-            if let fresh = missionStore.missions.first(where: { $0.id == mission.id }) {
-                run?.updateTemplate(fresh)
-            } else {
+        run.missionTemplatePersister = { [weak controlStore, weak run] mission in
+            Task { @MainActor in
                 run?.updateTemplate(mission)
+                guard let r = run, let controlStore else { return }
+                controlStore.updateRun(r)
             }
         }
     }
@@ -6768,9 +7987,7 @@ struct MissionRunDetailView: View {
     private var missionAbortPreferenceChainBinding: Binding<[MissionRunAbortTactic]> {
         Binding(
             get: {
-                let chain = missionStore.missions.first(where: { $0.id == run.missionId })?
-                    .routeMacro.rules.missionAbortPreferenceChain
-                    ?? []
+                let chain = resolvedMission?.routeMacro.rules.missionAbortPreferenceChain ?? []
                 return MissionRunAbortTactic.normalizedPreferenceChain(chain)
             },
             set: { newValue in
@@ -6784,9 +8001,7 @@ struct MissionRunDetailView: View {
     private var missionCompletePreferenceChainBinding: Binding<[MissionRunCompleteTactic]> {
         Binding(
             get: {
-                let chain = missionStore.missions.first(where: { $0.id == run.missionId })?
-                    .routeMacro.rules.missionCompletePreferenceChain
-                    ?? []
+                let chain = resolvedMission?.routeMacro.rules.missionCompletePreferenceChain ?? []
                 return MissionRunCompleteTactic.normalizedPreferenceChain(chain)
             },
             set: { newValue in
@@ -6800,9 +8015,7 @@ struct MissionRunDetailView: View {
     private var missionReserveSwapPreferenceChainBinding: Binding<[MissionRunReserveSwapTactic]> {
         Binding(
             get: {
-                let chain = missionStore.missions.first(where: { $0.id == run.missionId })?
-                    .routeMacro.rules.missionReserveSwapPreferenceChain
-                    ?? []
+                let chain = resolvedMission?.routeMacro.rules.missionReserveSwapPreferenceChain ?? []
                 return MissionRunReserveSwapTactic.normalizedPreferenceChain(chain)
             },
             set: { newValue in
@@ -7057,7 +8270,7 @@ struct MissionRunDetailView: View {
                             toggleSetupRostersMissionPointMapSelection(missionPointID: id)
                         },
                         onMissionPointMoved: { id, lat, lon in
-                            persistMissionMutation { mission in
+                            persistMissionMutationAfterCurrentUIUpdate { mission in
                                 guard let idx = mission.missionPoints.firstIndex(where: { $0.id == id }) else { return }
                                 mission.missionPoints[idx].coordinate.lat = lat
                                 mission.missionPoints[idx].coordinate.lon = lon
@@ -7082,10 +8295,90 @@ struct MissionRunDetailView: View {
                             clearAllSetupStagingReservePoolSimDragOverlays()
                             clearAllSetupStagingSimDragOverlays()
                             dismissSetupRostersMissionPointDrawerIfNeeded()
+                            dismissSetupRostersGeofenceDrawerIfNeeded()
+                            clearSetupRostersGeofenceChrome()
                             disarmMCSReservePoolHomePlacement()
                         },
                         onViewportCenterChanged: { lat, lon in
                             setupRostersMapViewportCenter = RouteCoordinate(lat: lat, lon: lon)
+                        },
+                        onGeofenceClick: { id in
+                            guard rostersSidebarListTab == .fences else { return }
+                            toggleSetupRostersGeofenceMapSelection(fenceID: id)
+                        },
+                        onGeofenceCircleCenterMoved: { id, lat, lon in
+                            guard rostersSidebarListTab == .fences else { return }
+                            mutateSetupRosterMissionGeofenceFromMapAfterCurrentUIUpdate(id: id) {
+                                $0.circleCenter.lat = lat
+                                $0.circleCenter.lon = lon
+                            }
+                        },
+                        onGeofenceCircleRadiusMoved: { id, radiusM in
+                            guard rostersSidebarListTab == .fences else { return }
+                            mutateSetupRosterMissionGeofenceFromMapAfterCurrentUIUpdate(id: id) {
+                                $0.circleRadiusMeters = max(1, radiusM)
+                            }
+                        },
+                        onGeofencePolygonVertexMoved: { id, idx, lat, lon in
+                            guard rostersSidebarListTab == .fences else { return }
+                            mutateSetupRosterMissionGeofenceFromMapAfterCurrentUIUpdate(id: id) { g in
+                                guard g.shape == .polygon, g.polygonVertices.indices.contains(idx) else { return }
+                                g.polygonVertices[idx].lat = lat
+                                g.polygonVertices[idx].lon = lon
+                            }
+                        },
+                        onGeofencePolygonTranslated: { id, dLat, dLon in
+                            guard rostersSidebarListTab == .fences else { return }
+                            mutateSetupRosterMissionGeofenceFromMapAfterCurrentUIUpdate(id: id) { g in
+                                guard g.shape == .polygon else { return }
+                                for i in g.polygonVertices.indices {
+                                    g.polygonVertices[i].lat += dLat
+                                    g.polygonVertices[i].lon += dLon
+                                }
+                            }
+                        },
+                        onGeofencePolygonEdgeInsert: { id, afterIndex, lat, lon in
+                            guard rostersSidebarListTab == .fences else { return }
+                            mutateSetupRosterMissionGeofenceFromMapAfterCurrentUIUpdate(id: id) { g in
+                                guard g.shape == .polygon else { return }
+                                var v = g.polygonVertices
+                                let n = v.count
+                                guard n >= 3, afterIndex >= 0, afterIndex < n else { return }
+                                let insertAt = afterIndex + 1
+                                let coord = RouteCoordinate(lat: lat, lon: lon)
+                                if insertAt >= n {
+                                    v.append(coord)
+                                } else {
+                                    v.insert(coord, at: insertAt)
+                                }
+                                g.polygonVertices = v
+                            }
+                        },
+                        onGeofencePolygonVertexDelete: { id, idx in
+                            guard rostersSidebarListTab == .fences else { return }
+                            let vertexCount: Int = {
+                                guard let mission = resolvedMission else { return 0 }
+                                if let i = mission.missionGeofences.firstIndex(where: { $0.id == id }) {
+                                    return mission.missionGeofences[i].polygonVertices.count
+                                }
+                                for t in mission.routeMacro.tasks {
+                                    if let fi = t.geofences.firstIndex(where: { $0.id == id }) {
+                                        return t.geofences[fi].polygonVertices.count
+                                    }
+                                }
+                                return 0
+                            }()
+                            guard vertexCount > 3 else {
+                                toastCenter.show("A polygon fence needs at least three markers.", style: .warning)
+                                return
+                            }
+                            DispatchQueue.main.async {
+                                self.mutateSetupRosterMissionGeofenceFromMap(id: id) { g in
+                                    guard g.shape == .polygon, g.polygonVertices.count > 3, g.polygonVertices.indices.contains(idx) else { return }
+                                    g.polygonVertices.remove(at: idx)
+                                }
+                                self.toastCenter.show("Marker removed", style: .success)
+                            }
                         }
                     )
                     .task(id: setupStagingMapStructureIdentity) {
@@ -7135,16 +8428,38 @@ struct MissionRunDetailView: View {
             selectedTaskPathID: setupStagingMapSelectedTaskPathID,
             selectedStagingRosterAssignmentID: setupSelectedAssignmentId,
             mcsReservePoolHomePlacementTaskID: mcsReservePoolHomePlacementTaskID,
-            stagingReservePoolBerthSelectionSignature: setupSelectedReservePoolBerthSignature,
-            showMissionGeofencesOnMap: run.operatorDisplaySettings.showMissionGeofencesOnMap,
-            missionGeofenceTemplateTopologySignature: mission?.missionGeofenceTemplateTopologySignature() ?? "",
-            missionControlRunGeofenceAugmentationTopologySignature: run.missionControlRunGeofenceAugmentationTopologySignature()
+            stagingReservePoolBerthSelectionSignature: setupSelectedReservePoolBerthSignature
         )
     }
 
     private var setupSelectedReservePoolBerthSignature: String {
         guard let t = setupSelectedReservePoolTaskID, let s = setupSelectedReservePoolSlotID else { return "" }
         return "\(t.uuidString)|\(s.uuidString)"
+    }
+
+    /// Template geofence geometry on the MCS staging map (marker-only pushes while dragging fence handles).
+    private var setupStagingGeofenceGeometryDigest: String {
+        guard let mission = resolvedMission else { return "" }
+        var parts: [String] = []
+        for g in mission.missionGeofences {
+            parts.append(
+                "m:\(g.id.uuidString);\(g.shape.rawValue);\(g.boundary.rawValue);\(g.polygonVertices.count);\(g.circleCenter.lat),\(g.circleCenter.lon);\(g.circleRadiusMeters)"
+            )
+            for v in g.polygonVertices {
+                parts.append("\(v.lat),\(v.lon)")
+            }
+        }
+        for t in mission.routeMacro.tasks {
+            for g in t.geofences {
+                parts.append(
+                    "t:\(t.id.uuidString);\(g.id.uuidString);\(g.shape.rawValue);\(g.boundary.rawValue);\(g.polygonVertices.count);\(g.circleCenter.lat),\(g.circleCenter.lon);\(g.circleRadiusMeters)"
+                )
+                for v in g.polygonVertices {
+                    parts.append("\(v.lat),\(v.lon)")
+                }
+            }
+        }
+        return parts.joined(separator: "|")
     }
 
     /// Quantized lat/lon for mission map points + roster vehicle markers; drives marker-only pushes without churning `.task(id:)`.
@@ -7159,7 +8474,13 @@ struct MissionRunDetailView: View {
                 String(format: "%@:%.5f:%.5f:%@", m.id, m.lat, m.lon, m.pendingSimSync ? "1" : "0")
             }
             .joined(separator: "|")
-        return pts + "§" + veh + "§poolSel:" + setupSelectedReservePoolBerthSignature
+        let gfTopo = resolvedMission?.missionGeofenceTemplateTopologySignature() ?? ""
+        let gfAug = run.missionControlRunGeofenceAugmentationTopologySignature()
+        let rostab = rostersSidebarListTab.rawValue
+        let gfsel = setupRostersSelectedGeofenceID?.uuidString ?? "none"
+        let gfshow = run.operatorDisplaySettings.showMissionGeofencesOnMap ? "1" : "0"
+        return pts + "§" + veh + "§poolSel:" + setupSelectedReservePoolBerthSignature + "§gf:" + setupStagingGeofenceGeometryDigest
+            + "§gftopo:\(gfTopo)§gfaug:\(gfAug)§rostab:\(rostab)§gfsel:\(gfsel)§gfshow:\(gfshow)"
     }
 
     /// Clears mission-point / task-path / roster-vehicle / pool-berth map selection after a map background tap (same policy as mutual exclusivity elsewhere).
@@ -7169,6 +8490,8 @@ struct MissionRunDetailView: View {
         setupStagingMapSelectedTaskPathID = nil
         setupSelectedAssignmentId = nil
         clearStagingReservePoolBerthSelection()
+        dismissSetupRostersGeofenceDrawerIfNeeded()
+        clearSetupRostersGeofenceChrome()
         // Match roster SIM drag policy: optimistic pool / roster pose overlays stay until hub sustains or timeout.
         dismissSetupRostersMissionPointDrawerIfNeeded()
     }
@@ -7459,6 +8782,7 @@ struct MissionRunDetailView: View {
     /// MC-R live map: same background-tap deselection contract as MCS staging map (``clearStagingSetupMapSelectionFromBackgroundTap``).
     private func clearLiveOverviewMapSelectionFromBackgroundTap() {
         liveRuntimeOverviewSelectedMissionPointID = nil
+        liveRuntimeGeofenceMapSelectedFenceID = nil
         focusedLiveTaskID = nil
         focusedLiveAssignmentID = nil
         dismissLiveRuntimeMissionPointEditDrawerIfNeeded()
@@ -7479,6 +8803,8 @@ struct MissionRunDetailView: View {
             setupRostersSelectedMissionPointID = nil
             setupStagingMapSelectedTaskPathID = nil
             dismissSetupRostersMissionPointDrawerIfNeeded()
+            dismissSetupRostersGeofenceDrawerIfNeeded()
+            clearSetupRostersGeofenceChrome()
             setupSelectedReservePoolTaskID = taskID
             setupSelectedReservePoolSlotID = slotID
         }
@@ -7495,6 +8821,8 @@ struct MissionRunDetailView: View {
             setupRostersSelectedMissionPointID = nil
             setupStagingMapSelectedTaskPathID = nil
             dismissSetupRostersMissionPointDrawerIfNeeded()
+            dismissSetupRostersGeofenceDrawerIfNeeded()
+            clearSetupRostersGeofenceChrome()
             setupSelectedAssignmentId = assignmentId
         }
     }
@@ -7712,9 +9040,10 @@ struct MissionRunDetailView: View {
                     operatorSettings: run.operatorDisplaySettings,
                     mapFocusedTaskID: nil,
                     respectMapTaskIsolation: false,
-                    run: run
+                    run: run,
+                    mapSelectionFenceID: rostersSidebarListTab == .fences ? setupRostersSelectedGeofenceID : nil
                 ),
-                geofenceMapLayerPointerSelectsFence: false
+                geofenceMapLayerPointerSelectsFence: rostersSidebarListTab == .fences
             )
         } else {
             mapModel.routeGeometry = .empty
@@ -7735,6 +9064,14 @@ struct MissionRunDetailView: View {
         var geo = mapModel.routeGeometry
         geo.missionPointMarkers = setupStagingMissionPointMapMarkers
         geo.mcsReservePoolHomePlacementArmed = mcsReservePoolHomePlacementTaskID != nil
+        geo.geofenceOverlays = mission.geofenceGuardianMapOverlaysForMissionControl(
+            operatorSettings: run.operatorDisplaySettings,
+            mapFocusedTaskID: nil,
+            respectMapTaskIsolation: false,
+            run: run,
+            mapSelectionFenceID: rostersSidebarListTab == .fences ? setupRostersSelectedGeofenceID : nil
+        )
+        geo.geofenceMapLayerPointerSelectsFence = rostersSidebarListTab == .fences
         mapModel.routeGeometry = geo
         mapModel.vehicleMarkers = setupStagingMapVehicleMarkers
     }
@@ -7742,29 +9079,24 @@ struct MissionRunDetailView: View {
     private var rosterMissionTemplateBinding: Binding<Mission> {
         Binding(
             get: {
-                missionStore.missions.first(where: { $0.id == run.missionId })
+                run.template
+                    ?? missionStore.missions.first(where: { $0.id == run.missionId })
                     ?? Mission(id: run.missionId, name: "", description: "", type: .mobile)
             },
             set: { newMission in
-                missionStore.updateMission(newMission)
-                if let fresh = missionStore.missions.first(where: { $0.id == newMission.id }) {
-                    run.updateTemplate(fresh)
-                } else {
-                    run.updateTemplate(newMission)
+                if let msg = Utilities.mission.templateGeofences.inclusionConstraintViolationMessage(for: newMission) {
+                    toastCenter.show(msg, style: .error)
+                    return
                 }
-                onUpdate(run)
+                Task { @MainActor in
+                    run.updateTemplate(newMission)
+                    onUpdate(run)
+                }
             }
         )
     }
 
     private func persistRosterMissionTemplateFromPointsEditor() {
-        guard let m = missionStore.missions.first(where: { $0.id == run.missionId }) else { return }
-        missionStore.updateMission(m)
-        if let fresh = missionStore.missions.first(where: { $0.id == m.id }) {
-            run.updateTemplate(fresh)
-        } else {
-            run.updateTemplate(m)
-        }
         onUpdate(run)
     }
 
@@ -7774,6 +9106,177 @@ struct MissionRunDetailView: View {
         setupRostersMissionPointDrawerEditingID = nil
         setupRostersMissionPointDeleteCandidate = nil
         setupStagingMapSelectedTaskPathID = nil
+        dismissSetupRostersGeofenceDrawerIfNeeded()
+        clearSetupRostersGeofenceChrome()
+    }
+
+    private func clearSetupRostersGeofenceChrome() {
+        setupRostersSelectedGeofenceID = nil
+        setupRostersGeofenceDeleteCandidate = nil
+        setupRostersFencesListScrollTargetRow = nil
+    }
+
+    private func dismissSetupRostersGeofenceDrawerIfNeeded() {
+        guard setupRostersGeofenceDrawerEditingID != nil else { return }
+        setupRostersGeofenceDrawerEditingID = nil
+        appDrawer.dismiss()
+    }
+
+    private func mutateSetupRosterMissionGeofenceFromMap(id: UUID, _ update: (inout MissionGeofence) -> Void) {
+        persistMissionMutation { mission in
+            if let i = mission.missionGeofences.firstIndex(where: { $0.id == id }) {
+                update(&mission.missionGeofences[i])
+                return
+            }
+            for ti in mission.routeMacro.tasks.indices {
+                if let fi = mission.routeMacro.tasks[ti].geofences.firstIndex(where: { $0.id == id }) {
+                    update(&mission.routeMacro.tasks[ti].geofences[fi])
+                    return
+                }
+            }
+        }
+    }
+
+    private func moveSetupRosterGeofenceTemplateToPlacement(fenceID: UUID, target: MissionGeofenceTemplatePlacement) {
+        persistMissionMutation { mission in
+            var fence: MissionGeofence?
+            if let i = mission.missionGeofences.firstIndex(where: { $0.id == fenceID }) {
+                fence = mission.missionGeofences.remove(at: i)
+            } else {
+                for ti in mission.routeMacro.tasks.indices {
+                    if let fi = mission.routeMacro.tasks[ti].geofences.firstIndex(where: { $0.id == fenceID }) {
+                        fence = mission.routeMacro.tasks[ti].geofences.remove(at: fi)
+                        break
+                    }
+                }
+            }
+            guard let f = fence else { return }
+            switch target {
+            case .missionWide:
+                mission.missionGeofences.append(f)
+            case .taskScoped(let taskUUID):
+                if let ti = mission.routeMacro.tasks.firstIndex(where: { $0.id == taskUUID }) {
+                    mission.routeMacro.tasks[ti].geofences.append(f)
+                } else {
+                    mission.missionGeofences.append(f)
+                }
+            }
+        }
+    }
+
+    private func openSetupRostersGeofenceEditDrawer(fenceID: UUID) {
+        let exists = resolvedMission.map { m in
+            m.missionGeofences.contains(where: { $0.id == fenceID })
+                || m.routeMacro.tasks.contains { $0.geofences.contains { $0.id == fenceID } }
+        } ?? false
+        guard exists else { return }
+        disarmMCSReservePoolHomePlacement()
+        setupSelectedAssignmentId = nil
+        clearAllSetupStagingSimDragOverlays()
+        clearAllSetupStagingReservePoolSimDragOverlays()
+        setupStagingMapSelectedTaskPathID = nil
+        setupRostersSelectedMissionPointID = nil
+        setupRostersMissionPointDeleteCandidate = nil
+        dismissSetupRostersMissionPointDrawerIfNeeded()
+        setupRostersSelectedGeofenceID = fenceID
+        setupRostersGeofenceDrawerEditingID = fenceID
+        appDrawer.present(title: "Edit fence", preferredWidth: 400, scrimTapDismisses: true) {
+            MissionWorkspaceGeofenceEditDrawer(
+                fenceID: fenceID,
+                mission: rosterMissionTemplateBinding,
+                onMovePlacement: { placement in moveSetupRosterGeofenceTemplateToPlacement(fenceID: fenceID, target: placement) },
+                persist: {
+                    persistRosterMissionTemplateFromPointsEditor()
+                }
+            )
+        }
+    }
+
+    private func toggleSetupRostersGeofenceEditDrawer(fenceID: UUID) {
+        let exists = resolvedMission.map { m in
+            m.missionGeofences.contains(where: { $0.id == fenceID })
+                || m.routeMacro.tasks.contains { $0.geofences.contains { $0.id == fenceID } }
+        } ?? false
+        guard exists else { return }
+        if setupRostersGeofenceDrawerEditingID == fenceID {
+            setupRostersGeofenceDrawerEditingID = nil
+            appDrawer.dismiss()
+            return
+        }
+        openSetupRostersGeofenceEditDrawer(fenceID: fenceID)
+    }
+
+    private func toggleSetupRostersGeofenceMapSelection(fenceID: UUID) {
+        let exists = resolvedMission.map { m in
+            m.missionGeofences.contains(where: { $0.id == fenceID })
+                || m.routeMacro.tasks.contains { $0.geofences.contains { $0.id == fenceID } }
+        } ?? false
+        guard exists else { return }
+        disarmMCSReservePoolHomePlacement()
+        if setupRostersSelectedGeofenceID == fenceID {
+            setupRostersSelectedGeofenceID = nil
+            if setupRostersGeofenceDrawerEditingID == fenceID {
+                setupRostersGeofenceDrawerEditingID = nil
+                appDrawer.dismiss()
+            }
+        } else {
+            setupSelectedAssignmentId = nil
+            clearStagingReservePoolBerthSelection()
+            clearAllSetupStagingSimDragOverlays()
+            clearAllSetupStagingReservePoolSimDragOverlays()
+            setupStagingMapSelectedTaskPathID = nil
+            setupRostersSelectedMissionPointID = nil
+            setupRostersMissionPointDeleteCandidate = nil
+            if setupRostersMissionPointDrawerEditingID != nil {
+                appDrawer.dismiss()
+                setupRostersMissionPointDrawerEditingID = nil
+            }
+            if setupRostersGeofenceDrawerEditingID != nil {
+                appDrawer.dismiss()
+                setupRostersGeofenceDrawerEditingID = nil
+            }
+            setupRostersSelectedGeofenceID = fenceID
+            setupRostersFencesListScrollTargetRow = fenceID
+            setupRostersFencesListScrollEpoch &+= 1
+        }
+    }
+
+    private func appendSetupRosterGeofencePolygonAtViewportCenter() {
+        disarmMCSReservePoolHomePlacement()
+        let coord = setupRostersMapViewportCenter ?? RouteCoordinate()
+        let newID = UUID()
+        persistMissionMutation { mission in
+            let n = mission.missionGeofences.count + 1
+            var fence = MissionGeofence.newPolygon(name: "Mission fence \(n)", around: coord)
+            fence.id = newID
+            mission.missionGeofences.append(fence)
+        }
+        setupRostersSelectedGeofenceID = newID
+        setupSelectedAssignmentId = nil
+        clearAllSetupStagingSimDragOverlays()
+        setupStagingMapSelectedTaskPathID = nil
+        setupRostersFencesListScrollTargetRow = newID
+        setupRostersFencesListScrollEpoch &+= 1
+        toastCenter.show("Fence added — drag vertices or the square handle on the map to adjust", style: .success)
+    }
+
+    private func appendSetupRosterGeofenceCircleAtViewportCenter() {
+        disarmMCSReservePoolHomePlacement()
+        let coord = setupRostersMapViewportCenter ?? RouteCoordinate()
+        let newID = UUID()
+        persistMissionMutation { mission in
+            let n = mission.missionGeofences.count + 1
+            var fence = MissionGeofence.newCircle(name: "Mission fence \(n)", center: coord)
+            fence.id = newID
+            mission.missionGeofences.append(fence)
+        }
+        setupRostersSelectedGeofenceID = newID
+        setupSelectedAssignmentId = nil
+        clearAllSetupStagingSimDragOverlays()
+        setupStagingMapSelectedTaskPathID = nil
+        setupRostersFencesListScrollTargetRow = newID
+        setupRostersFencesListScrollEpoch &+= 1
+        toastCenter.show("Fence added — drag the center and rim on the map to adjust", style: .success)
     }
 
     private func dismissSetupRostersMissionPointDrawerIfNeeded() {
@@ -7805,6 +9308,8 @@ struct MissionRunDetailView: View {
         setupStagingMapSelectedTaskPathID = nil
         setupRostersMapPointsListScrollTargetRow = newID
         setupRostersMapPointsListScrollEpoch &+= 1
+        dismissSetupRostersGeofenceDrawerIfNeeded()
+        clearSetupRostersGeofenceChrome()
         toastCenter.show("Map point added — drag the pin on the map to move it", style: .success)
     }
 
@@ -7814,6 +9319,8 @@ struct MissionRunDetailView: View {
         setupSelectedAssignmentId = nil
         clearAllSetupStagingSimDragOverlays()
         setupStagingMapSelectedTaskPathID = nil
+        dismissSetupRostersGeofenceDrawerIfNeeded()
+        clearSetupRostersGeofenceChrome()
         setupRostersSelectedMissionPointID = missionPointID
         setupRostersMissionPointDrawerEditingID = missionPointID
         appDrawer.present(title: "Edit map point", preferredWidth: 400, scrimTapDismisses: true) {
@@ -7859,6 +9366,8 @@ struct MissionRunDetailView: View {
                 appDrawer.dismiss()
                 setupRostersMissionPointDrawerEditingID = nil
             }
+            dismissSetupRostersGeofenceDrawerIfNeeded()
+            clearSetupRostersGeofenceChrome()
             setupRostersSelectedMissionPointID = missionPointID
         }
     }
@@ -8708,6 +10217,38 @@ struct MissionRunDetailView: View {
         run.assignments[idx].attachedFleetVehicleToken = vehicle.token.storageKey
         run.assignments[idx].attachedDevice = vehicle.title
         removeSetupStagingSimDragOverlay(for: assignmentId)
+    }
+
+    private func missionPickableFleetVehicle(forStorageKey key: String) -> MissionPickableFleetVehicle? {
+        buildMissionPickableVehicles(fleetLink: fleetLink, sitl: sitl).first { $0.token.storageKey == key }
+    }
+
+    /// Resolved granular ``FleetVehicleType`` for a pickable row (live = first non-SITL hardware stream; SITL = instance preset).
+    private func resolvedFleetVehicleTypeForPickable(_ vehicle: MissionPickableFleetVehicle) -> FleetVehicleType? {
+        switch vehicle.token {
+        case .sitl(let uuid):
+            return sitl.instances.first(where: { $0.id == uuid })?.preset.fleetVehicleType
+        case .live:
+            let simVehicleIDs = Set(sitl.instances.map { "sysid:\($0.stackInstanceIndex + 1)" })
+            for vid in fleetLink.telemetryByVehicleID.keys.sorted() where !simVehicleIDs.contains(vid) {
+                return fleetLink.vehicleModel(forVehicleID: vid)?.data.vehicleType
+            }
+            return nil
+        }
+    }
+
+    /// `true` when binding should require an extra confirm (template class vs pickable under mission-run substitution policy).
+    private func rosterAssignmentVehicleRequiresClassMismatchConfirm(
+        pickable: MissionPickableFleetVehicle,
+        assignmentId: UUID
+    ) -> Bool {
+        guard let assignment = run.assignments.first(where: { $0.id == assignmentId }) else { return false }
+        let expected = run.expectedFleetVehicleClassForRosterAssignment(assignment)
+        guard let candidate = resolvedFleetVehicleTypeForPickable(pickable) else { return false }
+        return MissionRosterVehicleClassCompatibility.bindingShowsDifferentClassWarning(
+            expected: expected,
+            candidate: candidate
+        )
     }
 
     private func clearFleetVehicle(assignmentId: UUID) {

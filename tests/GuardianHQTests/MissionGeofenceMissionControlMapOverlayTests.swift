@@ -196,4 +196,36 @@ final class MissionGeofenceMissionControlMapOverlayTests: XCTestCase {
         XCTAssertTrue(ids.contains(slotFence.id))
         XCTAssertFalse(ids.contains(t1.geofences[0].id))
     }
+
+    func test_mapSelectionFenceID_marksOverlayAuthoringSelected() {
+        let fence = MissionGeofence.newCircle(name: "Pick", center: RouteCoordinate(lat: 1, lon: 2))
+        let mission = Mission(
+            name: "M",
+            description: "",
+            type: .mobile,
+            routeMacro: RouteMacro(tasks: []),
+            missionGeofences: [fence]
+        )
+        var settings = MissionRunOperatorDisplaySettings.default
+        settings.showMissionGeofencesOnMap = true
+        settings.isolateLiveMapToSelectedTask = false
+        let withoutSel = mission.geofenceGuardianMapOverlaysForMissionControl(
+            operatorSettings: settings,
+            mapFocusedTaskID: nil,
+            respectMapTaskIsolation: false,
+            run: nil,
+            mapSelectionFenceID: nil
+        )
+        let withSel = mission.geofenceGuardianMapOverlaysForMissionControl(
+            operatorSettings: settings,
+            mapFocusedTaskID: nil,
+            respectMapTaskIsolation: false,
+            run: nil,
+            mapSelectionFenceID: fence.id
+        )
+        XCTAssertEqual(withoutSel.count, 1)
+        XCTAssertFalse(withoutSel[0].isAuthoringMapSelected)
+        XCTAssertEqual(withSel.count, 1)
+        XCTAssertTrue(withSel[0].isAuthoringMapSelected)
+    }
 }

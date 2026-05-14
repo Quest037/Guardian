@@ -43,9 +43,11 @@ enum FleetVehicleCommand: Equatable {
     /// callers compose those as separate commands (`.arm`, plus a future "start mission"
     /// atom). This atom is what `command.fleet.vehicle.do.mission.upload` dispatches.
     case uploadMission(items: [Mavsdk.Mission.MissionItem])
-    /// Upload geofence polygons to the autopilot (``Geofence/uploadGeofence``). Replaces any
-    /// prior fence plan on the vehicle for this upload call.
-    case uploadGeofence(polygons: [Mavsdk.Geofence.Polygon])
+    /// Upload geofence plan to the autopilot (``Geofence/uploadGeofence``). Replaces any prior fence plan for this call.
+    ///
+    /// Payload mirrors `geofencePolygonsJSON`: MAVSDK ``Geofence/GeofenceData`` polygons plus optional circle primitives
+    /// (horizontal geometry only on the fleet wire).
+    case uploadGeofence(FleetVehicleCommandGeofenceUploadPayload)
     /// Clear all geofences on the autopilot (``Geofence/clearGeofence``).
     case clearGeofence
     /// Clear the mission plan on the autopilot (`Mission.clearMission()`).
@@ -141,7 +143,8 @@ extension FleetVehicleCommand {
         case .holdPosition: return "hold"
         case .gotoCoordinate: return "goto"
         case .uploadMission(let items): return "upload mission (\(items.count) item(s))"
-        case .uploadGeofence(let polys): return "upload geofence (\(polys.count) polygon(s))"
+        case .uploadGeofence(let wire):
+            return "upload geofence (\(wire.polygons.count) polygon(s), \(wire.circles.count) circle(s))"
         case .clearGeofence: return "clear geofence"
         case .missionClear: return "mission clear"
         case .missionStart: return "mission start"

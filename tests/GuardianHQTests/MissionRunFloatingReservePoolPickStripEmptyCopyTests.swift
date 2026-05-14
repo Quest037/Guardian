@@ -88,7 +88,7 @@ final class MissionRunFloatingReservePoolPickStripEmptyCopyTests: XCTestCase {
         )
         let copy = run.floatingReservePoolPickStripEmptyOperatorCopy(vacancyAssignmentID: vacancy.id, taskID: task.id)
         XCTAssertEqual(copy?.title, "No bound reserves")
-        XCTAssertTrue(copy?.subtitle.contains("Bind aircraft") ?? false)
+        XCTAssertTrue(copy?.subtitle.contains("Bind vehicles") ?? false)
     }
 
     func test_empty_class_mismatch_shows_template_class() {
@@ -201,7 +201,7 @@ final class MissionRunFloatingReservePoolPickStripEmptyCopyTests: XCTestCase {
         XCTAssertTrue(copy?.subtitle.contains("template reserve row") ?? false)
     }
 
-    func test_empty_all_pool_aircraft_written_off() {
+    func test_empty_all_pool_vehicles_written_off_for_reserve_draws() {
         let primaryID = UUID()
         let task = MissionTask(name: "T", rosterDeviceIds: [primaryID])
         let mission = Mission(
@@ -232,6 +232,7 @@ final class MissionRunFloatingReservePoolPickStripEmptyCopyTests: XCTestCase {
         run.markFleetVehicleWrittenOffForReservePool(storageKey: "tokB")
         let copy = run.floatingReservePoolPickStripEmptyOperatorCopy(vacancyAssignmentID: vacancy.id, taskID: task.id)
         XCTAssertEqual(copy?.title, "No eligible reserves")
+        XCTAssertTrue(copy?.subtitle.contains("floating reserve vehicles") ?? false)
         XCTAssertTrue(copy?.subtitle.contains("written off") ?? false)
     }
 }

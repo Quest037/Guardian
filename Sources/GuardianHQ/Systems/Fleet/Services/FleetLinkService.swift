@@ -207,6 +207,35 @@ final class FleetLinkService: ObservableObject {
         return vehicleIDs.count
     }
 
+    /// Per-vehicle outcome for ``performRunCleanupSimKill(vehicleID:)`` (Mission Run SIM cleanup).
+    enum RunCleanupSimKillOutcome: Equatable {
+        case skippedNoSession
+        case succeeded
+        case failed
+    }
+
+    /// Best-effort **manual stream stop** + MAVSDK ``Action/kill`` (force disarm) on one **Guardian-managed SITL** stream.
+    ///
+    /// Used by Mission Run complete SIM cleanup instead of the park recipe so SITLs return to a disarmed, motor-off state
+    /// even when higher-level recipes would fail or prompt the operator.
+    func performRunCleanupSimKill(vehicleID: String) async -> RunCleanupSimKillOutcome {
+        guard let session = sessionsByVehicleID[vehicleID] else { return .skippedNoSession }
+        guard isGuardianManagedSitlStream(vehicleID: vehicleID) else { return .skippedNoSession }
+        appendVehicleLog("Mission run complete: SIM cleanup kill (force disarm) starting.", vehicleID: vehicleID)
+        await stopManualControlStream(vehicleID: vehicleID)
+        do {
+            try await awaitCompletableForManualStream(session.drone.action.kill())
+            appendVehicleLog("Mission run complete: SIM cleanup kill acknowledged.", vehicleID: vehicleID)
+            return .succeeded
+        } catch {
+            appendVehicleLog(
+                "Mission run complete: SIM cleanup kill failed (\(mavsdkPublicErrorDescription(error))).",
+                vehicleID: vehicleID
+            )
+            return .failed
+        }
+    }
+
     /// Clears the **Continue mission** affordance latch for this vehicle (after the operator queues continue, or to discard stale UI).
     func clearMcrOperatorParkAwaitingContinue(vehicleID: String) {
         guard mcrOperatorParkAwaitingContinueVehicleIDs.contains(vehicleID) else { return }
@@ -1009,6 +1038,9 @@ final class FleetLinkService: ObservableObject {
             return commandID
         }
 
+        // When non-nil, `onError` appends a decoded-wire summary so logs show what Guardian sent to MAVSDK.
+        var geofenceUploadWireForErrorLog: FleetVehicleCommandGeofenceUploadPayload?
+
         let completion: Completable
         switch command {
         case .arm:
@@ -1039,8 +1071,12 @@ final class FleetLinkService: ObservableObject {
                 vehicleID: vehicleID,
                 session: session
             )
-        case .uploadGeofence(let polygons):
-            completion = session.drone.geofence.uploadGeofence(polygons: polygons)
+        case .uploadGeofence(let wire):
+            geofenceUploadWireForErrorLog = wire
+            let polygons = wire.polygons.map(\.mavsdkPolygon)
+            let circles = wire.circles.map(\.mavsdkCircle)
+            logGeofenceUploadMavsdkDiagnostics(vehicleID: vehicleID, wire: wire, polygons: polygons, circles: circles)
+            completion = session.drone.geofence.uploadGeofence(polygons: polygons, circles: circles)
         case .clearGeofence:
             completion = session.drone.geofence.clearGeofence()
         case .missionClear:
@@ -1117,7 +1153,10 @@ final class FleetLinkService: ObservableObject {
                 },
                 onError: { [weak self] error in
                     Task { @MainActor [weak self] in
-                        let raw = self?.mavsdkPublicErrorDescription(error) ?? error.localizedDescription
+                        var raw = self?.mavsdkPublicErrorDescription(error) ?? error.localizedDescription
+                        if let wire = geofenceUploadWireForErrorLog, let strongSelf = self {
+                            raw += " — geofence wire (MAVSDK sees lat/lon + fenceType; circles use center+radius): \(strongSelf.geofenceUploadWireSummary(wire: wire))"
+                        }
                         let detail = self?.augmentCommandFailureDetail(vehicleID: vehicleID, detail: raw) ?? raw
                         self?.markVehicleCommand(
                             vehicleID: vehicleID,
@@ -1419,6 +1458,30 @@ final class FleetLinkService: ObservableObject {
         }
     }
 
+    /// Walks `NSError` / `NSUnderlyingErrorKey` to surface gRPC / transport wrappers above a MAVSDK plugin error.
+    private func NSErrorUnderlyingChainDescription(_ error: Error) -> String? {
+        var parts: [String] = []
+        var current: Error? = error
+        var depth = 0
+        while let err = current, depth < 8 {
+            depth += 1
+            let ns = err as NSError
+            var line = "\(ns.domain)(\(ns.code)): \(ns.localizedDescription)"
+            if let reason = ns.userInfo[NSLocalizedFailureReasonErrorKey] as? String {
+                let t = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !t.isEmpty { line += " [failureReason: \(t)]" }
+            }
+            if let suggestion = ns.userInfo[NSLocalizedRecoverySuggestionErrorKey] as? String {
+                let t = suggestion.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !t.isEmpty { line += " [recovery: \(t)]" }
+            }
+            parts.append(line)
+            current = ns.userInfo[NSUnderlyingErrorKey] as? Error
+        }
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: " ← ")
+    }
+
     /// Human-readable MAVSDK failure (autopilot `resultStr` + enum case), not only `localizedDescription`.
     private func mavsdkPublicErrorDescription(_ error: Error) -> String {
         if let e = error as? Mavsdk.Action.ActionError {
@@ -1436,7 +1499,208 @@ final class FleetLinkService: ObservableObject {
             if tail.isEmpty { return String(describing: e.code) }
             return "\(String(describing: e.code)): \(tail)"
         }
-        return error.localizedDescription
+        if let e = error as? Mavsdk.Geofence.GeofenceError {
+            return geofenceErrorPublicDescription(e, bridgedError: error)
+        }
+        let base = error.localizedDescription
+        if let chain = NSErrorUnderlyingChainDescription(error), !chain.isEmpty {
+            return "\(base) — NSError chain: \(chain)"
+        }
+        return base
+    }
+
+    /// MAVSDK `GeofenceError` carries `code` + autopilot `resultStr` in `description`; add FC-agnostic hints and any bridged NSError chain.
+    private func geofenceErrorPublicDescription(_ e: Mavsdk.Geofence.GeofenceError, bridgedError: Error) -> String {
+        let tail = e.description.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        let resultStr = tail.isEmpty ? "<empty autopilot resultStr>" : tail
+        var out = "Geofence.\(String(describing: e.code)) resultStr=\(resultStr)"
+        switch e.code {
+        case .invalidArgument:
+            out += " — Hint: MAVSDK maps several fence mission-transfer failures to invalidArgument (e.g. fewer than 3 vertices, duplicate consecutive coordinates, inconsistent fence sequence, polygon rejected by FC, geofence upload while the onboard mission is still empty, or upload not accepted in current vehicle/mode state). Guardian sends **mission upload before geofence** in `do.mission.upload`; the autopilot string above is the only FC-specific detail MAVSDK exposes here."
+        case .tooManyGeofenceItems:
+            out += " — Hint: fence item count exceeds what the autopilot / MAVSDK transfer will accept."
+        case .timeout:
+            out += " — Hint: mission-protocol fence upload timed out (link or FC busy)."
+        case .busy:
+            out += " — Hint: autopilot reported busy; retry after mission/fence transfer completes."
+        case .noSystem:
+            out += " — Hint: no system / session on the MAVSDK link when the call ran."
+        case .error, .unknown:
+            out += " — Hint: generic geofence failure; check FC STATUSTEXT and mission/fence support for this platform."
+        case .success:
+            break
+        case .UNRECOGNIZED(let code):
+            out += " — Hint: unrecognized MAVSDK geofence result raw value \(code)."
+        }
+        if let chain = NSErrorUnderlyingChainDescription(bridgedError), chain.contains(" ← ") {
+            out += " — NSError chain: \(chain)"
+        }
+        return out
+    }
+
+    /// One-line summary of decoded `geofencePolygonsJSON` (polygons + circles) before MAVSDK upload.
+    private func geofenceUploadWireSummary(wire: FleetVehicleCommandGeofenceUploadPayload) -> String {
+        if wire.isEmpty { return "0 polygon(s), 0 circle(s)" }
+        var parts: [String] = []
+        for (idx, p) in wire.polygons.enumerated() {
+            let n = p.points.count
+            var seg = "poly#\(idx + 1) fenceType=\(p.fenceType) vertices=\(n)"
+            if let f = p.points.first {
+                seg += String(format: " first=(%.6f,%.6f)", f.latitudeDeg, f.longitudeDeg)
+            }
+            if let l = p.points.last {
+                seg += String(format: " last=(%.6f,%.6f)", l.latitudeDeg, l.longitudeDeg)
+            }
+            var dupAdjacent = false
+            if n >= 2 {
+                for k in 1..<p.points.count {
+                    let a = p.points[k - 1], b = p.points[k]
+                    if abs(a.latitudeDeg - b.latitudeDeg) < 1e-9, abs(a.longitudeDeg - b.longitudeDeg) < 1e-9 {
+                        dupAdjacent = true
+                        break
+                    }
+                }
+            }
+            if dupAdjacent { seg += " [adjacent duplicate coordinate]" }
+            parts.append(seg)
+        }
+        for (idx, c) in wire.circles.enumerated() {
+            let seg = String(
+                format: "circle#%d fenceType=%@ r=%.1fm center=(%.6f,%.6f)",
+                idx + 1,
+                c.fenceType,
+                c.radiusMeters,
+                c.latitudeDeg,
+                c.longitudeDeg
+            )
+            parts.append(seg)
+        }
+        return parts.joined(separator: " | ")
+    }
+
+    // MARK: Geofence upload — MAVSDK diagnostics (copy/paste JSON)
+
+    /// Single-line JSON for operators pasting into tickets: Swift ``Geofence/GeofenceData`` input, Guardian decoded wire mirror,
+    /// and where MAVLink fence items are actually built (mavsdk_server, not Swift).
+    private func logGeofenceUploadMavsdkDiagnostics(
+        vehicleID: String,
+        wire: FleetVehicleCommandGeofenceUploadPayload,
+        polygons: [Mavsdk.Geofence.Polygon],
+        circles: [Mavsdk.Geofence.Circle]
+    ) {
+        let dto = GeofenceUploadMavsdkDiagnosticDTO(
+            schema: "guardianhq.fleet.geofence_upload_debug.v2",
+            grpcMethod: "/mavsdk.rpc.geofence.GeofenceService/UploadGeofence",
+            mavsdkSwiftPolygonsPassedToUploadGeofence: polygons.map { Self.geofenceSwiftPolygonDTO(from: $0) },
+            mavsdkSwiftCirclesPassedToUploadGeofence: circles.map { Self.geofenceSwiftCircleDTO(from: $0) },
+            guardianDecodedPolygonPayloadsParallelToSwiftPolygons: wire.polygons.map { Self.geofenceGuardianPayloadDTO(from: $0) },
+            guardianDecodedCirclePayloadsParallelToSwiftCircles: wire.circles.map { Self.geofenceGuardianCirclePayloadDTO(from: $0) },
+            grpcVersusMavlinkNote: Self.geofenceGrpcVersusMavlinkNote
+        )
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.sortedKeys]
+        guard let data = try? enc.encode(dto), let json = String(data: data, encoding: .utf8) else {
+            appendVehicleLog(
+                "GEOFENCE_MAVSDK_UPLOAD_DEBUG_JSON {\"error\":\"failed_to_encode_diagnostic_json\"}",
+                vehicleID: vehicleID
+            )
+            return
+        }
+        appendVehicleLog("GEOFENCE_MAVSDK_UPLOAD_DEBUG_JSON \(json)", vehicleID: vehicleID)
+    }
+
+    private struct GeofenceUploadMavsdkDiagnosticDTO: Encodable {
+        let schema: String
+        let grpcMethod: String
+        let mavsdkSwiftPolygonsPassedToUploadGeofence: [GeofenceSwiftPolygonDTO]
+        let mavsdkSwiftCirclesPassedToUploadGeofence: [GeofenceSwiftCircleDTO]
+        let guardianDecodedPolygonPayloadsParallelToSwiftPolygons: [GeofenceGuardianPayloadDTO]
+        let guardianDecodedCirclePayloadsParallelToSwiftCircles: [GeofenceGuardianCirclePayloadDTO]
+        let grpcVersusMavlinkNote: String
+    }
+
+    private struct GeofenceSwiftPolygonDTO: Encodable {
+        let fenceType: String
+        let fenceTypeUnrecognizedEnumValue: Int?
+        let points: [GeofencePointDTO]
+    }
+
+    private struct GeofenceSwiftCircleDTO: Encodable {
+        let fenceType: String
+        let fenceTypeUnrecognizedEnumValue: Int?
+        let latitudeDeg: Double
+        let longitudeDeg: Double
+        let radius: Float
+    }
+
+    private struct GeofenceGuardianCirclePayloadDTO: Encodable {
+        let fenceType: String
+        let latitudeDeg: Double
+        let longitudeDeg: Double
+        let radiusMeters: Double
+    }
+
+    private struct GeofenceGuardianPayloadDTO: Encodable {
+        let fenceType: String
+        let points: [GeofencePointDTO]
+    }
+
+    private struct GeofencePointDTO: Encodable {
+        let latitudeDeg: Double
+        let longitudeDeg: Double
+    }
+
+    private static let geofenceGrpcVersusMavlinkNote: String = {
+        "The Swift API calls Geofence.uploadGeofence(polygons:circles:) which wraps ``GeofenceData`` in "
+            + "`mavsdk.rpc.geofence.UploadGeofenceRequest` over gRPC to mavsdk_server. "
+            + "Fence MISSION_ITEM_INT rows (MAV_MISSION_TYPE_FENCE) are assembled inside mavsdk_server "
+            + "(e.g. geofence plugin C++); GuardianHQ does not receive those per-item MAVLink payloads on this path. "
+            + "Use PX4 / mavlink-router logs or a MAVLink capture for on-wire fence items."
+    }()
+
+    private static func geofenceSwiftCircleDTO(from circle: Mavsdk.Geofence.Circle) -> GeofenceSwiftCircleDTO {
+        let (token, raw): (String, Int?) = {
+            switch circle.fenceType {
+            case .inclusion: return ("FENCE_TYPE_INCLUSION", nil)
+            case .exclusion: return ("FENCE_TYPE_EXCLUSION", nil)
+            case .UNRECOGNIZED(let code): return ("UNRECOGNIZED", code)
+            }
+        }()
+        return GeofenceSwiftCircleDTO(
+            fenceType: token,
+            fenceTypeUnrecognizedEnumValue: raw,
+            latitudeDeg: circle.point.latitudeDeg,
+            longitudeDeg: circle.point.longitudeDeg,
+            radius: circle.radius
+        )
+    }
+
+    private static func geofenceGuardianCirclePayloadDTO(from payload: FleetVehicleCommandGeofenceCirclePayload) -> GeofenceGuardianCirclePayloadDTO {
+        GeofenceGuardianCirclePayloadDTO(
+            fenceType: payload.fenceType,
+            latitudeDeg: payload.latitudeDeg,
+            longitudeDeg: payload.longitudeDeg,
+            radiusMeters: payload.radiusMeters
+        )
+    }
+
+    private static func geofenceSwiftPolygonDTO(from polygon: Mavsdk.Geofence.Polygon) -> GeofenceSwiftPolygonDTO {
+        let (token, raw): (String, Int?) = {
+            switch polygon.fenceType {
+            case .inclusion: return ("FENCE_TYPE_INCLUSION", nil)
+            case .exclusion: return ("FENCE_TYPE_EXCLUSION", nil)
+            case .UNRECOGNIZED(let code): return ("UNRECOGNIZED", code)
+            }
+        }()
+        let pts = polygon.points.map { GeofencePointDTO(latitudeDeg: $0.latitudeDeg, longitudeDeg: $0.longitudeDeg) }
+        return GeofenceSwiftPolygonDTO(fenceType: token, fenceTypeUnrecognizedEnumValue: raw, points: pts)
+    }
+
+    private static func geofenceGuardianPayloadDTO(from payload: FleetVehicleCommandGeofencePolygonPayload) -> GeofenceGuardianPayloadDTO {
+        GeofenceGuardianPayloadDTO(
+            fenceType: payload.fenceType,
+            points: payload.points.map { GeofencePointDTO(latitudeDeg: $0.latitudeDeg, longitudeDeg: $0.longitudeDeg) }
+        )
     }
 
     /// Whether to mirror this STATUSTEXT into Guardian logs (stack-agnostic; light keyword filter on `.info` only).
@@ -2498,8 +2762,8 @@ final class FleetLinkService: ObservableObject {
             )
         case .uploadMission(let items):
             return "uploadMission(\(items.count) items)"
-        case .uploadGeofence(let polys):
-            return "uploadGeofence(\(polys.count) polygon(s))"
+        case .uploadGeofence(let wire):
+            return "uploadGeofence(\(wire.polygons.count) polygon(s), \(wire.circles.count) circle(s))"
         case .clearGeofence:
             return "clearGeofence"
         case .missionClear:
@@ -3716,12 +3980,19 @@ final class FleetLinkService: ObservableObject {
     }
 
     /// Seeds a **Guardian SITL** stream + hub stack for Mission Run SIM cleanup / park policy tests (no MAVSDK).
-    func seedMissionRunTestSitlCleanupStream(vehicleID: String, systemID: Int = 1, autopilotStack: FleetAutopilotStack = .px4) {
+    func seedMissionRunTestSitlCleanupStream(
+        vehicleID: String,
+        systemID: Int = 1,
+        autopilotStack: FleetAutopilotStack = .px4,
+        hub: FleetHubVehicleTelemetry? = nil
+    ) {
         simulatedFleetVehicleIDs.insert(vehicleID)
         vehicleIDBySystemID[systemID] = vehicleID
-        var hub = FleetHubVehicleTelemetry.empty
-        hub.autopilotStack = autopilotStack
-        hubTelemetryByVehicleID[vehicleID] = hub
+        var seeded = hub ?? FleetHubVehicleTelemetry.empty
+        if hub == nil || seeded.autopilotStack == .unknown {
+            seeded.autopilotStack = autopilotStack
+        }
+        hubTelemetryByVehicleID[vehicleID] = seeded
     }
 }
 

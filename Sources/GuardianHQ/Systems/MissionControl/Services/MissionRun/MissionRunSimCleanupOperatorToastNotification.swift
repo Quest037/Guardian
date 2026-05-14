@@ -24,9 +24,9 @@ enum GuardianMissionRunSimCleanupOperatorToastNotification {
 }
 
 enum MissionRunSimCleanupOperatorToastCopy {
-    /// Operator-facing summary when park or gated home-restore skips indicate a partial pass; `nil` when no toast.
+    /// Operator-facing summary when SIM kill or gated home-restore skips indicate a partial pass; `nil` when no toast.
     static func partialFailureMessage(
-        parkFailedCount: Int,
+        simKillFailedCount: Int,
         shouldTeleport: Bool,
         rosterSnapshotCount: Int,
         rosterSkipped: Int,
@@ -34,11 +34,11 @@ enum MissionRunSimCleanupOperatorToastCopy {
         poolSkipped: Int
     ) -> String? {
         var parts: [String] = []
-        if parkFailedCount > 0 {
+        if simKillFailedCount > 0 {
             parts.append(
-                parkFailedCount == 1
-                    ? "park did not finish for one vehicle"
-                    : "park did not finish for \(parkFailedCount) vehicles"
+                simKillFailedCount == 1
+                    ? "SIM kill did not succeed for one vehicle"
+                    : "SIM kill did not succeed for \(simKillFailedCount) vehicles"
             )
         }
         if shouldTeleport {

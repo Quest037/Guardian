@@ -79,6 +79,7 @@ final class MissionRunLifecycleSubsystem {
         environment.clearTaskMissionEndRecoveryAcknowledgements()
         environment.clearTaskMissionEndAbortAcknowledgements()
         environment.clearMissionTaskScopedOrchestrationState()
+        environment.clearAssignmentSlotLifecycleLanesOnAllRows()
         environment.clearEvents()
         environment.systems.planner.clearCompiledPlan()
         environment.systems.logging.clearState()
@@ -98,13 +99,18 @@ extension MissionRunLogTemplateKey {
     /// Params: `vehicleCount` — best-effort manual stream / mission pause / offboard stop for Guardian SITLs at SIM cleanup start (Phase A motion damp).
     static let guardianSitlMotionStopPassAfterRunCompleted =
         "missioncontrol.mre.lifecycle.guardian_sitl_motion_stop_pass_run_completed"
+    /// Params: `vehicleCount` — SIM cleanup Phase A: MAVSDK ``Action/kill`` acknowledged for that many Guardian SITL streams (excludes no-session skips).
+    static let guardianSitlKillPassAfterRunCompleted =
+        "missioncontrol.mre.lifecycle.guardian_sitl_kill_pass_run_completed"
     /// Params: `dispatch` — ``MissionRunQueuedCommandBatch/dispatchLogLabel``; mission-start batch dropped because the run is already ``MissionRunSessionPhase/completed``.
     static let executorMissionStartBatchSuppressedRunCompleted =
         "missioncontrol.mre.executor.mission_start_batch_suppressed_run_completed"
     /// Params: `attempted`, `succeeded`, `failed` — run-complete sequential park batch (SIM cleanup).
     static let lifecycleSimCleanupParkBatch = "missioncontrol.mre.lifecycle.sim_cleanup_park_batch"
-    /// Params: `park`, `teleport`, `union`, `completion` — async SIM cleanup pass begins (after ``markCompleted``).
+    /// Params: `attempted`, `succeeded`, `failed` — run-complete waved SIM ``Action/kill`` batch (force disarm).
+    static let lifecycleSimCleanupKillBatch = "missioncontrol.mre.lifecycle.sim_cleanup_kill_batch"
+    /// Params: `sitlKill`, `teleport`, `union`, `completion` — async SIM cleanup pass begins (after ``markCompleted``); `sitlKill` is Guardian SITL session count targeted for kill.
     static let lifecycleSimCleanupRunStarted = "missioncontrol.mre.lifecycle.sim_cleanup_run_started"
-    /// Params: `parkAttempted`, `parkFailed`, `missionClear`, `geofenceClear`, `rTeleApplied`, `rTeleSkipped`, `pTeleApplied`, `pTeleSkipped`, `battery` — one-line end summary for the same pass.
+    /// Params: `killAttempted`, `killFailed`, `missionClear`, `geofenceClear`, `rTeleApplied`, `rTeleSkipped`, `pTeleApplied`, `pTeleSkipped`, `battery` — one-line end summary for the same pass.
     static let lifecycleSimCleanupRunFinished = "missioncontrol.mre.lifecycle.sim_cleanup_run_finished"
 }

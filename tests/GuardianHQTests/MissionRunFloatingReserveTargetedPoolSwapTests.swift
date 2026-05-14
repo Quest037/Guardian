@@ -24,7 +24,11 @@ final class MissionRunFloatingReserveTargetedPoolSwapTests: XCTestCase {
             rosterDeviceId: rd,
             slotName: "Primary",
             attachedDevice: "LEGACY",
-            attachedFleetVehicleToken: nil
+            attachedFleetVehicleToken: nil,
+            slotLifecycleLanes: MissionRunAssignmentSlotStateLanes(
+                commanded: .executingMission,
+                observed: .executingMission
+            )
         )
         let fleet = FleetLinkService()
         let sitl = SitlService()
@@ -57,6 +61,7 @@ final class MissionRunFloatingReserveTargetedPoolSwapTests: XCTestCase {
         }
         XCTAssertEqual(used, poolSlotID)
         XCTAssertEqual(run.assignments[0].attachedFleetVehicleToken, "live")
+        XCTAssertNil(run.assignments[0].slotLifecycleLanes)
         let pool = run.reservePool(forTaskID: tid)
         XCTAssertEqual(pool.entries.count, 1)
         XCTAssertEqual(pool.entries[0].id, poolSlotID)

@@ -35,13 +35,21 @@ final class MissionRunFixedRosterReserveSwapTests: XCTestCase {
             taskId: tid,
             rosterDeviceId: primaryDevice.id,
             slotName: primaryDevice.name,
-            attachedFleetVehicleToken: "fleet:sim:alpha"
+            attachedFleetVehicleToken: "fleet:sim:alpha",
+            slotLifecycleLanes: MissionRunAssignmentSlotStateLanes(
+                commanded: .policySucceeded,
+                observed: .policySucceeded
+            )
         )
         let reserveAssignment = MissionRunAssignment(
             taskId: tid,
             rosterDeviceId: reserveDevice.id,
             slotName: reserveDevice.name,
-            attachedFleetVehicleToken: "fleet:sim:bravo"
+            attachedFleetVehicleToken: "fleet:sim:bravo",
+            slotLifecycleLanes: MissionRunAssignmentSlotStateLanes(
+                commanded: .executingMission,
+                observed: .executingMission
+            )
         )
         let run = MissionRunEnvironment(
             missionId: mission.id,
@@ -62,6 +70,8 @@ final class MissionRunFixedRosterReserveSwapTests: XCTestCase {
         let r = run.assignments.first { $0.id == reserveAssignment.id }!
         XCTAssertEqual(p.attachedFleetVehicleToken, "fleet:sim:bravo")
         XCTAssertEqual(r.attachedFleetVehicleToken, "fleet:sim:alpha")
+        XCTAssertNil(p.slotLifecycleLanes)
+        XCTAssertNil(r.slotLifecycleLanes)
 
         let keys = run.events.compactMap(\.templateKey)
         XCTAssertTrue(keys.contains(MissionRunLogTemplateKey.fixedRosterReserveSwapEngaged))

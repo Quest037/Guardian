@@ -228,8 +228,30 @@ extension MissionRunEnvironment {
 
         let geofencePolygonsJSON: String
         do {
+            let vacancyHubForPx4Filter: FleetHubVehicleTelemetry? = {
+                guard let token = FleetMissionVehicleToken(storageKey: vacToken),
+                      let vehicleID = resolvedFleetStreamVehicleID(token: token, fleetLink: fleetLink, sitl: sitl)
+                else { return nil }
+                return fleetLink.hubTelemetry(forVehicleID: vehicleID)
+            }()
+            let px4FilterHome = MissionGeofenceMavsdkGeofenceUtilities.px4GeofenceFilterHome(
+                routeMacroHome: mission.routeMacro.home?.coord,
+                hub: vacancyHubForPx4Filter
+            )
+            let (geofencesForPx4, omittedPx4Inclusions) = MissionGeofenceMavsdkGeofenceUtilities.fencesFilteredForPX4GeofenceUpload(
+                fences: squad.effectiveGeofencesForSquad,
+                home: px4FilterHome
+            )
+            if omittedPx4Inclusions > 0 {
+                appendReserveSwapPipelinePhaseLog(
+                    phase: .missionUpload,
+                    passed: false,
+                    correlation: correlation,
+                    detail: "Omitted \(omittedPx4Inclusions) inclusion geofence(s) for PX4 upload (mission home outside those inclusion fences); encoding remaining fences."
+                )
+            }
             geofencePolygonsJSON = try MissionGeofenceMavsdkGeofenceUtilities.encodeGeofencePolygonsJSON(
-                forGeofences: squad.effectiveGeofencesForSquad
+                forGeofences: geofencesForPx4
             )
         } catch {
             appendReserveSwapPipelinePhaseLog(

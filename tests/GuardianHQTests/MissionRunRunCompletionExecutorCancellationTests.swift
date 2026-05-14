@@ -238,6 +238,24 @@ final class MissionRunRunCompletionExecutorCancellationTests: XCTestCase {
         XCTAssertNotNil(StructuredLogTemplateCatalog.pattern(forKey: key, presentation: .missionControlRoom))
     }
 
+    func test_guardian_sitl_kill_pass_log_template_registered_in_catalog() {
+        let key = MissionRunLogTemplateKey.guardianSitlKillPassAfterRunCompleted
+        XCTAssertNotNil(
+            StructuredLogTemplateCatalog.pattern(forKey: key, presentation: .plainExport),
+            "Missing plainExport catalog entry for \(key)"
+        )
+        XCTAssertNotNil(
+            StructuredLogTemplateCatalog.pattern(forKey: key, presentation: .missionControlRoom),
+            "Missing MCR catalog entry for \(key)"
+        )
+    }
+
+    func test_lifecycle_sim_cleanup_kill_batch_log_template_registered_in_catalog() {
+        let key = MissionRunLogTemplateKey.lifecycleSimCleanupKillBatch
+        XCTAssertNotNil(StructuredLogTemplateCatalog.pattern(forKey: key, presentation: .plainExport))
+        XCTAssertNotNil(StructuredLogTemplateCatalog.pattern(forKey: key, presentation: .missionControlRoom))
+    }
+
     func test_guardian_sitl_motion_stop_pass_log_template_registered_in_catalog() {
         let key = MissionRunLogTemplateKey.guardianSitlMotionStopPassAfterRunCompleted
         XCTAssertNotNil(

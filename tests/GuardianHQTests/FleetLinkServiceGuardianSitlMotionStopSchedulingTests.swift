@@ -15,4 +15,10 @@ final class FleetLinkServiceGuardianSitlMotionStopSchedulingTests: XCTestCase {
         let n = await fleet.awaitGuardianSitlMotionStopAfterMissionRunCompleted(vehicleIDs: [])
         XCTAssertEqual(n, 0)
     }
+
+    func test_performRunCleanupSimKill_skipsWithoutSession() async {
+        let fleet = FleetLinkService()
+        let outcome = await fleet.performRunCleanupSimKill(vehicleID: "nonexistent-stream")
+        XCTAssertEqual(outcome, .skippedNoSession)
+    }
 }

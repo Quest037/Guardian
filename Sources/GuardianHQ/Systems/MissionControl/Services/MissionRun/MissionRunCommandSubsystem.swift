@@ -84,6 +84,14 @@ final class MissionRunCommandSubsystem {
             category: issued.category,
             onCommandOutcome: { [weak self] outcome in
                 guard let self, let environment = self.environment else { return }
+                let dispatchOutcomeSuccess: Bool
+                switch outcome {
+                case .succeeded, .succeededWithPayload:
+                    dispatchOutcomeSuccess = true
+                case .failed:
+                    dispatchOutcomeSuccess = false
+                }
+                environment.applySlotDispatchOutcomeEvidence(issued: issued, success: dispatchOutcomeSuccess)
                 switch outcome {
                 case .succeeded, .succeededWithPayload:
                     let ackCtx = environment.systems.logging.effectiveTaskFields(forAssignmentID: issued.assignmentID)
@@ -100,6 +108,7 @@ final class MissionRunCommandSubsystem {
                             "slotID": slotIDString,
                             "issuer": issued.issuer.rawValue,
                             "issuerKey": issued.issuerKey,
+                            "recipeRunSuffix": "",
                         ]
                     )
                 case .failed(let reason):
@@ -118,12 +127,14 @@ final class MissionRunCommandSubsystem {
                             "slotID": slotIDString,
                             "issuer": issued.issuer.rawValue,
                             "issuerKey": issued.issuerKey,
+                            "recipeRunSuffix": "",
                         ]
                     )
                 }
             }
         )
         if commandID != nil {
+            environment?.applySlotPolicyDispatchStartIfNeeded(issued: issued)
             return MissionRunEvent(
                 level: .info,
                 taskID: ctx.0,
@@ -182,6 +193,7 @@ final class MissionRunCommandSubsystem {
                 summary: summary
             )
         }
+        environment?.applySlotPolicyDispatchStartIfNeeded(issued: issued)
         return MissionRunEvent(
             level: .info,
             taskID: ctx.0,
@@ -271,6 +283,7 @@ final class MissionRunCommandSubsystem {
                 ]
             )
         )
+        environment.applySlotPolicyDispatchStartIfNeeded(issued: issued)
         let response = await FleetCommandsCatalogue.shared.invoke(
             name,
             parameters: parameters,
@@ -313,6 +326,7 @@ final class MissionRunCommandSubsystem {
                     "slotID": slotIDString,
                     "issuer": issued.issuer.rawValue,
                     "issuerKey": issued.issuerKey,
+                    "recipeRunSuffix": "",
                 ]
             )
         } else {
@@ -335,9 +349,11 @@ final class MissionRunCommandSubsystem {
                     "slotID": slotIDString,
                     "issuer": issued.issuer.rawValue,
                     "issuerKey": issued.issuerKey,
+                    "recipeRunSuffix": "",
                 ]
             )
         }
+        environment.applySlotDispatchOutcomeEvidence(issued: issued, success: response.isSuccess)
     }
 
     /// Same recipe execution + ack logs as ``dispatchRecipeRun``'s background `Task`, but **awaited** so abort
@@ -397,6 +413,7 @@ final class MissionRunCommandSubsystem {
                 ]
             )
         )
+        environment.applySlotPolicyDispatchStartIfNeeded(issued: issued)
         let outcome = await runRegisteredRecipeAwaitingOutcome(
             issued: issued,
             name: name,
@@ -432,6 +449,12 @@ final class MissionRunCommandSubsystem {
             FleetMovePointParkRecipeRegistrations.registerAll()
         }
         if name == FleetMissionRecipeRegistrations.vehicleDoParkRecipeName,
+           FleetRecipesCatalogue.shared.descriptor(for: name) == nil {
+            FleetRecipesCatalogueBootstrap.ensureRegistered()
+            FleetMissionRecipeRegistrations.registerAll()
+        }
+        if name == FleetMissionRecipeRegistrations.doGeofenceUploadRecipeName
+            || name == FleetMissionRecipeRegistrations.doGeofenceClearRecipeName,
            FleetRecipesCatalogue.shared.descriptor(for: name) == nil {
             FleetRecipesCatalogueBootstrap.ensureRegistered()
             FleetMissionRecipeRegistrations.registerAll()
@@ -482,6 +505,10 @@ final class MissionRunCommandSubsystem {
         )
     }
 
+    private static func recipeRunLogSuffixFromOutcome(_ outcome: FleetRecipeOutcome) -> String {
+        " · run \(outcome.trace.runID.rawValue.uuidString)"
+    }
+
     private func appendRecipeRunAckLogs(
         issued: MissionRunIssuedCommand,
         outcome: FleetRecipeOutcome,
@@ -491,6 +518,35 @@ final class MissionRunCommandSubsystem {
     ) {
         guard let environment else { return }
         let ackCtx = environment.systems.logging.effectiveTaskFields(forAssignmentID: issued.assignmentID)
+        let recipeSuffix = Self.recipeRunLogSuffixFromOutcome(outcome)
+        guard MissionRunRecipeOutcomeCorrelation.outcomeTraceMatchesIssuedRecipeDispatch(
+            issued: issued,
+            outcome: outcome,
+            resolvedFleetVehicleID: vehicleID
+        ) else {
+            let issuedRecipe: String
+            if case .recipe(let name, _) = issued.dispatch {
+                issuedRecipe = name.rawValue
+            } else {
+                issuedRecipe = "(not recipe)"
+            }
+            environment.systems.logging.appendLogEvent(
+                level: .warning,
+                taskID: ackCtx.0,
+                taskLabel: ackCtx.1,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.recipeFleetOutcomeTraceMismatch,
+                templateParams: [
+                    "summary": summary,
+                    "issuedRecipe": issuedRecipe,
+                    "traceRecipe": outcome.trace.recipe.rawValue,
+                    "traceVehicleID": outcome.trace.vehicleID,
+                    "resolvedVehicleID": vehicleID,
+                    "runID": outcome.trace.runID.rawValue.uuidString,
+                ]
+            )
+            return
+        }
         if outcome.isSuccess {
             environment.systems.logging.appendLogEvent(
                 level: .info,
@@ -505,6 +561,7 @@ final class MissionRunCommandSubsystem {
                     "slotID": slotIDString,
                     "issuer": issued.issuer.rawValue,
                     "issuerKey": issued.issuerKey,
+                    "recipeRunSuffix": recipeSuffix,
                 ]
             )
         } else {
@@ -529,9 +586,11 @@ final class MissionRunCommandSubsystem {
                     "slotID": slotIDString,
                     "issuer": issued.issuer.rawValue,
                     "issuerKey": issued.issuerKey,
+                    "recipeRunSuffix": recipeSuffix,
                 ]
             )
         }
+        environment.applySlotDispatchOutcomeEvidence(issued: issued, success: outcome.isSuccess)
     }
 
     private func dispatchRecipeRun(
@@ -561,6 +620,7 @@ final class MissionRunCommandSubsystem {
                 slotIDString: slotIDString
             )
         }
+        environment?.applySlotPolicyDispatchStartIfNeeded(issued: issued)
         return MissionRunEvent(
             level: .info,
             taskID: ctx.0,
@@ -641,4 +701,6 @@ extension MissionRunLogTemplateKey {
     static let fleetAckFailed = "missioncontrol.mre.fleet.ack_failed"
     /// Same params as ``fleetAckFailed`` — geofence upload/clear or composite mission upload failing on the geofence stack child.
     static let missionRunGeofenceFleetAckFailed = "missioncontrol.mre.fleet.geofence_ack_failed"
+    /// ``FleetRecipeOutcome`` trace did not match the ``MissionRunIssuedCommand`` recipe / vehicle — slot lane updates skipped.
+    static let recipeFleetOutcomeTraceMismatch = "missioncontrol.mre.recipe.fleet_outcome_trace_mismatch"
 }

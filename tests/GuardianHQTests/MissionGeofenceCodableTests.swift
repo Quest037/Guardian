@@ -43,4 +43,31 @@ final class MissionGeofenceCodableTests: XCTestCase {
         XCTAssertEqual(decoded.routeMacro.tasks[0].geofences.count, 1)
         XCTAssertEqual(decoded.routeMacro.tasks[0].geofences.first?.name, "Task fence")
     }
+
+    func test_missionGeofence_decode_without_altitude_keys_uses_defaults() throws {
+        let json = """
+        {"id":"00000000-0000-0000-0000-000000000001","name":"Z","boundary":"inclusion","shape":"circle","polygonVertices":[],"circleCenter":{"lat":0,"lon":0},"circleRadiusMeters":10}
+        """
+        let data = try XCTUnwrap(json.data(using: .utf8))
+        let fence = try JSONDecoder().decode(MissionGeofence.self, from: data)
+        XCTAssertEqual(fence.minAltitudeMeters, 0)
+        XCTAssertEqual(fence.maxAltitudeMeters, 120)
+        XCTAssertEqual(fence.altitudeUnits, .meters)
+        XCTAssertEqual(fence.altitudeReference, .relativeHome)
+    }
+
+    func test_missionGeofence_altitude_snake_case_keys_roundTrip() throws {
+        let json = """
+        {"id":"00000000-0000-0000-0000-000000000002","name":"Band","boundary":"inclusion","shape":"circle","polygonVertices":[],"circleCenter":{"lat":1,"lon":2},"circleRadiusMeters":50,"min_altitude":30,"max_altitude":120,"altitude_units":"m","altitude_reference":"AGL"}
+        """
+        let data = try XCTUnwrap(json.data(using: .utf8))
+        let decoded = try JSONDecoder().decode(MissionGeofence.self, from: data)
+        XCTAssertEqual(decoded.minAltitudeMeters, 30)
+        XCTAssertEqual(decoded.maxAltitudeMeters, 120)
+        XCTAssertEqual(decoded.altitudeUnits, .meters)
+        XCTAssertEqual(decoded.altitudeReference, .agl)
+        let out = try JSONEncoder().encode(decoded)
+        let again = try JSONDecoder().decode(MissionGeofence.self, from: out)
+        XCTAssertEqual(again, decoded)
+    }
 }

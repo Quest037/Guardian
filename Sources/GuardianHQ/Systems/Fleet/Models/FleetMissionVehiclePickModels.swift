@@ -104,21 +104,28 @@ func buildMissionPickableVehicles(
 }
 
 /// Resolves the FleetLink stream key (`sysid:n` or bridge id) for a roster assignment’s fleet token.
+///
+/// - **``FleetMissionVehicleToken/live``:** picks the first telemetry stream key that is **not** a Guardian-managed built-in SITL (``FleetLinkService/isGuardianManagedSitlStream``). When ``sitl`` is non-nil, keys matching running SITL instances’ `sysid:n` ids are also excluded (legacy disambiguation when multiple streams exist).
+/// - **``FleetMissionVehicleToken/sitl``:** requires ``sitl`` to map the SITL instance UUID to a stack id.
 @MainActor
 func resolvedFleetStreamVehicleID(
     token: FleetMissionVehicleToken,
     fleetLink: FleetLinkService,
-    sitl: SitlService
+    sitl: SitlService?
 ) -> String? {
     switch token {
     case .sitl(let uuid):
+        guard let sitl else { return nil }
         guard let inst = sitl.instances.first(where: { $0.id == uuid }) else { return nil }
         let systemID = inst.stackInstanceIndex + 1
         return fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
     case .live:
-        let simVehicleIDs = Set(sitl.instances.map { "sysid:\($0.stackInstanceIndex + 1)" })
+        var excluded = Set(fleetLink.telemetryByVehicleID.keys.filter { fleetLink.isGuardianManagedSitlStream(vehicleID: $0) })
+        if let sitl {
+            excluded.formUnion(sitl.instances.map { "sysid:\($0.stackInstanceIndex + 1)" })
+        }
         return fleetLink.telemetryByVehicleID.keys
-            .filter { !simVehicleIDs.contains($0) }
+            .filter { !excluded.contains($0) }
             .sorted()
             .first
     }
@@ -128,7 +135,7 @@ func resolvedFleetStreamVehicleID(
 func resolvedFleetStreamVehicleID(
     assignment: MissionRunAssignment,
     fleetLink: FleetLinkService,
-    sitl: SitlService
+    sitl: SitlService?
 ) -> String? {
     guard let key = assignment.attachedFleetVehicleToken,
           let token = FleetMissionVehicleToken(storageKey: key)
@@ -140,7 +147,7 @@ func resolvedFleetStreamVehicleID(
 func resolvedRosterVehicleLabel(
     assignment: MissionRunAssignment,
     fleetLink: FleetLinkService,
-    sitl: SitlService
+    sitl: SitlService?
 ) -> String? {
     if let key = assignment.attachedFleetVehicleToken,
        let token = FleetMissionVehicleToken(storageKey: key)
@@ -152,7 +159,7 @@ func resolvedRosterVehicleLabel(
             }
             return assignment.attachedDevice.isEmpty ? "Live vehicle (unavailable)" : assignment.attachedDevice
         case .sitl(let uuid):
-            if let inst = sitl.instances.first(where: { $0.id == uuid }) {
+            if let sitl, let inst = sitl.instances.first(where: { $0.id == uuid }) {
                 let alive = inst.isAlive ? "" : " (stopped)"
                 return "\(inst.preset.displayName)\(alive)"
             }
@@ -168,13 +175,14 @@ func resolvedRosterVehicleLabel(
 func resolvedRosterVehicleSecondaryLine(
     assignment: MissionRunAssignment,
     fleetLink: FleetLinkService,
-    sitl: SitlService
+    sitl: SitlService?
 ) -> String? {
     guard let full = resolvedRosterVehicleLabel(assignment: assignment, fleetLink: fleetLink, sitl: sitl) else {
         let legacy = assignment.attachedDevice.trimmingCharacters(in: .whitespacesAndNewlines)
         return legacy.isEmpty ? nil : legacy
     }
-    if let key = assignment.attachedFleetVehicleToken,
+    if let sitl,
+       let key = assignment.attachedFleetVehicleToken,
        let token = FleetMissionVehicleToken(storageKey: key),
        case .sitl(let uuid) = token,
        let inst = sitl.instances.first(where: { $0.id == uuid })

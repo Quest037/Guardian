@@ -30,7 +30,7 @@ final class MissionRunReserveAutoSuggestPolicyTests: XCTestCase {
             runStatus: .running,
             sessionPhase: .executing,
             taskState: .executing,
-            taskAttemptState: .abortWindDownIssued,
+            taskAttemptState: .abortMissionEnd,
             hasClassCompatibleFloatingReserve: true
         )
         XCTAssertFalse(MissionRunReserveAutoSuggestPolicy.gatingAllowsSuggest(g))
@@ -76,7 +76,7 @@ final class MissionRunReserveAutoSuggestPolicyTests: XCTestCase {
                 level: .error,
                 message: "x",
                 templateKey: MissionRunLogTemplateKey.fleetAckFailed,
-                templateParams: ["vehicleID": vid, "summary": "arm"]
+                templateParams: ["vehicleID": vid, "summary": "arm", "reason": "x", "recipeRunSuffix": ""]
             ),
         ]
         XCTAssertTrue(

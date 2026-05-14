@@ -43,8 +43,9 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     /// Live **mission points** envelope for this run (rally / extraction / …): seeded from the mission template,
     /// then mutated by operator / MRE / plugins without rewriting the saved ``Mission`` document (see README **Mission template points**).
     ///
-    /// While ``status`` is ``MissionRunStatus/setup``, ``updateTemplate(_:)`` re-syncs from ``Mission/missionPoints`` so
-    /// authoring changes flow in. After the run leaves setup, this array is **not** replaced from the template—only
+    /// While ``status`` is ``MissionRunStatus/setup``, ``updateTemplate(_:)`` re-syncs from the run’s forked
+    /// ``Mission/missionPoints`` when the template is replaced; catalog ``MissionStore`` edits do not apply until
+    /// the run template is refreshed from that source. After the run leaves setup, this array is **not** replaced from the template—only
     /// ``applyRuntimeMissionPointCreate`` / ``applyRuntimeMissionPointUpdate`` / ``applyRuntimeMissionPointSetClosed``.
     @Published private(set) var runtimeMissionPoints: [MissionPoint] = []
 
@@ -61,7 +62,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     @Published private(set) var events: [MissionRunEvent] = []
     @Published private(set) var template: Mission?
     @Published private(set) var compiledPlan: MissionControlPlan?
-    @Published private(set) var finishedMissionCycleVehicleIDs: Set<String> = []
+    @Published private(set) var finishedMissionCycleVehicleIDsByTaskID: [UUID: Set<String>] = [:]
     @Published private(set) var activeCycleTaskIDs: Set<UUID> = []
     /// Completed autopilot cycles per task this run (continuous / continuous-with-delay). Used with ``MissionTask/cycles``.
     private(set) var taskCyclesCompletedByTaskID: [UUID: Int] = [:]
@@ -75,7 +76,10 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     /// Derived per-task state for MC-R UI (refreshed when run scheduling / lifecycle inputs change).
     @Published private(set) var taskStateByTaskID: [UUID: MissionTaskState] = [:]
 
-    /// Derived per-task **attempting** intent (abort/complete protocol scheduled or wind-down issued). Co-refreshed with ``taskStateByTaskID`` in ``refreshDerivedTaskStates()`` — v1 uses orchestration flags only; see README **Task attempting vs current**.
+    /// MC-led mission-end **intent** (abort vs recovery protocol) before and while fleet work runs — see ``noteMissionTaskEndAttempt(_:forTaskID:)``.
+    @Published private(set) var taskMissionEndAttemptByTaskID: [UUID: MissionTaskAttemptState] = [:]
+
+    /// Derived per-task **attempting** line for MC-R UI (mirrors ``taskMissionEndAttemptByTaskID`` with triage / disabled filtering).
     @Published private(set) var taskAttemptingByTaskID: [UUID: MissionTaskAttemptState] = [:]
 
     /// Operator triage terminal state for a task (``.aborted`` / ``.completed``). ``deriveMissionTaskState`` returns this verbatim so refresh cannot override the operator’s choice.
@@ -117,6 +121,9 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     /// autostart must not run for the mapped mission tasks until the handoff clears (see ``unionedMissionTaskIDsSuppressingAutopilotAutostart(forMission:)``).
     @Published private(set) var missionRunAssignmentIDsWithOperatorLiveDriveHandoff: Set<UUID> = []
 
+    /// Last §3 **pull** conformance promotion to ``policySucceeded`` per ``MissionRunAssignment/id`` (debounce).
+    internal var slotPolicyPullConformanceLastSuccessByAssignmentID: [UUID: Date] = [:]
+
     internal weak var fleetLink: FleetLinkService?
     internal weak var sitl: SitlService?
     internal weak var generalSettings: GeneralSettingsStore?
@@ -124,8 +131,8 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     let systems: MissionRunSystems
 
     /// Persists template mutations performed via ``MissionRunEnvironment`` policy / Rules-of-Engagement APIs.
-    /// Set by the layer that owns the ``MissionStore`` (typically ``MissionRunDetailView``); when `nil`,
-    /// mission/task edits are still applied to the in-memory ``template`` but won't survive a template refresh.
+    /// Set by the layer that owns the ``MissionControlStore`` (typically ``MissionRunDetailView``); when `nil`,
+    /// mission/task edits are still applied to the in-memory ``template`` but won't notify the store to re‑index the run.
     var missionTemplatePersister: ((Mission) -> Void)?
 
     init(
@@ -245,6 +252,28 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         return !(targets.isEmpty && !shouldTeleport && motionIDs.isEmpty)
     }
 
+    /// Whether deleting this run should run the waved SIM cleanup pass (kill / mission clear / geofence clear / battery / teleport)
+    /// before removing it from ``MissionControlStore``.
+    func shouldTriggerSimCleanupBeforeRemoval() -> Bool {
+        switch status {
+        case .running, .paused, .recovery, .completed:
+            return true
+        case .setup:
+            return canScheduleMissionRunSimCleanupNow()
+        }
+    }
+
+    /// Waits for any in-flight SIM cleanup pass on this run, then runs ``performMissionRunSimCleanupPassIfNeeded(fleetLink:sitl:)``
+    /// when ``shouldTriggerSimCleanupBeforeRemoval()`` is true. Caller should ``attachServices`` first.
+    func awaitMissionRunSimCleanupBeforeRemovalIfNeeded() async {
+        guard shouldTriggerSimCleanupBeforeRemoval() else { return }
+        while isMissionRunSimCleanupPassRunning {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        guard let fleetLink, let sitl else { return }
+        await performMissionRunSimCleanupPassIfNeeded(fleetLink: fleetLink, sitl: sitl)
+    }
+
     func captureExecutionContext(_ context: MissionRunExecutionContext?) {
         lastExecutionContext = context
         if let mission = context?.mission {
@@ -327,6 +356,16 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         }
     }
 
+    /// Clears persisted §3 / §4 **slot lifecycle lanes** on every roster row so a new run pass does not inherit policy-complete chips from the prior execution.
+    func clearAssignmentSlotLifecycleLanesOnAllRows() {
+        guard !assignments.isEmpty else { return }
+        var next = assignments
+        for i in next.indices {
+            next[i].slotLifecycleLanes = nil
+        }
+        assignments = next
+    }
+
     /// Clears task-scoped graceful scheduling, dispatch markers, and autostart suppression (whole-run start / reset).
     internal func clearMissionTaskScopedOrchestrationState() {
         if !pendingMissionTaskGracefulWindDownKindByTaskID.isEmpty {
@@ -337,6 +376,8 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         if !missionTaskAutopilotAutostartSuppressedTaskIDs.isEmpty { missionTaskAutopilotAutostartSuppressedTaskIDs = [] }
         if !missionRunAssignmentIDsWithOperatorLiveDriveHandoff.isEmpty { missionRunAssignmentIDsWithOperatorLiveDriveHandoff = [] }
         if !operatorTriageMarkedMissionTaskStateByTaskID.isEmpty { operatorTriageMarkedMissionTaskStateByTaskID = [:] }
+        if !slotPolicyPullConformanceLastSuccessByAssignmentID.isEmpty { slotPolicyPullConformanceLastSuccessByAssignmentID = [:] }
+        if !taskMissionEndAttemptByTaskID.isEmpty { taskMissionEndAttemptByTaskID = [:] }
     }
 
     internal func setPendingMissionTaskGracefulWindDown(kind: MissionRunMissionTaskGracefulPendingKind, forTaskID taskID: UUID) {
@@ -371,6 +412,41 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         refreshDerivedTaskStates()
     }
 
+    /// True while whole-run after-cycle intent **or** any per-task graceful / issued wind-down markers are active.
+    ///
+    /// ``MissionRunExecutionSubsystem`` uses this so between-cycle autostart / delay scheduling does not race
+    /// complete-policy recovery when ``gracefulStopKind`` is still ``none`` but per-task pending or issued markers
+    /// are set.
+    func shouldSuppressBetweenCycleAutostartForMissionEndWindDown() -> Bool {
+        gracefulStopKind != .none
+            || !pendingMissionTaskGracefulWindDownKindByTaskID.isEmpty
+            || !missionTaskCompleteWindDownIssuedTaskIDs.isEmpty
+            || !missionTaskAbortWindDownIssuedTaskIDs.isEmpty
+    }
+
+    /// Records MC-led mission-end **intent** before fleet wind-down commands; **abort** wins if both were ever set.
+    internal func noteMissionTaskEndAttempt(_ kind: MissionTaskAttemptState, forTaskID taskID: UUID) {
+        var m = taskMissionEndAttemptByTaskID
+        switch kind {
+        case .abortMissionEnd:
+            m[taskID] = .abortMissionEnd
+        case .recoveryMissionEnd:
+            if m[taskID] != .abortMissionEnd {
+                m[taskID] = .recoveryMissionEnd
+            }
+        }
+        taskMissionEndAttemptByTaskID = m
+        refreshDerivedTaskStates()
+    }
+
+    /// Clears stored mission-end attempt without an extra refresh (caller owns ``refreshDerivedTaskStates()``).
+    internal func clearMissionTaskEndAttemptStorage(forTaskID taskID: UUID) {
+        guard taskMissionEndAttemptByTaskID[taskID] != nil else { return }
+        var m = taskMissionEndAttemptByTaskID
+        m.removeValue(forKey: taskID)
+        taskMissionEndAttemptByTaskID = m
+    }
+
     /// When the operator explicitly starts a task cycle again, allow autostart bookkeeping and prior task-scoped markers to reset for that path.
     internal func prepareMissionTaskForOperatorRestart(taskID: UUID) {
         clearPendingMissionTaskGracefulWindDown(forTaskID: taskID)
@@ -379,6 +455,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         missionTaskCompleteWindDownIssuedTaskIDs.remove(taskID)
         taskMissionEndRecoveryCompletedByTaskID.remove(taskID)
         taskMissionEndAbortCompletedByTaskID.remove(taskID)
+        clearMissionTaskEndAttemptStorage(forTaskID: taskID)
         var triage = operatorTriageMarkedMissionTaskStateByTaskID
         triage.removeValue(forKey: taskID)
         operatorTriageMarkedMissionTaskStateByTaskID = triage
@@ -495,6 +572,8 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             break
         }
 
+        clearMissionTaskEndAttemptStorage(forTaskID: taskID)
+
         appendEvent(
             MissionRunEvent(
                 taskID: taskID,
@@ -508,10 +587,142 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             )
         )
 
-        refreshDerivedTaskStates()
-        if state == .aborted {
-            promoteSessionPhaseToAbortedIfAllTasksAcknowledgedAbort()
+        let manualMessage = MissionRunSlotEvidenceAutoTriageOperatorCopy.toastManualTriage(taskName: task.name, state: state)
+        if !manualMessage.isEmpty {
+            GuardianMissionRunSlotEvidenceAutoTriageToastNotification.post(
+                message: manualMessage,
+                severity: state == .aborted ? .warning : .success
+            )
         }
+
+        refreshDerivedTaskStates()
+    }
+
+    // MARK: - §3 slot evidence → mission-end ack (auto triage)
+
+    /// When **every** roster row bound to a task satisfies the §3 rollup for that task’s issued wind-down (strict
+    /// ``policySucceeded`` for **abort**; settled terminals including ``policyFailed`` for **complete** — see
+    /// ``MissionRunSlotEvidenceAutoMissionEndAckRules``), inserts the task into ``taskMissionEndAbortCompletedByTaskID`` or
+    /// ``taskMissionEndRecoveryCompletedByTaskID`` **without** an operator triage pin (``TaskRosterAssignmentStatesToDo.md`` §3).
+    ///
+    /// Call after §3 push/pull lane mutations for the listed ``MissionRunAssignment/id`` values. Emits **one** consolidated
+    /// run log line per invocation and posts ``GuardianMissionRunSlotEvidenceAutoTriageToastNotification`` with the same batch summary.
+    internal func applySlotEvidenceAutoMissionEndAckIfNeeded(forAssignmentIDs assignmentIDs: Set<UUID>) {
+        guard let mission = template else { return }
+        var taskIDs = Set<UUID>()
+        for aid in assignmentIDs {
+            guard let assignment = assignments.first(where: { $0.id == aid }) else { continue }
+            if let tid = MissionRunPolicyResolution.resolvedTaskId(for: assignment, mission: mission) {
+                taskIDs.insert(tid)
+            }
+        }
+        var abortTaskNames: [String] = []
+        var recoveryTaskNames: [String] = []
+        for tid in taskIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
+            guard let outcome = trySlotEvidenceAutoMissionEndAckMutation(forTaskID: tid, mission: mission) else { continue }
+            switch outcome {
+            case .abort(let name):
+                abortTaskNames.append(name)
+            case .recovery(let name):
+                recoveryTaskNames.append(name)
+            }
+        }
+        guard !abortTaskNames.isEmpty || !recoveryTaskNames.isEmpty else { return }
+        appendSlotEvidenceAutoAckConsolidatedMissionRunEvent(abortTaskNames: abortTaskNames, recoveryTaskNames: recoveryTaskNames)
+        postSlotEvidenceAutoTriageToast(abortTaskNames: abortTaskNames, recoveryTaskNames: recoveryTaskNames)
+        refreshDerivedTaskStates()
+    }
+
+    private enum SlotEvidenceAutoMissionEndAckMutationOutcome {
+        case abort(String)
+        case recovery(String)
+    }
+
+    /// Returns an outcome only when this call **mutated** ack / issued sets (idempotent replays return `nil`).
+    private func trySlotEvidenceAutoMissionEndAckMutation(
+        forTaskID taskID: UUID,
+        mission: Mission
+    ) -> SlotEvidenceAutoMissionEndAckMutationOutcome? {
+        if operatorTriageMarkedMissionTaskStateByTaskID[taskID] != nil { return nil }
+        guard let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }), task.enabled else { return nil }
+        let bound = assignmentsBoundToMissionTask(taskID: taskID)
+
+        if missionTaskAbortWindDownIssuedTaskIDs.contains(taskID) {
+            guard MissionRunSlotEvidenceAutoMissionEndAckRules.allBoundRosterRowsPolicySucceeded(bound) else { return nil }
+            guard insertAutoMissionEndAbortAckIfNeeded(taskID: taskID) else { return nil }
+            return .abort(task.name)
+        }
+        if missionTaskCompleteWindDownIssuedTaskIDs.contains(taskID) {
+            guard MissionRunSlotEvidenceAutoMissionEndAckRules.allBoundRosterRowsSatisfiedForCompleteMissionEndAutoAck(bound) else { return nil }
+            guard insertAutoMissionEndRecoveryAckIfNeeded(taskID: taskID) else { return nil }
+            return .recovery(task.name)
+        }
+        return nil
+    }
+
+    private func appendSlotEvidenceAutoAckConsolidatedMissionRunEvent(abortTaskNames: [String], recoveryTaskNames: [String]) {
+        let abortJoined = abortTaskNames.joined(separator: ", ")
+        let recoveryJoined = recoveryTaskNames.joined(separator: ", ")
+        appendEvent(
+            MissionRunEvent(
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.slotEvidenceAutoAcknowledgedMissionEndBatch,
+                templateParams: [
+                    "abortTasks": abortJoined.isEmpty ? "—" : abortJoined,
+                    "recoveryTasks": recoveryJoined.isEmpty ? "—" : recoveryJoined,
+                ]
+            )
+        )
+    }
+
+    private func postSlotEvidenceAutoTriageToast(abortTaskNames: [String], recoveryTaskNames: [String]) {
+        GuardianMissionRunSlotEvidenceAutoTriageToastNotification.post(
+            message: MissionRunSlotEvidenceAutoTriageOperatorCopy.toastConsolidated(
+                abortTaskNames: abortTaskNames,
+                recoveryTaskNames: recoveryTaskNames
+            ),
+            severity: .success
+        )
+    }
+
+    /// `true` when state changed (first auto-ack for this task on this protocol).
+    @discardableResult
+    private func insertAutoMissionEndAbortAckIfNeeded(taskID: UUID) -> Bool {
+        guard !taskMissionEndAbortCompletedByTaskID.contains(taskID) else { return false }
+        var abortDone = taskMissionEndAbortCompletedByTaskID
+        abortDone.insert(taskID)
+        taskMissionEndAbortCompletedByTaskID = abortDone
+        var abortIssued = missionTaskAbortWindDownIssuedTaskIDs
+        abortIssued.remove(taskID)
+        missionTaskAbortWindDownIssuedTaskIDs = abortIssued
+        var recoveryDone = taskMissionEndRecoveryCompletedByTaskID
+        recoveryDone.remove(taskID)
+        taskMissionEndRecoveryCompletedByTaskID = recoveryDone
+        var completeIssued = missionTaskCompleteWindDownIssuedTaskIDs
+        completeIssued.remove(taskID)
+        missionTaskCompleteWindDownIssuedTaskIDs = completeIssued
+        clearMissionTaskEndAttemptStorage(forTaskID: taskID)
+        return true
+    }
+
+    /// `true` when state changed (first auto-ack for this task on this protocol).
+    @discardableResult
+    private func insertAutoMissionEndRecoveryAckIfNeeded(taskID: UUID) -> Bool {
+        guard !taskMissionEndRecoveryCompletedByTaskID.contains(taskID) else { return false }
+        var recoveryDone = taskMissionEndRecoveryCompletedByTaskID
+        recoveryDone.insert(taskID)
+        taskMissionEndRecoveryCompletedByTaskID = recoveryDone
+        var completeIssued = missionTaskCompleteWindDownIssuedTaskIDs
+        completeIssued.remove(taskID)
+        missionTaskCompleteWindDownIssuedTaskIDs = completeIssued
+        var abortDone = taskMissionEndAbortCompletedByTaskID
+        abortDone.remove(taskID)
+        taskMissionEndAbortCompletedByTaskID = abortDone
+        var abortIssued = missionTaskAbortWindDownIssuedTaskIDs
+        abortIssued.remove(taskID)
+        missionTaskAbortWindDownIssuedTaskIDs = abortIssued
+        clearMissionTaskEndAttemptStorage(forTaskID: taskID)
+        return true
     }
 
     @discardableResult
@@ -847,6 +1058,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     /// Filled reserve **slots** MRE may choose from on ``taskID``: has binding, fleet token not run-written-off, and when
     /// ``fleetLink`` + ``sitl`` are attached, the bound vehicle must resolve and pass the same **lifecycle + battery** gate
     /// as ``returnAssignmentToReservePool`` (``FleetVehicleOperationalModel/qualifiesForMissionRunReservePoolOperationalDraw``).
+    /// **Roster slot chip state is out of scope:** ``MissionRunAssignment/slotLifecycleLanes`` on the **vacancy** or other rows does not filter pool entries here.
     /// Legacy text-only slots stay eligible whenever they have a non-empty device string. If services are not attached yet,
     /// only binding + written-off rules apply (MCS setup before link).
     ///
@@ -969,7 +1181,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         }
         let anyBinding = pool.contains { $0.hasFleetOrLegacyBinding }
         if !anyBinding {
-            return ("No bound reserves", appendBenchHint("Bind aircraft to floating reserve berths on this task."))
+            return ("No bound reserves", appendBenchHint("Bind vehicles to floating reserve berths on this task."))
         }
 
         let slotsWithNonEmptyFleetToken = pool.filter { slot in
@@ -983,7 +1195,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         {
             return (
                 "No eligible reserves",
-                appendBenchHint("All floating reserve aircraft on this task are written off for this run.")
+                appendBenchHint("All floating reserve vehicles on this task are written off for this run.")
             )
         }
 
@@ -1003,13 +1215,13 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         if classIgnore.isEmpty {
             return (
                 "No eligible reserves",
-                appendBenchHint("Pool aircraft on this task cannot be drawn (written off, battery or lifecycle, or hub link).")
+                appendBenchHint("Pool vehicles on this task cannot be drawn (written off for floating reserve on this run, battery or lifecycle, or hub link).")
             )
         }
         if classIgnoreDeduped.isEmpty {
             return (
                 "No other reserves",
-                appendBenchHint("Every pool aircraft already shares this slot’s fleet binding.")
+                appendBenchHint("Every pool vehicle already shares this slot’s fleet binding.")
             )
         }
         if classOKDeduped.isEmpty {
@@ -1022,7 +1234,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             } else {
                 return (
                     "No other reserves",
-                    appendBenchHint("Every class-matched pool aircraft already shares this slot’s fleet binding.")
+                    appendBenchHint("Every class-matched pool vehicle already shares this slot’s fleet binding.")
                 )
             }
         }
@@ -1347,6 +1559,10 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         next[vIdx].attachedDevice = next[rIdx].attachedDevice
         next[rIdx].attachedFleetVehicleToken = tVac
         next[rIdx].attachedDevice = dVac
+        nilOutSlotLifecycleLanesOnRosterRowsAfterReserveBindingChange(
+            assignmentIDs: [vacancyAssignmentID, reserveAssignmentID],
+            mutatedRows: &next
+        )
         assignments = next
         clearRosterSimStartPoseSnapshots(forAssignmentIDs: [vac.id, res.id])
 
@@ -1393,6 +1609,20 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         return .success
     }
 
+    /// §5 (``TaskRosterAssignmentStatesToDo.md`` — reserve draw / return): roster swap commits change which vehicle occupies stable ``MissionRunAssignment`` rows. Clear persisted ``slotLifecycleLanes`` so §3 / §4 policy evidence is not attributed to the wrong stream after a token change; effective lanes read **idle** until writers repopulate.
+    ///
+    /// **Not** ``supersededReassigned`` as a lingering post-swap state: that value is merge-terminal on the commanded lane and blocks §4 dispatch-start transitions until cleared.
+    private func nilOutSlotLifecycleLanesOnRosterRowsAfterReserveBindingChange(
+        assignmentIDs: [UUID],
+        mutatedRows: inout [MissionRunAssignment]
+    ) {
+        guard !assignmentIDs.isEmpty else { return }
+        let touch = Set(assignmentIDs)
+        for i in mutatedRows.indices where touch.contains(mutatedRows[i].id) {
+            mutatedRows[i].slotLifecycleLanes = nil
+        }
+    }
+
     private func commitFloatingReservePoolPickToVacancy(
         pickSnap: MissionRunReservePoolSlot,
         vacancyAssignmentIndex idx: Int,
@@ -1426,6 +1656,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         var nextAssignments = assignments
         nextAssignments[idx].attachedFleetVehicleToken = pickSnap.attachedFleetVehicleToken
         nextAssignments[idx].attachedDevice = pickSnap.attachedDevice
+        nilOutSlotLifecycleLanesOnRosterRowsAfterReserveBindingChange(assignmentIDs: [assignmentID], mutatedRows: &nextAssignments)
 
         assignments = nextAssignments
         clearRosterSimStartPoseSnapshots(forAssignmentIDs: [assignmentID])
@@ -1539,6 +1770,8 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         return missionRunFleetBindingPassesReservePoolOperationalDrawGate(fleetStorageKey: key)
     }
 
+    /// Hub lifecycle + battery gate for reserve **pool draw / swap pick** (``FleetVehicleOperationalModel/qualifiesForMissionRunReservePoolOperationalDraw``).
+    /// **Does not** read roster ``MissionRunAssignment/slotLifecycleLanes`` — merged ``policyFailed`` / ``blockedNoVehicle`` on a squad row must not hide otherwise-eligible pool berths.
     private func missionRunFleetBindingPassesReservePoolOperationalDrawGate(fleetStorageKey: String) -> Bool {
         let key = fleetStorageKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return true }
@@ -1624,14 +1857,12 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     }
 
     /// Last-moment validation before mutating two roster rows on a fixed-reserve ↔ vacancy swap.
+    ///
+    /// **Operational draw (``FleetVehicleOperationalModel/qualifiesForMissionRunReservePoolOperationalDraw``):** applies to the **incoming** reserve binding (the vehicle moving onto the vacancy). The **outgoing** vacancy stream is **not** gated with the pool-return bar — that bar is for ``returnAssignmentToReservePool`` / floating pool commits; a distressed active may still bench-swap onto template ``.reserve``. Roster **slot** chip evidence (``policyFailed`` / ``blockedNoVehicle`` on ``MissionRunAssignment/slotLifecycleLanes``) is **not** consulted here or in ``availableReservePoolEntries`` — it must not deadlock reserve enumeration or commit.
     private func fixedRosterReserveSwapPreCommitDedupeAndOperationalHold(
         vacancy: MissionRunAssignment,
         reserve: MissionRunAssignment
     ) -> Bool {
-        if floatingReservePriorBindingRejectedIfReturnedToPoolBerth(vacancy) != nil {
-            return false
-        }
-
         let allowedIDs: Set<UUID> = [vacancy.id, reserve.id]
 
         let resKey = Self.normalizedFleetStorageKey(reserve.attachedFleetVehicleToken)
@@ -1646,7 +1877,6 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         let vacKey = Self.normalizedFleetStorageKey(vacancy.attachedFleetVehicleToken)
         if !vacKey.isEmpty {
             if isFleetVehicleWrittenOffForReservePool(storageKey: vacKey) { return false }
-            if !missionRunFleetBindingPassesReservePoolOperationalDrawGate(fleetStorageKey: vacKey) { return false }
             if fleetStorageKeyBoundOutsideAssignmentPair(fleetStorageKey: vacKey, allowedAssignmentIDs: allowedIDs) {
                 return false
             }
@@ -1848,15 +2078,28 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     }
 
     internal func clearFinishedMissionCycleVehicleIDs() {
-        finishedMissionCycleVehicleIDs.removeAll()
+        finishedMissionCycleVehicleIDsByTaskID.removeAll()
     }
 
-    internal func markFinishedMissionCycleVehicleID(_ vehicleID: String) {
-        finishedMissionCycleVehicleIDs.insert(vehicleID)
+    internal func clearFinishedMissionCycleVehicleIDs(forTaskID taskID: UUID) {
+        finishedMissionCycleVehicleIDsByTaskID.removeValue(forKey: taskID)
+    }
+
+    internal func markFinishedMissionCycleVehicleID(_ vehicleID: String, forTaskID taskID: UUID) {
+        var next = finishedMissionCycleVehicleIDsByTaskID
+        var bucket = next[taskID] ?? []
+        bucket.insert(vehicleID)
+        next[taskID] = bucket
+        finishedMissionCycleVehicleIDsByTaskID = next
     }
 
     internal func clearActiveCycleTasks() {
         activeCycleTaskIDs.removeAll()
+        refreshDerivedTaskStates()
+    }
+
+    internal func removeTaskFromActiveCycle(_ taskID: UUID) {
+        guard activeCycleTaskIDs.remove(taskID) != nil else { return }
         refreshDerivedTaskStates()
     }
 
@@ -1888,13 +2131,22 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         operatorMarkMissionTaskTriageState(taskID: taskID, state: .aborted)
     }
 
-    /// When every **enabled** task has acknowledged the abort protocol, move session from ``MissionRunSessionPhase/aborting`` → ``MissionRunSessionPhase/aborted`` (run stays ``MissionRunStatus/running`` or ``MissionRunStatus/paused`` until the operator marks complete).
+    /// True when this task counts toward ``aborting`` → ``aborted`` promotion: abort ack **or** §3 merged-slot rollup while abort wind-down remains **issued** (bound roster rows only).
+    private func taskAbortProtocolSatisfiedForAbortingSessionPromotion(taskID: UUID) -> Bool {
+        if taskMissionEndAbortCompletedByTaskID.contains(taskID) { return true }
+        guard missionTaskAbortWindDownIssuedTaskIDs.contains(taskID) else { return false }
+        return MissionRunSlotEvidenceAutoMissionEndAckRules.allBoundRosterRowsPolicySucceeded(
+            assignmentsBoundToMissionTask(taskID: taskID)
+        )
+    }
+
+    /// When every **enabled** task satisfies ``taskAbortProtocolSatisfiedForAbortingSessionPromotion``, move session from ``MissionRunSessionPhase/aborting`` → ``MissionRunSessionPhase/aborted`` (run stays ``MissionRunStatus/running`` or ``MissionRunStatus/paused`` until the operator marks complete). **Idempotent:** if phase is not ``aborting``, returns without writing; after a successful promotion, repeated calls are no-ops.
     private func promoteSessionPhaseToAbortedIfAllTasksAcknowledgedAbort() {
         guard (status == .running || status == .paused), sessionPhase == .aborting,
               let mission = template
         else { return }
-        let enabledIDs = Set(mission.routeMacro.tasks.filter(\.enabled).map(\.id))
-        guard enabledIDs.isSubset(of: taskMissionEndAbortCompletedByTaskID) else { return }
+        let enabledTasks = mission.routeMacro.tasks.filter(\.enabled)
+        guard enabledTasks.allSatisfy({ taskAbortProtocolSatisfiedForAbortingSessionPromotion(taskID: $0.id) }) else { return }
         setSessionPhase(.aborted)
     }
 
@@ -1973,6 +2225,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         guard let mission = template else {
             if !taskStateByTaskID.isEmpty { taskStateByTaskID = [:] }
             if !taskAttemptingByTaskID.isEmpty { taskAttemptingByTaskID = [:] }
+            if !taskMissionEndAttemptByTaskID.isEmpty { taskMissionEndAttemptByTaskID = [:] }
             return
         }
         let previous = taskStateByTaskID
@@ -1989,13 +2242,15 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         var nextAttempting: [UUID: MissionTaskAttemptState] = [:]
         nextAttempting.reserveCapacity(mission.routeMacro.tasks.count)
         for task in mission.routeMacro.tasks {
-            if let attempting = Self.deriveMissionTaskAttemptState(task: task, run: self) {
+            if let attempting = Self.displayedMissionTaskEndAttempt(task: task, run: self) {
                 nextAttempting[task.id] = attempting
             }
         }
         if nextAttempting != taskAttemptingByTaskID {
             taskAttemptingByTaskID = nextAttempting
         }
+
+        promoteSessionPhaseToAbortedIfAllTasksAcknowledgedAbort()
     }
 
     /// Logs when MC’s derived task-force state changes (initial population is silent to avoid noise).
@@ -2031,26 +2286,30 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         }
     }
 
-    /// v1: abort wind-down **issued** wins over complete **issued**; **issued** wins over graceful **pending** only.
-    private static func deriveMissionTaskAttemptState(task: MissionTask, run: MissionRunEnvironment) -> MissionTaskAttemptState? {
+    /// Stored mission-end attempt (``taskMissionEndAttemptByTaskID``) unless disabled or operator triage pins a terminal label.
+    private static func displayedMissionTaskEndAttempt(task: MissionTask, run: MissionRunEnvironment) -> MissionTaskAttemptState? {
         guard task.enabled else { return nil }
         if let pinned = run.operatorTriageMarkedMissionTaskStateByTaskID[task.id],
            pinned == .aborted || pinned == .completed {
             return nil
         }
-        if run.missionTaskAbortWindDownIssuedTaskIDs.contains(task.id) {
-            return .abortWindDownIssued
-        }
-        if run.missionTaskCompleteWindDownIssuedTaskIDs.contains(task.id) {
-            return .recoveryWindDownIssued
-        }
-        if run.pendingMissionTaskGracefulWindDownKindByTaskID[task.id] == .abortAfterCycle {
-            return .abortWindDownScheduledAfterCycle
-        }
-        if run.pendingMissionTaskGracefulWindDownKindByTaskID[task.id] == .completeAfterCycle {
-            return .recoveryWindDownScheduledAfterCycle
-        }
-        return nil
+        return run.taskMissionEndAttemptByTaskID[task.id]
+    }
+
+    /// Same predicate as §3 auto mission-end ack while abort wind-down remains **issued** (no ack-set mutation here).
+    private static func slotRollupMirrorsAutoMissionEndAckAbort(task: MissionTask, run: MissionRunEnvironment) -> Bool {
+        guard run.missionTaskAbortWindDownIssuedTaskIDs.contains(task.id) else { return false }
+        return MissionRunSlotEvidenceAutoMissionEndAckRules.allBoundRosterRowsPolicySucceeded(
+            run.assignmentsBoundToMissionTask(taskID: task.id)
+        )
+    }
+
+    /// Same predicate as §3 auto mission-end ack while complete wind-down remains **issued** (no ack-set mutation here).
+    private static func slotRollupMirrorsAutoMissionEndAckRecovery(task: MissionTask, run: MissionRunEnvironment) -> Bool {
+        guard run.missionTaskCompleteWindDownIssuedTaskIDs.contains(task.id) else { return false }
+        return MissionRunSlotEvidenceAutoMissionEndAckRules.allBoundRosterRowsSatisfiedForCompleteMissionEndAutoAck(
+            run.assignmentsBoundToMissionTask(taskID: task.id)
+        )
     }
 
     private static func deriveMissionTaskState(task: MissionTask, run: MissionRunEnvironment, now: Date) -> MissionTaskState {
@@ -2064,11 +2323,15 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         switch run.status {
         case .completed:
             if run.sessionPhase == .aborted {
-                return run.taskMissionEndAbortCompletedByTaskID.contains(task.id) ? .aborted : .aborting
+                let abortDone = run.taskMissionEndAbortCompletedByTaskID.contains(task.id)
+                    || Self.slotRollupMirrorsAutoMissionEndAckAbort(task: task, run: run)
+                return abortDone ? .aborted : .aborting
             }
             return .completed
         case .recovery:
-            if run.taskMissionEndRecoveryCompletedByTaskID.contains(task.id) { return .completed }
+            let recoveryDone = run.taskMissionEndRecoveryCompletedByTaskID.contains(task.id)
+                || Self.slotRollupMirrorsAutoMissionEndAckRecovery(task: task, run: run)
+            if recoveryDone { return .completed }
             return .recovery
         case .setup:
             switch run.sessionPhase {
@@ -2090,24 +2353,40 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         case .staging:
             return .compiling
         case .recovery:
-            return .recovery
+            let recoveryDone = run.taskMissionEndRecoveryCompletedByTaskID.contains(task.id)
+                || Self.slotRollupMirrorsAutoMissionEndAckRecovery(task: task, run: run)
+            return recoveryDone ? .completed : .recovery
         case .completed:
             return .completed
         case .aborting, .aborted:
-            return run.taskMissionEndAbortCompletedByTaskID.contains(task.id) ? .aborted : .aborting
+            let abortDone = run.taskMissionEndAbortCompletedByTaskID.contains(task.id)
+                || Self.slotRollupMirrorsAutoMissionEndAckAbort(task: task, run: run)
+            return abortDone ? .aborted : .aborting
         case .executing:
             if run.missionTaskAbortWindDownIssuedTaskIDs.contains(task.id) {
-                return run.taskMissionEndAbortCompletedByTaskID.contains(task.id) ? .aborted : .aborting
+                let abortDone = run.taskMissionEndAbortCompletedByTaskID.contains(task.id)
+                    || Self.slotRollupMirrorsAutoMissionEndAckAbort(task: task, run: run)
+                return abortDone ? .aborted : .aborting
+            }
+            if run.taskMissionEndAbortCompletedByTaskID.contains(task.id) {
+                return .aborted
             }
             if run.missionTaskCompleteWindDownIssuedTaskIDs.contains(task.id) {
-                return run.taskMissionEndRecoveryCompletedByTaskID.contains(task.id) ? .completed : .recovery
+                let recoveryDone = run.taskMissionEndRecoveryCompletedByTaskID.contains(task.id)
+                    || Self.slotRollupMirrorsAutoMissionEndAckRecovery(task: task, run: run)
+                return recoveryDone ? .completed : .recovery
+            }
+            if run.taskMissionEndRecoveryCompletedByTaskID.contains(task.id) {
+                return .completed
             }
             if inDeferral { return .staging }
             if run.activeCycleTaskIDs.contains(task.id) { return .executing }
             let cyclesDone = run.taskCyclesCompletedByTaskID[task.id] ?? 0
             let repeats = task.regularity == .continuous || task.regularity == .continuousWithDelay
             if repeats, Self.finiteRepeatingCyclesExhausted(task: task, cyclesDone: cyclesDone) {
-                return run.taskMissionEndRecoveryCompletedByTaskID.contains(task.id) ? .completed : .recovery
+                let recoveryDone = run.taskMissionEndRecoveryCompletedByTaskID.contains(task.id)
+                    || Self.slotRollupMirrorsAutoMissionEndAckRecovery(task: task, run: run)
+                return recoveryDone ? .completed : .recovery
             }
             if repeats, cyclesDone > 0 { return .between }
             return .ready
@@ -2140,7 +2419,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         return fleetLink.hubTelemetry(forVehicleID: vehicleID)
     }
 
-    /// Roster SIM teleport after park when ``MissionRunSimHomeRestorePolicy`` gates pass; skips ``skipVehicleIDs`` (e.g. park failures).
+    /// Roster SIM teleport after run-complete cleanup; ``skipVehicleIDs`` is reserved for future gating (currently unused — teleport runs regardless of kill outcome).
     internal func performRosterSimHomeRestoreAfterSuccessfulCompletion(
         snapshots: [UUID: FleetSimState],
         fleetLink: FleetLinkService,
@@ -2201,7 +2480,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         return (applied, skipped)
     }
 
-    /// Reserve pool SIM teleport after park when policy passes; skips ``skipVehicleIDs`` (e.g. park failures).
+    /// Reserve pool SIM teleport after run-complete cleanup; ``skipVehicleIDs`` is reserved for future gating (currently unused).
     internal func performReservePoolSimHomeRestoreAfterSuccessfulCompletion(
         snapshots: [UUID: FleetSimState],
         fleetLink: FleetLinkService,
@@ -2298,6 +2577,8 @@ extension MissionRunEnvironment {
 extension MissionRunLogTemplateKey {
     static let taskForceStateChanged = "missioncontrol.mre.task.taskforce_state"
     static let operatorMarkedMissionTaskTriageState = "missioncontrol.mre.operator.marked_task_triage_state"
+    /// §3 auto triage: one consolidated line per ``applySlotEvidenceAutoMissionEndAckIfNeeded`` pass; ``templateParams``: `abortTasks`, `recoveryTasks` (use `—` when that side had no auto-ack).
+    static let slotEvidenceAutoAcknowledgedMissionEndBatch = "missioncontrol.mre.slot_evidence.auto_ack_mission_end_batch"
 
     // Mission points (run envelope; see ``MissionRunEnvironment/runtimeMissionPoints``)
     static let missionPointRuntimeSeeded = "missioncontrol.mre.point.runtime_seeded"

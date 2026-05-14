@@ -90,7 +90,6 @@ struct GuardianHQApp: App {
     @StateObject private var operatorPromptReviewFocusController = OperatorPromptReviewFocusController()
 
     init() {
-        NSWindow.allowsAutomaticWindowTabbing = false
         // Force-quit leaves PX4 / ArduPilot children; clear before any new SITL or MAVSDK work this session.
         GuardianSitlOrphanBlitz.kickoffFromColdLaunch()
     }
@@ -138,6 +137,12 @@ struct GuardianHQApp: App {
                 let style = GuardianFeedbackSeverity(rawValue: raw ?? "") ?? .warning
                 toastCenter.show(message, style: style, duration: 4.5)
             }
+            .onReceive(NotificationCenter.default.publisher(for: GuardianMissionRunSlotEvidenceAutoTriageToastNotification.name)) { note in
+                guard let message = note.userInfo?[GuardianMissionRunSlotEvidenceAutoTriageToastNotification.messageKey] as? String else { return }
+                let raw = note.userInfo?[GuardianMissionRunSlotEvidenceAutoTriageToastNotification.severityRawKey] as? String
+                let style = GuardianFeedbackSeverity(rawValue: raw ?? "") ?? .success
+                toastCenter.show(message, style: style, duration: 4.5)
+            }
             // Must be an ancestor of ``View/withGuardianConfirmOverlayHost()`` so ``GuardianConfirmOverlayRootModifier`` can resolve ``@EnvironmentObject`` (it wraps the drawer, not the other way around).
             .environmentObject(guardianConfirmOverlayHost)
             .onChange(of: showingSplash) { stillShowingSplash in
@@ -182,15 +187,17 @@ struct GuardianHQApp: App {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSWindow.allowsAutomaticWindowTabbing = false
         NSApp.setActivationPolicy(.regular)
         if let logo = AppIconLoader.loadLogoIcon() {
             NSApp.applicationIconImage = logo
         }
         NSApp.activate(ignoringOtherApps: true)
         /// Defer one turn so SwiftUI has installed the ``WindowGroup`` window before we resize (not Full Screen — fills ``NSScreen/visibleFrame``).
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { @MainActor in
             Self.resizePrimaryWindowToFillVisibleScreen()
         }
         Task { @MainActor in
@@ -219,10 +226,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // AppKit invokes this on the main thread; run inline so MainActor work does not deadlock.
-        MainActor.assumeIsolated {
-            GuardianAppQuitCoordinator.shared.teardownForApplicationQuit()
-        }
+        GuardianAppQuitCoordinator.shared.teardownForApplicationQuit()
     }
 }
 

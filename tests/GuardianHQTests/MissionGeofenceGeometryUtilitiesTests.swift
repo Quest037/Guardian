@@ -52,4 +52,32 @@ final class MissionGeofenceGeometryUtilitiesTests: XCTestCase {
         ]
         XCTAssertFalse(geo.polygonSelfIntersectsWGS84(vertices: verts))
     }
+
+    func test_point_inside_polygon_square_center() {
+        let baseLat = 10.0
+        let baseLon = 20.0
+        let d = 0.0001
+        let square = [
+            RouteCoordinate(lat: baseLat, lon: baseLon),
+            RouteCoordinate(lat: baseLat + d, lon: baseLon),
+            RouteCoordinate(lat: baseLat + d, lon: baseLon + d),
+            RouteCoordinate(lat: baseLat, lon: baseLon + d),
+        ]
+        let inside = RouteCoordinate(lat: baseLat + d * 0.5, lon: baseLon + d * 0.5)
+        XCTAssertTrue(geo.pointInsidePolygonHorizontallyWGS84(point: inside, polygonVertices: square))
+    }
+
+    func test_point_outside_polygon_square_corner_far() {
+        let baseLat = 10.0
+        let baseLon = 20.0
+        let d = 0.0001
+        let square = [
+            RouteCoordinate(lat: baseLat, lon: baseLon),
+            RouteCoordinate(lat: baseLat + d, lon: baseLon),
+            RouteCoordinate(lat: baseLat + d, lon: baseLon + d),
+            RouteCoordinate(lat: baseLat, lon: baseLon + d),
+        ]
+        let outside = RouteCoordinate(lat: baseLat + 1.0, lon: baseLon + 1.0)
+        XCTAssertFalse(geo.pointInsidePolygonHorizontallyWGS84(point: outside, polygonVertices: square))
+    }
 }

@@ -84,9 +84,12 @@ struct MissionRunControlsSidebarView: View {
             Divider().overlay(theme.borderSubtle)
 
             MissionRunGeofenceAugmentationRunPolicySidebarSection(
+                run: run,
+                scope: .missionWide,
                 title: "Mission run geofence augmentation",
-                caption: "Additional fences merge after every task’s template fences for this run. Clear removes mission-wide run-only extras; edit shapes on the mission Geofences tab.",
-                fenceCount: run.policies.missionGeofenceAugmentation.count,
+                caption: "Additional fences merge after every task’s template fences for this run. Clear removes mission-wide run-only extras. Edit fence shapes on the mission Geofences tab; edit altitude envelopes below.",
+                credential: credential,
+                onRecompilePlanForGeofenceAugmentationPolicy: onRecompilePlanForGeofenceAugmentationPolicy,
                 onClear: {
                     _ = run.updateMissionGeofenceAugmentation([], credential: credential)
                     onRecompilePlanForGeofenceAugmentationPolicy()

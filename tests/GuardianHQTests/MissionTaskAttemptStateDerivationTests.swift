@@ -19,62 +19,114 @@ final class MissionTaskAttemptStateDerivationTests: XCTestCase {
         return (run, task.id)
     }
 
-    func test_graceful_abort_pending_maps_to_scheduled_attempting() {
+    func test_graceful_abort_pending_does_not_publish_mission_end_attempt() {
         let (run, taskID) = runWithBoundAssignment()
         run.systems.scheduling.abortMissionTaskAfterCycle(target: .task(taskID))
-        XCTAssertEqual(run.taskAttemptingByTaskID[taskID], .abortWindDownScheduledAfterCycle)
+        XCTAssertNil(run.taskAttemptingByTaskID[taskID])
+        XCTAssertNil(run.taskMissionEndAttemptByTaskID[taskID])
     }
 
-    func test_graceful_complete_pending_maps_to_scheduled_attempting() {
+    func test_graceful_complete_pending_does_not_publish_mission_end_attempt() {
         let (run, taskID) = runWithBoundAssignment()
         run.systems.scheduling.completeMissionTaskAfterCycle(target: .task(taskID))
-        XCTAssertEqual(run.taskAttemptingByTaskID[taskID], .recoveryWindDownScheduledAfterCycle)
+        XCTAssertNil(run.taskAttemptingByTaskID[taskID])
+        XCTAssertNil(run.taskMissionEndAttemptByTaskID[taskID])
     }
 
-    func test_abort_issued_maps_to_abort_wind_down_attempting() {
+    func test_mark_issued_alone_does_not_create_attempting_line() {
         let (run, taskID) = runWithBoundAssignment()
         run.markMissionTaskAbortWindDownIssued(forTaskID: taskID)
-        XCTAssertEqual(run.taskAttemptingByTaskID[taskID], .abortWindDownIssued)
-    }
-
-    func test_complete_issued_maps_to_recovery_wind_down_attempting() {
-        let (run, taskID) = runWithBoundAssignment()
-        run.markMissionTaskCompleteWindDownIssued(forTaskID: taskID)
-        XCTAssertEqual(run.taskAttemptingByTaskID[taskID], .recoveryWindDownIssued)
-    }
-
-    func test_abort_issued_takes_precedence_over_complete_issued() {
-        let (run, taskID) = runWithBoundAssignment()
-        run.markMissionTaskCompleteWindDownIssued(forTaskID: taskID)
-        run.markMissionTaskAbortWindDownIssued(forTaskID: taskID)
-        XCTAssertEqual(run.taskAttemptingByTaskID[taskID], .abortWindDownIssued)
-    }
-
-    func test_abort_issued_takes_precedence_over_graceful_pending() {
-        let (run, taskID) = runWithBoundAssignment()
-        run.systems.scheduling.completeMissionTaskAfterCycle(target: .task(taskID))
-        XCTAssertEqual(run.taskAttemptingByTaskID[taskID], .recoveryWindDownScheduledAfterCycle)
-        run.markMissionTaskAbortWindDownIssued(forTaskID: taskID)
-        XCTAssertEqual(run.taskAttemptingByTaskID[taskID], .abortWindDownIssued)
-    }
-
-    func test_operator_triage_aborted_clears_task_attempting() {
-        let (run, taskID) = runWithBoundAssignment()
-        run.markMissionTaskAbortWindDownIssued(forTaskID: taskID)
-        XCTAssertEqual(run.taskAttemptingByTaskID[taskID], .abortWindDownIssued)
-        run.operatorMarkMissionTaskTriageState(taskID: taskID, state: .aborted)
         XCTAssertNil(run.taskAttemptingByTaskID[taskID])
     }
 
-    func test_operator_triage_completed_clears_task_attempting() {
+    func test_note_abort_attempt_published() {
         let (run, taskID) = runWithBoundAssignment()
+        run.noteMissionTaskEndAttempt(.abortMissionEnd, forTaskID: taskID)
+        XCTAssertEqual(run.taskMissionEndAttemptByTaskID[taskID], .abortMissionEnd)
+        XCTAssertEqual(run.taskAttemptingByTaskID[taskID], .abortMissionEnd)
+    }
+
+    func test_note_recovery_attempt_published() {
+        let (run, taskID) = runWithBoundAssignment()
+        run.noteMissionTaskEndAttempt(.recoveryMissionEnd, forTaskID: taskID)
+        XCTAssertEqual(run.taskMissionEndAttemptByTaskID[taskID], .recoveryMissionEnd)
+        XCTAssertEqual(run.taskAttemptingByTaskID[taskID], .recoveryMissionEnd)
+    }
+
+    func test_abort_note_wins_over_recovery_note() {
+        let (run, taskID) = runWithBoundAssignment()
+        run.noteMissionTaskEndAttempt(.recoveryMissionEnd, forTaskID: taskID)
+        run.noteMissionTaskEndAttempt(.abortMissionEnd, forTaskID: taskID)
+        XCTAssertEqual(run.taskMissionEndAttemptByTaskID[taskID], .abortMissionEnd)
+    }
+
+    func test_recovery_note_does_not_replace_abort_note() {
+        let (run, taskID) = runWithBoundAssignment()
+        run.noteMissionTaskEndAttempt(.abortMissionEnd, forTaskID: taskID)
+        run.noteMissionTaskEndAttempt(.recoveryMissionEnd, forTaskID: taskID)
+        XCTAssertEqual(run.taskMissionEndAttemptByTaskID[taskID], .abortMissionEnd)
+    }
+
+    func test_operator_triage_aborted_clears_mission_end_attempt() {
+        let (run, taskID) = runWithBoundAssignment()
+        run.noteMissionTaskEndAttempt(.abortMissionEnd, forTaskID: taskID)
+        run.markMissionTaskAbortWindDownIssued(forTaskID: taskID)
+        XCTAssertEqual(run.taskAttemptingByTaskID[taskID], .abortMissionEnd)
+        run.operatorMarkMissionTaskTriageState(taskID: taskID, state: .aborted)
+        XCTAssertNil(run.taskAttemptingByTaskID[taskID])
+        XCTAssertNil(run.taskMissionEndAttemptByTaskID[taskID])
+    }
+
+    func test_abort_attempt_survives_all_slots_policy_succeeded_until_auto_ack() {
+        let (run, taskID) = runWithBoundAssignment()
+        var rows = run.assignments
+        rows[0].slotLifecycleLanes = MissionRunAssignmentSlotStateLanes(
+            commanded: .policySucceeded,
+            observed: .policySucceeded
+        )
+        run.assignments = rows
+        run.status = .running
+        run.setSessionPhase(.executing)
+        run.noteMissionTaskEndAttempt(.abortMissionEnd, forTaskID: taskID)
+        run.markMissionTaskAbortWindDownIssued(forTaskID: taskID)
+        XCTAssertEqual(run.taskAttemptingByTaskID[taskID], .abortMissionEnd)
+        XCTAssertEqual(run.taskStateByTaskID[taskID], .aborting)
+
+        run.applySlotEvidenceAutoMissionEndAckIfNeeded(forAssignmentIDs: Set([rows[0].id]))
+        XCTAssertNil(run.taskAttemptingByTaskID[taskID])
+        XCTAssertNil(run.taskMissionEndAttemptByTaskID[taskID])
+        XCTAssertEqual(run.taskStateByTaskID[taskID], .aborted)
+    }
+
+    func test_recovery_attempt_survives_all_slots_policy_succeeded_until_auto_ack() {
+        let (run, taskID) = runWithBoundAssignment()
+        var rows = run.assignments
+        rows[0].slotLifecycleLanes = MissionRunAssignmentSlotStateLanes(
+            commanded: .policySucceeded,
+            observed: .policySucceeded
+        )
+        run.assignments = rows
+        run.status = .running
+        run.setSessionPhase(.executing)
+        run.noteMissionTaskEndAttempt(.recoveryMissionEnd, forTaskID: taskID)
         run.markMissionTaskCompleteWindDownIssued(forTaskID: taskID)
-        XCTAssertEqual(run.taskAttemptingByTaskID[taskID], .recoveryWindDownIssued)
+        XCTAssertEqual(run.taskAttemptingByTaskID[taskID], .recoveryMissionEnd)
+
+        run.applySlotEvidenceAutoMissionEndAckIfNeeded(forAssignmentIDs: Set([rows[0].id]))
+        XCTAssertNil(run.taskAttemptingByTaskID[taskID])
+        XCTAssertEqual(run.taskStateByTaskID[taskID], .completed)
+    }
+
+    func test_operator_triage_completed_clears_mission_end_attempt() {
+        let (run, taskID) = runWithBoundAssignment()
+        run.noteMissionTaskEndAttempt(.recoveryMissionEnd, forTaskID: taskID)
+        run.markMissionTaskCompleteWindDownIssued(forTaskID: taskID)
+        XCTAssertEqual(run.taskAttemptingByTaskID[taskID], .recoveryMissionEnd)
         run.operatorMarkMissionTaskTriageState(taskID: taskID, state: .completed)
         XCTAssertNil(run.taskAttemptingByTaskID[taskID])
     }
 
-    func test_disabled_task_has_no_attempting_even_if_pending_internally_set() {
+    func test_disabled_task_hides_attempt_even_if_storage_set() {
         let deviceId = UUID()
         let task = MissionTask(name: "Off", enabled: false, rosterDeviceIds: [deviceId])
         let mission = Mission(
@@ -86,7 +138,7 @@ final class MissionTaskAttemptStateDerivationTests: XCTestCase {
         )
         let assignment = MissionRunAssignment(taskId: task.id, rosterDeviceId: deviceId, slotName: "Slot A")
         let run = MissionRunEnvironment(mission: mission, assignments: [assignment])
-        run.setPendingMissionTaskGracefulWindDown(kind: .abortAfterCycle, forTaskID: task.id)
+        run.noteMissionTaskEndAttempt(.abortMissionEnd, forTaskID: task.id)
         XCTAssertNil(run.taskAttemptingByTaskID[task.id])
     }
 }

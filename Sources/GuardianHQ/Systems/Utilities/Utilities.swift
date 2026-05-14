@@ -20,7 +20,7 @@ final class MissionUtilities {
     let templateGeofences = MissionTemplateGeofenceUtilities()
     let geofenceGeometry = MissionGeofenceGeometryUtilities()
 
-    /// MAVSDK geofence polygon JSON for fleet upload (``FleetVehicleCommandGeofencePolygonPayload`` wire shape).
+    /// MAVSDK geofence wire JSON for fleet upload (``FleetVehicleCommandGeofenceUploadPayload``: polygons + circles).
     func geofencePolygonsJSON(forGeofences fences: [MissionGeofence]) throws -> String {
         try MissionGeofenceMavsdkGeofenceUtilities.encodeGeofencePolygonsJSON(forGeofences: fences)
     }

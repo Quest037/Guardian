@@ -203,6 +203,7 @@ extension FleetVehicleOperationalModel {
     }
 
     /// Same lifecycle + battery bar as MRE **draw** eligibility and ``MissionRunEnvironment/returnAssignmentToReservePool``.
+    /// **Roster slot lanes are orthogonal:** ``MissionRunAssignment/slotLifecycleLanes`` (e.g. merged ``policyFailed`` / ``blockedNoVehicle``) do **not** affect this predicate — reserve enumeration and operational draw consult hub lifecycle + battery only.
     var qualifiesForMissionRunReservePoolOperationalDraw: Bool {
         reservePoolReturnFromAssignmentRejection() == nil
     }

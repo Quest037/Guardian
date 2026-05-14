@@ -70,4 +70,30 @@ enum MissionControlLiveMapFitCoordinates {
         }
         return out
     }
+
+    /// WGS84 points used to fit the live map viewport to one template geofence (polygon vertices or a circle bounding box).
+    static func geofenceFitCoordinates(_ fence: MissionGeofence) -> [(Double, Double)] {
+        switch fence.shape {
+        case .polygon:
+            return fence.polygonVertices.compactMap { c in
+                guard isUsableWgs84ForMapFit(lat: c.lat, lon: c.lon) else { return nil }
+                return (c.lat, c.lon)
+            }
+        case .circle:
+            let c = fence.circleCenter
+            guard isUsableWgs84ForMapFit(lat: c.lat, lon: c.lon) else { return [] }
+            let r = max(1.0, fence.circleRadiusMeters)
+            let latRad = c.lat * .pi / 180.0
+            let cosLat = max(0.01, cos(latRad))
+            let dLat = r / 111_320.0
+            let dLon = r / (111_320.0 * cosLat)
+            let corners: [(Double, Double)] = [
+                (c.lat + dLat, c.lon - dLon),
+                (c.lat + dLat, c.lon + dLon),
+                (c.lat - dLat, c.lon - dLon),
+                (c.lat - dLat, c.lon + dLon),
+            ]
+            return corners.filter { isUsableWgs84ForMapFit(lat: $0.0, lon: $0.1) }
+        }
+    }
 }

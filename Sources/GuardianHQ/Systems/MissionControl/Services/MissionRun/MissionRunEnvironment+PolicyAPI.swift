@@ -6,7 +6,7 @@ import Foundation
 /// fields stored on the **mission template** (``Mission/routeMacro`` — mission-level preferential chains,
 /// per-task tactic overrides, ``MissionTask/betweenCycles``, etc.) call ``applyMissionTemplateMutation``, which
 /// prefers ``missionTemplatePersister`` (``MissionRunDetailView`` installs this on ``onAppear`` for the shared
-/// MCS + MC‑R drill-in: ``MissionStore/updateMission`` then ``updateTemplate``) and otherwise updates the
+/// MCS + MC‑R drill-in: ``MissionControlStore/updateRun`` after ``updateTemplate``) and otherwise updates the
 /// template on the run only. Assignment-level preference chains, run geofence augmentation, and engagement rules
 /// mutate ``MissionRunEnvironment`` state without ``applyMissionTemplateMutation``.
 extension MissionRunEnvironment {

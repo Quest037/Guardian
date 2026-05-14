@@ -29,8 +29,38 @@ enum MissionGeofenceShapeKind: String, Codable, CaseIterable, Identifiable, Send
     }
 }
 
+/// JSON `altitude_units` — v1 supports meters only.
+enum MissionGeofenceAltitudeUnits: String, Codable, CaseIterable, Identifiable, Sendable, Equatable {
+    case meters = "m"
+
+    var id: String { rawValue }
+
+    var displayTitle: String {
+        switch self {
+        case .meters: return "Meters (m)"
+        }
+    }
+}
+
+/// JSON `altitude_reference` for the fence altitude band.
+enum MissionGeofenceAltitudeReference: String, Codable, CaseIterable, Identifiable, Sendable, Equatable {
+    case relativeHome = "relative_home"
+    case agl = "AGL"
+    case msl = "MSL"
+
+    var id: String { rawValue }
+
+    var displayTitle: String {
+        switch self {
+        case .relativeHome: return "Relative to home"
+        case .agl: return "Above ground level (AGL)"
+        case .msl: return "Mean sea level (MSL)"
+        }
+    }
+}
+
 /// One geofence region on a mission template — either **mission-wide** (``Mission/missionGeofences``) or scoped to a **task** (``MissionTask/geofences``).
-struct MissionGeofence: Identifiable, Codable, Equatable, Sendable {
+struct MissionGeofence: Identifiable, Equatable, Sendable {
     var id: UUID
     var name: String
     var boundary: MissionGeofenceBoundaryKind
@@ -41,6 +71,12 @@ struct MissionGeofence: Identifiable, Codable, Equatable, Sendable {
     var circleCenter: RouteCoordinate
     /// Radius in **meters** for ``shape`` ``circle`` (minimum **1**).
     var circleRadiusMeters: Double
+    /// JSON `min_altitude` — lower bound of the allowed altitude band (meters).
+    var minAltitudeMeters: Double
+    /// JSON `max_altitude` — upper bound of the allowed altitude band (meters).
+    var maxAltitudeMeters: Double
+    var altitudeUnits: MissionGeofenceAltitudeUnits
+    var altitudeReference: MissionGeofenceAltitudeReference
 
     init(
         id: UUID = UUID(),
@@ -49,7 +85,11 @@ struct MissionGeofence: Identifiable, Codable, Equatable, Sendable {
         shape: MissionGeofenceShapeKind,
         polygonVertices: [RouteCoordinate] = [],
         circleCenter: RouteCoordinate = RouteCoordinate(),
-        circleRadiusMeters: Double = 150
+        circleRadiusMeters: Double = 150,
+        minAltitudeMeters: Double = 0,
+        maxAltitudeMeters: Double = 120,
+        altitudeUnits: MissionGeofenceAltitudeUnits = .meters,
+        altitudeReference: MissionGeofenceAltitudeReference = .relativeHome
     ) {
         self.id = id
         self.name = name
@@ -58,6 +98,10 @@ struct MissionGeofence: Identifiable, Codable, Equatable, Sendable {
         self.polygonVertices = polygonVertices
         self.circleCenter = circleCenter
         self.circleRadiusMeters = max(1, circleRadiusMeters)
+        self.minAltitudeMeters = minAltitudeMeters
+        self.maxAltitudeMeters = maxAltitudeMeters
+        self.altitudeUnits = altitudeUnits
+        self.altitudeReference = altitudeReference
     }
 
     /// Template row for a new **polygon** near ``center`` (~220 m triangle).
@@ -97,7 +141,57 @@ struct MissionGeofence: Identifiable, Codable, Equatable, Sendable {
             shape: shape,
             polygonVertices: polygonVertices,
             circleCenter: circleCenter,
-            circleRadiusMeters: circleRadiusMeters
+            circleRadiusMeters: circleRadiusMeters,
+            minAltitudeMeters: minAltitudeMeters,
+            maxAltitudeMeters: maxAltitudeMeters,
+            altitudeUnits: altitudeUnits,
+            altitudeReference: altitudeReference
         )
+    }
+}
+
+extension MissionGeofence: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case boundary
+        case shape
+        case polygonVertices
+        case circleCenter
+        case circleRadiusMeters
+        case minAltitudeMeters = "min_altitude"
+        case maxAltitudeMeters = "max_altitude"
+        case altitudeUnits = "altitude_units"
+        case altitudeReference = "altitude_reference"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        boundary = try c.decode(MissionGeofenceBoundaryKind.self, forKey: .boundary)
+        shape = try c.decode(MissionGeofenceShapeKind.self, forKey: .shape)
+        polygonVertices = try c.decodeIfPresent([RouteCoordinate].self, forKey: .polygonVertices) ?? []
+        circleCenter = try c.decodeIfPresent(RouteCoordinate.self, forKey: .circleCenter) ?? RouteCoordinate()
+        circleRadiusMeters = max(1, try c.decodeIfPresent(Double.self, forKey: .circleRadiusMeters) ?? 150)
+        minAltitudeMeters = try c.decodeIfPresent(Double.self, forKey: .minAltitudeMeters) ?? 0
+        maxAltitudeMeters = try c.decodeIfPresent(Double.self, forKey: .maxAltitudeMeters) ?? 120
+        altitudeUnits = try c.decodeIfPresent(MissionGeofenceAltitudeUnits.self, forKey: .altitudeUnits) ?? .meters
+        altitudeReference = try c.decodeIfPresent(MissionGeofenceAltitudeReference.self, forKey: .altitudeReference) ?? .relativeHome
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(boundary, forKey: .boundary)
+        try c.encode(shape, forKey: .shape)
+        try c.encode(polygonVertices, forKey: .polygonVertices)
+        try c.encode(circleCenter, forKey: .circleCenter)
+        try c.encode(circleRadiusMeters, forKey: .circleRadiusMeters)
+        try c.encode(minAltitudeMeters, forKey: .minAltitudeMeters)
+        try c.encode(maxAltitudeMeters, forKey: .maxAltitudeMeters)
+        try c.encode(altitudeUnits, forKey: .altitudeUnits)
+        try c.encode(altitudeReference, forKey: .altitudeReference)
     }
 }

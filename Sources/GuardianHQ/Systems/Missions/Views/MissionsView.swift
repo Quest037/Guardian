@@ -1491,33 +1491,52 @@ private struct MissionWorkspaceView: View {
 
     // MARK: - Geofences (mission template)
 
+    /// Applies a geofence-affecting mutation when the result satisfies ``MissionTemplateGeofenceUtilities/inclusionConstraintViolationMessage`` (inclusion limits and exclusion–inclusion pairing).
+    @discardableResult
+    private func applyGeofenceTemplateMutation(successToast: String?, _ body: (inout Mission) -> Void) -> Bool {
+        var copy = draft
+        body(&copy)
+        if let msg = Utilities.mission.templateGeofences.inclusionConstraintViolationMessage(for: copy) {
+            onToast(msg, .error)
+            return false
+        }
+        draft = copy
+        persistMissionToStoreNow()
+        if let successToast {
+            onToast(successToast, .success)
+        }
+        return true
+    }
+
     private func addMissionGeofencePolygon() {
         let n = draft.missionGeofences.count + 1
         let fence = MissionGeofence.newPolygon(name: "Mission fence \(n)", around: missionGeofenceDefaultCenter)
-        draft.missionGeofences.append(fence)
+        guard applyGeofenceTemplateMutation(successToast: "Fence added — drag vertices or the square handle on the map to adjust", { $0.missionGeofences.append(fence) }) else { return }
         selectedGeofenceID = fence.id
         missionWorkspaceGeofencesListScrollTargetRow = fence.id
         missionWorkspaceGeofencesListScrollEpoch &+= 1
-        persistMissionToStoreNow()
-        onToast("Fence added — drag vertices or the square handle on the map to adjust", .success)
     }
 
     private func addMissionGeofenceCircle() {
         let n = draft.missionGeofences.count + 1
         let fence = MissionGeofence.newCircle(name: "Mission fence \(n)", center: missionGeofenceDefaultCenter)
-        draft.missionGeofences.append(fence)
+        guard applyGeofenceTemplateMutation(successToast: "Fence added — drag the center and rim on the map to adjust", { $0.missionGeofences.append(fence) }) else { return }
         selectedGeofenceID = fence.id
         missionWorkspaceGeofencesListScrollTargetRow = fence.id
         missionWorkspaceGeofencesListScrollEpoch &+= 1
-        persistMissionToStoreNow()
-        onToast("Fence added — drag the center and rim on the map to adjust", .success)
     }
 
     private func removeGeofence(id: UUID) {
-        draft.missionGeofences.removeAll { $0.id == id }
-        for ti in draft.routeMacro.tasks.indices {
-            draft.routeMacro.tasks[ti].geofences.removeAll { $0.id == id }
+        var copy = draft
+        copy.missionGeofences.removeAll { $0.id == id }
+        for ti in copy.routeMacro.tasks.indices {
+            copy.routeMacro.tasks[ti].geofences.removeAll { $0.id == id }
         }
+        if let msg = Utilities.mission.templateGeofences.inclusionConstraintViolationMessage(for: copy) {
+            onToast(msg, .error)
+            return
+        }
+        draft = copy
         if selectedGeofenceID == id {
             selectedGeofenceID = nil
         }
@@ -1530,68 +1549,67 @@ private struct MissionWorkspaceView: View {
 
     private func duplicateGeofence(id: UUID) {
         if let i = draft.missionGeofences.firstIndex(where: { $0.id == id }) {
-            var copy = draft.missionGeofences[i].duplicatedForClonedMission()
-            copy.name = copy.name + " copy"
-            draft.missionGeofences.append(copy)
-            selectedGeofenceID = copy.id
-            missionWorkspaceGeofencesListScrollTargetRow = copy.id
+            var dup = draft.missionGeofences[i].duplicatedForClonedMission()
+            dup.name = dup.name + " copy"
+            guard applyGeofenceTemplateMutation(successToast: nil, { $0.missionGeofences.append(dup) }) else { return }
+            selectedGeofenceID = dup.id
+            missionWorkspaceGeofencesListScrollTargetRow = dup.id
             missionWorkspaceGeofencesListScrollEpoch &+= 1
-            persistMissionToStoreNow()
             return
         }
         for ti in draft.routeMacro.tasks.indices {
             if let i = draft.routeMacro.tasks[ti].geofences.firstIndex(where: { $0.id == id }) {
-                var copy = draft.routeMacro.tasks[ti].geofences[i].duplicatedForClonedMission()
-                copy.name = copy.name + " copy"
-                draft.routeMacro.tasks[ti].geofences.append(copy)
-                selectedGeofenceID = copy.id
-                missionWorkspaceGeofencesListScrollTargetRow = copy.id
+                var dup = draft.routeMacro.tasks[ti].geofences[i].duplicatedForClonedMission()
+                dup.name = dup.name + " copy"
+                guard applyGeofenceTemplateMutation(successToast: nil, { $0.routeMacro.tasks[ti].geofences.append(dup) }) else { return }
+                selectedGeofenceID = dup.id
+                missionWorkspaceGeofencesListScrollTargetRow = dup.id
                 missionWorkspaceGeofencesListScrollEpoch &+= 1
-                persistMissionToStoreNow()
                 return
             }
         }
     }
 
     private func mutateMissionGeofenceFromMap(id: UUID, _ update: (inout MissionGeofence) -> Void) {
-        if let i = draft.missionGeofences.firstIndex(where: { $0.id == id }) {
-            update(&draft.missionGeofences[i])
-            persistMissionToStoreNow()
-            return
-        }
-        for ti in draft.routeMacro.tasks.indices {
-            if let fi = draft.routeMacro.tasks[ti].geofences.firstIndex(where: { $0.id == id }) {
-                update(&draft.routeMacro.tasks[ti].geofences[fi])
-                persistMissionToStoreNow()
+        applyGeofenceTemplateMutation(successToast: nil) { mission in
+            if let i = mission.missionGeofences.firstIndex(where: { $0.id == id }) {
+                update(&mission.missionGeofences[i])
                 return
+            }
+            for ti in mission.routeMacro.tasks.indices {
+                if let fi = mission.routeMacro.tasks[ti].geofences.firstIndex(where: { $0.id == id }) {
+                    update(&mission.routeMacro.tasks[ti].geofences[fi])
+                    return
+                }
             }
         }
     }
 
     private func moveGeofenceTemplateToPlacement(fenceID: UUID, target: MissionGeofenceTemplatePlacement) {
-        var fence: MissionGeofence?
-        if let i = draft.missionGeofences.firstIndex(where: { $0.id == fenceID }) {
-            fence = draft.missionGeofences.remove(at: i)
-        } else {
-            for ti in draft.routeMacro.tasks.indices {
-                if let fi = draft.routeMacro.tasks[ti].geofences.firstIndex(where: { $0.id == fenceID }) {
-                    fence = draft.routeMacro.tasks[ti].geofences.remove(at: fi)
-                    break
+        applyGeofenceTemplateMutation(successToast: nil) { mission in
+            var fence: MissionGeofence?
+            if let i = mission.missionGeofences.firstIndex(where: { $0.id == fenceID }) {
+                fence = mission.missionGeofences.remove(at: i)
+            } else {
+                for ti in mission.routeMacro.tasks.indices {
+                    if let fi = mission.routeMacro.tasks[ti].geofences.firstIndex(where: { $0.id == fenceID }) {
+                        fence = mission.routeMacro.tasks[ti].geofences.remove(at: fi)
+                        break
+                    }
+                }
+            }
+            guard let f = fence else { return }
+            switch target {
+            case .missionWide:
+                mission.missionGeofences.append(f)
+            case .taskScoped(let taskUUID):
+                if let ti = mission.routeMacro.tasks.firstIndex(where: { $0.id == taskUUID }) {
+                    mission.routeMacro.tasks[ti].geofences.append(f)
+                } else {
+                    mission.missionGeofences.append(f)
                 }
             }
         }
-        guard let f = fence else { return }
-        switch target {
-        case .missionWide:
-            draft.missionGeofences.append(f)
-        case .taskScoped(let taskUUID):
-            if let ti = draft.routeMacro.tasks.firstIndex(where: { $0.id == taskUUID }) {
-                draft.routeMacro.tasks[ti].geofences.append(f)
-            } else {
-                draft.missionGeofences.append(f)
-            }
-        }
-        persistMissionToStoreNow()
     }
 
     private func openGeofenceEditDrawer(fenceID: UUID) {
@@ -1603,7 +1621,17 @@ private struct MissionWorkspaceView: View {
         appDrawer.present(title: "Edit fence", preferredWidth: 400, scrimTapDismisses: true) {
             MissionWorkspaceGeofenceEditDrawer(
                 fenceID: fenceID,
-                mission: $draft,
+                mission: Binding(
+                    get: { draft },
+                    set: { newValue in
+                        if let msg = Utilities.mission.templateGeofences.inclusionConstraintViolationMessage(for: newValue) {
+                            onToast(msg, .error)
+                            return
+                        }
+                        draft = newValue
+                        persistMissionToStoreNow()
+                    }
+                ),
                 onMovePlacement: { placement in moveGeofenceTemplateToPlacement(fenceID: fenceID, target: placement) },
                 persist: { persistMissionToStoreNow() }
             )
@@ -1957,6 +1985,29 @@ private struct MissionWorkspaceView: View {
                                 }
                                 g.polygonVertices = v
                             }
+                        },
+                        onGeofencePolygonVertexDelete: { id, idx in
+                            guard tasksInnerTab == .geofences else { return }
+                            let vertexCount: Int = {
+                                if let i = draft.missionGeofences.firstIndex(where: { $0.id == id }) {
+                                    return draft.missionGeofences[i].polygonVertices.count
+                                }
+                                for ti in draft.routeMacro.tasks.indices {
+                                    if let fi = draft.routeMacro.tasks[ti].geofences.firstIndex(where: { $0.id == id }) {
+                                        return draft.routeMacro.tasks[ti].geofences[fi].polygonVertices.count
+                                    }
+                                }
+                                return 0
+                            }()
+                            guard vertexCount > 3 else {
+                                onToast("A polygon fence needs at least three markers.", .warning)
+                                return
+                            }
+                            mutateMissionGeofenceFromMap(id: id) { g in
+                                guard g.shape == .polygon, g.polygonVertices.count > 3, g.polygonVertices.indices.contains(idx) else { return }
+                                g.polygonVertices.remove(at: idx)
+                            }
+                            onToast("Marker removed", .success)
                         }
                     )
                     .task(id: routeTabMapSignature) {
@@ -2332,41 +2383,28 @@ private struct MissionWorkspaceView: View {
         return draft.routeMacro.tasks[validTaskIndex]
     }
 
-    /// Geofences sub-tab: mission-wide list plus fences on the **currently selected** task.
+    private func geofenceTaskScopeLabel(for task: MissionTask) -> String {
+        let n = task.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return n.isEmpty ? "Task" : n
+    }
+
+    /// Geofences sub-tab: single list of every template fence (mission-wide, then each task in order).
     private var missionGeofencesListScrollContent: some View {
         VStack(alignment: .leading, spacing: GuardianSpacing.md) {
-            Text("Mission-wide")
-                .font(GuardianTypography.font(.panelSecondaryHeadingSemibold))
-                .foregroundStyle(theme.textPrimary)
-
-            if draft.missionGeofences.isEmpty {
-                Text("No mission-wide fences.")
+            let hasAnyFence = !draft.missionGeofences.isEmpty
+                || draft.routeMacro.tasks.contains { !$0.geofences.isEmpty }
+            if !hasAnyFence {
+                Text("No fences yet.")
                     .font(GuardianTypography.font(.denseCaption12Regular))
                     .foregroundStyle(theme.textTertiary)
             } else {
-                ForEach(Array(draft.missionGeofences.enumerated()), id: \.element.id) { _, fence in
+                ForEach(draft.missionGeofences) { fence in
                     geofenceListRow(scopeLabel: "Mission", fence: fence)
                         .id(fence.id)
                 }
-            }
-
-            Rectangle()
-                .fill(theme.borderSubtle)
-                .frame(height: 1)
-
-            if draft.routeMacro.tasks.isEmpty {
-                Text("Add a task to attach fences to a route.")
-                    .font(GuardianTypography.font(.denseCaption12Regular))
-                    .foregroundStyle(theme.textTertiary)
-            } else {
-                let ti = validTaskIndex
-                if draft.routeMacro.tasks[ti].geofences.isEmpty {
-                    Text("No fences on this task.")
-                        .font(GuardianTypography.font(.denseCaption12Regular))
-                        .foregroundStyle(theme.textTertiary)
-                } else {
-                    ForEach(Array(draft.routeMacro.tasks[ti].geofences.enumerated()), id: \.element.id) { _, fence in
-                        geofenceListRow(scopeLabel: "Task", fence: fence)
+                ForEach(draft.routeMacro.tasks) { task in
+                    ForEach(task.geofences) { fence in
+                        geofenceListRow(scopeLabel: geofenceTaskScopeLabel(for: task), fence: fence)
                             .id(fence.id)
                     }
                 }

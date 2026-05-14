@@ -69,8 +69,8 @@ final class MissionControlStore: ObservableObject {
             simBatteryDrainRateDuringRun: appMissionRunDefaults.missionRunSimBatteryDrainRate
         )
         /// The convenience initializer seeds a **placeholder** ``MissionRunEnvironment/template`` (empty tasks).
-        /// Hydrate from the source ``Mission`` so task-scoped policy APIs (abort / complete chain overrides,
-        /// ``MissionRunEnvironment/updateTaskBetweenCyclesAction``, etc.) can resolve ``taskID``.
+        /// Hydrate from a **value copy** of the catalog ``Mission`` so MCS / MC‑R edits stay on the run fork
+        /// (``MissionStore`` templates are edited only from the Missions workspace).
         run.updateTemplate(mission)
         runs.insert(run, at: 0)
         run.refreshDerivedTaskStates()
@@ -78,10 +78,21 @@ final class MissionControlStore: ObservableObject {
         return run
     }
 
+    /// Replaces the stored run after refreshing derived task state.
+    ///
+    /// Must not assign ``runs`` (a ``Published`` field) during a SwiftUI view update transaction (e.g. ``Binding``
+    /// setters, map callbacks). Those paths call this via ``MissionRunDetailView`` `onUpdate`; deferring only the
+    /// array write avoids **Publishing changes from within view updates** while keeping ``refreshDerivedTaskStates``
+    /// synchronous so callers like ``startRun`` immediately see refreshed state on the same ``MissionRunEnvironment``
+    /// instance.
     func updateRun(_ run: MissionRunEnvironment) {
-        guard let idx = runs.firstIndex(where: { $0.id == run.id }) else { return }
+        guard runs.contains(where: { $0.id == run.id }) else { return }
         run.refreshDerivedTaskStates()
-        runs[idx] = run
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let idx2 = self.runs.firstIndex(where: { $0.id == run.id }) else { return }
+            self.runs[idx2] = run
+        }
     }
 
     func startRun(
@@ -96,13 +107,18 @@ final class MissionControlStore: ObservableObject {
         cancelScheduledMissionCycle(for: id)
         cancelScheduledTaskMissionStarts(for: id)
         let run = runs[idx]
-        run.updateTemplate(mission)
+        let effectiveMission = mission ?? run.template
+        run.updateTemplate(effectiveMission)
+        let runID = run.id
+        let missionCatalogID = run.missionId
         let ctx = MissionRunExecutionContext(
-            mission: mission,
+            mission: effectiveMission,
             fleetLink: fleetLink,
             sitl: sitl,
-            missionProvider: { [missionsProvider, run] in
-                missionsProvider().first { $0.id == run.missionId }
+            missionProvider: { [weak self, missionsProvider] in
+                guard let self else { return nil }
+                guard let r = self.runs.first(where: { $0.id == runID }) else { return nil }
+                return r.template ?? missionsProvider().first(where: { $0.id == missionCatalogID })
             }
         )
         run.captureExecutionContext(ctx)
@@ -110,7 +126,7 @@ final class MissionControlStore: ObservableObject {
         notifyRunStarted(
             run,
             context: MissionRunStartContext(
-                mission: mission,
+                mission: effectiveMission,
                 fleetLink: fleetLink,
                 sitl: sitl,
                 missionsProvider: missionsProvider
@@ -119,7 +135,18 @@ final class MissionControlStore: ObservableObject {
         run.refreshDerivedTaskStates()
     }
 
-    func deleteRun(id: UUID) {
+    /// Removes a run from Mission Control. When the run may still own simulator or fleet motion state, awaits the waved
+    /// SIM cleanup pass (``MissionRunEnvironment/awaitMissionRunSimCleanupBeforeRemovalIfNeeded``) before removal.
+    func deleteRun(id: UUID, fleetLink: FleetLinkService, sitl: SitlService, generalSettings: GeneralSettingsStore) async {
+        guard let run = runEnvironment(for: id) else { return }
+        run.attachServices(fleetLink: fleetLink, sitl: sitl, generalSettings: generalSettings)
+        if run.shouldTriggerSimCleanupBeforeRemoval() {
+            await run.awaitMissionRunSimCleanupBeforeRemovalIfNeeded()
+        }
+        removeRunState(id: id)
+    }
+
+    private func removeRunState(id: UUID) {
         if let run = runEnvironment(for: id) {
             notifyRunWillDelete(run)
         }
@@ -149,26 +176,18 @@ final class MissionControlStore: ObservableObject {
             }
             .map(\.id)
         for runID in removable {
-            deleteRun(id: runID)
+            removeRunState(id: runID)
         }
     }
 
     /// Move a completed run back to setup for another configured launch.
+    ///
+    /// Delegates to ``MissionRunLifecycleSubsystem/resetToSetup()`` so mission-end ack sets, triage pins, slot lane
+    /// evidence, events, compiled plan, and scheduling state match a **fresh** MCS pass (roster rows and template fork
+    /// stay on the run; operator recompiles before the next start).
     func resetRunToSetup(id: UUID) {
         guard let idx = runs.firstIndex(where: { $0.id == id }) else { return }
-        cancelScheduledMissionCycle(for: id)
-        cancelScheduledTaskMissionStarts(for: id)
-        cancelDeferredOneOffExecution(for: id)
-        runEnvironment(for: id)?.setMissionCycleCount(0)
-        runEnvironment(for: id)?.systems.logging.clearState()
-        runs[idx].status = .setup
-        runs[idx].gracefulStopKind = .none
-        runs[idx].reportCyclesCompleted = nil
-        runs[idx].completionKind = nil
-        runs[idx].systems.executor.clearCommandQueue()
-        runs[idx].captureExecutionContext(nil)
-        runs[idx].refreshDerivedTaskStates()
-        // Intentionally preserve mission prep state (schedule, assignments, and chosen vehicles).
+        runs[idx].systems.lifecycle.resetToSetup()
     }
 
     /// Routes cycle-finished callbacks to active run environments.
@@ -179,12 +198,16 @@ final class MissionControlStore: ObservableObject {
         missionsProvider: @escaping @MainActor () -> [Mission]
     ) {
         for run in runs where run.status == .running || run.status == .recovery {
+            let runID = run.id
+            let missionCatalogID = run.missionId
             let ctx = MissionRunExecutionContext(
                 mission: nil,
                 fleetLink: fleetLink,
                 sitl: sitl,
-                missionProvider: { [missionsProvider, run] in
-                    missionsProvider().first { $0.id == run.missionId }
+                missionProvider: { [weak self, missionsProvider] in
+                    guard let self else { return nil }
+                    guard let r = self.runs.first(where: { $0.id == runID }) else { return nil }
+                    return r.template ?? missionsProvider().first(where: { $0.id == missionCatalogID })
                 }
             )
             run.captureExecutionContext(ctx)

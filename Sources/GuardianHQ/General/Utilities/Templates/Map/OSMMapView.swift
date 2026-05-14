@@ -183,6 +183,8 @@ struct OSMMapView: NSViewRepresentable {
     var onGeofencePolygonTranslated: (UUID, Double, Double) -> Void = { _, _, _ in }
     /// Primary click on a polygon edge hit-strip inserts a vertex (selected fence only).
     var onGeofencePolygonEdgeInsert: (UUID, Int, Double, Double) -> Void = { _, _, _, _ in }
+    /// Right-click context menu on a polygon vertex: remove that corner (minimum three vertices remain).
+    var onGeofencePolygonVertexDelete: (UUID, Int) -> Void = { _, _ in }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -208,7 +210,8 @@ struct OSMMapView: NSViewRepresentable {
             onGeofenceCircleRadiusMoved: onGeofenceCircleRadiusMoved,
             onGeofencePolygonVertexMoved: onGeofencePolygonVertexMoved,
             onGeofencePolygonTranslated: onGeofencePolygonTranslated,
-            onGeofencePolygonEdgeInsert: onGeofencePolygonEdgeInsert
+            onGeofencePolygonEdgeInsert: onGeofencePolygonEdgeInsert,
+            onGeofencePolygonVertexDelete: onGeofencePolygonVertexDelete
         )
     }
 
@@ -237,6 +240,7 @@ struct OSMMapView: NSViewRepresentable {
         controller.add(context.coordinator, name: "geofencePolygonVertexMove")
         controller.add(context.coordinator, name: "geofencePolygonTranslate")
         controller.add(context.coordinator, name: "geofencePolygonEdgeInsert")
+        controller.add(context.coordinator, name: "geofencePolygonVertexDelete")
 
         let config = WKWebViewConfiguration()
         config.userContentController = controller
@@ -279,6 +283,7 @@ struct OSMMapView: NSViewRepresentable {
         c.onGeofencePolygonVertexMoved = onGeofencePolygonVertexMoved
         c.onGeofencePolygonTranslated = onGeofencePolygonTranslated
         c.onGeofencePolygonEdgeInsert = onGeofencePolygonEdgeInsert
+        c.onGeofencePolygonVertexDelete = onGeofencePolygonVertexDelete
         let homeJSON: String
         if let home {
             homeJSON = "{\"lat\":\(home.coord.lat),\"lon\":\(home.coord.lon)}"
@@ -458,6 +463,7 @@ extension OSMMapView {
         var onGeofencePolygonVertexMoved: (UUID, Int, Double, Double) -> Void
         var onGeofencePolygonTranslated: (UUID, Double, Double) -> Void
         var onGeofencePolygonEdgeInsert: (UUID, Int, Double, Double) -> Void
+        var onGeofencePolygonVertexDelete: (UUID, Int) -> Void
 
         init(
             onMapClick: @escaping (Double, Double) -> Void,
@@ -482,7 +488,8 @@ extension OSMMapView {
             onGeofenceCircleRadiusMoved: @escaping (UUID, Double) -> Void,
             onGeofencePolygonVertexMoved: @escaping (UUID, Int, Double, Double) -> Void,
             onGeofencePolygonTranslated: @escaping (UUID, Double, Double) -> Void,
-            onGeofencePolygonEdgeInsert: @escaping (UUID, Int, Double, Double) -> Void
+            onGeofencePolygonEdgeInsert: @escaping (UUID, Int, Double, Double) -> Void,
+            onGeofencePolygonVertexDelete: @escaping (UUID, Int) -> Void
         ) {
             self.onMapClick = onMapClick
             self.onVehicleMarkerMoved = onVehicleMarkerMoved
@@ -507,6 +514,7 @@ extension OSMMapView {
             self.onGeofencePolygonVertexMoved = onGeofencePolygonVertexMoved
             self.onGeofencePolygonTranslated = onGeofencePolygonTranslated
             self.onGeofencePolygonEdgeInsert = onGeofencePolygonEdgeInsert
+            self.onGeofencePolygonVertexDelete = onGeofencePolygonVertexDelete
         }
 
         private func noteLayerPointerDeliveredToSwift() {
@@ -841,6 +849,16 @@ extension OSMMapView {
                 onGeofencePolygonEdgeInsert(uuid, afterIndex, lat, lon)
                 return
             }
+
+            if message.name == "geofencePolygonVertexDelete",
+               let payload = message.body as? [String: Any],
+               let idStr = OSMMapView.WKScriptPayloadBridge.optionalString(payload["id"]),
+               let uuid = UUID(uuidString: idStr),
+               let idx = OSMMapView.WKScriptPayloadBridge.int(payload["idx"]) {
+                noteLayerPointerDeliveredToSwift()
+                onGeofencePolygonVertexDelete(uuid, idx)
+                return
+            }
         }
     }
 }
@@ -900,6 +918,18 @@ private extension OSMMapView {
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     const map = L.map('map', { zoomControl: true, maxZoom: 24 }).setView([20, 0], 2);
+    /** Below default Leaflet ``overlayPane`` (z 400) so task route polylines stay on top for hit-testing. */
+    const GUARDIAN_GEOFENCE_UNDERLAY_PANE = 'guardianGeofenceUnderlay';
+    (function initGuardianGeofenceUnderlayPane() {
+      const p = GUARDIAN_GEOFENCE_UNDERLAY_PANE;
+      if (!map.getPane(p)) {
+        map.createPane(p);
+        const el = map.getPane(p);
+        if (el) {
+          el.style.zIndex = '360';
+        }
+      }
+    })();
     const standardLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxNativeZoom: 19,
       maxZoom: 24,
@@ -1090,6 +1120,45 @@ private extension OSMMapView {
         });
         menu.appendChild(item);
       });
+      shieldContextMenuFromMapPointerEvents(menu);
+      container.appendChild(menu);
+      contextMenuEl = menu;
+
+      const point = map.latLngToContainerPoint([lat, lon]);
+      const rect = container.getBoundingClientRect();
+      const maxLeft = Math.max(0, rect.width - menu.offsetWidth - 8);
+      const maxTop = Math.max(0, rect.height - menu.offsetHeight - 8);
+      const left = Math.min(maxLeft, Math.max(6, point.x + 6));
+      const top = Math.min(maxTop, Math.max(6, point.y + 6));
+      menu.style.left = `${left}px`;
+      menu.style.top = `${top}px`;
+    }
+
+    /** Mission polygon fence vertex: right-click → delete (Swift enforces ≥3 corners). */
+    function openGeofenceVertexContextMenu(e, fenceIdStr, vertexIndex, lat, lon) {
+      hideContextMenu();
+      if (e.originalEvent) L.DomEvent.preventDefault(e.originalEvent);
+
+      const container = map.getContainer();
+      const menu = document.createElement('div');
+      menu.className = 'guardian-context-menu';
+      const item = document.createElement('button');
+      item.className = 'guardian-context-item';
+      item.type = 'button';
+      item.textContent = 'Delete marker';
+      item.addEventListener('click', (ev) => {
+        L.DomEvent.stop(ev);
+        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.geofencePolygonVertexDelete) {
+          window.webkit.messageHandlers.geofencePolygonVertexDelete.postMessage({
+            id: fenceIdStr,
+            idx: vertexIndex
+          });
+        }
+        queueMicrotask(() => {
+          hideContextMenu();
+        });
+      });
+      menu.appendChild(item);
       shieldContextMenuFromMapPointerEvents(menu);
       container.appendChild(menu);
       contextMenuEl = menu;
@@ -1538,9 +1607,13 @@ private extension OSMMapView {
       return { lat: (lat2 * 180) / Math.PI, lng: (lon2 * 180) / Math.PI };
     }
     function guardianClosestPointOnSegmentLatLng(clickLL, aLL, bLL) {
-      const p = map.project(clickLL);
-      const pa = map.project(aLL);
-      const pb = map.project(bLL);
+      // Use projected **map** pixel space (CRS) and unproject back — not container pixels.
+      // `containerPointToLatLng` is for `latLngToContainerPoint` / DOM coordinates; pairing it
+      // with `map.project` sent edge-insert vertices to arbitrary wrong locations.
+      const z = map.getZoom();
+      const p = map.project(clickLL, z);
+      const pa = map.project(aLL, z);
+      const pb = map.project(bLL, z);
       const abx = pb.x - pa.x;
       const aby = pb.y - pa.y;
       const apx = p.x - pa.x;
@@ -1549,7 +1622,7 @@ private extension OSMMapView {
       const t = ab2 === 0 ? 0 : Math.max(0, Math.min(1, (apx * abx + apy * aby) / ab2));
       const cx = pa.x + t * abx;
       const cy = pa.y + t * aby;
-      return map.containerPointToLatLng(L.point(cx, cy));
+      return map.unproject(L.point(cx, cy), z);
     }
     function guardianClosedPolygonNearestEdge(verts, clickLatLng) {
       const n = verts.length;
@@ -1854,7 +1927,8 @@ private extension OSMMapView {
               weight: weight,
               fillColor: fill,
               fillOpacity: 1,
-              interactive: gfInteractive
+              interactive: gfInteractive,
+              pane: GUARDIAN_GEOFENCE_UNDERLAY_PANE
             }).addTo(map);
             geofenceLayers.push(c);
             if (gfInteractive) {
@@ -1928,7 +2002,8 @@ private extension OSMMapView {
               weight: weight,
               fillColor: fill,
               fillOpacity: 1,
-              interactive: gfInteractive
+              interactive: gfInteractive,
+              pane: GUARDIAN_GEOFENCE_UNDERLAY_PANE
             }).addTo(map);
             geofenceLayers.push(poly);
             if (gfInteractive) {
@@ -1953,7 +2028,8 @@ private extension OSMMapView {
                   color: '#000',
                   opacity: 0,
                   weight: 16,
-                  interactive: true
+                  interactive: true,
+                  pane: GUARDIAN_GEOFENCE_UNDERLAY_PANE
                 }).addTo(map);
                 edgeLayers.push(edge);
                 edge.on('click', function(e) {
@@ -1990,6 +2066,12 @@ private extension OSMMapView {
                   if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.geofencePolygonVertexMove) {
                     window.webkit.messageHandlers.geofencePolygonVertexMove.postMessage({ id: idStr, idx: vi, lat: pos.lat, lon: pos.lng });
                   }
+                });
+                vm.on('contextmenu', function(e) {
+                  L.DomEvent.stop(e);
+                  guardianMarkLayerMapClickSuppressed();
+                  const pos = e.target.getLatLng();
+                  openGeofenceVertexContextMenu(e, idStr, vi, pos.lat, pos.lng);
                 });
                 vertexMarkers.push(vm);
                 geofenceHandleLayers.push(vm);

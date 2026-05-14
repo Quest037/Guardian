@@ -7,6 +7,18 @@ import SwiftUI
 struct MissionControlRosterSlotAttentionCapsule: View {
     let severity: GuardianFeedbackSeverity
     let title: String
+    /// Pointer-hover text; defaults to ``title`` when omitted.
+    var help: String? = nil
+    /// Tighter padding for MC-R task rows and live-console roster tiles (MCS accordion uses default ``false``).
+    var compactMetrics: Bool = false
+
+    private var resolvedHelp: String { help ?? title }
+
+    private var horizontalPadding: CGFloat {
+        compactMetrics ? GuardianSpacing.xxs : GuardianSpacing.xsTight
+    }
+
+    private var verticalPadding: CGFloat { compactMetrics ? 2 : 3 }
 
     var body: some View {
         Text(title)
@@ -14,8 +26,8 @@ struct MissionControlRosterSlotAttentionCapsule: View {
             .foregroundStyle(foreground)
             .lineLimit(1)
             .minimumScaleFactor(0.85)
-            .padding(.horizontal, GuardianSpacing.xsTight)
-            .padding(.vertical, 3)
+            .padding(.horizontal, horizontalPadding)
+            .padding(.vertical, verticalPadding)
             .background(
                 Capsule(style: .continuous)
                     .fill(severity.legacyTranslucentChipBackground)
@@ -24,8 +36,9 @@ struct MissionControlRosterSlotAttentionCapsule: View {
                 Capsule(style: .continuous)
                     .strokeBorder(stroke.opacity(0.45), lineWidth: 1)
             )
-            .help(title)
+            .help(resolvedHelp)
             .accessibilityLabel("Roster slot: \(title)")
+            .modifier(RosterSlotAttentionDistinctHintModifier(hint: resolvedHelp == title ? nil : resolvedHelp))
     }
 
     private var foreground: Color {
@@ -43,6 +56,18 @@ struct MissionControlRosterSlotAttentionCapsule: View {
         case .info: GuardianSemanticColors.infoForeground
         case .warning: GuardianSemanticColors.warningStroke
         case .error: GuardianSemanticColors.dangerStroke
+        }
+    }
+}
+
+private struct RosterSlotAttentionDistinctHintModifier: ViewModifier {
+    let hint: String?
+
+    func body(content: Content) -> some View {
+        if let hint {
+            content.accessibilityHint(hint)
+        } else {
+            content
         }
     }
 }
@@ -138,7 +163,9 @@ struct MissionLiveVehicleHealthCard: View {
     /// MC-R vehicle overlay on the Tasks card). The empty-roster placeholder leaves this nil.
     var onTap: (() -> Void)?
     /// Worst merged slot attention for this roster row (MC-R live console); `nil` hides the pill.
-    var slotAttention: (severity: GuardianFeedbackSeverity, title: String)? = nil
+    var slotAttention: (severity: GuardianFeedbackSeverity, title: String, help: String)? = nil
+    /// When ``slotAttention`` is set, use tighter capsule padding in the fixed-height roster tile.
+    var slotAttentionCapsuleCompact: Bool = true
     /// When true (MC-R **reserve pool swap** pick list): neutral **class** capsule beside the title when the bracketed id does not already encode class.
     var reservePoolPickerChrome: Bool = false
     /// Overrides button `.help` when set (e.g. reserve **browse** vs swap **pick**).
@@ -212,7 +239,9 @@ struct MissionLiveVehicleHealthCard: View {
                     if let slotAttention {
                         MissionControlRosterSlotAttentionCapsule(
                             severity: slotAttention.severity,
-                            title: slotAttention.title
+                            title: slotAttention.title,
+                            help: slotAttention.help,
+                            compactMetrics: slotAttentionCapsuleCompact
                         )
                     }
                     Spacer(minLength: GuardianSpacing.xs)

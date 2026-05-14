@@ -85,6 +85,7 @@ enum FleetMissionRecipeRegistrations {
             humanDescription:
                 "Uploads the MAVLink mission plan, arms the vehicle, then starts mission execution. " +
                 "Catalogue id is recipe.fleet.do.mission.upload.start (arm is part of this flow, not a segment in the name). " +
+                "The `command.fleet.vehicle.do.mission.upload` child sends mission items first, then clears and uploads geofence polygons when non-empty. " +
                 "Used by Mission Control runs; transient autopilot/link errors retry before escalating to the operator on the run panel.",
             parameters: [
                 FleetRecipeParameterDeclaration(
@@ -97,7 +98,7 @@ enum FleetMissionRecipeRegistrations {
                     name: "geofencePolygonsJSON",
                     type: .string,
                     required: true,
-                    humanLabel: "Geofence polygons (JSON array)"
+                    humanLabel: "Geofence plan (JSON: polygons and/or circles)"
                 ),
             ],
             riskTier: .confirmInLiveMission,
@@ -134,7 +135,8 @@ enum FleetMissionRecipeRegistrations {
             humanDescription:
                 "Uploads the full MAVLink mission plan, sets the current mission item index (`command.fleet.vehicle.do.mission.jump.to`), " +
                 "arms, then starts mission execution. Used when reserve swap-in must resume from the displaced stream’s last-known " +
-                "mission progress; when progress is 0 or unknown use `recipe.fleet.do.mission.upload.start` instead.",
+                "mission progress; when progress is 0 or unknown use `recipe.fleet.do.mission.upload.start` instead. " +
+                "The upload step sends mission items first, then clears and uploads geofence polygons when non-empty.",
             parameters: [
                 FleetRecipeParameterDeclaration(
                     name: "missionItemsJSON",
@@ -152,7 +154,7 @@ enum FleetMissionRecipeRegistrations {
                     name: "geofencePolygonsJSON",
                     type: .string,
                     required: true,
-                    humanLabel: "Geofence polygons (JSON array)"
+                    humanLabel: "Geofence plan (JSON: polygons and/or circles)"
                 ),
             ],
             riskTier: .confirmInLiveMission,
@@ -187,14 +189,14 @@ enum FleetMissionRecipeRegistrations {
             name: name,
             humanLabel: "Upload geofence",
             humanDescription:
-                "Invokes catalogue command.fleet.vehicle.do.geofence.upload with `geofencePolygonsJSON`. " +
+                "Invokes catalogue command.fleet.vehicle.do.geofence.upload with `geofencePolygonsJSON` (polygons and/or circles). " +
                 "Use from automation when mission upload is not part of the flow.",
             parameters: [
                 FleetRecipeParameterDeclaration(
                     name: "geofencePolygonsJSON",
                     type: .string,
                     required: true,
-                    humanLabel: "Geofence polygons (JSON array)"
+                    humanLabel: "Geofence plan (JSON: polygons and/or circles)"
                 ),
             ],
             riskTier: .confirmInLiveMission,

@@ -1012,4 +1012,50 @@ final class MissionRunReservePoolTests: XCTestCase {
             .noEligiblePoolSlots
         )
     }
+
+    @MainActor
+    func test_enumerate_reserve_swap_candidates_includes_pool_when_vacancy_slot_shows_blocked_no_vehicle() {
+        let rd = UUID()
+        let task = MissionTask(name: "Alpha", rosterDeviceIds: [rd])
+        let mission = Mission(
+            id: UUID(),
+            name: "M",
+            description: "",
+            type: .mobile,
+            rosterDevices: [RosterDevice(id: rd, name: "P1", slot: .primary, vehicleClass: .unknown)],
+            routeMacro: RouteMacro(tasks: [task])
+        )
+        let assignID = UUID()
+        let blockedLanes = MissionRunAssignmentSlotStateLanes(commanded: .idle, observed: .blockedNoVehicle)
+        let vacancy = MissionRunAssignment(
+            id: assignID,
+            taskId: task.id,
+            rosterDeviceId: rd,
+            slotName: "Primary",
+            attachedFleetVehicleToken: "vacancy-token",
+            slotLifecycleLanes: blockedLanes
+        )
+        let run = MissionRunEnvironment(mission: mission, assignments: [vacancy])
+        let tid = task.id
+        let poolSlotID = UUID(uuidString: "00000000-0000-0000-0000-0000000000E1")!
+        run.setReservePool(
+            MissionRunReservePool(entries: [
+                MissionRunReservePoolSlot(
+                    id: poolSlotID,
+                    label: "R1",
+                    attachedFleetVehicleToken: "pool-token",
+                    attachedDevice: ""
+                ),
+            ]),
+            forTaskID: tid
+        )
+        let cands = run.enumerateReserveSwapCandidates(vacancyAssignmentID: assignID, taskID: tid)
+        XCTAssertTrue(
+            cands.contains { cand in
+                if case .floatingPool(_, let slot) = cand { return slot.id == poolSlotID }
+                return false
+            },
+            "pool candidate must remain visible despite vacancy roster slot evidence"
+        )
+    }
 }

@@ -73,4 +73,28 @@ final class MissionControlStoreCreateRunTests: XCTestCase {
         XCTAssertEqual(decision, .allowed)
         XCTAssertEqual(run.template?.routeMacro.tasks.first?.betweenCycles, .park)
     }
+
+    /// MCS / MC‑R work on a **forked** ``MissionRunEnvironment/template`` (value copy at create time); mutating the
+    /// run template must not change an unrelated ``Mission`` value the caller still holds.
+    func test_createRun_template_fork_is_independent_of_caller_seed_mission() {
+        let controlStore = MissionControlStore()
+        let seed = Mission(
+            name: "Op",
+            description: "",
+            type: .mobile,
+            routeMacro: RouteMacro(tasks: [], rules: RouteRules())
+        )
+        XCTAssertTrue(seed.missionGeofences.isEmpty)
+        let run = controlStore.createRun(from: seed, cloningMissionRunDefaultsFrom: GeneralSettingsStore())
+        guard var forked = run.template else {
+            XCTFail("expected run template")
+            return
+        }
+        var fence = MissionGeofence.newPolygon(name: "Run fence", around: RouteCoordinate(lat: 0, lon: 0))
+        fence.id = UUID()
+        forked.missionGeofences.append(fence)
+        run.updateTemplate(forked)
+        XCTAssertTrue(seed.missionGeofences.isEmpty)
+        XCTAssertEqual(run.template?.missionGeofences.count, 1)
+    }
 }

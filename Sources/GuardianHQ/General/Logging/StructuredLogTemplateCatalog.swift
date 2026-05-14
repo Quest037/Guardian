@@ -95,18 +95,23 @@ enum StructuredLogTemplateCatalog: Sendable {
         )
         put(
             MissionRunLogTemplateKey.fleetAckSuccess,
-            "Fleet acknowledged: {{summary}} on {{vehicleID}}.",
-            mcr: "ACK OK · {{summary}} · {{vehicleID}}"
+            "Fleet acknowledged: {{summary}} on {{vehicleID}}{{recipeRunSuffix}}.",
+            mcr: "ACK OK · {{summary}} · {{vehicleID}}{{recipeRunSuffix}}"
         )
         put(
             MissionRunLogTemplateKey.fleetAckFailed,
-            "Fleet command failed: {{summary}} - {{reason}}",
-            mcr: "ACK fail · {{summary}} — {{reason}}"
+            "Fleet command failed: {{summary}} - {{reason}}{{recipeRunSuffix}}",
+            mcr: "ACK fail · {{summary}} — {{reason}}{{recipeRunSuffix}}"
+        )
+        put(
+            MissionRunLogTemplateKey.recipeFleetOutcomeTraceMismatch,
+            "Recipe outcome ignored for slot updates: trace does not match issued dispatch (run {{runID}}, trace recipe {{traceRecipe}}, issued {{issuedRecipe}}, trace vehicle {{traceVehicleID}}, resolved {{resolvedVehicleID}}).",
+            mcr: "Recipe trace mismatch · run {{runID}} · slot evidence skipped"
         )
         put(
             MissionRunLogTemplateKey.missionRunGeofenceFleetAckFailed,
-            "Geofence fleet step failed: {{summary}} — {{reason}} (vehicle {{vehicleID}}).",
-            mcr: "Geofence ACK fail · {{summary}} — {{reason}} · {{vehicleID}}"
+            "Geofence fleet step failed: {{summary}} — {{reason}} (vehicle {{vehicleID}}){{recipeRunSuffix}}.",
+            mcr: "Geofence ACK fail · {{summary}} — {{reason}} · {{vehicleID}}{{recipeRunSuffix}}"
         )
         put(
             MissionRunLogTemplateKey.executorPendingBatchesCancelledForLiveDriveEngage,
@@ -122,6 +127,11 @@ enum StructuredLogTemplateCatalog: Sendable {
             MissionRunLogTemplateKey.guardianSitlMotionStopPassAfterRunCompleted,
             "Guardian SITL motion damp after run completed ({{vehicleCount}} vehicle(s)): manual stream stop, mission pause, offboard stop (best effort).",
             mcr: "Run complete · motion damp · {{vehicleCount}} SITL(s)"
+        )
+        put(
+            MissionRunLogTemplateKey.guardianSitlKillPassAfterRunCompleted,
+            "Guardian SITL SIM cleanup kill after run completed ({{vehicleCount}} vehicle(s)): manual stream stop, Action.kill force disarm (best effort).",
+            mcr: "Run complete · SIM kill · {{vehicleCount}} SITL(s)"
         )
         put(
             MissionRunLogTemplateKey.executorMissionStartBatchSuppressedRunCompleted,
@@ -190,6 +200,12 @@ enum StructuredLogTemplateCatalog: Sendable {
             MissionRunLogTemplateKey.operatorMarkedMissionTaskTriageState,
             "Operator marked @{{taskID}} as {{stateDisplay}}.",
             mcr: "Op · @{{taskID}} · {{stateDisplay}}"
+        )
+
+        put(
+            MissionRunLogTemplateKey.slotEvidenceAutoAcknowledgedMissionEndBatch,
+            "All roster slots report policy complete; automatic protocol confirmation — abort tasks: {{abortTasks}}; complete tasks: {{recoveryTasks}}.",
+            mcr: "Slot ack · auto · abort: {{abortTasks}} · complete: {{recoveryTasks}}"
         )
 
         put(MissionRunLogTemplateKey.executionStarted, "Mission execution started.", mcr: "Execution started (MC)")
@@ -326,6 +342,21 @@ enum StructuredLogTemplateCatalog: Sendable {
             mcr: "Geofence encode failed · @{{slotID}} · {{reason}}"
         )
         put(
+            MissionRunLogTemplateKey.missionGeofencePx4InclusionFencesOmitted,
+            "Omitted {{count}} inclusion geofence(s) for PX4 MAVLink upload @{{slotID}} — mission home must lie inside each inclusion fence; those fences were not sent to the vehicle.",
+            mcr: "Geofence upload · omitted {{count}} inclusion @{{slotID}} (home outside fence)"
+        )
+        put(
+            MissionRunLogTemplateKey.mcrLiveGeofenceFleetPushSummary,
+            "MC-R geofence push finished: {{succeeded}} of {{attempted}} roster slot(s) acknowledged the upload or clear recipe.",
+            mcr: "Geofence push · {{succeeded}}/{{attempted}} slots acknowledged"
+        )
+        put(
+            MissionRunLogTemplateKey.missionGeofenceFleetPushMissionPlanMissing,
+            "MC-R geofence push @{{slotID}}: no compiled waypoint mission for this slot — using standalone geofence upload only (some autopilots reject fence uploads while the onboard mission plan is empty).",
+            mcr: "Geofence push @{{slotID}} · no plan · standalone upload (risky)"
+        )
+        put(
             MissionRunLogTemplateKey.missionExecuting,
             "Executing MAVLink mission for @{{slotID}} ({{itemCount}} item(s), {{formation}}, {{timing}}).",
             mcr: "MAVLink live · @{{slotID}} · {{itemCount}} items · {{formation}} · {{timing}}"
@@ -387,9 +418,19 @@ enum StructuredLogTemplateCatalog: Sendable {
             mcr: "Task abort · no fleet commands"
         )
         put(
+            MissionRunLogTemplateKey.missionTaskAbortEndAttemptNoted,
+            "Mission Control marked this path for abort mission-end protocol; issuing fleet commands next.",
+            mcr: "Task abort · attempt noted"
+        )
+        put(
             MissionRunLogTemplateKey.missionTaskCompleteSkippedNoCommands,
             "completeMissionTask skipped — complete policy resolves to no fleet commands for bound slots on this path.",
             mcr: "Task complete · no fleet commands"
+        )
+        put(
+            MissionRunLogTemplateKey.missionTaskRecoveryEndAttemptNoted,
+            "Mission Control marked this path for recovery mission-end protocol; issuing fleet commands next.",
+            mcr: "Task recovery · attempt noted"
         )
         put(
             MissionRunLogTemplateKey.missionTaskAbortNowDispatched,
@@ -479,14 +520,19 @@ enum StructuredLogTemplateCatalog: Sendable {
             mcr: "SIM park cleanup · ok {{succeeded}} / {{attempted}} · failed {{failed}}"
         )
         put(
+            MissionRunLogTemplateKey.lifecycleSimCleanupKillBatch,
+            "Run-complete SIM kill cleanup: attempted {{attempted}}, succeeded {{succeeded}}, failed {{failed}}.",
+            mcr: "SIM kill cleanup · ok {{succeeded}} / {{attempted}} · failed {{failed}}"
+        )
+        put(
             MissionRunLogTemplateKey.lifecycleSimCleanupRunStarted,
-            "Run-complete SIM cleanup starting: park {{park}} vehicle(s), teleport {{teleport}}, mission/battery union {{union}}, completion {{completion}}.",
-            mcr: "SIM cleanup · start · park {{park}} · teleport {{teleport}} · union {{union}} · {{completion}}"
+            "Run-complete SIM cleanup starting: kill wave {{sitlKill}} SITL session(s), teleport {{teleport}}, mission/battery union {{union}}, completion {{completion}}.",
+            mcr: "SIM cleanup · start · kill {{sitlKill}} · teleport {{teleport}} · union {{union}} · {{completion}}"
         )
         put(
             MissionRunLogTemplateKey.lifecycleSimCleanupRunFinished,
-            "Run-complete SIM cleanup finished: park attempted {{parkAttempted}} (failed {{parkFailed}}), mission clear {{missionClear}}, geofence clear {{geofenceClear}}, roster teleport applied {{rTeleApplied}} skipped {{rTeleSkipped}}, pool teleport applied {{pTeleApplied}} skipped {{pTeleSkipped}}, battery vehicles {{battery}}.",
-            mcr: "SIM cleanup · done · park {{parkAttempted}} (fail {{parkFailed}}) · clr {{missionClear}} · gf {{geofenceClear}} · r-tel {{rTeleApplied}}/{{rTeleSkipped}} · p-tel {{pTeleApplied}}/{{pTeleSkipped}} · bat {{battery}}"
+            "Run-complete SIM cleanup finished: kill attempted {{killAttempted}} (failed {{killFailed}}), mission clear {{missionClear}}, geofence clear {{geofenceClear}}, roster teleport applied {{rTeleApplied}} skipped {{rTeleSkipped}}, pool teleport applied {{pTeleApplied}} skipped {{pTeleSkipped}}, battery vehicles {{battery}}.",
+            mcr: "SIM cleanup · done · kill {{killAttempted}} (fail {{killFailed}}) · clr {{missionClear}} · gf {{geofenceClear}} · r-tel {{rTeleApplied}}/{{rTeleSkipped}} · p-tel {{pTeleApplied}}/{{pTeleSkipped}} · bat {{battery}}"
         )
 
         put(

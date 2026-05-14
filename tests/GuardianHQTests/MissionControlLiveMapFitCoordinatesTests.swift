@@ -85,4 +85,42 @@ final class MissionControlLiveMapFitCoordinatesTests: XCTestCase {
         )
         XCTAssertEqual(pts.count, 5)
     }
+
+    func test_geofenceFitCoordinates_polygon_returnsVertices() {
+        let fence = MissionGeofence(
+            name: "p",
+            shape: .polygon,
+            polygonVertices: [
+                RouteCoordinate(lat: 1, lon: 2),
+                RouteCoordinate(lat: 0, lon: 0),
+                RouteCoordinate(lat: 3, lon: 4),
+            ]
+        )
+        let pts = MissionControlLiveMapFitCoordinates.geofenceFitCoordinates(fence)
+        let set = Set(pts.map { "\($0.0),\($0.1)" })
+        XCTAssertEqual(set, ["1.0,2.0", "3.0,4.0"])
+        XCTAssertEqual(pts.count, 2)
+    }
+
+    func test_geofenceFitCoordinates_circle_returnsBoundingCorners() {
+        let fence = MissionGeofence(
+            name: "c",
+            shape: .circle,
+            polygonVertices: [],
+            circleCenter: RouteCoordinate(lat: -34.0, lon: 151.0),
+            circleRadiusMeters: 1_000
+        )
+        let pts = MissionControlLiveMapFitCoordinates.geofenceFitCoordinates(fence)
+        XCTAssertEqual(pts.count, 4)
+        let latMin = pts.map(\.0).min()!
+        let latMax = pts.map(\.0).max()!
+        let lonMin = pts.map(\.1).min()!
+        let lonMax = pts.map(\.1).max()!
+        XCTAssertLessThan(latMin, -34.0)
+        XCTAssertGreaterThan(latMax, -34.0)
+        XCTAssertLessThan(lonMin, 151.0)
+        XCTAssertGreaterThan(lonMax, 151.0)
+        XCTAssert(latMax - latMin > 0.001)
+        XCTAssert(lonMax - lonMin > 0.001)
+    }
 }

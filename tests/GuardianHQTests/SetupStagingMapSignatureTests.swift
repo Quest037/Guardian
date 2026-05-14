@@ -2,8 +2,11 @@ import XCTest
 @testable import GuardianHQ
 
 final class SetupStagingMapStructureIdentityTests: XCTestCase {
+    private func chrome(_ tab: MissionControlSetupRostersSidebarTab = .tasks, point: UUID? = nil) -> MissionControlSetupRosterStagingMissionPointChrome {
+        MissionControlSetupRosterStagingMissionPointChrome(listTab: tab, selectedPointID: point)
+    }
+
     func test_selectedTaskPathID_participatesInEquality() {
-        let chrome = MissionControlSetupRosterStagingMissionPointChrome(listTab: .tasks, selectedPointID: nil)
         let base = SetupStagingMapStructureIdentity(
             missionID: nil,
             homeCoord: nil,
@@ -11,14 +14,11 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             taskPathIDs: [],
             missionPointTopologySignature: "",
             assignmentFleetBindingSignature: "",
-            rosterStagingMissionPointChrome: chrome,
+            rosterStagingMissionPointChrome: chrome(),
             selectedTaskPathID: nil,
             selectedStagingRosterAssignmentID: nil,
             mcsReservePoolHomePlacementTaskID: nil,
-            stagingReservePoolBerthSelectionSignature: "",
-            showMissionGeofencesOnMap: true,
-            missionGeofenceTemplateTopologySignature: "",
-            missionControlRunGeofenceAugmentationTopologySignature: ""
+            stagingReservePoolBerthSelectionSignature: ""
         )
         let withPath = SetupStagingMapStructureIdentity(
             missionID: nil,
@@ -27,20 +27,16 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             taskPathIDs: [],
             missionPointTopologySignature: "",
             assignmentFleetBindingSignature: "",
-            rosterStagingMissionPointChrome: chrome,
+            rosterStagingMissionPointChrome: chrome(),
             selectedTaskPathID: UUID(),
             selectedStagingRosterAssignmentID: nil,
             mcsReservePoolHomePlacementTaskID: nil,
-            stagingReservePoolBerthSelectionSignature: "",
-            showMissionGeofencesOnMap: true,
-            missionGeofenceTemplateTopologySignature: "",
-            missionControlRunGeofenceAugmentationTopologySignature: ""
+            stagingReservePoolBerthSelectionSignature: ""
         )
         XCTAssertNotEqual(base, withPath)
     }
 
     func test_selectedStagingRosterAssignmentID_participatesInEquality() {
-        let chrome = MissionControlSetupRosterStagingMissionPointChrome(listTab: .tasks, selectedPointID: nil)
         let a = SetupStagingMapStructureIdentity(
             missionID: nil,
             homeCoord: nil,
@@ -48,14 +44,11 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             taskPathIDs: [],
             missionPointTopologySignature: "",
             assignmentFleetBindingSignature: "",
-            rosterStagingMissionPointChrome: chrome,
+            rosterStagingMissionPointChrome: chrome(),
             selectedTaskPathID: nil,
             selectedStagingRosterAssignmentID: nil,
             mcsReservePoolHomePlacementTaskID: nil,
-            stagingReservePoolBerthSelectionSignature: "",
-            showMissionGeofencesOnMap: true,
-            missionGeofenceTemplateTopologySignature: "",
-            missionControlRunGeofenceAugmentationTopologySignature: ""
+            stagingReservePoolBerthSelectionSignature: ""
         )
         let b = SetupStagingMapStructureIdentity(
             missionID: nil,
@@ -64,20 +57,16 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             taskPathIDs: [],
             missionPointTopologySignature: "",
             assignmentFleetBindingSignature: "",
-            rosterStagingMissionPointChrome: chrome,
+            rosterStagingMissionPointChrome: chrome(),
             selectedTaskPathID: nil,
             selectedStagingRosterAssignmentID: UUID(),
             mcsReservePoolHomePlacementTaskID: nil,
-            stagingReservePoolBerthSelectionSignature: "",
-            showMissionGeofencesOnMap: true,
-            missionGeofenceTemplateTopologySignature: "",
-            missionControlRunGeofenceAugmentationTopologySignature: ""
+            stagingReservePoolBerthSelectionSignature: ""
         )
         XCTAssertNotEqual(a, b)
     }
 
     func test_mcsReservePoolHomePlacementTaskID_participatesInEquality() {
-        let chrome = MissionControlSetupRosterStagingMissionPointChrome(listTab: .tasks, selectedPointID: nil)
         let a = SetupStagingMapStructureIdentity(
             missionID: nil,
             homeCoord: nil,
@@ -85,14 +74,11 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             taskPathIDs: [],
             missionPointTopologySignature: "",
             assignmentFleetBindingSignature: "",
-            rosterStagingMissionPointChrome: chrome,
+            rosterStagingMissionPointChrome: chrome(),
             selectedTaskPathID: nil,
             selectedStagingRosterAssignmentID: nil,
             mcsReservePoolHomePlacementTaskID: nil,
-            stagingReservePoolBerthSelectionSignature: "",
-            showMissionGeofencesOnMap: true,
-            missionGeofenceTemplateTopologySignature: "",
-            missionControlRunGeofenceAugmentationTopologySignature: ""
+            stagingReservePoolBerthSelectionSignature: ""
         )
         let b = SetupStagingMapStructureIdentity(
             missionID: nil,
@@ -101,20 +87,16 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             taskPathIDs: [],
             missionPointTopologySignature: "",
             assignmentFleetBindingSignature: "",
-            rosterStagingMissionPointChrome: chrome,
+            rosterStagingMissionPointChrome: chrome(),
             selectedTaskPathID: nil,
             selectedStagingRosterAssignmentID: nil,
             mcsReservePoolHomePlacementTaskID: UUID(),
-            stagingReservePoolBerthSelectionSignature: "",
-            showMissionGeofencesOnMap: true,
-            missionGeofenceTemplateTopologySignature: "",
-            missionControlRunGeofenceAugmentationTopologySignature: ""
+            stagingReservePoolBerthSelectionSignature: ""
         )
         XCTAssertNotEqual(a, b)
     }
 
     func test_stagingReservePoolBerthSelectionSignature_participatesInEquality() {
-        let chrome = MissionControlSetupRosterStagingMissionPointChrome(listTab: .tasks, selectedPointID: nil)
         let t = UUID()
         let s = UUID()
         let a = SetupStagingMapStructureIdentity(
@@ -124,14 +106,11 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             taskPathIDs: [],
             missionPointTopologySignature: "",
             assignmentFleetBindingSignature: "",
-            rosterStagingMissionPointChrome: chrome,
+            rosterStagingMissionPointChrome: chrome(),
             selectedTaskPathID: nil,
             selectedStagingRosterAssignmentID: nil,
             mcsReservePoolHomePlacementTaskID: nil,
-            stagingReservePoolBerthSelectionSignature: "",
-            showMissionGeofencesOnMap: true,
-            missionGeofenceTemplateTopologySignature: "",
-            missionControlRunGeofenceAugmentationTopologySignature: ""
+            stagingReservePoolBerthSelectionSignature: ""
         )
         let b = SetupStagingMapStructureIdentity(
             missionID: nil,
@@ -140,15 +119,20 @@ final class SetupStagingMapStructureIdentityTests: XCTestCase {
             taskPathIDs: [],
             missionPointTopologySignature: "",
             assignmentFleetBindingSignature: "",
-            rosterStagingMissionPointChrome: chrome,
+            rosterStagingMissionPointChrome: chrome(),
             selectedTaskPathID: nil,
             selectedStagingRosterAssignmentID: nil,
             mcsReservePoolHomePlacementTaskID: nil,
-            stagingReservePoolBerthSelectionSignature: "\(t.uuidString)|\(s.uuidString)",
-            showMissionGeofencesOnMap: true,
-            missionGeofenceTemplateTopologySignature: "",
-            missionControlRunGeofenceAugmentationTopologySignature: ""
+            stagingReservePoolBerthSelectionSignature: "\(t.uuidString)|\(s.uuidString)"
         )
         XCTAssertNotEqual(a, b)
+    }
+
+    /// Fence map selection is intentionally **not** part of ``MissionControlSetupRosterStagingMissionPointChrome`` so MCS
+    /// staging map ``.task(id:)`` does not refit when the operator highlights a different fence row.
+    func test_roster_staging_chrome_is_tab_and_mission_point_only() {
+        let a = MissionControlSetupRosterStagingMissionPointChrome(listTab: .fences, selectedPointID: nil)
+        let b = MissionControlSetupRosterStagingMissionPointChrome(listTab: .fences, selectedPointID: nil)
+        XCTAssertEqual(a, b)
     }
 }

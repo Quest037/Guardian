@@ -31,6 +31,7 @@ final class MissionRunAssignmentSlotMissionControlRosterDisplayTests: XCTestCase
         let w = MissionControlAssignmentSlotRosterAttention.worstAmong(assignments: [a, b])
         XCTAssertEqual(w?.severity, .error)
         XCTAssertEqual(w?.title, "No vehicle bound")
+        XCTAssertTrue(w?.help.contains("written off") ?? false)
     }
 
     func test_worstAmong_all_idle_returns_nil() {

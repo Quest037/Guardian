@@ -252,9 +252,14 @@ enum FleetCommandStackConverterShared {
     // MARK: - do.mission.upload — JSON-string parameter → MAVSDK mission items
 
     /// Translate `command.fleet.vehicle.do.mission.upload` into one or more vehicle
-    /// commands: optionally ``FleetVehicleCommand/uploadGeofence(polygons:)`` (when
-    /// `geofencePolygonsJSON` decodes to a non-empty list), then
-    /// ``FleetVehicleCommand/uploadMission(items:)``.
+    /// commands: ``FleetVehicleCommand/uploadMission(items:)`` first, then (when `geofencePolygonsJSON`
+    /// decodes to a non-empty geofence wire payload) ``FleetVehicleCommand/clearGeofence`` followed by
+    /// ``FleetVehicleCommand/uploadGeofence(_:)``.
+    ///
+    /// **Ordering:** Mission is uploaded first, then (when polygons are present) the stack clears any
+    /// existing onboard geofence plan and uploads the new polygons. Clearing avoids stale dataman / fence
+    /// state conflicting with the new plan; mission-first avoids PX4 rejecting fence work while the onboard
+    /// mission is still empty (which can surface as MAVSDK `Geofence.invalidArgument` with a generic `resultStr`).
     ///
     /// Returns `.notImplemented` when the parameter is missing or the JSON does not
     /// decode — recipes / callers see the failure detail and can branch.
@@ -268,17 +273,17 @@ enum FleetCommandStackConverterShared {
         }
         do {
             let items = try FleetVehicleCommandMissionItemPayload.decodeMissionItems(fromJSON: json)
-            var commands: [FleetVehicleCommand] = []
+            var commands: [FleetVehicleCommand] = [.uploadMission(items: items)]
             if let fenceJSON = parameters.string(named: "geofencePolygonsJSON") {
                 let trimmed = fenceJSON.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty && trimmed != "[]" {
-                    let polys = try FleetVehicleCommandGeofencePolygonPayload.decodePolygons(fromJSON: fenceJSON)
-                    if !polys.isEmpty {
-                        commands.append(.uploadGeofence(polygons: polys))
+                    let wire = try FleetVehicleCommandGeofenceUploadPayload.decode(fromJSON: fenceJSON)
+                    if !wire.isEmpty {
+                        commands.append(.clearGeofence)
+                        commands.append(.uploadGeofence(wire))
                     }
                 }
             }
-            commands.append(.uploadMission(items: items))
             return .vehicleCommands(commands)
         } catch {
             return .notImplemented(
@@ -300,13 +305,13 @@ enum FleetCommandStackConverterShared {
                 )
             }
             do {
-                let polys = try FleetVehicleCommandGeofencePolygonPayload.decodePolygons(fromJSON: json)
-                guard !polys.isEmpty else {
+                let wire = try FleetVehicleCommandGeofenceUploadPayload.decode(fromJSON: json)
+                guard !wire.isEmpty else {
                     return .notImplemented(
-                        detail: "do.geofence.upload requires at least one valid polygon after decoding (got none)."
+                        detail: "do.geofence.upload requires at least one polygon or circle after decoding (got none)."
                     )
                 }
-                return .vehicleCommands([.uploadGeofence(polygons: polys)])
+                return .vehicleCommands([.uploadGeofence(wire)])
             } catch {
                 return .notImplemented(
                     detail: "do.geofence.upload: failed to decode geofencePolygonsJSON: \(error.localizedDescription)"
@@ -952,40 +957,122 @@ struct FleetVehicleCommandMissionItemPayload: Codable, Equatable, Sendable {
     }
 }
 
-// MARK: - Codable mirror for Mavsdk.Geofence.Polygon
+// MARK: - Codable mirror for MAVSDK geofence upload (GeofenceData: polygons + circles)
+
+/// Combined geofence wire payload for `geofencePolygonsJSON` (polygons and/or circles).
+///
+/// **Wire shapes:** (1) legacy JSON **array** of polygon-only objects (decoded as `polygons`, `circles` empty).
+/// (2) JSON **object** `{ "polygons": [...], "circles": [...] }` for mixed plans including MAVSDK circle primitives.
+struct FleetVehicleCommandGeofenceUploadPayload: Codable, Equatable, Sendable {
+    var polygons: [FleetVehicleCommandGeofencePolygonPayload]
+    var circles: [FleetVehicleCommandGeofenceCirclePayload]
+
+    init(polygons: [FleetVehicleCommandGeofencePolygonPayload], circles: [FleetVehicleCommandGeofenceCirclePayload]) {
+        self.polygons = polygons
+        self.circles = circles
+    }
+
+    var isEmpty: Bool { polygons.isEmpty && circles.isEmpty }
+
+    static func decode(fromJSON json: String) throws -> Self {
+        let trimmed = json.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "[]" else {
+            return Self(polygons: [], circles: [])
+        }
+        guard let data = json.data(using: .utf8) else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: [], debugDescription: "geofencePolygonsJSON is not valid UTF-8.")
+            )
+        }
+        if trimmed.hasPrefix("[") {
+            let polys = try JSONDecoder().decode([FleetVehicleCommandGeofencePolygonPayload].self, from: data)
+            return Self(polygons: polys, circles: [])
+        }
+        struct Envelope: Codable {
+            var polygons: [FleetVehicleCommandGeofencePolygonPayload]?
+            var circles: [FleetVehicleCommandGeofenceCirclePayload]?
+        }
+        let env = try JSONDecoder().decode(Envelope.self, from: data)
+        return Self(polygons: env.polygons ?? [], circles: env.circles ?? [])
+    }
+
+    func encodeToJSON() throws -> String {
+        struct Envelope: Codable {
+            var polygons: [FleetVehicleCommandGeofencePolygonPayload]
+            var circles: [FleetVehicleCommandGeofenceCirclePayload]
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(Envelope(polygons: polygons, circles: circles))
+        guard let string = String(data: data, encoding: .utf8) else {
+            throw EncodingError.invalidValue(
+                self,
+                .init(codingPath: [], debugDescription: "Encoded geofence JSON is not valid UTF-8.")
+            )
+        }
+        return string
+    }
+}
 
 /// JSON-portable mirror of ``Mavsdk.Geofence/Polygon`` for `geofencePolygonsJSON` on
 /// ``FleetCommandName/fleetVehicleDoMissionUpload`` and ``FleetCommandName/fleetVehicleDoGeofenceUpload``.
+///
+/// **Wire contract:** `fenceType` + `points` only — no per-polygon or per-vertex altitude / ``MAV_FRAME`` keys
+/// (encode/decode is explicit so stray keys in hand-authored JSON are ignored, not round-tripped).
 struct FleetVehicleCommandGeofencePolygonPayload: Codable, Equatable, Sendable {
     var fenceType: String
     var points: [FleetVehicleCommandGeofencePointPayload]
+
+    enum CodingKeys: String, CodingKey {
+        case fenceType
+        case points
+    }
 
     init(fenceType: String, points: [FleetVehicleCommandGeofencePointPayload]) {
         self.fenceType = fenceType
         self.points = points
     }
 
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        fenceType = try c.decode(String.self, forKey: .fenceType)
+        points = try c.decode([FleetVehicleCommandGeofencePointPayload].self, forKey: .points)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(fenceType, forKey: .fenceType)
+        try c.encode(points, forKey: .points)
+    }
+
     init(mavsdk polygon: Mavsdk.Geofence.Polygon) {
-        fenceType = Self.fenceTypeToken(polygon.fenceType)
+        fenceType = FleetVehicleCommandGeofenceFenceTypeWire.token(from: polygon.fenceType)
         points = polygon.points.map { FleetVehicleCommandGeofencePointPayload(mavsdk: $0) }
     }
 
     var mavsdkPolygon: Mavsdk.Geofence.Polygon {
-        Mavsdk.Geofence.Polygon(points: points.map(\.mavsdkPoint), fenceType: Self.fenceType(fromToken: fenceType))
+        Mavsdk.Geofence.Polygon(points: points.map(\.mavsdkPoint), fenceType: FleetVehicleCommandGeofenceFenceTypeWire.mavsdk(fromToken: fenceType))
     }
 
-    static func decodePolygons(fromJSON json: String) throws -> [Mavsdk.Geofence.Polygon] {
+    static func decodePolygonPayloads(fromJSON json: String) throws -> [FleetVehicleCommandGeofencePolygonPayload] {
         guard let data = json.data(using: .utf8) else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: [], debugDescription: "geofencePolygonsJSON is not valid UTF-8.")
             )
         }
-        let payloads = try JSONDecoder().decode([FleetVehicleCommandGeofencePolygonPayload].self, from: data)
-        return payloads.map(\.mavsdkPolygon)
+        return try JSONDecoder().decode([FleetVehicleCommandGeofencePolygonPayload].self, from: data)
+    }
+
+    static func decodePolygons(fromJSON json: String) throws -> [Mavsdk.Geofence.Polygon] {
+        try decodePolygonPayloads(fromJSON: json).map(\.mavsdkPolygon)
     }
 
     static func encodePolygonsToJSON(polygons: [Mavsdk.Geofence.Polygon]) throws -> String {
         let payloads = polygons.map { FleetVehicleCommandGeofencePolygonPayload(mavsdk: $0) }
+        return try encodePayloadsToJSON(payloads: payloads)
+    }
+
+    static func encodePayloadsToJSON(payloads: [FleetVehicleCommandGeofencePolygonPayload]) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(payloads)
@@ -998,7 +1085,49 @@ struct FleetVehicleCommandGeofencePolygonPayload: Codable, Equatable, Sendable {
         return string
     }
 
-    private static func fenceType(fromToken token: String) -> Mavsdk.Geofence.Polygon.FenceType {
+}
+
+/// JSON-portable mirror of ``Mavsdk.Geofence/Circle`` (center + radius metres) for `geofencePolygonsJSON`.
+/// Horizontal fence geometry only (no altitude metadata on the fleet wire).
+struct FleetVehicleCommandGeofenceCirclePayload: Codable, Equatable, Sendable {
+    var fenceType: String
+    var latitudeDeg: Double
+    var longitudeDeg: Double
+    /// Horizontal radius in **metres** (maps to MAVSDK ``Geofence/Circle`` `radius` float).
+    var radiusMeters: Double
+
+    enum CodingKeys: String, CodingKey {
+        case fenceType
+        case latitudeDeg = "latitude_deg"
+        case longitudeDeg = "longitude_deg"
+        case radiusMeters = "radius_meters"
+    }
+
+    init(fenceType: String, latitudeDeg: Double, longitudeDeg: Double, radiusMeters: Double) {
+        self.fenceType = fenceType
+        self.latitudeDeg = latitudeDeg
+        self.longitudeDeg = longitudeDeg
+        self.radiusMeters = radiusMeters
+    }
+
+    init(mavsdk circle: Mavsdk.Geofence.Circle) {
+        fenceType = FleetVehicleCommandGeofenceFenceTypeWire.token(from: circle.fenceType)
+        latitudeDeg = circle.point.latitudeDeg
+        longitudeDeg = circle.point.longitudeDeg
+        radiusMeters = Double(circle.radius)
+    }
+
+    var mavsdkCircle: Mavsdk.Geofence.Circle {
+        Mavsdk.Geofence.Circle(
+            point: Mavsdk.Geofence.Point(latitudeDeg: latitudeDeg, longitudeDeg: longitudeDeg),
+            radius: Float(radiusMeters),
+            fenceType: FleetVehicleCommandGeofenceFenceTypeWire.mavsdk(fromToken: fenceType)
+        )
+    }
+}
+
+private enum FleetVehicleCommandGeofenceFenceTypeWire {
+    static func mavsdk(fromToken token: String) -> Mavsdk.Geofence.FenceType {
         switch token {
         case "inclusion": return .inclusion
         case "exclusion": return .exclusion
@@ -1014,7 +1143,7 @@ struct FleetVehicleCommandGeofencePolygonPayload: Codable, Equatable, Sendable {
         }
     }
 
-    private static func fenceTypeToken(_ t: Mavsdk.Geofence.Polygon.FenceType) -> String {
+    static func token(from t: Mavsdk.Geofence.FenceType) -> String {
         switch t {
         case .inclusion: return "inclusion"
         case .exclusion: return "exclusion"
@@ -1024,13 +1153,31 @@ struct FleetVehicleCommandGeofencePolygonPayload: Codable, Equatable, Sendable {
     }
 }
 
+/// Geofence polygon vertex on the fleet wire: **lat/lon only** (no altitude / z).
 struct FleetVehicleCommandGeofencePointPayload: Codable, Equatable, Sendable {
     var latitudeDeg: Double
     var longitudeDeg: Double
 
+    enum CodingKeys: String, CodingKey {
+        case latitudeDeg
+        case longitudeDeg
+    }
+
     init(latitudeDeg: Double, longitudeDeg: Double) {
         self.latitudeDeg = latitudeDeg
         self.longitudeDeg = longitudeDeg
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        latitudeDeg = try c.decode(Double.self, forKey: .latitudeDeg)
+        longitudeDeg = try c.decode(Double.self, forKey: .longitudeDeg)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(latitudeDeg, forKey: .latitudeDeg)
+        try c.encode(longitudeDeg, forKey: .longitudeDeg)
     }
 
     init(mavsdk point: Mavsdk.Geofence.Point) {

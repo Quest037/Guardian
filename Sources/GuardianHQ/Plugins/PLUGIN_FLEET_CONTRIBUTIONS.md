@@ -50,5 +50,5 @@ Add or extend tests under `Tests/GuardianHQTests/` for manifest validation, cata
 
 ## 6. Further reading
 
-- `README.md` — “Fleet Commands & Recipes architecture”, bootstrap order, extension points.
+- `README_FULL.md` — “Fleet Commands & Recipes architecture”, bootstrap order, extension points.
 - `GuardianPluginManifest.swift` — claim validation helpers (`allowsPublishing`, `allowsInvoking`).

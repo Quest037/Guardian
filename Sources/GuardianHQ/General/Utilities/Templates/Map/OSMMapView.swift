@@ -110,7 +110,9 @@ struct GuardianGeofenceLeafletChrome: Equatable, Sendable {
     }
 }
 
+/// Live roster / hub vehicle marker for Leaflet. See ``MapVehicleMarkerIdentity`` for stable ``id`` rules.
 struct MapVehicleMarker: Equatable {
+    /// Stable map-layer key — must follow ``MapVehicleMarkerIdentity`` (not fleet tokens or stream handles).
     var id: String
     var lat: Double
     var lon: Double
@@ -185,6 +187,8 @@ struct OSMMapView: NSViewRepresentable {
     var onGeofencePolygonEdgeInsert: (UUID, Int, Double, Double) -> Void = { _, _, _, _ in }
     /// Right-click context menu on a polygon vertex: remove that corner (minimum three vertices remain).
     var onGeofencePolygonVertexDelete: (UUID, Int) -> Void = { _, _ in }
+    /// Called after a ``GuardianMapViewportNudge`` is applied in JS (typically ``GuardianMapModel/consumeViewportNudge()``).
+    var onViewportNudgeConsumed: () -> Void = {}
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -284,74 +288,41 @@ struct OSMMapView: NSViewRepresentable {
         c.onGeofencePolygonTranslated = onGeofencePolygonTranslated
         c.onGeofencePolygonEdgeInsert = onGeofencePolygonEdgeInsert
         c.onGeofencePolygonVertexDelete = onGeofencePolygonVertexDelete
-        let homeJSON: String
-        if let home {
-            homeJSON = "{\"lat\":\(home.coord.lat),\"lon\":\(home.coord.lon)}"
-        } else {
-            homeJSON = "null"
+        c.onViewportNudgeConsumed = onViewportNudgeConsumed
+        GuardianLeafletMissionBridgeProfiler.recordUpdateNSView(vehicleMarkerCount: vehicleMarkers.count)
+        let payload = GuardianLeafletMissionBridgePayload(
+            home: home,
+            allTasksCoords: allTasksCoords,
+            taskPathIDs: taskPathIDs,
+            selectedTaskWaypoints: selectedTaskWaypoints,
+            selectedWaypointIndex: selectedWaypointIndex,
+            vehicleMarkers: vehicleMarkers,
+            mapStyle: mapStyle,
+            recenterNonce: recenterNonce,
+            headingPreview: headingPreview,
+            cameraPreview: cameraPreview,
+            followedVehicleMarkerID: followedVehicleMarkerID,
+            contextMenuPolicy: contextMenuPolicy,
+            preserveView: preserveView,
+            isEditingTask: isEditingTask,
+            missionPointMarkers: missionPointMarkers,
+            missionPointPlacementArmed: missionPointPlacementArmed,
+            mcsReservePoolHomePlacementArmed: mcsReservePoolHomePlacementArmed,
+            geofenceOverlays: geofenceOverlays,
+            geofenceLeafletChrome: geofenceLeafletChrome,
+            geofenceMapLayerPointerSelectsFence: geofenceMapLayerPointerSelectsFence
+        )
+        guard payload != c.lastBridgePayload else {
+            GuardianLeafletMissionBridgeProfiler.recordPayloadUnchangedSkip()
+            c.applyViewportNudge(viewportNudge, webView: webView)
+            return
         }
-
-        let allPathsJSON = allTasksCoords.map { path in
-            "[\(path.map { "{\"lat\":\($0.lat),\"lon\":\($0.lon)}" }.joined(separator: ","))]"
-        }.joined(separator: ",")
-        let taskPathIDsJSON: String
-        if taskPathIDs.count == allTasksCoords.count, !allTasksCoords.isEmpty {
-            taskPathIDsJSON = "[\(taskPathIDs.map { Self.jsStringLiteral($0.uuidString) }.joined(separator: ","))]"
-        } else {
-            taskPathIDsJSON = "null"
-        }
-        let waypointsJSON = selectedTaskWaypoints.enumerated().map { idx, wp in
-            let anchorJSON = wp.pathRole == .anchor ? "true" : "false"
-            return "{\"idx\":\(idx),\"lat\":\(wp.coord.lat),\"lon\":\(wp.coord.lon),\"anchor\":\(anchorJSON)}"
-        }.joined(separator: ",")
-        let selectedWaypointIndexJS = selectedWaypointIndex.map(String.init) ?? "null"
-        let vehicleMarkersJSON = vehicleMarkers.map { marker in
-            let headingJSON: String
-            if let h = marker.headingDeg {
-                headingJSON = "\"heading\":\(h)"
-            } else {
-                headingJSON = "\"heading\":null"
-            }
-            let imageJSON = marker.imageDataURL.map(Self.jsStringLiteral) ?? "null"
-            let accessibilityTitleJSON = marker.accessibilityTitle.map(Self.jsStringLiteral) ?? "null"
-            return "{\"id\":\(Self.jsStringLiteral(marker.id)),\"lat\":\(marker.lat),\"lon\":\(marker.lon),\"label\":\(Self.jsStringLiteral(marker.label)),\"color\":\(Self.jsStringLiteral(marker.colorHex)),\"image\":\(imageJSON),\"showLabel\":\(marker.showLabel ? "true" : "false"),\"selected\":\(marker.selected ? "true" : "false"),\"draggable\":\(marker.draggable ? "true" : "false"),\"pendingSimSync\":\(marker.pendingSimSync ? "true" : "false"),\"selectionAttentionPulse\":\(marker.selectionAttentionPulse ? "true" : "false"),\"accessibilityTitle\":\(accessibilityTitleJSON),\(headingJSON)}"
-        }.joined(separator: ",")
-        let headingPreviewJSON: String
-        if let headingPreview {
-            headingPreviewJSON = "{\"lat\":\(headingPreview.lat),\"lon\":\(headingPreview.lon),\"heading\":\(headingPreview.heading)}"
-        } else {
-            headingPreviewJSON = "null"
-        }
-        let cameraPreviewJSON: String
-        if let cameraPreview {
-            cameraPreviewJSON = "{\"lat\":\(cameraPreview.lat),\"lon\":\(cameraPreview.lon),\"bearing\":\(cameraPreview.bearing),\"fovDeg\":\(cameraPreview.fovDeg)}"
-        } else {
-            cameraPreviewJSON = "null"
-        }
-        let followedVehicleMarkerIDJSON = followedVehicleMarkerID.map(Self.jsStringLiteral) ?? "null"
-        let missionPointsJSON = missionPointMarkers.map { m in
-            "{\"id\":\(Self.jsStringLiteral(m.id.uuidString)),\"lat\":\(m.lat),\"lon\":\(m.lon),\"chipCompact\":\(Self.jsStringLiteral(m.mapLabelCompact)),\"chipFull\":\(Self.jsStringLiteral(m.mapLabelFull)),\"kind\":\(Self.jsStringLiteral(m.kindRaw)),\"closed\":\(m.isClosed ? "true" : "false"),\"selected\":\(m.isSelected ? "true" : "false")}"
-        }.joined(separator: ",")
-        let contextMenuPolicyJSON = """
-        {"vehicleActions":[\(contextMenuPolicy.vehicleActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"waypointActions":[\(contextMenuPolicy.waypointActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"homeActions":[\(contextMenuPolicy.homeActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))],"missionPointActions":[\(contextMenuPolicy.missionPointActions.map { Self.jsStringLiteral($0.rawValue) }.joined(separator: ","))]}
-        """
-        let mcsPoolHomeArmedJS = mcsReservePoolHomePlacementArmed ? "true" : "false"
-        let geofencesJSON = geofenceOverlays.map { g in
-            let polyInner = g.polygonLatLons.map { "{\"lat\":\($0.0),\"lon\":\($0.1)}" }.joined(separator: ",")
-            let cirLat: String
-            if let v = g.circleLat { cirLat = String(v) } else { cirLat = "null" }
-            let cirLon: String
-            if let v = g.circleLon { cirLon = String(v) } else { cirLon = "null" }
-            let cirR: String
-            if let v = g.circleRadiusM { cirR = String(v) } else { cirR = "null" }
-            let boundary = g.isInclusion ? "inclusion" : "exclusion"
-            let shape = g.isPolygon ? "polygon" : "circle"
-            let sel = g.isAuthoringMapSelected ? "true" : "false"
-            return "{\"id\":\(Self.jsStringLiteral(g.id.uuidString)),\"boundary\":\(Self.jsStringLiteral(boundary)),\"shape\":\(Self.jsStringLiteral(shape)),\"polygon\":[\(polyInner)],\"circleLat\":\(cirLat),\"circleLon\":\(cirLon),\"circleRadiusM\":\(cirR),\"selected\":\(sel)}"
-        }.joined(separator: ",")
-        let geofenceChromeJSON = geofenceLeafletChrome.jsonObjectFragmentEscapedForJS()
-        let geofencePtrSelJS = geofenceMapLayerPointerSelectsFence ? "true" : "false"
-        let js = "setMissionData(\(homeJSON), [\(allPathsJSON)], \(taskPathIDsJSON), [\(waypointsJSON)], \(selectedWaypointIndexJS), [\(vehicleMarkersJSON)], \"\(mapStyle.rawValue)\", \(recenterNonce), \(headingPreviewJSON), \(cameraPreviewJSON), \(followedVehicleMarkerIDJSON), \(contextMenuPolicyJSON), \(preserveView ? "true" : "false"), \(isEditingTask ? "true" : "false"), \(missionPointPlacementArmed ? "true" : "false"), \(mcsPoolHomeArmedJS), [\(missionPointsJSON)], [\(geofencesJSON)], \(geofenceChromeJSON), \(geofencePtrSelJS));"
+        c.lastBridgePayload = payload
+        let js = Self.javascriptExpression(for: payload)
+        GuardianLeafletMissionBridgeProfiler.recordScriptBuilt(
+            byteCount: js.utf8.count,
+            vehicleMarkerCount: vehicleMarkers.count
+        )
         context.coordinator.queueMissionUpdate(script: js)
         context.coordinator.applyViewportNudge(viewportNudge, webView: webView)
     }
@@ -409,7 +380,7 @@ extension OSMMapView {
     }
 }
 
-private extension OSMMapView {
+extension OSMMapView {
     static func jsStringLiteral(_ raw: String) -> String {
         let escaped = raw
             .replacingOccurrences(of: "\\", with: "\\\\")
@@ -425,12 +396,9 @@ extension OSMMapView {
         weak var webView: WKWebView?
         private var pendingScript: String?
         private var didFinishInitialLoad = false
-        /// Latest mission script from ``updateNSView`` (may arrive in a burst when several
-        /// ``GuardianMapModel`` fields publish in the same tick).
-        private var latestMissionScript: String?
-        private var coalescedMissionWorkItem: DispatchWorkItem?
-        /// Last script we successfully pushed to JS (skip duplicate evals).
-        private var lastAppliedMissionScript: String?
+        private let missionBridgeCoalescer = GuardianLeafletMissionBridgeCoalescer()
+        /// Last ``GuardianLeafletMissionBridgePayload`` enqueued — skips JSON + bridge when ``Equatable`` unchanged.
+        fileprivate var lastBridgePayload: GuardianLeafletMissionBridgePayload?
         private var pendingViewportNudge: GuardianMapViewportNudge?
         private var lastAppliedViewportNudgeSequence: UInt64?
         /// After a layer-specific bridge message (vehicle, mission point, task path, …), Leaflet can still
@@ -464,6 +432,7 @@ extension OSMMapView {
         var onGeofencePolygonTranslated: (UUID, Double, Double) -> Void
         var onGeofencePolygonEdgeInsert: (UUID, Int, Double, Double) -> Void
         var onGeofencePolygonVertexDelete: (UUID, Int) -> Void
+        var onViewportNudgeConsumed: () -> Void = {}
 
         init(
             onMapClick: @escaping (Double, Double) -> Void,
@@ -521,27 +490,22 @@ extension OSMMapView {
             suppressBackgroundMapClickUntil = CFAbsoluteTimeGetCurrent() + 0.08
         }
 
-        /// Coalesces rapid ``updateNSView`` calls and skips identical mission payloads so the
-        /// WKWebView bridge does not tear down/rebuild every Leaflet layer dozens of times per frame.
+        /// Coalesces rapid ``updateNSView`` calls (see ``GuardianLeafletMissionBridgeCoalescer``) and skips
+        /// identical mission payloads so the WKWebView bridge does not tear down/rebuild every Leaflet layer dozens of times per frame.
         func queueMissionUpdate(script: String) {
-            latestMissionScript = script
-            coalescedMissionWorkItem?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                self?.flushMissionScriptToWebViewIfNeeded()
+            GuardianLeafletMissionBridgeProfiler.recordScriptEnqueued(byteCount: script.utf8.count)
+            missionBridgeCoalescer.enqueue(script: script) { [weak self] script in
+                self?.applyMissionScriptToWebView(script)
             }
-            coalescedMissionWorkItem = work
-            DispatchQueue.main.async(execute: work)
         }
 
-        private func flushMissionScriptToWebViewIfNeeded() {
-            guard let script = latestMissionScript else { return }
-            if script == lastAppliedMissionScript { return }
+        private func applyMissionScriptToWebView(_ script: String) {
             guard didFinishInitialLoad, let webView else {
                 pendingScript = script
                 return
             }
-            lastAppliedMissionScript = script
             pendingScript = nil
+            GuardianLeafletMissionBridgeProfiler.recordJavaScriptEval(byteCount: script.utf8.count)
             webView.evaluateJavaScript(script, completionHandler: nil)
         }
 
@@ -555,6 +519,7 @@ extension OSMMapView {
             lastAppliedViewportNudgeSequence = nudge.sequence
             pendingViewportNudge = nil
             webView.evaluateJavaScript(OSMMapView.javascriptExpression(for: nudge), completionHandler: nil)
+            onViewportNudgeConsumed()
         }
 
         private func flushPendingViewportNudgeIfLoaded(webView: WKWebView) {
@@ -563,15 +528,18 @@ extension OSMMapView {
             if nudge.sequence == lastAppliedViewportNudgeSequence { return }
             lastAppliedViewportNudgeSequence = nudge.sequence
             webView.evaluateJavaScript(OSMMapView.javascriptExpression(for: nudge), completionHandler: nil)
+            onViewportNudgeConsumed()
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             didFinishInitialLoad = true
-            lastAppliedMissionScript = nil
-            let script = latestMissionScript ?? pendingScript
+            missionBridgeCoalescer.noteWebViewReloaded()
+            lastBridgePayload = nil
+            let script = missionBridgeCoalescer.latestScript ?? pendingScript
             if let script {
-                lastAppliedMissionScript = script
                 pendingScript = nil
+                missionBridgeCoalescer.noteScriptApplied(script)
+                GuardianLeafletMissionBridgeProfiler.recordJavaScriptEval(byteCount: script.utf8.count)
                 webView.evaluateJavaScript(script, completionHandler: nil)
             }
             flushPendingViewportNudgeIfLoaded(webView: webView)
@@ -962,7 +930,7 @@ private extension OSMMapView {
         try { map.removeLayer(lyr); } catch (e) {}
       }
     }
-    const state = { lastDataSignature: null, lastRecenterNonce: -1, lastFullMissionSig: null, lastStructureSig: null };
+    const state = { lastDataSignature: null, lastRecenterNonce: -1, lastFullMissionSig: null, lastStructureSig: null, lastFollowPanLatLon: null };
     let contextMenuEl = null;
     let followedVehicleMarkerID = null;
     let contextMenuPolicy = { vehicleActions: [], waypointActions: [], homeActions: [], missionPointActions: [] };
@@ -1648,6 +1616,27 @@ private extension OSMMapView {
       return { afterIndex, lat, lng };
     }
 
+    /** Follow mode: pan only when the followed marker moves — not on every hub-driven marker-only patch. */
+    function guardianMaybePanToFollowMarker(missionVehicleMarkers) {
+      if (!followedVehicleMarkerID) {
+        state.lastFollowPanLatLon = null;
+        return;
+      }
+      const followMarker = (missionVehicleMarkers || []).find((m) => m.id === followedVehicleMarkerID);
+      if (!followMarker || !Number.isFinite(followMarker.lat) || !Number.isFinite(followMarker.lon)) {
+        return;
+      }
+      const lat = followMarker.lat;
+      const lon = followMarker.lon;
+      const last = state.lastFollowPanLatLon;
+      const eps = 1e-7;
+      if (last && Math.abs(last.lat - lat) < eps && Math.abs(last.lon - lon) < eps) {
+        return;
+      }
+      state.lastFollowPanLatLon = { lat: lat, lon: lon };
+      map.panTo([lat, lon], { animate: true, duration: 0.25 });
+    }
+
     function setMissionData(home, allTasksCoords, taskPathIds, selectedWaypoints, selectedWaypointIndex, missionVehicleMarkers, mapStyle, recenterNonce, headingPreview, cameraPreview, followVehicleMarkerID, menuPolicy, preserveView, isEditingTask, missionPointPlacementArmed, mcsReservePoolHomePlacementArmed, missionPointMarkersArg, geofenceOverlaysArg, geofenceChrome, geofencePointerSelects) {
       const geometryTasks = (allTasksCoords || []).filter(path => path && path.length > 0);
       const fullMissionSig = JSON.stringify({
@@ -1698,7 +1687,11 @@ private extension OSMMapView {
       const canPatchMarkersOnly = state.lastStructureSig !== null && structureSig === state.lastStructureSig;
 
       if (canPatchMarkersOnly) {
+        const prevFollowedVehicleMarkerID = followedVehicleMarkerID;
         followedVehicleMarkerID = followVehicleMarkerID || null;
+        if (prevFollowedVehicleMarkerID !== followedVehicleMarkerID) {
+          state.lastFollowPanLatLon = null;
+        }
         contextMenuPolicy = menuPolicy || { vehicleActions: [], waypointActions: [], homeActions: [], missionPointActions: [] };
         applyStyle(mapStyle);
         map.getContainer().style.cursor = (isEditingTask || missionPointPlacementArmed || mcsReservePoolHomePlacementArmed) ? 'pointer' : '';
@@ -1721,24 +1714,13 @@ private extension OSMMapView {
         });
         rebuildVehicleAndMissionPointMarkers(missionVehicleMarkers, missionPointMarkersArg, points);
 
-        if (followedVehicleMarkerID) {
-          const followMarker = (missionVehicleMarkers || []).find((m) => m.id === followedVehicleMarkerID);
-          if (followMarker && Number.isFinite(followMarker.lat) && Number.isFinite(followMarker.lon)) {
-            map.panTo([followMarker.lat, followMarker.lon], { animate: true, duration: 0.25 });
-          }
-        }
+        guardianMaybePanToFollowMarker(missionVehicleMarkers);
 
-        const dataSignature = JSON.stringify({
-          home: home,
-          geometryTasks: geometryTasks,
-          missionVehicleMarkers: missionVehicleMarkers
-        });
-        const dataChanged = state.lastDataSignature !== dataSignature;
-        state.lastDataSignature = dataSignature;
+        /** Hub-driven marker motion: never auto-fit from vehicle position churn — only explicit ``recenterNonce``. */
         const forceRecenter = state.lastRecenterNonce !== recenterNonce;
         state.lastRecenterNonce = recenterNonce;
 
-        if ((dataChanged && !preserveView) || forceRecenter) {
+        if (forceRecenter) {
           const collapsed = collapsedCenterIfAllSame(points);
           if (collapsed) {
             map.setView(collapsed, defaultSinglePointZoom);
@@ -1764,7 +1746,11 @@ private extension OSMMapView {
         return;
       }
 
+      const prevFollowedVehicleMarkerIDFull = followedVehicleMarkerID;
       followedVehicleMarkerID = followVehicleMarkerID || null;
+      if (prevFollowedVehicleMarkerIDFull !== followedVehicleMarkerID) {
+        state.lastFollowPanLatLon = null;
+      }
       contextMenuPolicy = menuPolicy || { vehicleActions: [], waypointActions: [], homeActions: [], missionPointActions: [] };
       if (headingCone) { map.removeLayer(headingCone); headingCone = null; }
       if (cameraCone) { map.removeLayer(cameraCone); cameraCone = null; }
@@ -2132,12 +2118,7 @@ private extension OSMMapView {
 
       rebuildVehicleAndMissionPointMarkers(missionVehicleMarkers, missionPointMarkersArg, points);
 
-      if (followedVehicleMarkerID) {
-        const followMarker = (missionVehicleMarkers || []).find((m) => m.id === followedVehicleMarkerID);
-        if (followMarker && Number.isFinite(followMarker.lat) && Number.isFinite(followMarker.lon)) {
-          map.panTo([followMarker.lat, followMarker.lon], { animate: true, duration: 0.25 });
-        }
-      }
+      guardianMaybePanToFollowMarker(missionVehicleMarkers);
 
       if (headingPreview && Number.isFinite(headingPreview.lat) && Number.isFinite(headingPreview.lon) && Number.isFinite(headingPreview.heading)) {
         const coneColor = headingColor(headingPreview.heading);

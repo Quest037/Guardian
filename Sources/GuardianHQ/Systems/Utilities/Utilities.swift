@@ -5,13 +5,49 @@ import Mavsdk
 final class GlobalUtilities {
     let mission = MissionUtilities()
     let fleet = FleetUtilities()
+    let liveLeafletMap = LiveLeafletMapUtilitiesNamespace()
 }
 
+@MainActor
 enum Utilities {
     private static let global = GlobalUtilities()
 
     static var mission: MissionUtilities { global.mission }
     static var fleet: FleetUtilities { global.fleet }
+    static var liveLeafletMap: LiveLeafletMapUtilitiesNamespace { global.liveLeafletMap }
+}
+
+/// Namespace for ``LiveLeafletMapMarkerBuildInputs`` and Phase B marker builder APIs.
+@MainActor
+struct LiveLeafletMapUtilitiesNamespace {
+    /// Shared roster-art cache for live maps (MC-R, Live Drive, MCS). Safe across hub ticks.
+    let markerImageCache = LiveLeafletMapMarkerCache()
+
+    typealias MarkerBuildInputs = LiveLeafletMapMarkerBuildInputs
+    typealias MarkerFocus = LiveLeafletMapMarkerFocus
+    typealias MarkerImageCache = LiveLeafletMapMarkerCache
+    typealias MarkerBuildResult = LiveLeafletMapMarkerBuildResult
+
+    func buildMapVehicleMarkersLive(
+        inputs: LiveLeafletMapMarkerBuildInputs,
+        imageCache: LiveLeafletMapMarkerCache? = nil,
+        rosterAccessibilityTitle: ((MissionRunAssignment, Mission) -> String?)? = nil
+    ) -> LiveLeafletMapMarkerBuildResult {
+        let cache = imageCache ?? markerImageCache
+        return LiveLeafletMapUtilities.buildMapVehicleMarkersLive(
+            inputs: inputs,
+            imageCache: cache,
+            rosterAccessibilityTitle: rosterAccessibilityTitle
+        )
+    }
+
+    func buildMCSStagingMapVehicleMarkers(
+        inputs: LiveLeafletMapMCSStagingMarkerBuildInputs,
+        imageCache: LiveLeafletMapMarkerCache? = nil
+    ) -> LiveLeafletMapMarkerBuildResult {
+        let cache = imageCache ?? markerImageCache
+        return LiveLeafletMapUtilities.buildMCSStagingMapVehicleMarkers(inputs: inputs, imageCache: cache)
+    }
 }
 
 @MainActor

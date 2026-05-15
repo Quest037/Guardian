@@ -215,6 +215,18 @@ struct GuardianMapViewportNudge: Equatable {
     var kind: Kind
 }
 
+/// Route geometry and live vehicle markers published together so one hub tick can update both
+/// without fanning out two ``ObservableObject`` notifications (see ``GuardianMapModel/applyMapContent(routeGeometry:vehicleMarkers:)``).
+struct GuardianMapPublishedContent: Equatable {
+    var routeGeometry: GuardianRouteMapGeometry
+    var vehicleMarkers: [MapVehicleMarker]
+
+    static let empty = GuardianMapPublishedContent(
+        routeGeometry: .empty,
+        vehicleMarkers: []
+    )
+}
+
 /// Shared, observable state for a Leaflet-backed `OSMMapView`. One source of truth
 /// for tile style, content (home / paths / waypoints / vehicle markers / previews),
 /// and recenter requests, so call sites can `pull in` a single model instead of
@@ -222,9 +234,50 @@ struct GuardianMapViewportNudge: Equatable {
 @MainActor
 final class GuardianMapModel: ObservableObject {
     @Published var mapStyle: MapTileStyle
-    @Published var routeGeometry: GuardianRouteMapGeometry
-    @Published var vehicleMarkers: [MapVehicleMarker]
+    @Published private(set) var mapContent: GuardianMapPublishedContent
     @Published var followedVehicleMarkerID: String?
+
+    var routeGeometry: GuardianRouteMapGeometry {
+        get { mapContent.routeGeometry }
+        set { publishMapContent(routeGeometry: newValue, vehicleMarkers: mapContent.vehicleMarkers) }
+    }
+
+    var vehicleMarkers: [MapVehicleMarker] {
+        get { mapContent.vehicleMarkers }
+        set { publishMapContent(routeGeometry: mapContent.routeGeometry, vehicleMarkers: newValue) }
+    }
+
+    /// Applies route geometry and vehicle markers in a **single** publish (preferred over back-to-back property sets).
+    func applyMapContent(
+        routeGeometry: GuardianRouteMapGeometry,
+        vehicleMarkers: [MapVehicleMarker]
+    ) {
+        publishMapContent(routeGeometry: routeGeometry, vehicleMarkers: vehicleMarkers)
+    }
+
+    /// Hub-driven motion: update markers only when ``routeGeometry`` is unchanged (skips route publish + static overlay rebuild).
+    func applyVehicleMarkersOnly(_ vehicleMarkers: [MapVehicleMarker]) {
+        GuardianMapLiveViewportPolicy.assertHubDrivenPreserveViewIfNeeded(
+            preserveView: mapContent.routeGeometry.preserveView
+        )
+        guard mapContent.vehicleMarkers != vehicleMarkers else { return }
+        publishMapContent(routeGeometry: mapContent.routeGeometry, vehicleMarkers: vehicleMarkers)
+    }
+
+    /// Clears ``viewportNudge`` after Leaflet applied the one-shot operator framing request.
+    func consumeViewportNudge() {
+        guard viewportNudge != nil else { return }
+        viewportNudge = nil
+    }
+
+    private func publishMapContent(
+        routeGeometry: GuardianRouteMapGeometry,
+        vehicleMarkers: [MapVehicleMarker]
+    ) {
+        let next = GuardianMapPublishedContent(routeGeometry: routeGeometry, vehicleMarkers: vehicleMarkers)
+        guard mapContent != next else { return }
+        mapContent = next
+    }
 
     /// Bumping this nonce asks `OSMMapView`'s JS side to re-fit / recenter on the
     /// next render even when `preserveView` is `true`.
@@ -241,8 +294,10 @@ final class GuardianMapModel: ObservableObject {
         followedVehicleMarkerID: String? = nil
     ) {
         self.mapStyle = mapStyle
-        self.routeGeometry = routeGeometry
-        self.vehicleMarkers = vehicleMarkers
+        self.mapContent = GuardianMapPublishedContent(
+            routeGeometry: routeGeometry,
+            vehicleMarkers: vehicleMarkers
+        )
         self.followedVehicleMarkerID = followedVehicleMarkerID
         self.viewportNudge = nil
     }
@@ -258,7 +313,7 @@ final class GuardianMapModel: ObservableObject {
     /// reset button and by callers that change selection, etc.).
     func recenter() { recenterNonce &+= 1 }
 
-    /// Pan the map centre to ``lat``/``lon`` without changing zoom (MC-R triage shortcuts).
+    /// Pan the map centre to ``lat``/``lon`` without changing zoom (MC-R triage shortcuts). Does not bump ``recenterNonce``.
     func focusMapPanRetainZoom(lat: Double, lon: Double) {
         viewportNudgeSequence &+= 1
         viewportNudge = GuardianMapViewportNudge(sequence: viewportNudgeSequence, kind: .panRetainZoom(lat: lat, lon: lon))
@@ -485,7 +540,8 @@ struct GuardianMapView: View {
                 onGeofencePolygonVertexMoved: onGeofencePolygonVertexMoved,
                 onGeofencePolygonTranslated: onGeofencePolygonTranslated,
                 onGeofencePolygonEdgeInsert: onGeofencePolygonEdgeInsert,
-                onGeofencePolygonVertexDelete: onGeofencePolygonVertexDelete
+                onGeofencePolygonVertexDelete: onGeofencePolygonVertexDelete,
+                onViewportNudgeConsumed: { model.consumeViewportNudge() }
             )
 
             if toolbar.hasAnyVisibleButton {

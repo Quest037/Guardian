@@ -678,8 +678,10 @@ struct SettingsView: View {
                     .task(id: simSpawnDraftSignature) {
                         var geo = simSpawnMapModel.routeGeometry
                         geo.home = simSpawnDraftHome
-                        simSpawnMapModel.routeGeometry = geo
-                        simSpawnMapModel.vehicleMarkers = [simSpawnDraftMarker]
+                        simSpawnMapModel.applyMapContent(
+                            routeGeometry: geo,
+                            vehicleMarkers: [simSpawnDraftMarker]
+                        )
                     }
                     .frame(minHeight: 420)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -708,7 +710,7 @@ struct SettingsView: View {
 
     private var simSpawnDraftMarker: MapVehicleMarker {
         MapVehicleMarker(
-            id: "sim-spawn-default",
+            id: MapVehicleMarkerIdentity.simSpawnDraft,
             lat: draftSimLatitudeDeg,
             lon: draftSimLongitudeDeg,
             label: "SIM Default",

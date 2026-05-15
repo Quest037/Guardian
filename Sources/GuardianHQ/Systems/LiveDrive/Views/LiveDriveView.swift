@@ -14,6 +14,8 @@ struct LiveDriveView: View {
     @EnvironmentObject private var operatorPromptReviewFocus: OperatorPromptReviewFocusController
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var mapModel = GuardianMapModel(preserveView: true)
+    @StateObject private var hubMarkerApplyThrottle = LiveLeafletMapHubMarkerApplyThrottle()
+    @StateObject private var liveDriveVehicleBuildCache = LiveLeafletMapPerHubVehicleBuildCache()
     @State private var vehiclePickerVisible = false
     @State private var mediaTab: LiveDriveMediaTab = .map
     @State private var sessionStartInFlight = false
@@ -249,7 +251,7 @@ struct LiveDriveView: View {
         let slotLabel = liveMissionRosterContext?.slotName ?? ""
         return [
             MapVehicleMarker(
-                id: id,
+                id: MapVehicleMarkerIdentity.fleetHubVehicle(id),
                 lat: lat,
                 lon: lon,
                 label: slotLabel,
@@ -261,17 +263,6 @@ struct LiveDriveView: View {
                 headingDeg: hub.headingDeg
             ),
         ]
-    }
-
-    /// Equatable signature so `.task(id:)` only re-pushes the marker into the
-    /// shared map model when the underlying lat/lon/heading changes.
-    private var liveDriveMarkerSignature: LiveDriveMarkerSignature {
-        LiveDriveMarkerSignature(
-            vehicleID: selectedVehicleID,
-            lat: selectedHub?.latitudeDeg,
-            lon: selectedHub?.longitudeDeg,
-            headingDeg: selectedHub?.headingDeg
-        )
     }
 
     private var liveDriveActiveMissionRun: MissionRunEnvironment? {
@@ -298,23 +289,101 @@ struct LiveDriveView: View {
         return nil
     }
 
-    private var liveDriveLiveMissionMapSyncSignature: String {
-        let tab = String(describing: mediaTab)
+    /// Topology-only identity for `.task(id:)` — excludes hub lat/lon (see ``liveDriveMapMarkerMotionDigest``).
+    private var liveDriveMapStructureSyncIdentity: LiveDriveMapStructureSyncIdentity {
+        let vid = selectedVehicleID
         guard vehicleIsInLiveMission,
               let run = liveDriveActiveMissionRun,
               let mission = run.template,
+              let vid
+        else {
+            return LiveDriveMapStructureSyncIdentity(
+                mediaTab: mediaTab,
+                vehicleID: vid,
+                isMissionOverlay: false,
+                runID: nil,
+                missionID: nil,
+                focusedTaskID: nil,
+                taskPathIDs: [],
+                missionPointTopologySignature: "",
+                showMissionGeofencesOnMap: false,
+                missionGeofenceTemplateTopologySignature: "",
+                missionControlRunGeofenceAugmentationTopologySignature: ""
+            )
+        }
+        let focus = liveDriveLiveMissionFocusedTaskID
+        let pathIDs = MissionControlLiveDriveMapOverlay.taskPathPayload(
+            mission: mission,
+            focusedTaskID: focus
+        ).ids
+        let topo = MissionPoint.filteredForMissionControlLiveMap(
+            run.runtimeMissionPoints,
+            focusedTaskID: focus
+        )
+        .map { mp in
+            "\(mp.id.uuidString)|\(mp.kind.rawValue)|\(mp.isClosed)"
+        }
+        .joined(separator: ";")
+        return LiveDriveMapStructureSyncIdentity(
+            mediaTab: mediaTab,
+            vehicleID: vid,
+            isMissionOverlay: true,
+            runID: run.id,
+            missionID: mission.id,
+            focusedTaskID: focus,
+            taskPathIDs: pathIDs,
+            missionPointTopologySignature: topo,
+            showMissionGeofencesOnMap: run.operatorDisplaySettings.showMissionGeofencesOnMap,
+            missionGeofenceTemplateTopologySignature: mission.missionGeofenceTemplateTopologySignature(),
+            missionControlRunGeofenceAugmentationTopologySignature: run.missionControlRunGeofenceAugmentationTopologySignature()
+        )
+    }
+
+    private var liveDriveMissionPointCoordinateDigest: String {
+        guard let run = liveDriveActiveMissionRun else { return "" }
+        return MissionPoint.filteredForMissionControlLiveMap(
+            run.runtimeMissionPoints,
+            focusedTaskID: liveDriveLiveMissionFocusedTaskID
+        )
+        .map { mp in
+            String(format: "%@:%.5f:%.5f", mp.id.uuidString, mp.coordinate.lat, mp.coordinate.lon)
+        }
+        .joined(separator: "|")
+    }
+
+    private var liveDriveFreestyleMarkerMotionDigest: String {
+        guard let id = selectedVehicleID,
+              let hub = selectedHub,
+              let lat = hub.latitudeDeg,
+              let lon = hub.longitudeDeg
+        else { return "" }
+        return LiveLeafletMapMarkerMotionDigest.make(from: [
+            LiveLeafletMapMarkerMotionSample(
+                id: MapVehicleMarkerIdentity.fleetHubVehicle(id),
+                lat: lat,
+                lon: lon,
+                headingDeg: hub.headingDeg ?? hub.yawDeg
+            ),
+        ])
+    }
+
+    private var liveDriveMissionMapPresentationKey: String {
+        guard let run = liveDriveActiveMissionRun,
+              let mission = run.template,
+              let vid = selectedVehicleID
+        else { return "" }
+        let focus = liveDriveLiveMissionFocusedTaskID?.uuidString ?? ""
+        return "\(run.id.uuidString)|\(mission.id.uuidString)|\(vid)|\(focus)"
+    }
+
+    private func liveDriveMissionMapBuild() -> LiveLeafletMapMarkerBuildResult {
+        guard let run = liveDriveActiveMissionRun,
+              let mission = run.template,
               let vid = selectedVehicleID
         else {
-            let m = liveDriveMarkerSignature
-            return "free|\(tab)|\(m.vehicleID ?? "")|\(String(describing: m.lat))|\(String(describing: m.lon))|\(String(describing: m.headingDeg))"
+            return LiveLeafletMapMarkerBuildResult(markers: [], motionDigest: "", motionSamples: [])
         }
-        let focus = liveDriveLiveMissionFocusedTaskID?.uuidString ?? "none"
-        let path = MissionControlLiveDriveMapOverlay.taskPathPayload(mission: mission, focusedTaskID: liveDriveLiveMissionFocusedTaskID)
-        let pathKey = path.ids.map(\.uuidString).joined(separator: ",")
-        let pts = MissionPoint.filteredForMissionControlLiveMap(run.runtimeMissionPoints, focusedTaskID: liveDriveLiveMissionFocusedTaskID)
-            .map { "\($0.id.uuidString)|\(String(format: "%.5f", $0.coordinate.lat))|\(String(format: "%.5f", $0.coordinate.lon))|\($0.isClosed)" }
-            .joined(separator: ";")
-        let markers = MissionControlLiveDriveMapOverlay.vehicleMarkers(
+        return MissionControlLiveDriveMapOverlay.buildLiveMap(
             run: run,
             mission: mission,
             focusedTaskID: liveDriveLiveMissionFocusedTaskID,
@@ -322,29 +391,42 @@ struct LiveDriveView: View {
             fleetLink: fleetLink,
             sitl: sitl
         )
-        let veh = markers.map { "\($0.id)|\(String(format: "%.5f", $0.lat))|\(String(format: "%.5f", $0.lon))|\($0.headingDeg ?? 0)" }
-            .joined(separator: "|")
-        return "m|\(run.id.uuidString)|\(mission.id.uuidString)|\(focus)|\(pathKey)|\(pts)|\(veh)|\(tab)"
     }
 
-    private func syncLiveDriveMapContentFromModel() {
+    private func liveDriveCachedMissionMapBuild() -> LiveLeafletMapMarkerBuildResult {
+        liveDriveVehicleBuildCache.build(
+            hubSampleToken: LiveLeafletMapHubSampleToken.fromHubTelemetryByVehicleID(fleetLink.hubTelemetryByVehicleID),
+            presentationKey: liveDriveMissionMapPresentationKey
+        ) {
+            liveDriveMissionMapBuild()
+        }
+    }
+
+    /// Quantized hub motion + runtime map-point coordinates; drives marker-only pushes without rebuilding polylines/geofences.
+    private var liveDriveMapMarkerMotionDigest: String {
+        guard vehicleIsInLiveMission,
+              let run = liveDriveActiveMissionRun,
+              run.template != nil,
+              selectedVehicleID != nil
+        else {
+            return liveDriveFreestyleMarkerMotionDigest
+        }
+        return liveDriveMissionPointCoordinateDigest + "§" + liveDriveCachedMissionMapBuild().motionDigest
+    }
+
+    private func syncLiveDriveMapStructureFromModel() {
         if vehicleIsInLiveMission,
            let run = liveDriveActiveMissionRun,
            let mission = run.template,
            let vid = selectedVehicleID {
-            mapModel.routeGeometry = MissionControlLiveDriveMapOverlay.routeGeometry(
-                mission: mission,
-                run: run,
-                focusedTaskID: liveDriveLiveMissionFocusedTaskID,
-                selectedMissionPointID: nil
-            )
-            mapModel.vehicleMarkers = MissionControlLiveDriveMapOverlay.vehicleMarkers(
-                run: run,
-                mission: mission,
-                focusedTaskID: liveDriveLiveMissionFocusedTaskID,
-                ldStreamVehicleID: vid,
-                fleetLink: fleetLink,
-                sitl: sitl
+            mapModel.applyMapContent(
+                routeGeometry: MissionControlLiveDriveMapOverlay.routeGeometry(
+                    mission: mission,
+                    run: run,
+                    focusedTaskID: liveDriveLiveMissionFocusedTaskID,
+                    selectedMissionPointID: nil
+                ),
+                vehicleMarkers: liveDriveCachedMissionMapBuild().markers
             )
             if mediaTab == .map, liveDriveLiveMissionMapZoomAppliedVehicleKey != vid {
                 fitLiveDriveMapToVisibleContent(mapModel)
@@ -353,8 +435,46 @@ struct LiveDriveView: View {
             return
         }
         liveDriveLiveMissionMapZoomAppliedVehicleKey = nil
-        mapModel.routeGeometry = .empty
-        mapModel.vehicleMarkers = selectedVehicleMarker
+        mapModel.applyMapContent(routeGeometry: .empty, vehicleMarkers: selectedVehicleMarker)
+    }
+
+    private func pushLiveDriveMapMarkersOnly() {
+        LiveLeafletMapMarkerPipelineProfiler.recordMarkerOnlyApply()
+        if vehicleIsInLiveMission,
+           let run = liveDriveActiveMissionRun,
+           let mission = run.template,
+           let vid = selectedVehicleID {
+            let expectedIDs = MissionControlLiveDriveMapOverlay.taskPathPayload(
+                mission: mission,
+                focusedTaskID: liveDriveLiveMissionFocusedTaskID
+            ).ids
+            if mapModel.routeGeometry.taskPathIDs != expectedIDs {
+                syncLiveDriveMapStructureFromModel()
+                return
+            }
+            var geo = mapModel.routeGeometry
+            geo.missionPointMarkers = MissionControlLiveDriveMapOverlay.guardianMissionPointMarkers(
+                runtimePoints: run.runtimeMissionPoints,
+                focusedTaskID: liveDriveLiveMissionFocusedTaskID,
+                selectedMissionPointID: nil
+            )
+            let markers = liveDriveCachedMissionMapBuild().markers
+            if geo == mapModel.routeGeometry {
+                mapModel.applyVehicleMarkersOnly(markers)
+            } else {
+                mapModel.applyMapContent(routeGeometry: geo, vehicleMarkers: markers)
+            }
+            if let followID = mapModel.followedVehicleMarkerID,
+               !markers.contains(where: { $0.id == followID }) {
+                mapModel.followedVehicleMarkerID = nil
+            }
+            return
+        }
+        mapModel.applyVehicleMarkersOnly(selectedVehicleMarker)
+        if let followID = mapModel.followedVehicleMarkerID,
+           !selectedVehicleMarker.contains(where: { $0.id == followID }) {
+            mapModel.followedVehicleMarkerID = nil
+        }
     }
 
     /// Same bbox inputs as MC‑R ``MissionControlSetupView/fitLiveOverviewMapToVisibleMissionContent()`` (home, paths, runtime map points, live markers).
@@ -365,15 +485,7 @@ struct LiveDriveView: View {
            let vid = selectedVehicleID {
             let focus = liveDriveLiveMissionFocusedTaskID
             let pathPayload = MissionControlLiveDriveMapOverlay.taskPathPayload(mission: mission, focusedTaskID: focus)
-            let markers = MissionControlLiveDriveMapOverlay.vehicleMarkers(
-                run: run,
-                mission: mission,
-                focusedTaskID: focus,
-                ldStreamVehicleID: vid,
-                fleetLink: fleetLink,
-                sitl: sitl
-            )
-            let vehicleLL = markers.map { ($0.lat, $0.lon) }
+            let vehicleLL = liveDriveCachedMissionMapBuild().markers.map { ($0.lat, $0.lon) }
             let pts = MissionControlLiveMapFitCoordinates.liveOverviewMissionContentPoints(
                 homeCoordinate: mission.routeMacro.home?.coord,
                 taskPathCoordinates: pathPayload.coords,
@@ -1026,12 +1138,12 @@ struct LiveDriveView: View {
                                 }
                             }
                         )
-                        .task(id: liveDriveLiveMissionMapSyncSignature) {
-                            syncLiveDriveMapContentFromModel()
-                            if let followID = mapModel.followedVehicleMarkerID,
-                               !mapModel.vehicleMarkers.contains(where: { $0.id == followID }) {
-                                mapModel.followedVehicleMarkerID = nil
-                            }
+                        .task(id: liveDriveMapStructureSyncIdentity) {
+                            liveDriveVehicleBuildCache.invalidate()
+                            syncLiveDriveMapStructureFromModel()
+                        }
+                        .onChange(of: liveDriveMapMarkerMotionDigest) { _ in
+                            hubMarkerApplyThrottle.requestCoalesced { pushLiveDriveMapMarkersOnly() }
                         }
                     case .camera:
                         ZStack {
@@ -1789,11 +1901,19 @@ extension ManualControlStream.Mode {
     }
 }
 
-private struct LiveDriveMarkerSignature: Equatable {
+/// Topology-only inputs for Live Drive `.task(id:)` map sync (paths, geofences, mission-point metadata — not hub coordinates).
+private struct LiveDriveMapStructureSyncIdentity: Equatable {
+    let mediaTab: LiveDriveMediaTab
     let vehicleID: String?
-    let lat: Double?
-    let lon: Double?
-    let headingDeg: Double?
+    let isMissionOverlay: Bool
+    let runID: UUID?
+    let missionID: UUID?
+    let focusedTaskID: UUID?
+    let taskPathIDs: [UUID]
+    let missionPointTopologySignature: String
+    let showMissionGeofencesOnMap: Bool
+    let missionGeofenceTemplateTopologySignature: String
+    let missionControlRunGeofenceAugmentationTopologySignature: String
 }
 
 private struct LiveDriveVehiclePickerSidebar: View {

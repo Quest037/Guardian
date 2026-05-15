@@ -1,7 +1,7 @@
 # Fleet Commands Catalogue — Reference (Layer 0)
 
 Authoritative reference for the Layer 0 universal command catalogue. Companion to
-`README.md` (**Fleet Commands & Recipes architecture**) and deferred product notes in
+`README_FULL.md` (**Fleet Commands & Recipes architecture**) and deferred product notes in
 `NEXTVERSION.md` where relevant. Read this when authoring a new command, a new stack converter, a new recipe
 that consumes commands, or a plugin that contributes commands.
 

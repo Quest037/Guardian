@@ -9,7 +9,7 @@ When the operator’s message **includes the phrase** `(save for next version)` 
 
 ## What to do
 
-1. **Open or create** `NEXTVERSION.md` at the **repository root** (alongside `README.md` and `TODO.md`).
+1. **Open or create** `NEXTVERSION.md` at the **repository root** (alongside `README.md`, `README_FULL.md`, and `TODO.md`).
 2. **Append** one new capture block at the **end** of the file (after the horizontal rule / comment marker). Do **not** remove or rewrite existing captures unless the operator explicitly asks to edit or dedupe them.
 3. Write **only** what was being discussed in that turn (and immediate thread context): no unrelated polish, no drive-by README edits.
 
@@ -31,5 +31,5 @@ Use this structure every time — keep it **short** (roughly one screenful max p
 
 ## What not to do
 
-- Do not move captures into `TODO.md` or `README.md` unless the operator asks.
+- Do not move captures into `TODO.md` or `README_FULL.md` unless the operator asks.
 - Do not implement the deferred work as part of this capture unless they also asked you to build it.

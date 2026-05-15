@@ -1,5 +1,5 @@
 ---
-description: Delete completed todo items and migrate any retained info to README.md
+description: Delete completed todo items and migrate any retained info to README_FULL.md
 alwaysApply: true
 ---
 
@@ -16,7 +16,7 @@ This applies to every todo / tracker file in the repo, including but not limited
 
 ## When a task is complete
 
-1. **Migrate retained info to `README.md`** before deleting the task. Retained info
+1. **Migrate retained info to `README_FULL.md`** before deleting the task. Retained info
    is anything a future contributor would need that **isn't already obvious from
    the code itself**:
    - Locked architectural decisions / conventions.
@@ -59,7 +59,7 @@ Skip migrating any of the following — these are task-history cruft, not docs:
 - [ ] Implement FleetRecipeRunner
 ```
 
-And `README.md` gains a section (e.g. "Fleet Commands & Recipes architecture")
+And `README_FULL.md` gains a section (e.g. "Fleet Commands & Recipes architecture")
 that documents the locked decisions / vocabulary / directory layout permanently.
 
 ## When the todo file becomes empty
@@ -73,6 +73,6 @@ do not.
 
 - The user may explicitly ask for a closure note to remain (e.g. "leave a one-line
   note that I migrated this last week"). Honour that, but it's the exception.
-- If retained info doesn't belong in `README.md` (e.g. it's specific to a single
+- If retained info doesn't belong in `README_FULL.md` (e.g. it's specific to a single
   subsystem and the subsystem has its own doc file), migrate there instead — the
   point is "info lives somewhere durable", not specifically README.

@@ -28,7 +28,7 @@
   - RC presence gating: hide the RC marker (or label it "No RC bound") until `rcWasAvailableOnce == true`, so it stops being an amber line in pure-sim runs.
   - **Calibration commands + recipes:** Layer 0 `do.calibrate.*` catalogue + Layer 1
     `recipe.fleet.calibrate.*` / diagnose / error-fix recipes ship in-tree; see
-    `README.md` (Fleet Commands & Recipes) and `CommandsCatalogueDoc.md` §6. **Vehicle
+    `README_FULL.md` (Fleet Commands & Recipes) and `CommandsCatalogueDoc.md` §6. **Vehicle
     Inspector wizard + inline escalation** — `NEXTVERSION.md` → **Vehicle Inspector recipe wizard (Stage E)**.
   - Manual Calibration Process (live + sim): **Stage E** wizard in
     `NEXTVERSION.md` Stage E capture (replaces one-off hardcoded flows).
@@ -60,7 +60,7 @@
 ### Commands Catalogue
 
 Fleet **mission** command atoms and composites still to add: see **FleetCommands** below.
-Core fleet vehicle catalogue + recipes: `README.md` (Fleet Commands & Recipes architecture).
+Core fleet vehicle catalogue + recipes: `README_FULL.md` (Fleet Commands & Recipes architecture).
 
 ### Controllers System
 The controllers system is designed to allow a user to control a linked vehicle with either their keyboard or a connected game controller/joystick. It will also possible to do a hybrid joystick + keyboard.
@@ -200,7 +200,7 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 
 #### Scheduling
 
-- **MRE Scheduling:** 
+- **MRE Scheduling:**
   
 - **AbortPolicy:** 
   - Trigger a task to move into aborting/aborted (buggy)

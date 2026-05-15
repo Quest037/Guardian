@@ -615,6 +615,9 @@ struct MissionRunDetailView: View {
     /// owns the tile style, recenter nonce, and the per-tab content that gets
     /// pushed in via `.task(id:)`.
     @StateObject private var mapModel: GuardianMapModel
+    @StateObject private var hubMarkerApplyThrottle = LiveLeafletMapHubMarkerApplyThrottle()
+    @StateObject private var liveOverviewVehicleBuildCache = LiveLeafletMapPerHubVehicleBuildCache()
+    @StateObject private var setupStagingVehicleBuildCache = LiveLeafletMapPerHubVehicleBuildCache()
     /// MC-R: focused task triage — filters the live mission log and roster to this task; shows triage sheet on Tasks card.
     @State private var focusedLiveTaskID: UUID? = nil
     /// MC-R: focused roster slot triage — slides a vehicle detail sheet up over the Tasks card.
@@ -626,6 +629,8 @@ struct MissionRunDetailView: View {
     @State private var liveReservePoolBrowseTaskID: UUID? = nil
     /// MC-R: reserve pool berth detail sheet (above roster vehicle overlay, below map points).
     @State private var focusedLiveReservePoolBerth: LiveReservePoolBerthFocus? = nil
+    /// Last ``liveRuntimeMcrLiveMapGeofenceAuthoringDigest`` applied in ``pushLiveOverviewMapMarkersOnly`` — skips geofence layer rebuild on hub-only ticks.
+    @State private var liveOverviewLastPushedGeofenceAuthoringDigest: String = ""
     /// MC-R §4.2: runtime map-points sheet over the Tasks card (slide-up; stacks above task triage and vehicle overlays).
     @State private var liveRuntimeMissionPointsOverlayPresented = false
     @State private var liveRuntimeMissionPointDrawerEditingID: UUID?
@@ -709,6 +714,8 @@ struct MissionRunDetailView: View {
     @State private var setupSelectedReservePoolSlotID: UUID?
     /// Optimistic pool SIM poses after staging-map drags until hub telemetry sustains (parallel to roster ``setupStagingSimDragCoordByAssignmentID``).
     @State private var setupStagingReservePoolSimDragCoordByEncodedMarkerID: [String: MissionRunStagingSimDragOverlay] = [:]
+    /// Last geofence overlay digest applied in ``pushSetupStagingMapMarkersOnly`` — skips fence layer rebuild on hub-only ticks.
+    @State private var setupStagingLastPushedGeofenceOverlayDigest: String = ""
     @State private var setupStagingReservePoolSimDragTimeoutReconcileTasks: [String: Task<Void, Never>] = [:]
     /// MC-R Engage: non-blocking telemetry watch after operator **Park** / **Loiter** from the Stop Vehicle card (``MissionRunEngageStabilizeTelemetryClassifier``).
     private struct MissionLiveEngageStabilizeTelemetryWatch: Equatable {
@@ -2528,13 +2535,6 @@ struct MissionRunDetailView: View {
         return focusedLiveTaskID
     }
 
-    /// Roster rows that supply **live map** vehicle markers (full roster when map isolation is off).
-    private var missionLiveMapRosterAssignments: [MissionRunAssignment] {
-        guard let mission = resolvedMission else { return Array(run.assignments) }
-        guard liveOverviewMapFocusedTaskID != nil else { return Array(run.assignments) }
-        return run.assignments.filter { assignmentMatchesLiveFocus($0, mission: mission) }
-    }
-
     /// When ``liveReserveSwapPick`` is active, pool berths (ids) that may replace the vacancy — same slice and **pool-row order** as ``MissionRunEnvironment/enumerateReserveSwapCandidates`` with default ordering (floating pool rows only).
     private var mcrLiveReserveSwapEligiblePoolSlotsOrdered: [MissionRunReservePoolSlot] {
         guard let pick = liveReserveSwapPick else { return [] }
@@ -2845,6 +2845,7 @@ struct MissionRunDetailView: View {
                             .padding(.horizontal, GuardianSpacing.denseGutter)
                             .padding(.vertical, GuardianSpacing.denseGutter)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            /// Live-run signals only (voice, reserve suggest, slot pull) — not MCS staging SIM-drag map overlays; MC‑R map motion uses ``liveOverviewMapMarkerCoordinateDigest``.
                             .onChange(of: fleetLink.hubTelemetry?.lastUpdate) { _ in
                                 refreshVehicleVoiceNarrativeFromTelemetry()
                                 evaluateReserveAutoSuggestFromLiveSignalsIfNeeded()
@@ -5773,19 +5774,16 @@ struct MissionRunDetailView: View {
                     }
                 )
                 .task(id: liveOverviewMapStructureIdentity) {
+                    liveOverviewVehicleBuildCache.invalidate()
                     pushLiveOverviewMapModelFromMission()
                     fitLiveOverviewMapToVisibleMissionContent()
                 }
                 .onChange(of: liveOverviewMapMarkerCoordinateDigest) { _ in
-                    pushLiveOverviewMapMarkersOnly()
+                    hubMarkerApplyThrottle.requestCoalesced { pushLiveOverviewMapMarkersOnly() }
                 }
                 .onChange(of: focusedLiveAssignmentID) { _ in
                     // Selection is not part of ``liveOverviewMapMarkerCoordinateDigest``; still refresh markers for ring/label.
-                    pushLiveOverviewMapMarkersOnly()
-                }
-                .onChange(of: fleetLink.hubTelemetry?.lastUpdate) { _ in
-                    // Reconcile SIM drag overlays on every hub sample; marker moves use ``liveOverviewMapMarkerCoordinateDigest``.
-                    reconcileSetupStagingSimDragOverlayWithHubTelemetry()
+                    hubMarkerApplyThrottle.flushImmediately { pushLiveOverviewMapMarkersOnly() }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -5866,24 +5864,116 @@ struct MissionRunDetailView: View {
         return "\(act)|\(sel)|\(geo)"
     }
 
-    /// Quantized live coordinates for roster vehicles + runtime map points; drives marker-only pushes
-    /// without invalidating ``liveOverviewMapStructureIdentity`` on every hub sample.
-    private var liveOverviewMapMarkerCoordinateDigest: String {
-        let pts = MissionPoint.filteredForMissionControlLiveMap(
+    private func liveOverviewMapMarkerBuildInputs(mission: Mission) -> LiveLeafletMapMarkerBuildInputs {
+        let reserveSwapPick: LiveLeafletMapReserveSwapPickContext? = liveReserveSwapPick.map {
+            LiveLeafletMapReserveSwapPickContext(
+                vacancyAssignmentID: $0.vacancyAssignmentID,
+                taskID: $0.taskID
+            )
+        }
+        let browsingBerth: LiveLeafletMapPoolBerthFocus? = {
+            guard let tid = liveReservePoolBrowseTaskID,
+                  let berth = focusedLiveReservePoolBerth,
+                  berth.taskID == tid
+            else { return nil }
+            return LiveLeafletMapPoolBerthFocus(taskID: berth.taskID, slotID: berth.slotID)
+        }()
+        return LiveLeafletMapMarkerBuildInputs.missionControlLiveOverview(
+            run: run,
+            mission: mission,
+            fleetLink: fleetLink,
+            sitl: sitl,
+            isolateMapToSelectedTask: run.operatorDisplaySettings.isolateLiveMapToSelectedTask,
+            triageFocusedTaskID: focusedLiveTaskID,
+            presentation: LiveLeafletMapMarkerPresentationState(
+                selectedAssignmentID: focusedLiveAssignmentID
+            ),
+            reservePoolPresentation: LiveLeafletMapReservePoolPresentationState(
+                reserveSwapPick: reserveSwapPick,
+                eligiblePoolSlotIDsForSwapPick: mcrLiveReserveSwapEligiblePoolSlotIDs,
+                browsingPoolBerth: browsingBerth
+            )
+        )
+    }
+
+    private func liveOverviewMapMarkerRosterAccessibilityTitle(
+        assignment: MissionRunAssignment,
+        mission: Mission
+    ) -> String? {
+        guard let pick = liveReserveSwapPick,
+              let tid = assignment.taskId ?? focusedLiveTaskID,
+              tid == pick.taskID
+        else { return nil }
+        let taskName = mission.routeMacro.tasks.first { $0.id == tid }?.name ?? "Task"
+        if assignment.id == pick.vacancyAssignmentID {
+            return MissionRunReserveSwapAccessibilityCopy.rosterVacancyDuringReserveSwapPick(
+                taskName: taskName,
+                slotName: assignment.slotName
+            )
+        }
+        if let device = mission.rosterDevices.first(where: { $0.id == assignment.rosterDeviceId }),
+           device.slot == .reserve {
+            return MissionRunReserveSwapAccessibilityCopy.rosterBenchReserveDuringReserveSwapPick(
+                taskName: taskName,
+                slotName: assignment.slotName
+            )
+        }
+        return nil
+    }
+
+    private var liveOverviewMapMarkerPresentationKey: String {
+        let swap = liveReserveSwapPick.map { "\($0.vacancyAssignmentID.uuidString)|\($0.taskID.uuidString)" } ?? ""
+        let browse = liveReservePoolBrowseTaskID?.uuidString ?? ""
+        let berth = focusedLiveReservePoolBerth.map { "\($0.taskID.uuidString)|\($0.slotID.uuidString)" } ?? ""
+        return [
+            liveOverviewRosterRowTopologySignature,
+            liveOverviewReservePoolSlotTopologySignature,
+            focusedLiveAssignmentID?.uuidString ?? "",
+            focusedLiveTaskID?.uuidString ?? "",
+            liveOverviewMapFocusedTaskID?.uuidString ?? "",
+            swap,
+            browse,
+            berth,
+            run.operatorDisplaySettings.isolateLiveMapToSelectedTask ? "1" : "0",
+        ].joined(separator: "§")
+    }
+
+    private func liveOverviewLiveMapMarkerBuild() -> LiveLeafletMapMarkerBuildResult {
+        guard let mission = resolvedMission else {
+            return LiveLeafletMapMarkerBuildResult(markers: [], motionDigest: "", motionSamples: [])
+        }
+        let inputs = liveOverviewMapMarkerBuildInputs(mission: mission)
+        return Utilities.liveLeafletMap.buildMapVehicleMarkersLive(
+            inputs: inputs,
+            rosterAccessibilityTitle: liveOverviewMapMarkerRosterAccessibilityTitle(assignment:mission:)
+        )
+    }
+
+    private func liveOverviewCachedVehicleMarkerBuild() -> LiveLeafletMapMarkerBuildResult {
+        liveOverviewVehicleBuildCache.build(
+            hubSampleToken: LiveLeafletMapHubSampleToken.fromHubTelemetryByVehicleID(fleetLink.hubTelemetryByVehicleID),
+            presentationKey: liveOverviewMapMarkerPresentationKey
+        ) {
+            liveOverviewLiveMapMarkerBuild()
+        }
+    }
+
+    private var liveOverviewMissionPointCoordinateDigest: String {
+        MissionPoint.filteredForMissionControlLiveMap(
             run.runtimeMissionPoints,
             focusedTaskID: liveOverviewMapFocusedTaskID
         )
-            .map { mp in
-                String(format: "%@:%.5f:%.5f", mp.id.uuidString, mp.coordinate.lat, mp.coordinate.lon)
-            }
-            .joined(separator: "|")
-        let veh = missionLiveVehicleMarkers
-            .map { m in
-                let heading = m.headingDeg ?? 0
-                return String(format: "%@:%.5f:%.5f:%.2f", m.id, m.lat, m.lon, heading)
-            }
-            .joined(separator: "|")
-        return pts + "§" + veh + "§mcrGf§" + liveRuntimeMcrLiveMapGeofenceAuthoringDigest
+        .map { mp in
+            String(format: "%@:%.5f:%.5f", mp.id.uuidString, mp.coordinate.lat, mp.coordinate.lon)
+        }
+        .joined(separator: "|")
+    }
+
+    /// Quantized live coordinates for roster vehicles + runtime map points; drives marker-only pushes
+    /// without invalidating ``liveOverviewMapStructureIdentity`` on every hub sample.
+    private var liveOverviewMapMarkerCoordinateDigest: String {
+        let veh = liveOverviewCachedVehicleMarkerBuild().motionDigest
+        return liveOverviewMissionPointCoordinateDigest + "§" + veh + "§mcrGf§" + liveRuntimeMcrLiveMapGeofenceAuthoringDigest
     }
 
     /// Fits the MC-R live overview map to home, visible paths, runtime map points, and **current** vehicle markers (``mapModel/focusMapFitBounds`` — not ``recenterNonce`` / default world zoom).
@@ -5920,10 +6010,11 @@ struct MissionRunDetailView: View {
 
     /// Full route + marker rebuild when mission topology, roster bindings, or map-point selection metadata changes.
     private func pushLiveOverviewMapModelFromMission() {
+        liveOverviewLastPushedGeofenceAuthoringDigest = ""
         if let mission = resolvedMission {
             let pathPayload = liveOverviewMapTaskPathPayload(from: mission)
             let mapMission = missionMergingLiveGeofenceDraftForLiveMapDisplay(base: mission)
-            mapModel.routeGeometry = GuardianRouteMapGeometry(
+            let geo = GuardianRouteMapGeometry(
                 home: mission.routeMacro.home,
                 allTasksCoords: pathPayload.coords,
                 taskPathIDs: pathPayload.ids,
@@ -5945,18 +6036,20 @@ struct MissionRunDetailView: View {
                 ),
                 geofenceMapLayerPointerSelectsFence: liveRuntimeGeofenceDraftMission != nil
             )
+            mapModel.applyMapContent(routeGeometry: geo, vehicleMarkers: missionLiveVehicleMarkers)
         } else {
-            mapModel.routeGeometry = .empty
+            mapModel.applyMapContent(routeGeometry: .empty, vehicleMarkers: missionLiveVehicleMarkers)
         }
-        mapModel.vehicleMarkers = missionLiveVehicleMarkers
         if let followID = mapModel.followedVehicleMarkerID,
            !missionLiveVehicleMarkers.contains(where: { $0.id == followID }) {
             mapModel.followedVehicleMarkerID = nil
         }
+        liveOverviewLastPushedGeofenceAuthoringDigest = liveRuntimeMcrLiveMapGeofenceAuthoringDigest
     }
 
     /// Marker-only refresh for hub-driven movement (vehicles + dragged map points) without resetting polylines.
     private func pushLiveOverviewMapMarkersOnly() {
+        LiveLeafletMapMarkerPipelineProfiler.recordMarkerOnlyApply()
         guard resolvedMission != nil else {
             pushLiveOverviewMapModelFromMission()
             return
@@ -5969,19 +6062,27 @@ struct MissionRunDetailView: View {
         }
         var geo = mapModel.routeGeometry
         geo.missionPointMarkers = missionLiveMissionPointMapMarkers
-        let mapMission = missionMergingLiveGeofenceDraftForLiveMapDisplay(base: mission)
-        geo.geofenceOverlays = mapMission.geofenceGuardianMapOverlaysForMissionControl(
-            operatorSettings: run.operatorDisplaySettings,
-            mapFocusedTaskID: liveOverviewMapFocusedTaskID,
-            respectMapTaskIsolation: true,
-            run: run,
-            mapSelectionFenceID: liveRuntimeGeofenceDraftMission != nil ? liveRuntimeGeofenceMapSelectedFenceID : nil
-        )
-        geo.geofenceMapLayerPointerSelectsFence = liveRuntimeGeofenceDraftMission != nil
-        mapModel.routeGeometry = geo
-        mapModel.vehicleMarkers = missionLiveVehicleMarkers
+        let gfDigest = liveRuntimeMcrLiveMapGeofenceAuthoringDigest
+        if gfDigest != liveOverviewLastPushedGeofenceAuthoringDigest {
+            let mapMission = missionMergingLiveGeofenceDraftForLiveMapDisplay(base: mission)
+            geo.geofenceOverlays = mapMission.geofenceGuardianMapOverlaysForMissionControl(
+                operatorSettings: run.operatorDisplaySettings,
+                mapFocusedTaskID: liveOverviewMapFocusedTaskID,
+                respectMapTaskIsolation: true,
+                run: run,
+                mapSelectionFenceID: liveRuntimeGeofenceDraftMission != nil ? liveRuntimeGeofenceMapSelectedFenceID : nil
+            )
+            geo.geofenceMapLayerPointerSelectsFence = liveRuntimeGeofenceDraftMission != nil
+            liveOverviewLastPushedGeofenceAuthoringDigest = gfDigest
+        }
+        let markers = missionLiveVehicleMarkers
+        if geo == mapModel.routeGeometry {
+            mapModel.applyVehicleMarkersOnly(markers)
+        } else {
+            mapModel.applyMapContent(routeGeometry: geo, vehicleMarkers: markers)
+        }
         if let followID = mapModel.followedVehicleMarkerID,
-           !missionLiveVehicleMarkers.contains(where: { $0.id == followID }) {
+           !markers.contains(where: { $0.id == followID }) {
             mapModel.followedVehicleMarkerID = nil
         }
     }
@@ -6034,110 +6135,7 @@ struct MissionRunDetailView: View {
     }
 
     private var missionLiveVehicleMarkers: [MapVehicleMarker] {
-        let roster = missionLiveMapRosterAssignments.compactMap { assignment -> MapVehicleMarker? in
-            guard let vehicleID = resolvedFleetStreamVehicleID(assignment: assignment, fleetLink: fleetLink, sitl: sitl),
-                  let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID),
-                  let lat = hub.latitudeDeg,
-                  let lon = hub.longitudeDeg,
-                  assignment.attachedFleetVehicleToken != nil
-            else { return nil }
-            let colorHex = fleetLink.mapColorHex(forVehicleID: vehicleID)
-            let heading = hub.headingDeg ?? hub.yawDeg
-            let accessibilityTitle: String? = {
-                guard let pick = liveReserveSwapPick,
-                      let mission = resolvedMission,
-                      let tid = assignment.taskId ?? focusedLiveTaskID,
-                      tid == pick.taskID
-                else { return nil }
-                let taskName = mission.routeMacro.tasks.first { $0.id == tid }?.name ?? "Task"
-                if assignment.id == pick.vacancyAssignmentID {
-                    return MissionRunReserveSwapAccessibilityCopy.rosterVacancyDuringReserveSwapPick(
-                        taskName: taskName,
-                        slotName: assignment.slotName
-                    )
-                }
-                if let device = mission.rosterDevices.first(where: { $0.id == assignment.rosterDeviceId }),
-                   device.slot == .reserve {
-                    return MissionRunReserveSwapAccessibilityCopy.rosterBenchReserveDuringReserveSwapPick(
-                        taskName: taskName,
-                        slotName: assignment.slotName
-                    )
-                }
-                return nil
-            }()
-            return MapVehicleMarker(
-                id: assignment.id.uuidString,
-                lat: lat,
-                lon: lon,
-                label: assignment.slotName,
-                colorHex: colorHex,
-                imageDataURL: missionControlRosterMapMarkerImageDataURL(for: assignment),
-                selected: focusedLiveAssignmentID == assignment.id,
-                draggable: false,
-                headingDeg: heading,
-                accessibilityTitle: accessibilityTitle
-            )
-        }
-        return roster + missionLiveFloatingReservePoolVehicleMarkers
-    }
-
-    /// MC-R live map: hub positions for **floating reserve** vehicles (fleet token + live telemetry only).
-    private var missionLiveFloatingReservePoolVehicleMarkers: [MapVehicleMarker] {
-        guard let mission = resolvedMission else { return [] }
-        let taskIDs: [UUID] = {
-            if let f = liveOverviewMapFocusedTaskID { return [f] }
-            return mission.routeMacro.tasks.filter(\.enabled).map(\.id)
-        }()
-        var out: [MapVehicleMarker] = []
-        for tid in taskIDs {
-            let pool = run.reservePool(forTaskID: tid)
-            for slot in pool.entries {
-                guard slot.hasFleetOrLegacyBinding,
-                      let rawTok = slot.attachedFleetVehicleToken?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !rawTok.isEmpty
-                else { continue }
-                let syn = syntheticMissionRunAssignment(from: slot)
-                guard let vehicleID = resolvedFleetStreamVehicleID(assignment: syn, fleetLink: fleetLink, sitl: sitl),
-                      let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID),
-                      let lat = hub.latitudeDeg,
-                      let lon = hub.longitudeDeg
-                else { continue }
-                let colorHex = fleetLink.mapColorHex(forVehicleID: vehicleID)
-                let heading = hub.headingDeg ?? hub.yawDeg
-                let taskName = mission.routeMacro.tasks.first { $0.id == tid }?.name ?? "Task"
-                let swapPickOnTask = liveReserveSwapPick?.taskID == tid
-                let markerEligible: Bool = {
-                    guard let pick = liveReserveSwapPick else { return false }
-                    return pick.taskID == tid && mcrLiveReserveSwapEligiblePoolSlotIDs.contains(slot.id)
-                }()
-                let browsingBerth = liveReservePoolBrowseTaskID == tid && focusedLiveReservePoolBerth?.slotID == slot.id
-                let poolA11y = MissionRunReserveSwapAccessibilityCopy.floatingPoolMapMarker(
-                    taskName: taskName,
-                    berthLabel: slot.label,
-                    swapPickActiveOnTask: swapPickOnTask,
-                    markerIsEligiblePickTarget: markerEligible,
-                    browsingThisBerthOnTask: browsingBerth
-                )
-                out.append(
-                    MapVehicleMarker(
-                        id: MissionControlReservePoolMapMarkerID.encode(taskID: tid, slotID: slot.id),
-                        lat: lat,
-                        lon: lon,
-                        label: "\(slot.label) · pool",
-                        colorHex: colorHex,
-                        imageDataURL: missionControlRosterMapMarkerImageDataURL(for: syn),
-                        selected: (liveReserveSwapPick?.taskID == tid && mcrLiveReserveSwapEligiblePoolSlotIDs.contains(slot.id))
-                            || (liveReservePoolBrowseTaskID == tid && focusedLiveReservePoolBerth?.slotID == slot.id),
-                        draggable: false,
-                        selectionAttentionPulse: (liveReserveSwapPick?.taskID == tid && mcrLiveReserveSwapEligiblePoolSlotIDs.contains(slot.id))
-                            || (liveReservePoolBrowseTaskID == tid && focusedLiveReservePoolBerth?.slotID == slot.id),
-                        headingDeg: heading,
-                        accessibilityTitle: poolA11y
-                    )
-                )
-            }
-        }
-        return out
+        liveOverviewCachedVehicleMarkerBuild().markers
     }
 
     private var missionLiveVehicleStatusRow: some View {
@@ -8382,15 +8380,15 @@ struct MissionRunDetailView: View {
                         }
                     )
                     .task(id: setupStagingMapStructureIdentity) {
+                        setupStagingVehicleBuildCache.invalidate()
                         pushSetupStagingMapModelFromMissionTemplate()
                         fitSetupStagingMapToVisibleMissionContent()
                     }
                     .onChange(of: setupStagingMapMarkerCoordinateDigest) { _ in
-                        pushSetupStagingMapMarkersOnly()
-                        reconcileSetupStagingSimDragOverlayWithHubTelemetry()
+                        hubMarkerApplyThrottle.requestCoalesced { pushSetupStagingMapMarkersOnly() }
                     }
                     .onChange(of: fleetLink.hubTelemetry?.lastUpdate) { _ in
-                        reconcileSetupStagingSimDragOverlayWithHubTelemetry()
+                        reconcileSetupStagingSimDragOverlaysOnHubSampleIfNeeded()
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -8462,25 +8460,72 @@ struct MissionRunDetailView: View {
         return parts.joined(separator: "|")
     }
 
-    /// Quantized lat/lon for mission map points + roster vehicle markers; drives marker-only pushes without churning `.task(id:)`.
-    private var setupStagingMapMarkerCoordinateDigest: String {
-        let pts = setupStagingMissionPointRowsForMap
+    private var setupStagingMissionPointCoordinateDigest: String {
+        setupStagingMissionPointRowsForMap
             .map { mp in
                 String(format: "%@:%.5f:%.5f", mp.id.uuidString, mp.coordinate.lat, mp.coordinate.lon)
             }
             .joined(separator: "|")
-        let veh = setupStagingMapVehicleMarkers
-            .map { m in
-                String(format: "%@:%.5f:%.5f:%@", m.id, m.lat, m.lon, m.pendingSimSync ? "1" : "0")
-            }
-            .joined(separator: "|")
+    }
+
+    private var setupStagingMapGeofenceOverlayDigest: String {
         let gfTopo = resolvedMission?.missionGeofenceTemplateTopologySignature() ?? ""
         let gfAug = run.missionControlRunGeofenceAugmentationTopologySignature()
         let rostab = rostersSidebarListTab.rawValue
         let gfsel = setupRostersSelectedGeofenceID?.uuidString ?? "none"
         let gfshow = run.operatorDisplaySettings.showMissionGeofencesOnMap ? "1" : "0"
-        return pts + "§" + veh + "§poolSel:" + setupSelectedReservePoolBerthSignature + "§gf:" + setupStagingGeofenceGeometryDigest
+        return "§gf:" + setupStagingGeofenceGeometryDigest
             + "§gftopo:\(gfTopo)§gfaug:\(gfAug)§rostab:\(rostab)§gfsel:\(gfsel)§gfshow:\(gfshow)"
+    }
+
+    private var setupStagingMapMarkerPresentationKey: String {
+        let simDrag = setupStagingSimDragCoordByAssignmentID.keys
+            .sorted { $0.uuidString < $1.uuidString }
+            .map(\.uuidString)
+            .joined(separator: ";")
+        let poolDrag = setupStagingReservePoolSimDragCoordByEncodedMarkerID.keys.sorted().joined(separator: ";")
+        return [
+            setupMapBoundsSignature,
+            setupSelectedAssignmentId?.uuidString ?? "",
+            setupSelectedReservePoolBerthSignature,
+            simDrag,
+            poolDrag,
+            mcsReservePoolHomePlacementTaskID?.uuidString ?? "",
+        ].joined(separator: "§")
+    }
+
+    private func setupStagingLiveMapMarkerBuild() -> LiveLeafletMapMarkerBuildResult {
+        guard let mission = resolvedMission else {
+            return LiveLeafletMapMarkerBuildResult(markers: [], motionDigest: "", motionSamples: [])
+        }
+        let inputs = LiveLeafletMapMCSStagingMarkerBuildInputs.missionControlSetupStaging(
+            run: run,
+            mission: mission,
+            fleetLink: fleetLink,
+            sitl: sitl,
+            selectedAssignmentID: setupSelectedAssignmentId,
+            selectedReservePoolTaskID: setupSelectedReservePoolTaskID,
+            selectedReservePoolSlotID: setupSelectedReservePoolSlotID,
+            rosterSimDragByAssignmentID: setupStagingSimDragCoordByAssignmentID,
+            poolSimDragByMarkerID: setupStagingReservePoolSimDragCoordByEncodedMarkerID
+        )
+        return Utilities.liveLeafletMap.buildMCSStagingMapVehicleMarkers(inputs: inputs)
+    }
+
+    private func setupStagingCachedVehicleMarkerBuild() -> LiveLeafletMapMarkerBuildResult {
+        setupStagingVehicleBuildCache.build(
+            hubSampleToken: LiveLeafletMapHubSampleToken.fromHubTelemetryByVehicleID(fleetLink.hubTelemetryByVehicleID),
+            presentationKey: setupStagingMapMarkerPresentationKey
+        ) {
+            setupStagingLiveMapMarkerBuild()
+        }
+    }
+
+    /// Quantized lat/lon for mission map points + roster vehicle markers; drives marker-only pushes without churning `.task(id:)`.
+    private var setupStagingMapMarkerCoordinateDigest: String {
+        let veh = setupStagingCachedVehicleMarkerBuild().motionDigest
+        return setupStagingMissionPointCoordinateDigest + "§" + veh + "§poolSel:" + setupSelectedReservePoolBerthSignature
+            + setupStagingMapGeofenceOverlayDigest
     }
 
     /// Clears mission-point / task-path / roster-vehicle / pool-berth map selection after a map background tap (same policy as mutual exclusivity elsewhere).
@@ -8929,6 +8974,25 @@ struct MissionRunDetailView: View {
         }
     }
 
+    private var hasActiveSetupStagingSimDragOverlays: Bool {
+        !setupStagingSimDragCoordByAssignmentID.isEmpty
+            || !setupStagingReservePoolSimDragCoordByEncodedMarkerID.isEmpty
+    }
+
+    /// MCS roster staging map: reconcile pending SIM-drag overlays on hub samples **only while overlays exist**.
+    /// Marker motion uses ``setupStagingMapMarkerCoordinateDigest``; this path advances ``hubAgreesSince`` / clears overlays without re-running reconcile on every hub tick when idle.
+    private func reconcileSetupStagingSimDragOverlaysOnHubSampleIfNeeded() {
+        guard hasActiveSetupStagingSimDragOverlays else { return }
+        let rosterBefore = setupStagingSimDragCoordByAssignmentID
+        let poolBefore = setupStagingReservePoolSimDragCoordByEncodedMarkerID
+        reconcileSetupStagingSimDragOverlayWithHubTelemetry()
+        if setupStagingSimDragCoordByAssignmentID != rosterBefore
+            || setupStagingReservePoolSimDragCoordByEncodedMarkerID != poolBefore
+        {
+            hubMarkerApplyThrottle.flushImmediately { pushSetupStagingMapMarkersOnly() }
+        }
+    }
+
     /// Drops SIM drag optimistic coords once hub **stably** reflects the same pose (see ``MissionControlSetupSimDragOverlayPolicy/hubAgreesSustainSeconds``) or the pending-sync timeout elapses.
     private func reconcileSetupStagingSimDragOverlayWithHubTelemetry() {
         reconcileSetupStagingRosterSimDragOverlaysWithHubTelemetry()
@@ -9022,8 +9086,9 @@ struct MissionRunDetailView: View {
     }
 
     private func pushSetupStagingMapModelFromMissionTemplate() {
+        setupStagingLastPushedGeofenceOverlayDigest = ""
         if let mission = resolvedMission {
-            mapModel.routeGeometry = GuardianRouteMapGeometry(
+            let geo = GuardianRouteMapGeometry(
                 home: mission.routeMacro.home,
                 allTasksCoords: mission.routeMacro.tasks.map { $0.waypoints.map(\.coord) },
                 taskPathIDs: mission.routeMacro.tasks.map(\.id),
@@ -9045,13 +9110,15 @@ struct MissionRunDetailView: View {
                 ),
                 geofenceMapLayerPointerSelectsFence: rostersSidebarListTab == .fences
             )
+            mapModel.applyMapContent(routeGeometry: geo, vehicleMarkers: setupStagingMapVehicleMarkers)
         } else {
-            mapModel.routeGeometry = .empty
+            mapModel.applyMapContent(routeGeometry: .empty, vehicleMarkers: setupStagingMapVehicleMarkers)
         }
-        mapModel.vehicleMarkers = setupStagingMapVehicleMarkers
+        setupStagingLastPushedGeofenceOverlayDigest = setupStagingMapGeofenceOverlayDigest
     }
 
     private func pushSetupStagingMapMarkersOnly() {
+        LiveLeafletMapMarkerPipelineProfiler.recordMarkerOnlyApply()
         guard let mission = resolvedMission else {
             pushSetupStagingMapModelFromMissionTemplate()
             return
@@ -9064,16 +9131,24 @@ struct MissionRunDetailView: View {
         var geo = mapModel.routeGeometry
         geo.missionPointMarkers = setupStagingMissionPointMapMarkers
         geo.mcsReservePoolHomePlacementArmed = mcsReservePoolHomePlacementTaskID != nil
-        geo.geofenceOverlays = mission.geofenceGuardianMapOverlaysForMissionControl(
-            operatorSettings: run.operatorDisplaySettings,
-            mapFocusedTaskID: nil,
-            respectMapTaskIsolation: false,
-            run: run,
-            mapSelectionFenceID: rostersSidebarListTab == .fences ? setupRostersSelectedGeofenceID : nil
-        )
-        geo.geofenceMapLayerPointerSelectsFence = rostersSidebarListTab == .fences
-        mapModel.routeGeometry = geo
-        mapModel.vehicleMarkers = setupStagingMapVehicleMarkers
+        let gfDigest = setupStagingMapGeofenceOverlayDigest
+        if gfDigest != setupStagingLastPushedGeofenceOverlayDigest {
+            geo.geofenceOverlays = mission.geofenceGuardianMapOverlaysForMissionControl(
+                operatorSettings: run.operatorDisplaySettings,
+                mapFocusedTaskID: nil,
+                respectMapTaskIsolation: false,
+                run: run,
+                mapSelectionFenceID: rostersSidebarListTab == .fences ? setupRostersSelectedGeofenceID : nil
+            )
+            geo.geofenceMapLayerPointerSelectsFence = rostersSidebarListTab == .fences
+            setupStagingLastPushedGeofenceOverlayDigest = gfDigest
+        }
+        let markers = setupStagingMapVehicleMarkers
+        if geo == mapModel.routeGeometry {
+            mapModel.applyVehicleMarkersOnly(markers)
+        } else {
+            mapModel.applyMapContent(routeGeometry: geo, vehicleMarkers: markers)
+        }
     }
 
     private var rosterMissionTemplateBinding: Binding<Mission> {
@@ -9372,193 +9447,9 @@ struct MissionRunDetailView: View {
         }
     }
 
-    /// Bundled vehicle-class / SIM preset art — same basename resolution as ``MissionControlRosterSlotCard`` — for MCS staging and MCR live overview map thumbnails.
-    private func missionControlRosterMapMarkerImageDataURL(for assignment: MissionRunAssignment) -> String? {
-        let basenames: [String] = {
-            if let sim = simulationImageBasenamesForAssignment(assignment, sitl: sitl), !sim.isEmpty {
-                return sim
-            }
-            let device = resolvedMission.flatMap { m in
-                m.rosterDevices.first { $0.id == assignment.rosterDeviceId }
-            }
-            let rosterDeviceClass = device?.vehicleClass ?? .unknown
-            if let vid = telemetryVehicleID(for: assignment),
-               let model = fleetLink.vehicleModel(forVehicleID: vid)
-            {
-                return model.data.vehicleType.defaultSimulationDeviceImageBasenames
-            }
-            return rosterDeviceClass.defaultSimulationDeviceImageBasenames
-        }()
-        guard let image = SimulationDeviceBundleImage.nsImage(firstMatching: basenames),
-              let tiff = image.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff),
-              let png = rep.representation(using: .png, properties: [:])
-        else { return nil }
-        return "data:image/png;base64,\(png.base64EncodedString())"
-    }
-
-    private var setupVehicleMarkers: [MapVehicleMarker] {
-        run.assignments.compactMap { assignment in
-            guard let tokenKey = assignment.attachedFleetVehicleToken,
-                  let token = FleetMissionVehicleToken(storageKey: tokenKey)
-            else { return nil }
-            let selected = assignment.id == setupSelectedAssignmentId
-            let label = "\(assignment.slotName)"
-            let imageDataURL = missionControlRosterMapMarkerImageDataURL(for: assignment)
-            switch token {
-            case .sitl(let uuid):
-                guard let inst = sitl.instances.first(where: { $0.id == uuid }) else { return nil }
-                let systemID = inst.stackInstanceIndex + 1
-                let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
-                let colorHex = fleetLink.mapColorHex(forVehicleID: vehicleID)
-                if let optimistic = setupStagingSimDragCoordByAssignmentID[assignment.id] {
-                    let heading: Double? = {
-                        guard let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID) else { return nil }
-                        return hub.headingDeg ?? hub.yawDeg
-                    }()
-                    let now = Date()
-                    let hubCoord = stagingSimHubCoordinate(forAssignmentId: assignment.id)
-                    let hubOk = hubCoord.map {
-                        MissionControlSetupSimDragOverlayPolicy.hubMatches(
-                            pendingCoordinate: optimistic.coordinate,
-                            hubCoordinate: $0
-                        )
-                    } ?? false
-                    let sustained = MissionControlSetupSimDragOverlayPolicy.isSustainedHubAgreement(
-                        hubAgreesSince: optimistic.hubAgreesSince,
-                        now: now
-                    )
-                    let pendingSimSync = !hubOk || !sustained
-                    return MapVehicleMarker(
-                        id: assignment.id.uuidString,
-                        lat: optimistic.coordinate.lat,
-                        lon: optimistic.coordinate.lon,
-                        label: "\(label) (SIM)",
-                        colorHex: colorHex,
-                        imageDataURL: imageDataURL,
-                        selected: selected,
-                        draggable: selected,
-                        headingDeg: heading,
-                        pendingSimSync: pendingSimSync
-                    )
-                }
-                guard let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID),
-                      let lat = hub.latitudeDeg,
-                      let lon = hub.longitudeDeg else { return nil }
-                let heading = hub.headingDeg ?? hub.yawDeg
-                return MapVehicleMarker(
-                    id: assignment.id.uuidString,
-                    lat: lat,
-                    lon: lon,
-                    label: "\(label) (SIM)",
-                    colorHex: colorHex,
-                    imageDataURL: imageDataURL,
-                    selected: selected,
-                    draggable: selected,
-                    headingDeg: heading
-                )
-            case .live:
-                guard let vehicleID = resolvedFleetStreamVehicleID(assignment: assignment, fleetLink: fleetLink, sitl: sitl),
-                      let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID),
-                      let lat = hub.latitudeDeg,
-                      let lon = hub.longitudeDeg
-                else { return nil }
-                let heading = hub.headingDeg ?? hub.yawDeg
-                return MapVehicleMarker(
-                    id: assignment.id.uuidString,
-                    lat: lat,
-                    lon: lon,
-                    label: "\(label) (Live)",
-                    colorHex: fleetLink.mapColorHex(forVehicleID: vehicleID),
-                    imageDataURL: imageDataURL,
-                    selected: selected,
-                    draggable: false,
-                    headingDeg: heading
-                )
-            }
-        }
-    }
-
-    /// MCS **Rosters › Tasks** staging map: hub-backed markers for **floating reserve pool** SIMs (``MissionControlReservePoolMapMarkerID``); draggable when selected and SITL-eligible.
-    private var setupStagingFloatingReservePoolVehicleMarkers: [MapVehicleMarker] {
-        guard let mission = resolvedMission else { return [] }
-        var out: [MapVehicleMarker] = []
-        for task in mission.routeMacro.tasks where task.enabled {
-            let tid = task.id
-            let pool = run.reservePool(forTaskID: tid)
-            for slot in pool.entries {
-                guard slot.hasFleetOrLegacyBinding,
-                      let rawTok = slot.attachedFleetVehicleToken?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !rawTok.isEmpty
-                else { continue }
-                let encoded = MissionControlReservePoolMapMarkerID.encode(taskID: tid, slotID: slot.id)
-                let syn = syntheticMissionRunAssignment(from: slot)
-                guard let vehicleID = resolvedFleetStreamVehicleID(assignment: syn, fleetLink: fleetLink, sitl: sitl),
-                      let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID),
-                      let hubLat = hub.latitudeDeg,
-                      let hubLon = hub.longitudeDeg
-                else { continue }
-                let eligible = MCSReservePoolHomeStagingMapEligibility.isEligibleSitlReservePoolSlot(
-                    slot: slot,
-                    sitl: sitl,
-                    fleetLink: fleetLink
-                )
-                let selected = setupSelectedReservePoolTaskID == tid && setupSelectedReservePoolSlotID == slot.id
-                let colorHex = fleetLink.mapColorHex(forVehicleID: vehicleID)
-                let heading = hub.headingDeg ?? hub.yawDeg
-                let taskName = task.name
-                let poolA11y = MissionRunReserveSwapAccessibilityCopy.floatingPoolMapMarker(
-                    taskName: taskName,
-                    berthLabel: slot.label,
-                    swapPickActiveOnTask: false,
-                    markerIsEligiblePickTarget: false,
-                    browsingThisBerthOnTask: false
-                )
-                let lat: Double
-                let lon: Double
-                let pendingSimSync: Bool
-                if let optimistic = setupStagingReservePoolSimDragCoordByEncodedMarkerID[encoded] {
-                    lat = optimistic.coordinate.lat
-                    lon = optimistic.coordinate.lon
-                    let hubCoord = RouteCoordinate(lat: hubLat, lon: hubLon)
-                    let now = Date()
-                    let hubOk = MissionControlSetupSimDragOverlayPolicy.hubMatches(
-                        pendingCoordinate: optimistic.coordinate,
-                        hubCoordinate: hubCoord
-                    )
-                    let sustained = MissionControlSetupSimDragOverlayPolicy.isSustainedHubAgreement(
-                        hubAgreesSince: optimistic.hubAgreesSince,
-                        now: now
-                    )
-                    pendingSimSync = !hubOk || !sustained
-                } else {
-                    lat = hubLat
-                    lon = hubLon
-                    pendingSimSync = false
-                }
-                out.append(
-                    MapVehicleMarker(
-                        id: encoded,
-                        lat: lat,
-                        lon: lon,
-                        label: "\(slot.label) · pool",
-                        colorHex: colorHex,
-                        imageDataURL: missionControlRosterMapMarkerImageDataURL(for: syn),
-                        selected: selected,
-                        draggable: selected && eligible,
-                        headingDeg: heading,
-                        pendingSimSync: pendingSimSync,
-                        accessibilityTitle: poolA11y
-                    )
-                )
-            }
-        }
-        return out
-    }
-
     /// Roster assignment markers plus floating-reserve pool hub markers for the MCS staging map.
     private var setupStagingMapVehicleMarkers: [MapVehicleMarker] {
-        setupVehicleMarkers + setupStagingFloatingReservePoolVehicleMarkers
+        setupStagingCachedVehicleMarkerBuild().markers
     }
 
     /// **SITL-only:** applies dragged lat/lon to the bound sim via ``FleetLinkService/applySimState`` (SIM_OPOS_* / SIH_LOC_*).

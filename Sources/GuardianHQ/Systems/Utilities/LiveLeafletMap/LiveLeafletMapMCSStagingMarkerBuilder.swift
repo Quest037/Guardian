@@ -1,6 +1,6 @@
 import Foundation
 
-/// MCS roster staging map markers (roster SITL/live + floating reserve pool) with SIM-drag overlays and shared image cache.
+/// MCS roster staging map markers (roster SITL/live + floating reserve pool) with SIM-drag overlays. Markers use SVG glyphs; ``imageCache`` is reserved for optional thumbnail data URLs.
 @MainActor
 enum LiveLeafletMapMCSStagingMarkerBuilder {
 
@@ -54,12 +54,7 @@ enum LiveLeafletMapMCSStagingMarkerBuilder {
 
         let selected = assignment.id == inputs.selectedAssignmentID
         let label = assignment.slotName
-        let imageDataURL = imageCache.imageDataURL(
-            assignment: assignment,
-            mission: inputs.mission,
-            fleetLink: inputs.fleetLink,
-            sitl: inputs.sitl
-        )
+        let glyphKind = GuardianMapVehicleGlyphKind.forRosterAssignment(assignment, mission: inputs.mission)
 
         switch token {
         case .sitl(let uuid):
@@ -79,7 +74,8 @@ enum LiveLeafletMapMCSStagingMarkerBuilder {
                     lon: optimistic.coordinate.lon,
                     label: "\(label) (SIM)",
                     colorHex: colorHex,
-                    imageDataURL: imageDataURL,
+                    glyphKind: glyphKind,
+                    imageDataURL: nil,
                     selected: selected,
                     draggable: selected,
                     headingDeg: heading,
@@ -97,7 +93,8 @@ enum LiveLeafletMapMCSStagingMarkerBuilder {
                 lon: lon,
                 label: "\(label) (SIM)",
                 colorHex: colorHex,
-                imageDataURL: imageDataURL,
+                glyphKind: glyphKind,
+                imageDataURL: nil,
                 selected: selected,
                 draggable: selected,
                 headingDeg: heading
@@ -119,7 +116,8 @@ enum LiveLeafletMapMCSStagingMarkerBuilder {
                 lon: lon,
                 label: "\(label) (Live)",
                 colorHex: inputs.fleetLink.mapColorHex(forVehicleID: vehicleID),
-                imageDataURL: imageDataURL,
+                glyphKind: glyphKind,
+                imageDataURL: nil,
                 selected: selected,
                 draggable: false,
                 headingDeg: heading
@@ -159,6 +157,7 @@ enum LiveLeafletMapMCSStagingMarkerBuilder {
         let selected = inputs.selectedReservePoolTaskID == taskID && inputs.selectedReservePoolSlotID == slot.id
         let colorHex = inputs.fleetLink.mapColorHex(forVehicleID: vehicleID)
         let heading = hub.headingDeg ?? hub.yawDeg
+        let poolGlyphType = inputs.fleetLink.vehicleModel(forVehicleID: vehicleID)?.data.vehicleType ?? .unknown
         let poolA11y = MissionRunReserveSwapAccessibilityCopy.floatingPoolMapMarker(
             taskName: taskName,
             berthLabel: slot.label,
@@ -191,14 +190,8 @@ enum LiveLeafletMapMCSStagingMarkerBuilder {
             lon: lon,
             label: "\(slot.label) · pool",
             colorHex: colorHex,
-            imageDataURL: imageCache.imageDataURL(
-                syntheticAssignment: syn,
-                poolTaskID: taskID,
-                poolSlotID: slot.id,
-                mission: inputs.mission,
-                fleetLink: inputs.fleetLink,
-                sitl: inputs.sitl
-            ),
+            glyphKind: GuardianMapVehicleGlyphKind.forFleetVehicleType(poolGlyphType),
+            imageDataURL: nil,
             selected: selected,
             draggable: selected && eligible,
             headingDeg: heading,

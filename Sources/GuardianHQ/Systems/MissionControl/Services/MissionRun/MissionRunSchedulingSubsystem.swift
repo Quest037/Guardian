@@ -4,6 +4,7 @@ import Foundation
 final class MissionRunSchedulingSubsystem {
     weak var environment: MissionRunEnvironment?
     private var deferredTaskStartTasks: [UUID: Task<Void, Never>] = [:]
+    private var deferredSquadStartTasks: [UUID: Task<Void, Never>] = [:]
     private var deferredOneOffStartTask: Task<Void, Never>?
 
     private func enabledMissionTaskIDsWithBoundAssignments(in environment: MissionRunEnvironment) -> [UUID] {
@@ -294,10 +295,25 @@ final class MissionRunSchedulingSubsystem {
         if let taskID {
             cancelDeferredTaskMissionStartWaiter(forTaskID: taskID)
             clearMissionTaskStartDeferral(forTaskID: taskID)
+            if let environment {
+                let squadIDs = environment.primarySquads(forTaskID: taskID, mission: environment.template)
+                    .map(\.assignment.id)
+                for aid in squadIDs {
+                    cancelDeferredSquadMissionStartWaiter(forAssignmentID: aid)
+                    environment.setSquadStartDeferral(nil, forAssignmentID: aid)
+                }
+            }
         } else {
             deferredTaskStartTasks.values.forEach { $0.cancel() }
             deferredTaskStartTasks.removeAll()
+            deferredSquadStartTasks.values.forEach { $0.cancel() }
+            deferredSquadStartTasks.removeAll()
             clearMissionTaskStartDeferral()
+            if let environment {
+                for aid in environment.squadStartDeferralByAssignmentID.keys {
+                    environment.setSquadStartDeferral(nil, forAssignmentID: aid)
+                }
+            }
         }
     }
 
@@ -371,6 +387,92 @@ final class MissionRunSchedulingSubsystem {
         _ = environment.systems.executor.handleEvent(.deferredTaskStartDue(taskID: taskID), context: ctx)
     }
 
+    /// Dispatches ``MissionRunExecutionEvent/deferredSquadStartDue`` when an execution context exists.
+    private func startDeferredSquadMissionNow(taskID: UUID, primaryAssignmentID: UUID) {
+        guard let environment else { return }
+        guard let ctx = environment.effectiveExecutionContextForDispatch() else {
+            environment.systems.logging.appendLogEvent(
+                level: .warning,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.startMissionTaskNoExecutionContext
+            )
+            return
+        }
+        environment.captureExecutionContext(ctx)
+        _ = environment.systems.executor.handleEvent(
+            .deferredSquadStartDue(taskID: taskID, primaryAssignmentID: primaryAssignmentID),
+            context: ctx
+        )
+    }
+
+    func skipSquadMissionStartDeferral(taskID: UUID, primaryAssignmentID: UUID) {
+        guard let environment, environment.squadStartDeferralByAssignmentID[primaryAssignmentID] != nil else { return }
+        cancelDeferredSquadMissionStartWaiter(forAssignmentID: primaryAssignmentID)
+        startDeferredSquadMissionNow(taskID: taskID, primaryAssignmentID: primaryAssignmentID)
+        if environment.squadStartDeferralByAssignmentID[primaryAssignmentID] != nil {
+            environment.setSquadStartDeferral(nil, forAssignmentID: primaryAssignmentID)
+        }
+    }
+
+    /// Shifts one primary squad’s pending MAVLink mission start (between-cycle wall clock) by `deltaSeconds`.
+    func adjustSquadMissionStartDeferralBySeconds(
+        taskID: UUID,
+        primaryAssignmentID: UUID,
+        deltaSeconds: Int,
+        referenceNow: Date = Date()
+    ) {
+        guard let environment, let def = environment.squadStartDeferralByAssignmentID[primaryAssignmentID] else { return }
+        let delta = Double(deltaSeconds)
+        let newStart = def.startAt.addingTimeInterval(delta)
+        if newStart <= referenceNow {
+            skipSquadMissionStartDeferral(taskID: taskID, primaryAssignmentID: primaryAssignmentID)
+            return
+        }
+        let newTotal = max(1, def.totalDelay + delta)
+        cancelDeferredSquadMissionStartWaiter(forAssignmentID: primaryAssignmentID)
+        environment.setSquadStartDeferral(
+            MissionTaskStartDeferral(startAt: newStart, totalDelay: newTotal),
+            forAssignmentID: primaryAssignmentID
+        )
+        armSquadMissionStartTask(taskID: taskID, primaryAssignmentID: primaryAssignmentID, startAt: newStart) { [weak self] in
+            self?.startDeferredSquadMissionNow(taskID: taskID, primaryAssignmentID: primaryAssignmentID)
+        }
+    }
+
+    /// Skips whichever deferral is active for this primary row: per-squad ``squadStartDeferralByAssignmentID`` or, when absent, task-level ``taskStartDeferralByTaskID`` (single-primary mirror).
+    func skipTaskOrPrimarySquadMissionStartDeferral(taskID: UUID, primaryAssignmentID: UUID) {
+        guard let environment else { return }
+        if environment.squadStartDeferralByAssignmentID[primaryAssignmentID] != nil {
+            skipSquadMissionStartDeferral(taskID: taskID, primaryAssignmentID: primaryAssignmentID)
+        } else {
+            skipMissionTaskStartDeferral(taskID: taskID)
+        }
+    }
+
+    /// Adjusts whichever deferral is active for this primary row (squad-scoped vs mirrored task deferral).
+    func adjustTaskOrPrimarySquadMissionStartDeferralBySeconds(
+        taskID: UUID,
+        primaryAssignmentID: UUID,
+        deltaSeconds: Int,
+        referenceNow: Date = Date()
+    ) {
+        guard let environment else { return }
+        if environment.squadStartDeferralByAssignmentID[primaryAssignmentID] != nil {
+            adjustSquadMissionStartDeferralBySeconds(
+                taskID: taskID,
+                primaryAssignmentID: primaryAssignmentID,
+                deltaSeconds: deltaSeconds,
+                referenceNow: referenceNow
+            )
+        } else {
+            adjustMissionTaskStartDeferralBySeconds(
+                taskID: taskID,
+                deltaSeconds: deltaSeconds,
+                referenceNow: referenceNow
+            )
+        }
+    }
+
     func armTaskMissionStartTask(taskID: UUID, startAt: Date, onStartNow: @escaping @MainActor () -> Void) {
         registerDeferredTaskStartTask(nil, forTaskID: taskID)
         let captured = startAt
@@ -393,6 +495,46 @@ final class MissionRunSchedulingSubsystem {
             onStartNow()
         }
         registerDeferredTaskStartTask(task, forTaskID: taskID)
+    }
+
+    private func cancelDeferredSquadMissionStartWaiter(forAssignmentID assignmentID: UUID) {
+        deferredSquadStartTasks[assignmentID]?.cancel()
+        deferredSquadStartTasks.removeValue(forKey: assignmentID)
+    }
+
+    /// Cancels between-cycle wall-clock wait for one primary squad without touching sibling squads on the same task.
+    func cancelDeferredSquadMissionStartScheduling(forAssignmentID assignmentID: UUID) {
+        cancelDeferredSquadMissionStartWaiter(forAssignmentID: assignmentID)
+        environment?.setSquadStartDeferral(nil, forAssignmentID: assignmentID)
+    }
+
+    func armSquadMissionStartTask(
+        taskID: UUID,
+        primaryAssignmentID: UUID,
+        startAt: Date,
+        onStartNow: @escaping @MainActor () -> Void
+    ) {
+        cancelDeferredSquadMissionStartWaiter(forAssignmentID: primaryAssignmentID)
+        let captured = startAt
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                let remaining = captured.timeIntervalSince(Date())
+                if remaining <= 0.05 { break }
+                let chunk = min(remaining, 3600)
+                let rawNs = chunk * 1_000_000_000
+                guard rawNs.isFinite, rawNs > 0 else { break }
+                let ns = UInt64(min(Double(UInt64.max), max(1_000_000, rawNs)))
+                try? await Task.sleep(nanoseconds: ns)
+            }
+            guard !Task.isCancelled else { return }
+            guard let stored = self.environment?.squadStartDeferralByAssignmentID[primaryAssignmentID],
+                  abs(stored.startAt.timeIntervalSince(captured)) < 0.5
+            else { return }
+            self.cancelDeferredSquadMissionStartWaiter(forAssignmentID: primaryAssignmentID)
+            onStartNow()
+        }
+        deferredSquadStartTasks[primaryAssignmentID] = task
     }
 
     private func armDeferredOneOffExecutionTask(
@@ -428,6 +570,37 @@ final class MissionRunSchedulingSubsystem {
 
     // MARK: - Task-scoped wind-down (abort / complete)
 
+    private func gracefulWindDownLogAnchor(
+        target: MissionRunCommandTarget,
+        environment: MissionRunEnvironment
+    ) -> (taskID: UUID?, taskLabel: String?) {
+        switch target {
+        case .task(let taskID):
+            let label = environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name
+            return (taskID, label)
+        case .squad(let assignmentID):
+            guard let mission = environment.template,
+                  let taskID = environment.resolvedTaskID(forSquadAssignmentID: assignmentID, mission: mission)
+            else { return (nil, nil) }
+            let label = environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name
+            return (taskID, label)
+        }
+    }
+
+    private func squadLogForPrimary(
+        environment: MissionRunEnvironment,
+        task: MissionTask,
+        assignmentID: UUID
+    ) -> (id: UUID, label: String) {
+        let squadIndex = environment.primarySquads(forTaskID: task.id, mission: environment.template)
+            .firstIndex(where: { $0.assignment.id == assignmentID }) ?? 0
+        return MissionControlSquadUtilities.squadLogContext(
+            taskID: task.id,
+            taskName: task.name,
+            squadIndex: squadIndex
+        )
+    }
+
     /// Cancels this task’s deferred MAVLink start (initial or between-cycle). If the task is **not** in an in-flight
     /// autopilot cycle, delivers any **already-set** pending graceful wind-down immediately when dispatch context exists.
     private func cancelDeferredStartsAndDeliverGracefulIfIdle(taskID: UUID, environment: MissionRunEnvironment) {
@@ -443,6 +616,25 @@ final class MissionRunSchedulingSubsystem {
         )
     }
 
+    /// Cancels one primary squad’s between-cycle deferral; if that squad is **not** in an in-flight MAVLink cycle,
+    /// delivers any **already-set** per-squad pending graceful wind-down when dispatch context exists.
+    private func cancelDeferredStartsAndDeliverGracefulIfIdleForSquad(
+        assignmentID: UUID,
+        taskID: UUID,
+        environment: MissionRunEnvironment
+    ) {
+        cancelDeferredSquadMissionStartScheduling(forAssignmentID: assignmentID)
+        guard !environment.activeCycleSquadAssignmentIDs.contains(assignmentID) else { return }
+        guard let ctx = environment.lastExecutionContext ?? environment.effectiveExecutionContextForDispatch() else {
+            return
+        }
+        environment.captureExecutionContext(ctx)
+        environment.systems.executor.deliverPendingSquadGracefulWindDownsIfNeeded(
+            completedSquadAssignmentIDs: [assignmentID],
+            context: ctx
+        )
+    }
+
     func revokeMissionTaskGracefulWindDown(forTaskID taskID: UUID?) {
         environment?.clearPendingMissionTaskGracefulWindDown(forTaskID: taskID)
     }
@@ -450,87 +642,163 @@ final class MissionRunSchedulingSubsystem {
     /// Schedules abort-policy fleet commands for one path’s bound slots after its **current** autopilot mission cycle ends, or **immediately** if the path is idle (including between-cycle delay: the deferral is cancelled).
     @discardableResult
     func abortMissionTaskAfterCycle(target: MissionRunCommandTarget) -> Bool {
-        guard let environment, case .task(let taskID) = target else { return false }
+        guard let environment else { return false }
         guard environment.gracefulStopKind == .none else {
+            let anchor = gracefulWindDownLogAnchor(target: target, environment: environment)
             environment.systems.logging.appendLogEvent(
                 level: .warning,
-                taskID: taskID,
-                taskLabel: environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name,
+                taskID: anchor.taskID,
+                taskLabel: anchor.taskLabel,
                 speaker: .missionControl,
                 templateKey: MissionRunLogTemplateKey.missionTaskAbortGracefulSkippedWholeRunStopActive
             )
             return false
         }
-        guard let mission = environment.template,
-              let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }),
-              task.enabled
-        else { return false }
-        if environment.assignmentsBoundToMissionTask(taskID: taskID).isEmpty {
+        guard let mission = environment.template else { return false }
+        switch target {
+        case .task(let taskID):
+            guard let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }),
+                  task.enabled
+            else { return false }
+            if environment.assignmentsBoundToMissionTask(taskID: taskID).isEmpty {
+                environment.systems.logging.appendLogEvent(
+                    level: .warning,
+                    taskID: taskID,
+                    taskLabel: task.name,
+                    speaker: .missionControl,
+                    templateKey: MissionRunLogTemplateKey.missionTaskAbortGracefulSkippedNoSlots,
+                    templateParams: [:]
+                )
+                return false
+            }
+            environment.clearPendingMissionTaskGracefulWindDown(forTaskID: taskID)
+            environment.setPendingMissionTaskGracefulWindDown(kind: .abortAfterCycle, forTaskID: taskID)
+            cancelDeferredStartsAndDeliverGracefulIfIdle(taskID: taskID, environment: environment)
             environment.systems.logging.appendLogEvent(
-                level: .warning,
+                level: .info,
                 taskID: taskID,
                 taskLabel: task.name,
                 speaker: .missionControl,
-                templateKey: MissionRunLogTemplateKey.missionTaskAbortGracefulSkippedNoSlots,
-                templateParams: [:]
+                templateKey: MissionRunLogTemplateKey.missionTaskAbortGracefulScheduled,
+                templateParams: ["task": task.name]
             )
-            return false
+            return true
+        case .squad(let assignmentID):
+            guard let taskID = environment.resolvedTaskID(forSquadAssignmentID: assignmentID, mission: mission),
+                  let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }),
+                  task.enabled
+            else { return false }
+            let primaryIDs = Set(environment.primarySquads(forTaskID: taskID, mission: mission).map(\.assignment.id))
+            guard primaryIDs.contains(assignmentID) else { return false }
+            if environment.assignmentsBoundToMissionTask(taskID: taskID).isEmpty {
+                environment.systems.logging.appendLogEvent(
+                    level: .warning,
+                    taskID: taskID,
+                    taskLabel: task.name,
+                    speaker: .missionControl,
+                    templateKey: MissionRunLogTemplateKey.missionTaskAbortGracefulSkippedNoSlots,
+                    templateParams: [:]
+                )
+                return false
+            }
+            environment.setPendingMissionSquadGracefulWindDown(kind: .abortAfterCycle, forAssignmentID: assignmentID)
+            cancelDeferredStartsAndDeliverGracefulIfIdleForSquad(
+                assignmentID: assignmentID,
+                taskID: taskID,
+                environment: environment
+            )
+            let squadLog = squadLogForPrimary(environment: environment, task: task, assignmentID: assignmentID)
+            environment.systems.logging.appendLogEvent(
+                level: .info,
+                taskID: squadLog.id,
+                taskLabel: squadLog.label,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.missionTaskAbortGracefulScheduled,
+                templateParams: ["task": task.name, "slotID": assignmentID.uuidString]
+            )
+            return true
         }
-        environment.clearPendingMissionTaskGracefulWindDown(forTaskID: taskID)
-        environment.setPendingMissionTaskGracefulWindDown(kind: .abortAfterCycle, forTaskID: taskID)
-        cancelDeferredStartsAndDeliverGracefulIfIdle(taskID: taskID, environment: environment)
-        environment.systems.logging.appendLogEvent(
-            level: .info,
-            taskID: taskID,
-            taskLabel: task.name,
-            speaker: .missionControl,
-            templateKey: MissionRunLogTemplateKey.missionTaskAbortGracefulScheduled,
-            templateParams: ["task": task.name]
-        )
-        return true
     }
 
     /// Schedules complete-policy recovery wind-down for one path’s bound slots after its **current** autopilot mission cycle ends, or **immediately** if the path is idle (including between-cycle delay: the deferral is cancelled).
     @discardableResult
     func completeMissionTaskAfterCycle(target: MissionRunCommandTarget) -> Bool {
-        guard let environment, case .task(let taskID) = target else { return false }
+        guard let environment else { return false }
         guard environment.gracefulStopKind == .none else {
+            let anchor = gracefulWindDownLogAnchor(target: target, environment: environment)
             environment.systems.logging.appendLogEvent(
                 level: .warning,
-                taskID: taskID,
-                taskLabel: environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name,
+                taskID: anchor.taskID,
+                taskLabel: anchor.taskLabel,
                 speaker: .missionControl,
                 templateKey: MissionRunLogTemplateKey.missionTaskCompleteGracefulSkippedWholeRunStopActive
             )
             return false
         }
-        guard let mission = environment.template,
-              let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }),
-              task.enabled
-        else { return false }
-        if environment.assignmentsBoundToMissionTask(taskID: taskID).isEmpty {
+        guard let mission = environment.template else { return false }
+        switch target {
+        case .task(let taskID):
+            guard let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }),
+                  task.enabled
+            else { return false }
+            if environment.assignmentsBoundToMissionTask(taskID: taskID).isEmpty {
+                environment.systems.logging.appendLogEvent(
+                    level: .warning,
+                    taskID: taskID,
+                    taskLabel: task.name,
+                    speaker: .missionControl,
+                    templateKey: MissionRunLogTemplateKey.missionTaskCompleteGracefulSkippedNoSlots,
+                    templateParams: [:]
+                )
+                return false
+            }
+            environment.clearPendingMissionTaskGracefulWindDown(forTaskID: taskID)
+            environment.setPendingMissionTaskGracefulWindDown(kind: .completeAfterCycle, forTaskID: taskID)
+            cancelDeferredStartsAndDeliverGracefulIfIdle(taskID: taskID, environment: environment)
             environment.systems.logging.appendLogEvent(
-                level: .warning,
+                level: .info,
                 taskID: taskID,
                 taskLabel: task.name,
                 speaker: .missionControl,
-                templateKey: MissionRunLogTemplateKey.missionTaskCompleteGracefulSkippedNoSlots,
-                templateParams: [:]
+                templateKey: MissionRunLogTemplateKey.missionTaskCompleteGracefulScheduled,
+                templateParams: ["task": task.name]
             )
-            return false
+            return true
+        case .squad(let assignmentID):
+            guard let taskID = environment.resolvedTaskID(forSquadAssignmentID: assignmentID, mission: mission),
+                  let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }),
+                  task.enabled
+            else { return false }
+            let primaryIDs = Set(environment.primarySquads(forTaskID: taskID, mission: mission).map(\.assignment.id))
+            guard primaryIDs.contains(assignmentID) else { return false }
+            if environment.assignmentsBoundToMissionTask(taskID: taskID).isEmpty {
+                environment.systems.logging.appendLogEvent(
+                    level: .warning,
+                    taskID: taskID,
+                    taskLabel: task.name,
+                    speaker: .missionControl,
+                    templateKey: MissionRunLogTemplateKey.missionTaskCompleteGracefulSkippedNoSlots,
+                    templateParams: [:]
+                )
+                return false
+            }
+            environment.setPendingMissionSquadGracefulWindDown(kind: .completeAfterCycle, forAssignmentID: assignmentID)
+            cancelDeferredStartsAndDeliverGracefulIfIdleForSquad(
+                assignmentID: assignmentID,
+                taskID: taskID,
+                environment: environment
+            )
+            let squadLog = squadLogForPrimary(environment: environment, task: task, assignmentID: assignmentID)
+            environment.systems.logging.appendLogEvent(
+                level: .info,
+                taskID: squadLog.id,
+                taskLabel: squadLog.label,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.missionTaskCompleteGracefulScheduled,
+                templateParams: ["task": task.name, "slotID": assignmentID.uuidString]
+            )
+            return true
         }
-        environment.clearPendingMissionTaskGracefulWindDown(forTaskID: taskID)
-        environment.setPendingMissionTaskGracefulWindDown(kind: .completeAfterCycle, forTaskID: taskID)
-        cancelDeferredStartsAndDeliverGracefulIfIdle(taskID: taskID, environment: environment)
-        environment.systems.logging.appendLogEvent(
-            level: .info,
-            taskID: taskID,
-            taskLabel: task.name,
-            speaker: .missionControl,
-            templateKey: MissionRunLogTemplateKey.missionTaskCompleteGracefulScheduled,
-            templateParams: ["task": task.name]
-        )
-        return true
     }
 
     @discardableResult

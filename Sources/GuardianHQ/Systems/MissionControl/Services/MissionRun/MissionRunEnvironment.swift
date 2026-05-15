@@ -63,7 +63,14 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     @Published private(set) var template: Mission?
     @Published private(set) var compiledPlan: MissionControlPlan?
     @Published private(set) var finishedMissionCycleVehicleIDsByTaskID: [UUID: Set<String>] = [:]
+    /// Primary assignment ids with an in-flight MAVLink mission cycle (source of truth; ``activeCycleTaskIDs`` is synced).
+    @Published private(set) var activeCycleSquadAssignmentIDs: Set<UUID> = []
+    @Published private(set) var finishedMissionCycleVehicleIDsBySquadAssignmentID: [UUID: Set<String>] = [:]
     @Published private(set) var activeCycleTaskIDs: Set<UUID> = []
+    /// Completed autopilot cycles per primary squad (``MissionRunAssignment/id``).
+    @Published private(set) var squadCyclesCompletedByAssignmentID: [UUID: Int] = [:]
+    /// Derived per-primary-squad state for MC-R (refreshed with task rollup).
+    @Published private(set) var squadStateByAssignmentID: [UUID: MissionSquadState] = [:]
     /// Completed autopilot cycles per task this run (continuous / continuous-with-delay). Used with ``MissionTask/cycles``.
     private(set) var taskCyclesCompletedByTaskID: [UUID: Int] = [:]
 
@@ -107,14 +114,34 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     /// Task-scoped graceful wind-down scheduled for the next shared autopilot cycle boundary (see scheduling APIs).
     @Published private(set) var pendingMissionTaskGracefulWindDownKindByTaskID: [UUID: MissionRunMissionTaskGracefulPendingKind] = [:]
 
+    /// Primary-squad graceful wind-down at **that squad’s** next MAVLink cycle end (``MissionRunAssignment/id``).
+    @Published private(set) var pendingMissionSquadGracefulWindDownKindByAssignmentID: [UUID: MissionRunMissionTaskGracefulPendingKind] = [:]
+
     /// Fleet abort-policy commands were dispatched for this task (immediate or end-of-cycle); cleared when abort protocol is acknowledged.
     @Published private(set) var missionTaskAbortWindDownIssuedTaskIDs: Set<UUID> = []
 
     /// Complete-policy wind-down was dispatched for this task; cleared when recovery protocol is acknowledged.
     @Published private(set) var missionTaskCompleteWindDownIssuedTaskIDs: Set<UUID> = []
 
+    /// Per-primary-squad complete-policy dispatch issued while **task-wide** complete wind-down is not yet marked
+    /// (multi-primary finite-cycle race: each primary gets its own move+park / chain as soon as **that** squad exhausts
+    /// its allotted cycles). Drives §4 ``policyCompleting`` lane starts for ``MissionRunCommandIssuerKey/completePolicyWindDown``.
+    @Published private(set) var squadCompletePolicyWindDownIssuedAssignmentIDs: Set<UUID> = []
+
     /// Tasks that must not receive automatic next-cycle MAVLink starts after a task-scoped wind-down.
     @Published private(set) var missionTaskAutopilotAutostartSuppressedTaskIDs: Set<UUID> = []
+
+    /// Primary squads that must not receive automatic next-cycle MAVLink starts (squad-scoped wind-down).
+    @Published private(set) var missionSquadAutopilotAutostartSuppressedAssignmentIDs: Set<UUID> = []
+
+    /// First-wave primaries waiting operator / waypoint release (ordered), keyed by mission task id.
+    @Published private(set) var deferredFirstWaveSquadAssignmentIDsByTaskID: [UUID: [UUID]] = [:]
+
+    /// Between-cycle delay before the next MAVLink cycle for one primary squad.
+    @Published private(set) var squadStartDeferralByAssignmentID: [UUID: MissionTaskStartDeferral] = [:]
+
+    /// Last lead-primary ``missionProgressCurrent`` snapshot per task (``MissionTask/staggerTrigger`` ``waypointReached`` auto-release).
+    internal var waypointStaggerGateLastHubProgressByTaskID: [UUID: Int32] = [:]
 
     /// Roster / pool assignment ids for which MC‑R **Engage Live Drive** is active: manual streaming owns that
     /// airframe, so autonomous reserve distress automation must not target that vacancy and next-cycle MAVLink
@@ -219,6 +246,16 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     }
 
     func attachServices(fleetLink: FleetLinkService, sitl: SitlService, generalSettings: GeneralSettingsStore? = nil) {
+        let sameFleet = self.fleetLink === fleetLink
+        let sameSitl = self.sitl === sitl
+        let sameSettings: Bool = {
+            switch (self.generalSettings, generalSettings) {
+            case (nil, nil): return true
+            case let (l?, r?): return l === r
+            case (nil, .some), (.some, nil): return false
+            }
+        }()
+        if sameFleet, sameSitl, sameSettings { return }
         self.fleetLink = fleetLink
         self.sitl = sitl
         if let generalSettings {
@@ -345,6 +382,65 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         return systems.executor.startMissionTask(taskID: taskID, context: ctx)
     }
 
+    /// Launches the next primary that was held back by first-wave stagger (operator gate or waypoint auto-release path).
+    @discardableResult
+    func releaseNextDeferredFirstWaveSquad(taskID: UUID) -> Bool {
+        guard status == .running else { return false }
+        guard sessionPhase == .executing else { return false }
+        guard let queue = deferredFirstWaveSquadAssignmentIDsByTaskID[taskID], !queue.isEmpty else { return false }
+        guard let ctx = effectiveExecutionContextForDispatch() else {
+            systems.logging.appendLogEvent(
+                level: .warning,
+                taskID: taskID,
+                taskLabel: template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.startMissionTaskNoDispatchContext
+            )
+            return false
+        }
+        captureExecutionContext(ctx)
+        return systems.executor.releaseNextDeferredFirstWaveSquad(taskID: taskID, context: ctx)
+    }
+
+    /// When ``staggerTrigger`` is ``waypointReached``, auto-launch the next deferred first-wave primary once the lead vehicle’s MAVLink mission progress crosses the authored waypoint gate.
+    func syncHubWaypointStaggerDeferredFirstWaveIfNeeded() {
+        guard let mission = template, let fleetLink, let sitl else { return }
+        guard status == .running, sessionPhase == .executing else { return }
+        guard let ctx = effectiveExecutionContextForDispatch() else { return }
+        let enabledCount = mission.routeMacro.tasks.filter(\.enabled).count
+        for task in mission.routeMacro.tasks where task.enabled && task.staggerTrigger == .waypointReached {
+            guard let queue = deferredFirstWaveSquadAssignmentIDsByTaskID[task.id], !queue.isEmpty else { continue }
+            let primaries = MissionControlSquadUtilities.orderedPrimarySquads(
+                task: task,
+                assignments: assignments,
+                rosterDevices: mission.rosterDevices,
+                enabledTaskCount: enabledCount
+            )
+            guard let lead = primaries.first else { continue }
+            guard let vid = resolvedFleetStreamVehicleID(
+                assignment: lead.0,
+                fleetLink: fleetLink,
+                sitl: sitl
+            ),
+                let hub = fleetLink.hubTelemetry(forVehicleID: vid),
+                let cur = hub.missionProgressCurrent,
+                let tot = hub.missionProgressTotal,
+                tot > 0
+            else { continue }
+            let prev = waypointStaggerGateLastHubProgressByTaskID[task.id] ?? -1
+            if MissionTaskStaggerPolicy.shouldAutoReleaseNextDeferredFirstWaveSquad(
+                previousProgress: prev,
+                currentProgress: cur,
+                missionProgressTotal: tot,
+                staggerWaypointIndex: task.staggerWaypointIndex
+            ) {
+                captureExecutionContext(ctx)
+                _ = systems.executor.releaseNextDeferredFirstWaveSquad(taskID: task.id, context: ctx)
+            }
+            waypointStaggerGateLastHubProgressByTaskID[task.id] = cur
+        }
+    }
+
     // MARK: - Task-scoped mission wind-down (abort / complete)
 
     /// Assignments whose compiled or explicit ``MissionRunAssignment/taskId`` maps to `taskID`.
@@ -367,35 +463,89 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     }
 
     /// Clears task-scoped graceful scheduling, dispatch markers, and autostart suppression (whole-run start / reset).
-    internal func clearMissionTaskScopedOrchestrationState() {
+    ///
+    /// - Parameter preserveMissionEndWindDownIssued: When `true`, keeps ``missionTaskAbortWindDownIssuedTaskIDs`` and
+    ///   ``missionTaskCompleteWindDownIssuedTaskIDs`` so §3 slot-evidence auto mission-end ack (and UI rollups that mirror
+    ///   those predicates) still work after ``MissionRunExecutionSubsystem`` transitions the run into **recovery** or
+    ///   **aborting** via ``completeRun`` — those paths must not strip issued markers before fleet lanes settle.
+    internal func clearMissionTaskScopedOrchestrationState(preserveMissionEndWindDownIssued: Bool = false) {
         if !pendingMissionTaskGracefulWindDownKindByTaskID.isEmpty {
             pendingMissionTaskGracefulWindDownKindByTaskID = [:]
         }
-        if !missionTaskAbortWindDownIssuedTaskIDs.isEmpty { missionTaskAbortWindDownIssuedTaskIDs = [] }
-        if !missionTaskCompleteWindDownIssuedTaskIDs.isEmpty { missionTaskCompleteWindDownIssuedTaskIDs = [] }
+        if !pendingMissionSquadGracefulWindDownKindByAssignmentID.isEmpty {
+            pendingMissionSquadGracefulWindDownKindByAssignmentID = [:]
+        }
+        if !preserveMissionEndWindDownIssued {
+            if !missionTaskAbortWindDownIssuedTaskIDs.isEmpty { missionTaskAbortWindDownIssuedTaskIDs = [] }
+            if !missionTaskCompleteWindDownIssuedTaskIDs.isEmpty { missionTaskCompleteWindDownIssuedTaskIDs = [] }
+        }
         if !missionTaskAutopilotAutostartSuppressedTaskIDs.isEmpty { missionTaskAutopilotAutostartSuppressedTaskIDs = [] }
+        if !missionSquadAutopilotAutostartSuppressedAssignmentIDs.isEmpty { missionSquadAutopilotAutostartSuppressedAssignmentIDs = [] }
+        if !deferredFirstWaveSquadAssignmentIDsByTaskID.isEmpty { deferredFirstWaveSquadAssignmentIDsByTaskID = [:] }
+        if !squadStartDeferralByAssignmentID.isEmpty { squadStartDeferralByAssignmentID = [:] }
+        if !waypointStaggerGateLastHubProgressByTaskID.isEmpty { waypointStaggerGateLastHubProgressByTaskID = [:] }
         if !missionRunAssignmentIDsWithOperatorLiveDriveHandoff.isEmpty { missionRunAssignmentIDsWithOperatorLiveDriveHandoff = [] }
         if !operatorTriageMarkedMissionTaskStateByTaskID.isEmpty { operatorTriageMarkedMissionTaskStateByTaskID = [:] }
         if !slotPolicyPullConformanceLastSuccessByAssignmentID.isEmpty { slotPolicyPullConformanceLastSuccessByAssignmentID = [:] }
         if !taskMissionEndAttemptByTaskID.isEmpty { taskMissionEndAttemptByTaskID = [:] }
+        if !squadCompletePolicyWindDownIssuedAssignmentIDs.isEmpty { squadCompletePolicyWindDownIssuedAssignmentIDs = [] }
     }
 
     internal func setPendingMissionTaskGracefulWindDown(kind: MissionRunMissionTaskGracefulPendingKind, forTaskID taskID: UUID) {
+        clearPendingMissionSquadGracefulWindDownForPrimarySquads(ofTaskID: taskID)
         pendingMissionTaskGracefulWindDownKindByTaskID[taskID] = kind
         refreshDerivedTaskStates()
+    }
+
+    /// Clears per-primary-squad pending graceful rows for every primary bound to this task (used when task-wide pending replaces them).
+    internal func clearPendingMissionSquadGracefulWindDownForPrimarySquads(ofTaskID taskID: UUID) {
+        let aids = Set(primarySquads(forTaskID: taskID).map(\.assignment.id))
+        guard !aids.isEmpty else { return }
+        var changed = false
+        for aid in aids where pendingMissionSquadGracefulWindDownKindByAssignmentID[aid] != nil {
+            pendingMissionSquadGracefulWindDownKindByAssignmentID.removeValue(forKey: aid)
+            changed = true
+        }
+        if changed { refreshDerivedTaskStates() }
+    }
+
+    internal func setPendingMissionSquadGracefulWindDown(kind: MissionRunMissionTaskGracefulPendingKind, forAssignmentID assignmentID: UUID) {
+        if let taskID = taskIDForSquadGracefulMutation(assignmentID: assignmentID) {
+            pendingMissionTaskGracefulWindDownKindByTaskID.removeValue(forKey: taskID)
+        }
+        pendingMissionSquadGracefulWindDownKindByAssignmentID[assignmentID] = kind
+        refreshDerivedTaskStates()
+    }
+
+    private func taskIDForSquadGracefulMutation(assignmentID: UUID) -> UUID? {
+        guard let mission = template else { return nil }
+        return resolvedTaskID(forSquadAssignmentID: assignmentID, mission: mission)
     }
 
     internal func clearPendingMissionTaskGracefulWindDown(forTaskID taskID: UUID? = nil) {
         if let taskID {
             pendingMissionTaskGracefulWindDownKindByTaskID.removeValue(forKey: taskID)
+            clearPendingMissionSquadGracefulWindDownForPrimarySquads(ofTaskID: taskID)
         } else {
             pendingMissionTaskGracefulWindDownKindByTaskID.removeAll()
+            pendingMissionSquadGracefulWindDownKindByAssignmentID.removeAll()
         }
+        refreshDerivedTaskStates()
+    }
+
+    internal func clearPendingMissionSquadGracefulWindDown(forAssignmentID assignmentID: UUID) {
+        guard pendingMissionSquadGracefulWindDownKindByAssignmentID.removeValue(forKey: assignmentID) != nil else { return }
         refreshDerivedTaskStates()
     }
 
     internal func consumePendingMissionTaskGracefulWindDown(forTaskID taskID: UUID) -> MissionRunMissionTaskGracefulPendingKind? {
         let v = pendingMissionTaskGracefulWindDownKindByTaskID.removeValue(forKey: taskID)
+        if v != nil { refreshDerivedTaskStates() }
+        return v
+    }
+
+    internal func consumePendingMissionSquadGracefulWindDown(forAssignmentID assignmentID: UUID) -> MissionRunMissionTaskGracefulPendingKind? {
+        let v = pendingMissionSquadGracefulWindDownKindByAssignmentID.removeValue(forKey: assignmentID)
         if v != nil { refreshDerivedTaskStates() }
         return v
     }
@@ -412,16 +562,12 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         refreshDerivedTaskStates()
     }
 
-    /// True while whole-run after-cycle intent **or** any per-task graceful / issued wind-down markers are active.
+    /// True only for **whole-run** after-cycle operator intent (``gracefulStopKind``).
     ///
-    /// ``MissionRunExecutionSubsystem`` uses this so between-cycle autostart / delay scheduling does not race
-    /// complete-policy recovery when ``gracefulStopKind`` is still ``none`` but per-task pending or issued markers
-    /// are set.
-    func shouldSuppressBetweenCycleAutostartForMissionEndWindDown() -> Bool {
+    /// Per-task graceful / issued wind-down must **not** use this — they belong in
+    /// ``unionedMissionTaskIDsSuppressingAutopilotAutostart(forMission:)`` so sibling tasks keep independent autostart.
+    func shouldSuppressMissionWideBetweenCycleAutostart() -> Bool {
         gracefulStopKind != .none
-            || !pendingMissionTaskGracefulWindDownKindByTaskID.isEmpty
-            || !missionTaskCompleteWindDownIssuedTaskIDs.isEmpty
-            || !missionTaskAbortWindDownIssuedTaskIDs.isEmpty
     }
 
     /// Records MC-led mission-end **intent** before fleet wind-down commands; **abort** wins if both were ever set.
@@ -456,10 +602,31 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         taskMissionEndRecoveryCompletedByTaskID.remove(taskID)
         taskMissionEndAbortCompletedByTaskID.remove(taskID)
         clearMissionTaskEndAttemptStorage(forTaskID: taskID)
+        removeSquadCompletePolicyWindDownIssuedForBoundPrimaries(taskID: taskID)
         var triage = operatorTriageMarkedMissionTaskStateByTaskID
         triage.removeValue(forKey: taskID)
         operatorTriageMarkedMissionTaskStateByTaskID = triage
         refreshDerivedTaskStates()
+    }
+
+    /// Clears per-squad complete-policy dispatch markers for every primary bound to this task (operator restart / triage).
+    internal func removeSquadCompletePolicyWindDownIssuedForBoundPrimaries(taskID: UUID) {
+        guard let mission = template else { return }
+        let aids = Set(primarySquads(forTaskID: taskID, mission: mission).map(\.assignment.id))
+        guard !aids.isEmpty else { return }
+        var next = squadCompletePolicyWindDownIssuedAssignmentIDs
+        let before = next
+        aids.forEach { next.remove($0) }
+        guard next != before else { return }
+        squadCompletePolicyWindDownIssuedAssignmentIDs = next
+    }
+
+    /// Records that §4 complete-policy fleet traffic for this primary row should open ``policyCompleting`` lanes without a task-wide issued marker.
+    internal func markSquadCompletePolicyWindDownDispatchIssued(forAssignmentID assignmentID: UUID) {
+        guard !squadCompletePolicyWindDownIssuedAssignmentIDs.contains(assignmentID) else { return }
+        var next = squadCompletePolicyWindDownIssuedAssignmentIDs
+        next.insert(assignmentID)
+        squadCompletePolicyWindDownIssuedAssignmentIDs = next
     }
 
     // MARK: - MC-R → Live Drive operator handoff
@@ -502,9 +669,12 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         missionRunAssignmentIDsWithOperatorLiveDriveHandoff = []
     }
 
-    /// Wind-down markers plus mission tasks implied by ``missionRunAssignmentIDsWithOperatorLiveDriveHandoff`` (executor autostart gate).
+    /// Per-task autostart suppress: issued wind-down / operator suppress set, pending per-task graceful rows, and Live Drive handoff task mapping.
     internal func unionedMissionTaskIDsSuppressingAutopilotAutostart(forMission mission: Mission) -> Set<UUID> {
         var union = missionTaskAutopilotAutostartSuppressedTaskIDs
+        union.formUnion(pendingMissionTaskGracefulWindDownKindByTaskID.keys)
+        union.formUnion(missionTaskCompleteWindDownIssuedTaskIDs)
+        union.formUnion(missionTaskAbortWindDownIssuedTaskIDs)
         guard !missionRunAssignmentIDsWithOperatorLiveDriveHandoff.isEmpty else { return union }
         for aid in missionRunAssignmentIDsWithOperatorLiveDriveHandoff {
             union.formUnion(missionTaskIDsForOperatorLiveDriveHandoffAssignment(id: aid, mission: mission))
@@ -555,6 +725,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             var completeIssued = missionTaskCompleteWindDownIssuedTaskIDs
             completeIssued.remove(taskID)
             missionTaskCompleteWindDownIssuedTaskIDs = completeIssued
+            removeSquadCompletePolicyWindDownIssuedForBoundPrimaries(taskID: taskID)
         case .completed:
             var recoveryDone = taskMissionEndRecoveryCompletedByTaskID
             recoveryDone.insert(taskID)
@@ -568,6 +739,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             var abortIssued = missionTaskAbortWindDownIssuedTaskIDs
             abortIssued.remove(taskID)
             missionTaskAbortWindDownIssuedTaskIDs = abortIssued
+            removeSquadCompletePolicyWindDownIssuedForBoundPrimaries(taskID: taskID)
         default:
             break
         }
@@ -652,7 +824,9 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             guard insertAutoMissionEndAbortAckIfNeeded(taskID: taskID) else { return nil }
             return .abort(task.name)
         }
-        if missionTaskCompleteWindDownIssuedTaskIDs.contains(taskID) {
+        let completeRecoveryIntent = missionTaskCompleteWindDownIssuedTaskIDs.contains(taskID)
+            || Self.allPrimariesDispatchedPerSquadCompletePolicyWindDown(task: task, run: self)
+        if completeRecoveryIntent {
             guard MissionRunSlotEvidenceAutoMissionEndAckRules.allBoundRosterRowsSatisfiedForCompleteMissionEndAutoAck(bound) else { return nil }
             guard insertAutoMissionEndRecoveryAckIfNeeded(taskID: taskID) else { return nil }
             return .recovery(task.name)
@@ -722,12 +896,15 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         abortIssued.remove(taskID)
         missionTaskAbortWindDownIssuedTaskIDs = abortIssued
         clearMissionTaskEndAttemptStorage(forTaskID: taskID)
+        removeSquadCompletePolicyWindDownIssuedForBoundPrimaries(taskID: taskID)
         return true
     }
 
     @discardableResult
     func abortMissionTask(_ target: MissionRunCommandTarget) -> Bool {
-        guard case .task = target else { return false }
+        switch target {
+        case .task, .squad: break
+        }
         guard status == .running || status == .paused else { return false }
         guard sessionPhase == .executing else { return false }
         guard let ctx = effectiveExecutionContextForDispatch() else {
@@ -744,16 +921,22 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
 
     @discardableResult
     func abortMissionTaskGraceful(_ target: MissionRunCommandTarget) -> Bool {
-        guard case .task(let taskID) = target else { return false }
         guard status == .running || status == .paused else { return false }
         guard sessionPhase == .executing else { return false }
         systems.scheduling.abortMissionTaskAfterCycle(target: target)
-        return pendingMissionTaskGracefulWindDownKindByTaskID[taskID] != nil
+        switch target {
+        case .task(let taskID):
+            return pendingMissionTaskGracefulWindDownKindByTaskID[taskID] != nil
+        case .squad(let assignmentID):
+            return pendingMissionSquadGracefulWindDownKindByAssignmentID[assignmentID] != nil
+        }
     }
 
     @discardableResult
     func completeMissionTask(_ target: MissionRunCommandTarget) -> Bool {
-        guard case .task = target else { return false }
+        switch target {
+        case .task, .squad: break
+        }
         guard status == .running || status == .paused else { return false }
         guard sessionPhase == .executing else { return false }
         guard let ctx = effectiveExecutionContextForDispatch() else {
@@ -770,16 +953,25 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
 
     @discardableResult
     func completeMissionTaskGraceful(_ target: MissionRunCommandTarget) -> Bool {
-        guard case .task(let taskID) = target else { return false }
         guard status == .running || status == .paused else { return false }
         guard sessionPhase == .executing else { return false }
         systems.scheduling.completeMissionTaskAfterCycle(target: target)
-        return pendingMissionTaskGracefulWindDownKindByTaskID[taskID] != nil
+        switch target {
+        case .task(let taskID):
+            return pendingMissionTaskGracefulWindDownKindByTaskID[taskID] != nil
+        case .squad(let assignmentID):
+            return pendingMissionSquadGracefulWindDownKindByAssignmentID[assignmentID] != nil
+        }
     }
 
     /// Cancels a previously scheduled per-task end-of-cycle wind-down for one task (or all tasks if `taskID` is nil).
     func revokeMissionTaskGracefulWindDown(forTaskID taskID: UUID? = nil) {
         systems.scheduling.revokeMissionTaskGracefulWindDown(forTaskID: taskID)
+    }
+
+    /// Cancels scheduled end-of-cycle wind-down for one primary squad only.
+    func revokeMissionSquadGracefulWindDown(forAssignmentID assignmentID: UUID) {
+        clearPendingMissionSquadGracefulWindDown(forAssignmentID: assignmentID)
     }
 
     func installAssistant(_ assistant: AnyObject, key: String) {
@@ -2095,21 +2287,35 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
 
     internal func clearActiveCycleTasks() {
         activeCycleTaskIDs.removeAll()
+        clearSquadCycleTracking()
         refreshDerivedTaskStates()
     }
 
     internal func removeTaskFromActiveCycle(_ taskID: UUID) {
-        guard activeCycleTaskIDs.remove(taskID) != nil else { return }
+        let squads = primarySquads(forTaskID: taskID)
+        var removed = false
+        for squad in squads {
+            if activeCycleSquadAssignmentIDs.remove(squad.assignment.id) != nil {
+                removed = true
+            }
+        }
+        guard removed else { return }
+        syncActiveCycleTaskIDsFromSquads()
         refreshDerivedTaskStates()
     }
 
     internal func markTaskActiveInCurrentCycle(_ taskID: UUID) {
-        activeCycleTaskIDs.insert(taskID)
+        if let mission = template {
+            markFirstWaveSquadsActiveInCurrentCycle(taskID: taskID, mission: mission)
+        } else {
+            activeCycleTaskIDs.insert(taskID)
+        }
         refreshDerivedTaskStates()
     }
 
     internal func clearTaskCycleCompletionCounts() {
         taskCyclesCompletedByTaskID.removeAll()
+        squadCyclesCompletedByAssignmentID = [:]
     }
 
     internal func clearTaskMissionEndRecoveryAcknowledgements() {
@@ -2153,6 +2359,9 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     internal func recordTaskCycleCompletions(forTaskIDs taskIDs: Set<UUID>) {
         for id in taskIDs {
             taskCyclesCompletedByTaskID[id, default: 0] += 1
+        }
+        if let mission = template {
+            _ = recomputeAggregatedTaskCyclesAndReturnTasksWhoseCycleBoundaryClosed(mission: mission)
         }
         refreshDerivedTaskStates()
     }
@@ -2222,6 +2431,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     func refreshDerivedTaskStates(now: Date = Date()) {
         pruneRosterSimStartPoseSnapshotsToCurrentAssignments()
         pruneReservePoolSimStartPoseSnapshotsToCurrentSlots()
+        refreshDerivedSquadStates(now: now)
         guard let mission = template else {
             if !taskStateByTaskID.isEmpty { taskStateByTaskID = [:] }
             if !taskAttemptingByTaskID.isEmpty { taskAttemptingByTaskID = [:] }
@@ -2306,10 +2516,22 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
 
     /// Same predicate as §3 auto mission-end ack while complete wind-down remains **issued** (no ack-set mutation here).
     private static func slotRollupMirrorsAutoMissionEndAckRecovery(task: MissionTask, run: MissionRunEnvironment) -> Bool {
-        guard run.missionTaskCompleteWindDownIssuedTaskIDs.contains(task.id) else { return false }
-        return MissionRunSlotEvidenceAutoMissionEndAckRules.allBoundRosterRowsSatisfiedForCompleteMissionEndAutoAck(
-            run.assignmentsBoundToMissionTask(taskID: task.id)
-        )
+        let bound = run.assignmentsBoundToMissionTask(taskID: task.id)
+        guard MissionRunSlotEvidenceAutoMissionEndAckRules.allBoundRosterRowsSatisfiedForCompleteMissionEndAutoAck(bound) else { return false }
+        if run.missionTaskCompleteWindDownIssuedTaskIDs.contains(task.id) { return true }
+        return allPrimariesDispatchedPerSquadCompletePolicyWindDown(task: task, run: run)
+    }
+
+    /// Multi-primary finite-cycle: every primary row has dispatched its own complete-policy stack (see ``MissionRunExecutionSubsystem/autoDeliverPerSquadFiniteCycleCompletePolicyIfNeeded``).
+    internal static func allPrimariesDispatchedPerSquadCompletePolicyWindDown(task: MissionTask, run: MissionRunEnvironment) -> Bool {
+        let primaries = run.primarySquads(forTaskID: task.id)
+        guard primaries.count > 1 else { return false }
+        let repeats = task.regularity == .continuous || task.regularity == .continuousWithDelay
+        guard repeats, task.cycles > 0 else { return false }
+        for squad in primaries {
+            guard run.squadCompletePolicyWindDownIssuedAssignmentIDs.contains(squad.assignment.id) else { return false }
+        }
+        return true
     }
 
     private static func deriveMissionTaskState(task: MissionTask, run: MissionRunEnvironment, now: Date) -> MissionTaskState {
@@ -2380,6 +2602,9 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
                 return .completed
             }
             if inDeferral { return .staging }
+            if let rolled = Self.rollupMissionTaskStateFromSquads(task: task, run: run, now: now) {
+                return rolled
+            }
             if run.activeCycleTaskIDs.contains(task.id) { return .executing }
             let cyclesDone = run.taskCyclesCompletedByTaskID[task.id] ?? 0
             let repeats = task.regularity == .continuous || task.regularity == .continuousWithDelay
@@ -2388,7 +2613,10 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
                     || Self.slotRollupMirrorsAutoMissionEndAckRecovery(task: task, run: run)
                 return recoveryDone ? .completed : .recovery
             }
-            if repeats, cyclesDone > 0 { return .between }
+            if repeats, cyclesDone > 0 {
+                // Task-level rollup: off-cycle gaps read **Executing** — between-cycle gaps are squad/roster scoped.
+                return .executing
+            }
             return .ready
         }
     }
@@ -2569,6 +2797,332 @@ extension MissionRunEnvironment {
             }
         }
         return rows
+    }
+}
+
+// MARK: - Squad cycle state
+
+extension MissionRunEnvironment {
+
+    internal func clearSquadCycleTracking() {
+        activeCycleSquadAssignmentIDs = []
+        finishedMissionCycleVehicleIDsBySquadAssignmentID = [:]
+        squadCyclesCompletedByAssignmentID = [:]
+        if !squadStateByAssignmentID.isEmpty { squadStateByAssignmentID = [:] }
+        if !deferredFirstWaveSquadAssignmentIDsByTaskID.isEmpty { deferredFirstWaveSquadAssignmentIDsByTaskID = [:] }
+        if !squadStartDeferralByAssignmentID.isEmpty { squadStartDeferralByAssignmentID = [:] }
+        if !squadCompletePolicyWindDownIssuedAssignmentIDs.isEmpty { squadCompletePolicyWindDownIssuedAssignmentIDs = [] }
+    }
+
+    internal func markMissionSquadAutostartSuppressed(forAssignmentID assignmentID: UUID) {
+        missionSquadAutopilotAutostartSuppressedAssignmentIDs.insert(assignmentID)
+        refreshDerivedTaskStates()
+    }
+
+    internal func registerDeferredFirstWaveSquads(taskID: UUID, assignmentIDs: [UUID]) {
+        guard !assignmentIDs.isEmpty else { return }
+        deferredFirstWaveSquadAssignmentIDsByTaskID[taskID] = assignmentIDs
+    }
+
+    internal func consumeNextDeferredFirstWaveSquadAssignmentID(forTaskID taskID: UUID) -> UUID? {
+        guard var queue = deferredFirstWaveSquadAssignmentIDsByTaskID[taskID], !queue.isEmpty else { return nil }
+        let next = queue.removeFirst()
+        if queue.isEmpty {
+            deferredFirstWaveSquadAssignmentIDsByTaskID.removeValue(forKey: taskID)
+        } else {
+            deferredFirstWaveSquadAssignmentIDsByTaskID[taskID] = queue
+        }
+        return next
+    }
+
+    internal func setSquadStartDeferral(_ value: MissionTaskStartDeferral?, forAssignmentID assignmentID: UUID) {
+        if let value {
+            squadStartDeferralByAssignmentID[assignmentID] = value
+        } else {
+            squadStartDeferralByAssignmentID.removeValue(forKey: assignmentID)
+        }
+        refreshDerivedTaskStates()
+    }
+
+    internal func shouldSuppressAutopilotAutostart(
+        forSquadAssignmentID assignmentID: UUID,
+        taskID: UUID,
+        mission: Mission
+    ) -> Bool {
+        if unionedMissionTaskIDsSuppressingAutopilotAutostart(forMission: mission).contains(taskID) {
+            return true
+        }
+        if pendingMissionSquadGracefulWindDownKindByAssignmentID[assignmentID] != nil {
+            return true
+        }
+        return missionSquadAutopilotAutostartSuppressedAssignmentIDs.contains(assignmentID)
+    }
+
+    internal func resolvedTaskID(forSquadAssignmentID assignmentID: UUID, mission: Mission) -> UUID? {
+        guard let row = assignments.first(where: { $0.id == assignmentID }) else { return nil }
+        if let tid = row.taskId { return tid }
+        let enabled = mission.routeMacro.tasks.filter(\.enabled)
+        if enabled.count == 1 { return enabled.first?.id }
+        return nil
+    }
+
+    internal func clearFinishedMissionCycleVehicleIDs(forSquadAssignmentID assignmentID: UUID) {
+        finishedMissionCycleVehicleIDsBySquadAssignmentID.removeValue(forKey: assignmentID)
+    }
+
+    internal func markFinishedMissionCycleVehicleID(_ vehicleID: String, forSquadAssignmentID assignmentID: UUID) {
+        var next = finishedMissionCycleVehicleIDsBySquadAssignmentID
+        var bucket = next[assignmentID] ?? []
+        bucket.insert(vehicleID)
+        next[assignmentID] = bucket
+        finishedMissionCycleVehicleIDsBySquadAssignmentID = next
+    }
+
+    internal func markSquadActiveInCurrentCycle(_ assignmentID: UUID) {
+        guard activeCycleSquadAssignmentIDs.insert(assignmentID).inserted else { return }
+        syncActiveCycleTaskIDsFromSquads()
+        refreshDerivedTaskStates()
+    }
+
+    internal func removeSquadFromActiveCycle(_ assignmentID: UUID) {
+        guard activeCycleSquadAssignmentIDs.remove(assignmentID) != nil else { return }
+        syncActiveCycleTaskIDsFromSquads()
+        refreshDerivedTaskStates()
+    }
+
+    internal func markFirstWaveSquadsActiveInCurrentCycle(taskID: UUID, mission: Mission) {
+        guard let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }) else { return }
+        let enabledCount = mission.routeMacro.tasks.filter(\.enabled).count
+        let squads = MissionControlSquadUtilities.orderedPrimarySquads(
+            task: task,
+            assignments: assignments,
+            rosterDevices: mission.rosterDevices,
+            enabledTaskCount: enabledCount
+        )
+        for (index, squad) in squads.enumerated() {
+            guard MissionTaskStaggerPolicy.includesSquadInAutomaticFirstWave(
+                task: task,
+                squadIndex: index
+            ) else { continue }
+            _ = activeCycleSquadAssignmentIDs.insert(squad.assignment.id)
+        }
+        syncActiveCycleTaskIDsFromSquads()
+    }
+
+    internal func recordSquadCycleCompletions(assignmentIDs: Set<UUID>, mission: Mission) -> Set<UUID> {
+        guard !assignmentIDs.isEmpty else { return [] }
+        for aid in assignmentIDs {
+            squadCyclesCompletedByAssignmentID[aid, default: 0] += 1
+        }
+        let closed = recomputeAggregatedTaskCyclesAndReturnTasksWhoseCycleBoundaryClosed(mission: mission)
+        refreshDerivedTaskStates()
+        return closed
+    }
+
+    @discardableResult
+    internal func recomputeAggregatedTaskCyclesAndReturnTasksWhoseCycleBoundaryClosed(mission: Mission) -> Set<UUID> {
+        let enabled = mission.routeMacro.tasks.filter(\.enabled)
+        var closedTaskIDs: Set<UUID> = []
+        for task in enabled {
+            let enabledCount = enabled.count
+            let squads = MissionControlSquadUtilities.orderedPrimarySquads(
+                task: task,
+                assignments: assignments,
+                rosterDevices: mission.rosterDevices,
+                enabledTaskCount: enabledCount
+            )
+            guard !squads.isEmpty else { continue }
+            let counts = squads.map { squadCyclesCompletedByAssignmentID[$0.assignment.id] ?? 0 }
+            let rolled = counts.min() ?? 0
+            let previous = taskCyclesCompletedByTaskID[task.id] ?? 0
+            taskCyclesCompletedByTaskID[task.id] = rolled
+            let allMatch = counts.allSatisfy { $0 == rolled }
+            let noneInFlight = !squads.contains { activeCycleSquadAssignmentIDs.contains($0.assignment.id) }
+            if rolled > previous, allMatch, noneInFlight, rolled > 0 {
+                closedTaskIDs.insert(task.id)
+            }
+        }
+        return closedTaskIDs
+    }
+
+    internal func syncActiveCycleTaskIDsFromSquads() {
+        guard let mission = template else {
+            if !activeCycleTaskIDs.isEmpty { activeCycleTaskIDs = [] }
+            return
+        }
+        let enabled = mission.routeMacro.tasks.filter(\.enabled)
+        var taskIDs: Set<UUID> = []
+        for assignmentID in activeCycleSquadAssignmentIDs {
+            guard let row = assignments.first(where: { $0.id == assignmentID }) else { continue }
+            if let tid = row.taskId {
+                taskIDs.insert(tid)
+            } else if enabled.count == 1, let only = enabled.first {
+                taskIDs.insert(only.id)
+            }
+        }
+        if taskIDs != activeCycleTaskIDs {
+            activeCycleTaskIDs = taskIDs
+        }
+    }
+
+    func primarySquads(forTaskID taskID: UUID, mission: Mission? = nil) -> [(assignment: MissionRunAssignment, squadIndex: Int)] {
+        let source = mission ?? template
+        guard let mission = source,
+              let task = mission.routeMacro.tasks.first(where: { $0.id == taskID })
+        else { return [] }
+        let enabledCount = mission.routeMacro.tasks.filter(\.enabled).count
+        return MissionControlSquadUtilities.orderedPrimarySquads(
+            task: task,
+            assignments: assignments,
+            rosterDevices: mission.rosterDevices,
+            enabledTaskCount: enabledCount
+        ).enumerated().map { (assignment: $0.element.assignment, squadIndex: $0.offset) }
+    }
+
+    func boundPrimarySquadCount(forTaskID taskID: UUID, mission: Mission? = nil) -> Int {
+        primarySquads(forTaskID: taskID, mission: mission).count
+    }
+
+    func refreshDerivedSquadStates(now: Date = Date()) {
+        guard let mission = template else {
+            if !squadStateByAssignmentID.isEmpty { squadStateByAssignmentID = [:] }
+            return
+        }
+        var next: [UUID: MissionSquadState] = [:]
+        let enabled = mission.routeMacro.tasks.filter(\.enabled)
+        for task in enabled {
+            let squads = primarySquads(forTaskID: task.id, mission: mission)
+            for squad in squads {
+                next[squad.assignment.id] = Self.deriveMissionSquadState(
+                    task: task,
+                    assignment: squad.assignment,
+                    squadIndex: squad.squadIndex,
+                    run: self,
+                    now: now
+                )
+            }
+        }
+        if next != squadStateByAssignmentID {
+            squadStateByAssignmentID = next
+        }
+    }
+
+    static func deriveMissionSquadState(
+        task: MissionTask,
+        assignment: MissionRunAssignment,
+        squadIndex: Int,
+        run: MissionRunEnvironment,
+        now: Date
+    ) -> MissionSquadState {
+        if !task.enabled { return .ready }
+
+        let inDeferral = task.enabled
+            && (run.status == .running || run.status == .paused)
+            && (run.taskStartDeferralByTaskID[task.id].map { now < $0.startAt } ?? false)
+
+        switch run.sessionPhase {
+        case .draft, .compiled:
+            return .ready
+        case .staging:
+            return .staging
+        case .recovery, .completed:
+            let recoveryDone = run.taskMissionEndRecoveryCompletedByTaskID.contains(task.id)
+                || Self.slotRollupMirrorsAutoMissionEndAckRecovery(task: task, run: run)
+            return recoveryDone ? .completed : .recovery
+        case .aborting, .aborted:
+            let abortDone = run.taskMissionEndAbortCompletedByTaskID.contains(task.id)
+                || Self.slotRollupMirrorsAutoMissionEndAckAbort(task: task, run: run)
+            return abortDone ? .aborted : .aborting
+        case .executing:
+            if run.missionTaskAbortWindDownIssuedTaskIDs.contains(task.id) {
+                let abortDone = run.taskMissionEndAbortCompletedByTaskID.contains(task.id)
+                    || Self.slotRollupMirrorsAutoMissionEndAckAbort(task: task, run: run)
+                return abortDone ? .aborted : .aborting
+            }
+            if run.missionTaskCompleteWindDownIssuedTaskIDs.contains(task.id) {
+                let recoveryDone = run.taskMissionEndRecoveryCompletedByTaskID.contains(task.id)
+                    || Self.slotRollupMirrorsAutoMissionEndAckRecovery(task: task, run: run)
+                return recoveryDone ? .completed : .recovery
+            }
+            if inDeferral
+                || (run.squadStartDeferralByAssignmentID[assignment.id].map { now < $0.startAt } ?? false) {
+                return .staging
+            }
+            if run.activeCycleSquadAssignmentIDs.contains(assignment.id) { return .executing }
+            let cyclesDone = run.squadCyclesCompletedByAssignmentID[assignment.id] ?? 0
+            let repeats = task.regularity == .continuous || task.regularity == .continuousWithDelay
+            if repeats, Self.finiteRepeatingSquadCyclesExhausted(task: task, cyclesDone: cyclesDone) {
+                let recoveryDone = run.taskMissionEndRecoveryCompletedByTaskID.contains(task.id)
+                    || Self.slotRollupMirrorsAutoMissionEndAckRecovery(task: task, run: run)
+                return recoveryDone ? .completed : .recovery
+            }
+            if repeats, cyclesDone > 0 {
+                if task.regularity == .continuousWithDelay { return .between }
+                return .executing
+            }
+            return .ready
+        }
+    }
+
+    private static func finiteRepeatingSquadCyclesExhausted(task: MissionTask, cyclesDone: Int) -> Bool {
+        guard task.regularity == .continuous || task.regularity == .continuousWithDelay else { return false }
+        guard task.cycles > 0 else { return false }
+        return cyclesDone >= task.cycles
+    }
+
+    /// Multi-primary task rollup from precomputed per-squad states.
+    ///
+    /// **Product lock** (`MRESquadsToDo.md` — **Auto pipeline**): whole-run / task auto wind-down follows
+    /// **recovery → complete** among squads unless **every** primary is `.aborting` or `.aborted`; squads already on
+    /// the abort path are **ignored** when deciding that branch among the rest (mixed abort + recovery still yields
+    /// **recovery** until unanimity on abort).
+    static func rollupMissionTaskStateFromSquadStates(_ states: [MissionSquadState]) -> MissionTaskState? {
+        guard states.count > 1 else { return nil }
+        let abortDirected: Set<MissionSquadState> = [.aborting, .aborted]
+        if states.allSatisfy({ abortDirected.contains($0) }) {
+            if states.allSatisfy({ $0 == .aborted }) { return .aborted }
+            return .aborting
+        }
+        let active = states.filter { !abortDirected.contains($0) }
+        guard !active.isEmpty else { return .executing }
+        return rollupMissionTaskStateFromNonAbortSquadStates(active)
+    }
+
+    static func rollupMissionTaskStateFromSquads(
+        task: MissionTask,
+        run: MissionRunEnvironment,
+        now: Date
+    ) -> MissionTaskState? {
+        let squads = run.primarySquads(forTaskID: task.id)
+        guard squads.count > 1 else { return nil }
+        let states = squads.map {
+            deriveMissionSquadState(
+                task: task,
+                assignment: $0.assignment,
+                squadIndex: $0.squadIndex,
+                run: run,
+                now: now
+            )
+        }
+        return rollupMissionTaskStateFromSquadStates(states)
+    }
+
+    /// Priority order for squads after removing `.aborting` / `.aborted` (see ``rollupMissionTaskStateFromSquadStates``).
+    ///
+    /// **Finite multi-primary “race”:** the task stays ``executing`` while **any** primary is still in a contesting state
+    /// (executing, between-cycle gap, start deferral, or not yet started). Task ``recovery`` applies only when no squad
+    /// is still contesting and at least one remains in ``recovery`` (others may already be ``completed`` after ack).
+    private static func rollupMissionTaskStateFromNonAbortSquadStates(_ states: [MissionSquadState]) -> MissionTaskState {
+        if states.allSatisfy({ $0 == .completed }) { return .completed }
+        if states.allSatisfy({ $0 == .ready }) { return .ready }
+        if states.allSatisfy({ $0 == .staging }) { return .staging }
+
+        let stillContest: Set<MissionSquadState> = [.executing, .between, .staging, .ready]
+        if states.contains(where: { stillContest.contains($0) }) {
+            return .executing
+        }
+        if states.contains(.recovery) { return .recovery }
+        return .executing
     }
 }
 

@@ -361,6 +361,11 @@ enum StructuredLogTemplateCatalog: Sendable {
             "Executing MAVLink mission for @{{slotID}} ({{itemCount}} item(s), {{formation}}, {{timing}}).",
             mcr: "MAVLink live · @{{slotID}} · {{itemCount}} items · {{formation}} · {{timing}}"
         )
+        put(
+            MissionRunLogTemplateKey.missionSquadFirstWaveReleased,
+            "First-wave squad released for {{squad}} (@{{slotID}}); MAVLink execution starting.",
+            mcr: "First wave · {{squad}} · @{{slotID}} · executing"
+        )
 
         put(
             MissionRunLogTemplateKey.startMissionTaskSkippedPhase,

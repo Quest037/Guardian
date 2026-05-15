@@ -2,13 +2,13 @@ import Foundation
 
 extension GuardianLeafletMissionBridgePayload {
     /// Builds the `setMissionData(...)` JavaScript call for ``OSMMapView``.
-    func javascriptExpression() -> String {
+    nonisolated func javascriptExpression() -> String {
         OSMMapView.javascriptExpression(for: self)
     }
 }
 
 extension OSMMapView {
-    static func javascriptExpression(for payload: GuardianLeafletMissionBridgePayload) -> String {
+    nonisolated static func javascriptExpression(for payload: GuardianLeafletMissionBridgePayload) -> String {
         let homeJSON: String
         if let home = payload.home {
             homeJSON = "{\"lat\":\(home.coord.lat),\"lon\":\(home.coord.lon)}"
@@ -39,7 +39,8 @@ extension OSMMapView {
             }
             let imageJSON = marker.imageDataURL.map(jsStringLiteral) ?? "null"
             let accessibilityTitleJSON = marker.accessibilityTitle.map(jsStringLiteral) ?? "null"
-            return "{\"id\":\(jsStringLiteral(marker.id)),\"lat\":\(marker.lat),\"lon\":\(marker.lon),\"label\":\(jsStringLiteral(marker.label)),\"color\":\(jsStringLiteral(marker.colorHex)),\"image\":\(imageJSON),\"showLabel\":\(marker.showLabel ? "true" : "false"),\"selected\":\(marker.selected ? "true" : "false"),\"draggable\":\(marker.draggable ? "true" : "false"),\"pendingSimSync\":\(marker.pendingSimSync ? "true" : "false"),\"selectionAttentionPulse\":\(marker.selectionAttentionPulse ? "true" : "false"),\"accessibilityTitle\":\(accessibilityTitleJSON),\(headingJSON)}"
+            let glyphJSON = jsStringLiteral(marker.glyphKind.rawValue)
+            return "{\"id\":\(jsStringLiteral(marker.id)),\"lat\":\(marker.lat),\"lon\":\(marker.lon),\"label\":\(jsStringLiteral(marker.label)),\"color\":\(jsStringLiteral(marker.colorHex)),\"glyph\":\(glyphJSON),\"image\":\(imageJSON),\"showLabel\":\(marker.showLabel ? "true" : "false"),\"selected\":\(marker.selected ? "true" : "false"),\"draggable\":\(marker.draggable ? "true" : "false"),\"pendingSimSync\":\(marker.pendingSimSync ? "true" : "false"),\"selectionAttentionPulse\":\(marker.selectionAttentionPulse ? "true" : "false"),\"accessibilityTitle\":\(accessibilityTitleJSON),\(headingJSON)}"
         }.joined(separator: ",")
         let headingPreviewJSON: String
         if let headingPreview = payload.headingPreview {

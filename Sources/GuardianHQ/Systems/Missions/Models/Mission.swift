@@ -499,31 +499,6 @@ struct RouteWaypoint: Identifiable, Codable, Equatable {
     }
 }
 
-/// How a ``MissionTask`` is executed on the autopilot stack (authoring; runtime may narrow further).
-enum MissionTaskExecutionMethod: String, Codable, CaseIterable, Identifiable {
-    case group
-    case staggered
-
-    var id: String { rawValue }
-
-    var displayTitle: String {
-        switch self {
-        case .group: return "Group"
-        case .staggered: return "Staggered"
-        }
-    }
-
-    /// Migrates legacy persisted `executionMethod` strings.
-    static func migrated(fromRaw raw: String) -> MissionTaskExecutionMethod {
-        switch raw.lowercased() {
-        case "staggered": return .staggered
-        case "group": return .group
-        case "mavlink", "manual_guided", "companion_offboard": return .group
-        default: return .group
-        }
-    }
-}
-
 /// How often this task is intended to run within a broader mission schedule.
 enum MissionTaskRegularity: String, Codable, CaseIterable, Identifiable {
     case onceAtStart
@@ -587,6 +562,37 @@ enum MissionTaskBetweenCyclesAction: String, Codable, CaseIterable, Identifiable
     }
 }
 
+/// How the **first wave** of primary squads is spaced when a task starts (one primary per squad).
+enum MissionTaskStaggerTrigger: String, Codable, CaseIterable, Identifiable {
+    /// Estimate seconds between launches from the first path leg distance and speed.
+    case pathEstimate
+    /// Fixed interval between each primary's first launch.
+    case fixedInterval
+    /// Each primary after the first launches when the lead reaches ``MissionTask/staggerWaypointIndex``.
+    case waypointReached
+    /// Only the first primary launches automatically; operator releases each following primary.
+    case operatorFirstWaveGate
+
+    var id: String { rawValue }
+
+    var displayTitle: String {
+        switch self {
+        case .pathEstimate: return "Automatic spacing"
+        case .fixedInterval: return "Fixed interval"
+        case .waypointReached: return "Waypoint reached"
+        case .operatorFirstWaveGate: return "Operator starts each squad"
+        }
+    }
+
+    /// Primaries after index 0 are not auto-started in the first launch pass (MRE §4–5 completes release).
+    var defersSubsequentPrimariesInFirstWave: Bool {
+        switch self {
+        case .waypointReached, .operatorFirstWaveGate: return true
+        case .pathEstimate, .fixedInterval: return false
+        }
+    }
+}
+
 /// High-level formation / route pattern for planner and authoring (distinct from waypoint loop geometry).
 enum MissionTaskPattern: String, Codable, CaseIterable, Identifiable {
     case patrol
@@ -614,14 +620,19 @@ struct MissionTask: Identifiable, Codable, Equatable {
     /// Gap between continuous-with-delay cycles (same unit model as waypoint dwell; see ``MissionDelayPolicy``).
     var regularityDelayValue: Double
     var regularityDelayUnit: DelayUnit
-    /// Autopilot / planner execution strategy for this task.
-    var executionMethod: MissionTaskExecutionMethod
     /// Cadence / scheduling intent for this task within the mission.
     var regularity: MissionTaskRegularity
     /// What a squad should do between cycles when this task is not immediately continuous.
     var betweenCycles: MissionTaskBetweenCyclesAction
     /// Formation / pattern intent (e.g. patrol vs convoy column).
     var pattern: MissionTaskPattern
+    /// First-wave spacing between primary squads (see ``MissionTaskStaggerTrigger``).
+    var staggerTrigger: MissionTaskStaggerTrigger
+    /// Fixed interval between primaries when ``staggerTrigger`` is ``fixedInterval``.
+    var staggerIntervalValue: Double
+    var staggerIntervalUnit: DelayUnit
+    /// 0-based task waypoint index when ``staggerTrigger`` is ``waypointReached``.
+    var staggerWaypointIndex: Int
     /// Device slots assigned to this task (IDs into `Mission.rosterDevices`).
     var rosterDeviceIds: [UUID]
     /// Defer this task’s MAVLink mission upload/start after execution begins (``MissionDelayPolicy``); MC Setup can override per run (``TaskStartDelay``).
@@ -639,7 +650,8 @@ struct MissionTask: Identifiable, Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, name, enabled, waypoints, loopMode, cycles
         case legacyRepeatCount = "repeatCount"
-        case executionMethod, regularity, betweenCycles, pattern
+        case regularity, betweenCycles, pattern
+        case staggerTrigger, staggerIntervalValue, staggerIntervalUnit, staggerWaypointIndex
         case startDelayValue, startDelayUnit, regularityDelayValue, regularityDelayUnit
         case legacyRegularityDelayMinutes = "regularityDelayMinutes"
         case legacyStartDelayInt = "startDelay"
@@ -665,6 +677,14 @@ struct MissionTask: Identifiable, Codable, Equatable {
         )
     }
 
+    /// Effective fixed first-wave stagger interval (seconds, minimum 1).
+    var staggerIntervalTotalSeconds: TimeInterval {
+        MissionDelayPolicy.clampTotalSeconds(
+            MissionDelayPolicy.totalSeconds(value: staggerIntervalValue, unit: staggerIntervalUnit),
+            minimumTotalSeconds: 1
+        )
+    }
+
     init(
         id: UUID = UUID(),
         name: String = "Task 1",
@@ -674,10 +694,13 @@ struct MissionTask: Identifiable, Codable, Equatable {
         cycles: Int = 1,
         regularityDelayValue: Double = 1,
         regularityDelayUnit: DelayUnit = .mins,
-        executionMethod: MissionTaskExecutionMethod = .group,
         regularity: MissionTaskRegularity = .onceAtStart,
         betweenCycles: MissionTaskBetweenCyclesAction = .returnToLaunch,
         pattern: MissionTaskPattern = .patrol,
+        staggerTrigger: MissionTaskStaggerTrigger = .pathEstimate,
+        staggerIntervalValue: Double = 20,
+        staggerIntervalUnit: DelayUnit = .secs,
+        staggerWaypointIndex: Int = 0,
         rosterDeviceIds: [UUID] = [],
         startDelayValue: Double = 0,
         startDelayUnit: DelayUnit = .secs,
@@ -694,10 +717,13 @@ struct MissionTask: Identifiable, Codable, Equatable {
         self.cycles = min(100, max(0, cycles))
         self.regularityDelayValue = regularityDelayValue
         self.regularityDelayUnit = regularityDelayUnit
-        self.executionMethod = executionMethod
         self.regularity = regularity
         self.betweenCycles = betweenCycles
         self.pattern = pattern
+        self.staggerTrigger = staggerTrigger
+        self.staggerIntervalValue = staggerIntervalValue
+        self.staggerIntervalUnit = staggerIntervalUnit
+        self.staggerWaypointIndex = staggerWaypointIndex
         self.rosterDeviceIds = rosterDeviceIds
         self.startDelayValue = startDelayValue
         self.startDelayUnit = startDelayUnit
@@ -736,13 +762,6 @@ struct MissionTask: Identifiable, Codable, Equatable {
         rosterDeviceIds = try c.decodeIfPresent([UUID].self, forKey: .rosterDeviceIds) ?? []
         _ = try? c.decodeIfPresent([String].self, forKey: .legacyScheduleRefs)
 
-        if let raw = try c.decodeIfPresent(String.self, forKey: .executionMethod) {
-            executionMethod = MissionTaskExecutionMethod(rawValue: raw)
-                ?? MissionTaskExecutionMethod.migrated(fromRaw: raw)
-        } else {
-            executionMethod = .group
-        }
-
         if let raw = try c.decodeIfPresent(String.self, forKey: .regularity) {
             regularity = MissionTaskRegularity(rawValue: raw)
                 ?? MissionTaskRegularity.migrated(fromRaw: raw)
@@ -757,6 +776,17 @@ struct MissionTask: Identifiable, Codable, Equatable {
         }
 
         pattern = try c.decodeIfPresent(MissionTaskPattern.self, forKey: .pattern) ?? .patrol
+
+        staggerTrigger = try c.decodeIfPresent(MissionTaskStaggerTrigger.self, forKey: .staggerTrigger) ?? .pathEstimate
+        if let iv = try c.decodeIfPresent(Double.self, forKey: .staggerIntervalValue),
+           let iu = try c.decodeIfPresent(DelayUnit.self, forKey: .staggerIntervalUnit) {
+            staggerIntervalValue = iv
+            staggerIntervalUnit = iu
+        } else {
+            staggerIntervalValue = 20
+            staggerIntervalUnit = .secs
+        }
+        staggerWaypointIndex = try c.decodeIfPresent(Int.self, forKey: .staggerWaypointIndex) ?? 0
 
         if let sv = try c.decodeIfPresent(Double.self, forKey: .startDelayValue),
            let su = try c.decodeIfPresent(DelayUnit.self, forKey: .startDelayUnit) {
@@ -784,6 +814,14 @@ struct MissionTask: Identifiable, Codable, Equatable {
         let r = MissionDelayPolicy.normalizedRegularityGap(value: regularityDelayValue, unit: regularityDelayUnit)
         regularityDelayValue = r.0
         regularityDelayUnit = r.1
+        let g = MissionDelayPolicy.normalizedRegularityGap(value: staggerIntervalValue, unit: staggerIntervalUnit)
+        staggerIntervalValue = g.0
+        staggerIntervalUnit = g.1
+        if waypoints.isEmpty {
+            staggerWaypointIndex = 0
+        } else {
+            staggerWaypointIndex = min(max(0, staggerWaypointIndex), waypoints.count - 1)
+        }
     }
 
     /// Ensures path segment fields are populated (legacy JSON had no segment keys).
@@ -814,10 +852,13 @@ struct MissionTask: Identifiable, Codable, Equatable {
         try c.encode(cycles, forKey: .cycles)
         try c.encode(regularityDelayValue, forKey: .regularityDelayValue)
         try c.encode(regularityDelayUnit, forKey: .regularityDelayUnit)
-        try c.encode(executionMethod, forKey: .executionMethod)
         try c.encode(regularity, forKey: .regularity)
         try c.encode(betweenCycles, forKey: .betweenCycles)
         try c.encode(pattern, forKey: .pattern)
+        try c.encode(staggerTrigger, forKey: .staggerTrigger)
+        try c.encode(staggerIntervalValue, forKey: .staggerIntervalValue)
+        try c.encode(staggerIntervalUnit, forKey: .staggerIntervalUnit)
+        try c.encode(staggerWaypointIndex, forKey: .staggerWaypointIndex)
         try c.encode(rosterDeviceIds, forKey: .rosterDeviceIds)
         try c.encode(startDelayValue, forKey: .startDelayValue)
         try c.encode(startDelayUnit, forKey: .startDelayUnit)

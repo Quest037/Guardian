@@ -247,8 +247,8 @@ struct LiveDriveView: View {
 
     private var selectedVehicleMarker: [MapVehicleMarker] {
         guard let id = selectedVehicleID, let hub = selectedHub, let lat = hub.latitudeDeg, let lon = hub.longitudeDeg else { return [] }
-        let imageDataURL = markerImageDataURL(forVehicleID: id)
         let slotLabel = liveMissionRosterContext?.slotName ?? ""
+        let vClass = fleetLink.vehicleModel(forVehicleID: id)?.data.vehicleType ?? .unknown
         return [
             MapVehicleMarker(
                 id: MapVehicleMarkerIdentity.fleetHubVehicle(id),
@@ -256,7 +256,8 @@ struct LiveDriveView: View {
                 lon: lon,
                 label: slotLabel,
                 colorHex: fleetLink.mapColorHex(forVehicleID: id),
-                imageDataURL: imageDataURL,
+                glyphKind: GuardianMapVehicleGlyphKind.forFleetVehicleType(vClass),
+                imageDataURL: nil,
                 showLabel: !slotLabel.isEmpty,
                 selected: true,
                 draggable: false,
@@ -291,15 +292,14 @@ struct LiveDriveView: View {
 
     /// Topology-only identity for `.task(id:)` — excludes hub lat/lon (see ``liveDriveMapMarkerMotionDigest``).
     private var liveDriveMapStructureSyncIdentity: LiveDriveMapStructureSyncIdentity {
-        let vid = selectedVehicleID
         guard vehicleIsInLiveMission,
               let run = liveDriveActiveMissionRun,
               let mission = run.template,
-              let vid
+              let vid = selectedVehicleID
         else {
             return LiveDriveMapStructureSyncIdentity(
                 mediaTab: mediaTab,
-                vehicleID: vid,
+                vehicleID: selectedVehicleID,
                 isMissionOverlay: false,
                 runID: nil,
                 missionID: nil,
@@ -443,7 +443,7 @@ struct LiveDriveView: View {
         if vehicleIsInLiveMission,
            let run = liveDriveActiveMissionRun,
            let mission = run.template,
-           let vid = selectedVehicleID {
+           selectedVehicleID != nil {
             let expectedIDs = MissionControlLiveDriveMapOverlay.taskPathPayload(
                 mission: mission,
                 focusedTaskID: liveDriveLiveMissionFocusedTaskID
@@ -482,7 +482,7 @@ struct LiveDriveView: View {
         if vehicleIsInLiveMission,
            let run = liveDriveActiveMissionRun,
            let mission = run.template,
-           let vid = selectedVehicleID {
+           selectedVehicleID != nil {
             let focus = liveDriveLiveMissionFocusedTaskID
             let pathPayload = MissionControlLiveDriveMapOverlay.taskPathPayload(mission: mission, focusedTaskID: focus)
             let vehicleLL = liveDriveCachedMissionMapBuild().markers.map { ($0.lat, $0.lon) }
@@ -1509,17 +1509,6 @@ struct LiveDriveView: View {
 
     private func resolvedVehicleID(for vehicle: MissionPickableFleetVehicle) -> String? {
         resolvedFleetStreamVehicleID(token: vehicle.token, fleetLink: fleetLink, sitl: sitl)
-    }
-
-    private func markerImageDataURL(forVehicleID vehicleID: String) -> String? {
-        guard let vehicle = pickableVehicles.first(where: { resolvedVehicleID(for: $0) == vehicleID }),
-              let names = vehicle.simulationImageBasenames,
-              let image = SimulationDeviceBundleImage.nsImage(firstMatching: names),
-              let tiff = image.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff),
-              let png = rep.representation(using: .png, properties: [:])
-        else { return nil }
-        return "data:image/png;base64,\(png.base64EncodedString())"
     }
 
     @ViewBuilder

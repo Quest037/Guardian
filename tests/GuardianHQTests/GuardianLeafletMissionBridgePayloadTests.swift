@@ -51,6 +51,25 @@ final class GuardianLeafletMissionBridgePayloadTests: XCTestCase {
         XCTAssertTrue(js.contains("\"heading\":90"))
     }
 
+    func test_javascript_includes_vehicle_glyph_literal() {
+        let payload = samplePayload(
+            vehicleMarkers: [
+                MapVehicleMarker(
+                    id: "v-glyph",
+                    lat: 1,
+                    lon: 2,
+                    label: "G",
+                    colorHex: "#222",
+                    glyphKind: .usvUuvCross,
+                    selected: false,
+                    draggable: false
+                ),
+            ]
+        )
+        let js = OSMMapView.javascriptExpression(for: payload)
+        XCTAssertTrue(js.contains("\"glyph\":\"usv\""))
+    }
+
     private func samplePayload(
         vehicleMarkers: [MapVehicleMarker] = []
     ) -> GuardianLeafletMissionBridgePayload {

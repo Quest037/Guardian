@@ -66,7 +66,8 @@ extension MissionRunEnvironment {
         }
     }
 
-    /// Shared implementation for operator-scheduled cleanup and run removal (``MissionControlStore/deleteRun``).
+    /// Shared implementation for operator-scheduled cleanup. Run **removal** uses
+    /// ``MissionRunEnvironment/hardStopAndRemoveAllRunBoundSitlsForDeletion`` instead (see ``MissionControlStore/deleteRun``).
     func performMissionRunSimCleanupPassIfNeeded(fleetLink: FleetLinkService, sitl: SitlService) async {
         let targets = MissionRunSimCleanupParkPolicy.orderedCleanupParkTargets(
             assignments: assignments,

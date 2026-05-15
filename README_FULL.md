@@ -261,6 +261,18 @@ Typed **map points** (rally, extraction, …) live on the mission as **`Mission.
 | Task delete | Removing a **`MissionTask`** removes points whose **`taskID`** matches that task. |
 | Clone | **`MissionStore.cloneMission`** duplicates points with new row **`id`** and same **`pointId`** (mission id namespaces the file on disk). |
 
+## Mission task authoring (`MissionTask`)
+
+- **No `executionMethod`:** Group vs staggered was removed from the mission template. Mission JSON no longer reads or writes `executionMethod`; extra keys in old files are ignored on decode.
+- **Squad stagger (`MissionTaskStaggerTrigger`):** Authored on each task under **Squad stagger** in the mission workspace. **Automatic spacing** — `squadIndex ×` path-estimate seconds (`MissionTaskStaggerPolicy/pathEstimateStepSeconds`). **Fixed interval** — `squadIndex ×` ``staggerIntervalTotalSeconds``. **Waypoint reached** / **Operator starts each squad** — only the first primary auto-launches in the first wave; following primaries wait for MRE §4–5 release wiring (`MissionTaskStaggerPolicy/includesSquadInAutomaticFirstWave`).
+- **Per-squad cycle cap:** Task ``cycles`` applies to **each** primary squad independently (N primaries ⇒ each runs up to ``cycles`` MAVLink mission cycles). Task-level UI aggregates per-squad progress (see **Squad cycle state** below).
+- **Primaries define squads:** One squad per **primary** roster row on the task path. ``MissionControlSquadUtilities`` orders primaries by ``MissionTask/rosterDeviceIds`` and labels squads **TaskName:1**, **TaskName:2**, … (1-based). ``buildTaskSquadMissions`` is the squad list source; MRE run logs use squad labels. Plan compile: ``teamTopology`` is **multiVehicleTeam** when any task has more than one bound primary (or multiple roster rows).
+- **Cross-task autostart (shipped):** Between-cycle MAVLink autostart is **per task** unless ``gracefulStopKind`` is set (whole-run after-cycle stop). ``shouldSuppressMissionWideBetweenCycleAutostart()`` is whole-run only; ``unionedMissionTaskIDsSuppressingAutopilotAutostart(forMission:)`` merges per-task pending/issued wind-down, suppress set, and Live Drive handoff. ``deriveMissionTaskState``: pure ``.continuous`` off-cycle ⇒ ``.executing``; ``.continuousWithDelay`` ⇒ ``.between`` (single-squad tasks). Tests: ``MissionRunEnvironmentBetweenCycleAutostartSuppressionTests``, ``MissionRunEnvironmentTaskDerivationTests``.
+- **Squad cycle state (shipped):** ``MissionSquadState`` + ``squadStateByAssignmentID`` / ``activeCycleSquadAssignmentIDs`` / ``squadCyclesCompletedByAssignmentID`` on ``MissionRunEnvironment``. MAVLink cycle end is **per primary**; task counters roll up when all primaries match. Multi-squad tasks rollup task chips from squads via ``rollupMissionTaskStateFromSquads`` / ``rollupMissionTaskStateFromSquadStates`` (auto-pipeline: abort-path squads are ignored for the rollup unless **every** primary is `.aborting`/`.aborted`). Tests: ``MissionRunSquadStateDerivationTests``, ``MissionRunMultiSquadRollupAutoPipelineTests``.
+- **Squad execution (shipped):** Per-squad next-cycle autostart (`planNextAutoCycleStartsForSquads`), single-squad launch (`startSquadExecution` / ``buildPrimaryMissionPass(nextCyclePrimaryAssignmentIDs:)``), per-squad between-cycles + deferral, first-wave stagger queue + ``releaseNextDeferredFirstWaveSquad`` (MC‑R **Start next squad**), waypoint auto-release via ``MissionRunEnvironment/syncHubWaypointStaggerDeferredFirstWaveIfNeeded``, immediate complete/abort via ``MissionRunCommandTarget/squad``. Tests: ``MissionRunSquadExecutionTests``, ``MissionTaskStaggerTriggerTests``.
+- **Squad store / persistence (v1):** There is **no** separate on-disk **run snapshot** codec for Mission Control runs — ``MissionControlStore/runs`` holds in-memory ``MissionRunEnvironment`` instances only. **Topology** (which roster rows are primaries on a task) ships in the **mission** JSON (``MissionTask/rosterDeviceIds`` + ``Mission/rosterDevices``). **Runtime** squad maps on the run (``squadStateByAssignmentID``, ``pendingMissionSquadGracefulWindDownKindByAssignmentID``, ``activeCycleSquadAssignmentIDs``, first-wave deferral, squad start deferral, etc.) are **session RAM**; ``MissionControlStore/resetRunToSetup`` → ``MissionRunLifecycleSubsystem/resetToSetup`` clears them via ``clearMissionTaskScopedOrchestrationState``, ``clearActiveCycleTasks`` (which calls ``clearSquadCycleTracking``), slot-lane clears, and log/plan teardown — do not add a parallel persistence path without a deliberate schema. **Observers / Paladin:** ``MissionControlRunObserver`` callbacks pass the live ``MissionRunEnvironment``; read squad-facing published state from that object (no extra observer surface required for v1).
+- **Squads conversion (in progress):** Tracker `MRESquadsToDo.md` — follow-on items only (bench squad, re-sync, wingman follow).
+
 **Mission Preflight (Mission Control setup → run):** ``MissionRunStartPreflightOverlay`` runs arm probes on **roster** assignments only (`MissionRunEnvironment/orderedStartRunPreflightProbeTargets()` defaults `includeFloatingReservePoolSlots` to `false`). **Floating pool** aircraft are **not** probed at start run so reserves do not block mission start; at **MC-R reserve swap confirm** the store runs **telemetry-only** hub snapshot gates (``MissionControlReserveSwapInPreflightGates`` via ``MissionControlPreflightTelemetryGateMode/reserveSwapIn`` — no catalogue / recipe audit) then the **arm probe** recipe with `allowDuringLiveMission: true` and audit source `missionControl.preflightProbe.reserveSwapIn` (single catalogue attribution for the arm step). Pass `includeFloatingReservePoolSlots: true` only for diagnostics. Empty pool berths are never listed. Like roster rows, the probe path requires a parsable **`FleetMissionVehicleToken`** storage key; legacy text-only bindings surface the same “pick from the fleet list” failure as roster slots without a token.
 
 ## Live Leaflet map — bridge coalescing (Phase A)
@@ -378,6 +390,8 @@ Optional **per-task floating reserve pool** lives only on the **run envelope** (
 
 **Task vs slot vs vehicle:** A **task** is a mission-template step (orchestration flags, derived ``MissionTaskState`` / ``MissionTaskAttemptState``). A **slot** is a roster row or reserve-pool berth (``MissionRunAssignment`` / pool slot) carrying merged **policy** state (``MissionRunAssignmentSlotState`` from lanes + fleet evidence), not a duplicate “mission done” label on the pool row alone. The **vehicle** is the fleet-bound unit (token, link, operational bars) attached to a slot; draw / return / swap gates use ``MissionRunEnvironment`` + fleet operational helpers. **Backlog / inventory** for this layering (until the tracker is retired): **`TaskRosterAssignmentStatesToDo.md`**.
 
+**Primary squads vs task rollups:** Per-primary MAVLink cycle and squad orchestration state (``MissionSquadState``, ``squadStateByAssignmentID``, ``pendingMissionSquadGracefulWindDownKindByAssignmentID``, ``activeCycleSquadAssignmentIDs``, first-wave deferral, squad start deferral) lives on ``MissionRunEnvironment`` alongside task-level maps; **task** ``MissionTaskState`` remains the operator-facing rollup for multi-primary paths. **Persistence:** squad runtime maps are **not** a separate on-disk run snapshot — roster topology is in the **mission** JSON; ``MissionRunLifecycleSubsystem/resetToSetup`` clears squad maps with the rest of the run (see **Mission task authoring** → **Squad store / persistence**). **Observers:** ``MissionControlRunObserver`` receives the live ``MissionRunEnvironment`` — read squad fields from that instance.
+
 Authoritative derivation: ``MissionRunEnvironment/refreshDerivedTaskStates()`` → ``deriveMissionTaskState(task:run:now:)`` in `MissionRunEnvironment.swift`. **Mission-end attempting** is stored on ``MissionRunEnvironment/taskMissionEndAttemptByTaskID`` (set via ``noteMissionTaskEndAttempt(_:forTaskID:)`` **before** fleet wind-down in ``MissionRunExecutionSubsystem``), then mirrored to ``taskAttemptingByTaskID`` with triage/disabled filtering. Types: `MissionRunStatus`, `MissionRunSessionPhase`, `MissionTaskState`, `MissionTaskAttemptState` in `MissionControlModels.swift`.
 
 **Run layer (`MissionRunStatus` × `MissionRunSessionPhase`).** `MissionRunLifecycleSubsystem` moves **status**; ``MissionRunEnvironment/setSessionPhase`` updates **sessionPhase** and refreshes task states. ``MissionRunExecutionSubsystem/completeRun`` is the main bridge from **whole-run** stop/complete into session phase: **abort protocol** sets `sessionPhase` to ``MissionRunSessionPhase/aborting`` without flipping ``MissionRunStatus`` away from ``MissionRunStatus/running`` or ``MissionRunStatus/paused``; **recovery** sets ``MissionRunStatus/recovery`` and ``MissionRunSessionPhase/recovery``. ``MissionRunEnvironment/beginRun()`` sets ``MissionRunStatus/running`` + ``MissionRunSessionPhase/staging``; ``startExecution`` calls ``markExecuting()`` → ``MissionRunSessionPhase/executing``. **Pause / resume** only toggles ``MissionRunStatus`` (``paused`` ↔ ``running``); session phase is unchanged. **Lifecycle:** ``markCompleted`` → ``MissionRunStatus/completed`` + ``MissionRunSessionPhase/completed``; ``markFailed`` → ``MissionRunStatus/completed`` + ``MissionRunSessionPhase/aborted``; ``resetToSetup`` → ``MissionRunStatus/setup`` + ``MissionRunSessionPhase/draft``.
@@ -434,7 +448,7 @@ These three fields on ``MissionRunEnvironment`` drive MC-R “abort/complete **i
 
 **Operator revoke (MC Setup):** ``MissionRunEnvironment/revokeMissionTaskGracefulWindDown(forTaskID:)`` forwards to scheduling → ``clearPendingMissionTaskGracefulWindDown`` only; it does **not** clear issued sets (those mean “commands already went”).
 
-**UI read model:** ``MissionControlSetupView`` reads pending vs issued for per-task banners/chips (same three fields). For intent vs settled labels, also read ``MissionRunEnvironment/taskAttemptingByTaskID`` (``MissionTaskAttemptState``). **MC-R (running / paused / recovery):** the Tasks column task rows show ``MissionTaskAttemptState/displayTitle`` under the title row when non-nil (same copy as triage sheet under the settled-state banner) so operators see wind-down **intent** alongside ``MissionTaskState`` without replacing the settled chip. **Task triage sheet:** when abort or complete wind-down is **issued** and §3 automatic mission-end ack is still blocked (not every bound roster row shows merged ``policySucceeded``), the sheet lists those roster rows (``MissionRunSlotEvidenceAutoMissionEndAckRules/boundRosterRowsBlockingAutoMissionEndAck``) and points operators at the existing recovery / abort confirmation control for **manual triage** (``operatorMarkMissionTaskTriageState`` via ``acknowledgeTaskMissionEndRecovery`` / ``acknowledgeTaskMissionEndAbort``). **Chrome:** settled-state badge + banner use ``GuardianSemanticColors`` + ``GuardianThemePalette`` (not ad-hoc traffic-light ``Color``); the blocker list uses ``MissionRunSlotAutoAckBlockerTriageChrome`` for severity rails, row washes, and merged-state label tints aligned with roster chip severity.
+**UI read model:** ``MissionControlSetupView`` reads pending vs issued for per-task banners/chips (same three fields). For intent vs settled labels, also read ``MissionRunEnvironment/taskAttemptingByTaskID`` (``MissionTaskAttemptState``). **MC-R (running / paused / recovery):** the Tasks column task rows show ``MissionTaskAttemptState/displayTitle`` under the title row when non-nil (same copy as triage sheet under the settled-state banner) so operators see wind-down **intent** alongside ``MissionTaskState`` without replacing the settled chip. **Task triage sheet:** operator-protocol chrome (state, attempting line, §3 blocker list, end-protocol buttons) is driven by ``MissionControlLiveTaskTriageProjection`` so the strip can diff on an Equatable snapshot. When abort or complete wind-down is **issued** and §3 automatic mission-end ack is still blocked (not every bound roster row shows merged ``policySucceeded``), the sheet lists those roster rows (``MissionRunSlotEvidenceAutoMissionEndAckRules/boundRosterRowsBlockingAutoMissionEndAck``) and points operators at the existing recovery / abort confirmation control for **manual triage** (``operatorMarkMissionTaskTriageState`` via ``acknowledgeTaskMissionEndRecovery`` / ``acknowledgeTaskMissionEndAbort``). **Chrome:** settled-state badge + banner use ``GuardianSemanticColors`` + ``GuardianThemePalette`` (not ad-hoc traffic-light ``Color``); the blocker list uses ``MissionRunSlotAutoAckBlockerTriageChrome`` for severity rails, row washes, and merged-state label tints aligned with roster chip severity.
 
 **Auto-completion wiring:** any future “fleet said we’re done” path must either call the existing triage/ack APIs or update **new** slot-level state first; it must **not** silently clear ``missionTask*WindDownIssued`` without matching product rules, or autopilot autostart suppression can desynchronise from reality.
 
@@ -501,6 +515,156 @@ One **roster row** in MCS / MRE is a ``MissionRunAssignment`` (`MissionControlMo
 **Commanded vs observed (v2):** ``MissionRunAssignmentSlotStateLanes`` holds **commanded** (MRE dispatch / policy issuance only) and **observed** (hub / recipe / pull conformance). **Writers:** only orchestration paths mutate ``commanded``; telemetry subscribers mutate ``observed`` — never copy hub ticks into ``commanded``. For a single chip label, ``MissionRunAssignmentSlotLaneMerge/preferredDisplayState(lanes:)`` implements the merge rules so **stale telemetry does not overwrite** an in-flight ``policyAborting`` / ``policyCompleting`` (or commanded terminal rows), while still surfacing ``policyFailed`` / ``blockedNoVehicle`` from evidence when commanded is still in an exploratory execution phase. Refine with the §3 evidence catalogue.
 
 **MC-R / MCS roster slot chip (v1 UI contract):** While ``MissionRunStatus`` is ``running``, ``paused``, or ``recovery``, MCS roster accordion rows (``MissionControlRosterSlotCard``), MC-R live console tiles (``MissionLiveVehicleHealthCard``), and MC-R task list rows show a compact **slot** pill when ``MissionRunAssignmentSlotState/missionControlRosterBadgeSeverity`` is non-nil (``MissionControlModels.swift`` — slot state extensions). **Quiet states** (``idle``, ``notApplicableEmptySlot``) omit the pill. **Informational** paths use ``GuardianFeedbackSeverity/info`` (staging, on-mission, between cycles, recovery-in-progress, reassigned). **Abort in progress** uses ``warning``. **Policy complete** uses ``success``. **Policy failed** / **no vehicle bound** use ``error``. Capsule chrome uses ``GuardianSemanticColors`` + ``GuardianFeedbackSeverity/legacyTranslucentChipBackground`` (``MissionControlRosterSlotAttentionCapsule``). Pointer-hover / VoiceOver uses ``MissionRunAssignmentSlotState/rosterSlotChipHelp`` for every pill state (including ``blockedNoVehicle``, which spells out the distinction from **written off for floating reserve** — see **Floating reserve pool** → **Written off vs “No vehicle bound” roster chip**). Task rows show the **worst** severity across that task’s roster assignments (``MissionControlAssignmentSlotRosterAttention/worstAmong``). **Unfilled** MCS roster cards in that window show a tertiary cue to bind a fleet vehicle or simulator. MC-R task rows and live-console roster tiles use **tighter** capsule padding than the MCS accordion (``MissionControlRosterSlotAttentionCapsule/compactMetrics``).
+
+### MC-R live UI row contracts (narrow observation)
+
+**Why:** Today ``MissionRunDetailView`` observes the full ``MissionRunEnvironment`` and ``FleetLinkService``, so any hub tick or run-field publish can invalidate **all** MC-R chrome. The shipped goal is **row-scoped observation**: each tile/list row subscribes only to the **data slice** below (see **MC-R observation restructure — archived reference (v1 complete)** for historical inventory tables). Canonical MRE types and derivation rules stay in this README’s **Mission run state model** section; this subsection is the **UI adapter contract** only.
+
+**Shipped observation wiring (v1):** Equatable row snapshots from coordinators/stores, merged with **per-stream** ``FleetVehicleLiveChannel`` where a bridge ``vehicleID`` resolves — roster strip, task list, task triage progress card, **task triage operator-protocol strip** (``MissionControlLiveTaskTriageProjection``), vehicle overlay triage badges, floating reserve pool berth tiles, **live mission log strip tail** (``MCRLiveMissionLogStripStore`` — last 80 filtered lines, ingest on log/focus/hub strip hooks only; see **Implementation note** below and ``AGENTS.md`` for paths). **Live overview map:** structural Leaflet refresh is keyed by ``liveOverviewMapStructureIdentity``; draft fence edits and marker motion use digest / marker-only paths (``liveOverviewMapMarkerCoordinateDigest``, ``liveRuntimeMcrLiveMapGeofenceAuthoringDigest``) so hub samples and fence handle drags do not rebuild the full map model or churn task-row snapshots. **Still broad:** shell-level ``run`` / ``fleetLink`` on ``MissionRunDetailView`` for headers and actions — see **MC-R observation restructure — archived reference (v1 complete)** (shell vs row-owned observation).
+
+#### Fleet per-vehicle observation strategy (locked)
+
+**Choice:** **A** — a **registry** of narrow live objects keyed by fleet stream **vehicle id** (``FleetVehicleLiveChannel`` as ``ObservableObject`` today), updated from the coalesced hub emit path on ``FleetLinkService`` (``publishHubFleetTelemetryTickAndRefreshMcrChannels`` — tick + per-retained-id ``refresh`` in one pass) so **retained** MC‑R roster tiles refresh **only** their stream’s slice. When refcount hits zero, the registry **removes** that id’s channel entry (see **Phase 10 — manual smoke & channel registry** below). MC‑R row views observe **that** channel plus equatable assignment snapshots from ``MCRLiveRosterSnapshotStore`` — **not** ``@ObservedObject`` on the whole ``FleetLinkService`` on the tile. **Not chosen:** **B** (value-only ``AsyncStream`` / Combine per id into row ``@State`` without a registry). **Phase 5 (locked, v1):** **hybrid** — same central stores/coordinator on ``MissionControlLiveRunRoot`` for strip ordering and non-fleet row payloads, **plus** strategy **A** channels for hub-heavy fields per resolved stream id (no formal central-vs-distributed benchmark). Further work: migrate those stores to ``@Observable`` (same README subsection **MC-R observation restructure — archived reference (v1 complete)** — principles).
+
+**Roster health tile (MC-R live strip — one ``MissionRunAssignment`` row)**
+
+| Input slice | Must include | Must *not* require for the tile body |
+| --- | --- | --- |
+| Identity | ``assignment.id`` | Whole ``run.assignments`` array identity churn unrelated to this row |
+| Template join | ``RosterDevice`` for ``assignment.rosterDeviceId`` (slot name, class, behavior hint) | Full ``Mission`` |
+| MRE row state | ``assignment`` fields used by the card: ``slotName``, ``taskId``, ``attachedFleetVehicleToken`` / ``attachedDevice``, ``effectiveSlotLifecycleLanes`` (merged chip via ``MissionRunAssignmentSlotLaneMerge``) | Other assignments’ lane maps |
+| Resolve stream | Resolved fleet **vehicle id** string for this row (same rules as ``resolvedFleetStreamVehicleID(assignment:fleetLink:sitl:)``) | Entire ``fleetLink.hubTelemetryByVehicleID`` map |
+| Fleet vehicle | ``FleetVehicleLiveChannel`` (per resolved stream id) for live battery / lifecycle / short-id slice; SIM art still from assignment snapshot path | All other vehicles’ hub maps |
+| Ephemeral chrome | Reserve swap/browse context **only if** this row is the vacancy or a listed pool candidate (today driven by overlay state + run pool maps for that task) | Unrelated overlay state |
+
+**Task list row (MC-R Tasks card — one ``MissionTask`` / ``RoutePath``)**
+
+| Input slice | Must include | Must *not* require |
+| --- | --- | --- |
+| Identity | ``task.id``, display order index, ``MissionTask`` template fields shown in the row (name, enabled, regularity/cycles copy) | Full mission macro beyond this task |
+| Task rollup | ``MissionTaskState`` + ``MissionTaskAttemptState?`` for this ``task.id``; operator triage pin for this task if shown | Other tasks’ ``taskStateByTaskID`` entries |
+| Task deferral | ``taskStartDeferralByTaskID[task.id]`` when present | Other tasks’ deferrals |
+| Squad index set | Ordered list of **squad primary** ``assignment.id`` values for this task (for per-squad bars and labels — same source as ``MissionControlSquadUtilities`` / plan role tracks) | Full squad maps for other tasks |
+| Slot attention | Worst roster chip across assignments bound to this task (see ``MissionControlAssignmentSlotRosterAttention``) | Other tasks’ roster rows |
+| Progress / hub | **Primary-path** (or UI-chosen) vehicle id for mission progress + ``FleetHubVehicleTelemetry`` fields used by ``MCRLiveTaskListProgressFormatting`` (mission item fraction, battery row if shown) | Every stream in the fleet |
+| Footer / triggers | Footer kind for this task only (deferral controls, trigger, stagger release, end-protocol ack) | Other tasks’ footers |
+| Wind-down / cycles | Issued wind-down flags, active cycle membership, cycle counts **for this task id** only | Whole-run ``gracefulStopKind`` unless the row explicitly shows run-level stop |
+
+**Squad row (nested under a task row — one squad primary ``MissionRunAssignment``)**
+
+| Input slice | Must include | Must *not* require |
+| --- | --- | --- |
+| Identity | ``assignment.id``, squad label string | Other squads’ assignments on the same task |
+| Squad state | ``squadStateByAssignmentID[assignment.id]``, ``squadCyclesCompletedByAssignmentID[assignment.id]``, membership in ``activeCycleSquadAssignmentIDs``, deferred-first-wave lists keyed by this task | Other assignments’ squad maps |
+| Deferral | ``squadStartDeferralByAssignmentID[assignment.id]`` when inline deferral is shown on the squad row | Task-level deferral unless UI explicitly merges |
+| Progress | Hub / fraction for **this** squad’s bound vehicle id (when per-squad bars are enabled) | Primary task vehicle only when the UI is in per-squad mode |
+
+**Explicit non-contract (stays on a parent coordinator, not row bodies):** run **status** / **sessionPhase** for switching setup vs live vs completed; drawer / toast hosts; map **structure** pushes; ``MissionControlStore`` run list; global ``GeneralSettingsStore`` app defaults.
+
+**Implementation note:** Until per-row projections exist, ``MCRLiveRosterRowSnapshot`` / ``MCRLiveTaskListRowSnapshot`` approximate these contracts with **equatable value snapshots** rebuilt from a coordinator — the same slices should drive **both** diffing and future ``@Observable`` row models. **Roster strip (v1):** when a row has a resolved stream id, ``MCRRosterTileView`` merges live fleet fields from ``FleetVehicleLiveChannel`` (``FleetLinkService`` registry) on each coalesced hub emit, while slot copy / slot attention / SIM thumbnails still come from the snapshot store. **MCS setup roster (Phase 9):** ``MissionControlRosterSlotCard`` rows for bound fleet streams use ``MCSRosterSlotFleetKeyedWrapper`` (same channel registry + retain/release) so hub churn does not depend on the whole ``MissionRunDetailView`` body for battery / lifecycle / stream label updates. **Task list (v1):** when the primary-path stream id resolves, ``MissionControlLiveTasksPresentationList`` merges ``FleetVehicleLiveChannel/primaryPathHubTelemetry`` into the row presentation for mission fraction, triage single-bar fraction, and waypoint caption; per-squad bar fractions still follow the coordinator snapshot (per-assignment hub reads). **Floating reserve pool strip (v1):** ``MCRLiveReservePoolBerthTileView`` merges ``FleetVehicleLiveChannel/fleetSlice`` for browse + swap-pick tiles when the berth’s synthetic assignment resolves a stream id (``MCRLiveReservePoolBerthProjection.swift`` + ``MissionControlLiveReservePoolStripViews.swift``).
+
+#### Phase 10 — manual smoke & channel registry
+
+**Manual smoke (operator):** With Simulate enabled and many SITLs bound to roster / reserve berths, run MC-R through task focus changes, floating reserve browse or swap, and draft geofence edits on the live overview map. Watch the Xcode console for repeated **Publishing changes from within view updates** warnings and for obvious UI slowdown; neither should appear under normal use.
+
+**Registry memory (v1):** When the last ``mcrRosterReleaseLiveChannel(forVehicleID:)`` balances the refcount for a stream id, ``FleetLinkService`` removes that id from ``mcrRosterLiveChannelsByVehicleID`` (after clearing the live slice on the channel) so long sessions do not accumulate idle ``FleetVehicleLiveChannel`` shells for ids that scrolled off. SwiftUI row ``@ObservedObject`` wrappers keep the instance alive until the row tears down; the next ``mcrRosterLiveChannel(forVehicleID:)`` for that id allocates fresh. Unit coverage: ``FleetLinkServiceMcrRosterChannelRegistryTests``.
+
+### MC-R observation restructure — archived reference (v1 complete)
+
+This subsection replaces the retired tracker file: it keeps **goals**, **non-goals**, **primary file anchors**, **MC‑R roster tile ``FleetLinkService`` read surface** (audit table), and **invalidation / hub entry-point inventories** for ``MissionRunDetailView`` / ``MissionControlLiveRunRoot``. Counts in §0.1 were snapshot-style (``rg``-style weighting on ``MissionRunDetailView.swift``) and **will drift** as the file evolves — re-measure when debugging blast radius.
+
+**Goals (v1 shipped):** Stop treating MC‑R live chrome as one giant SwiftUI invalidation target; treat telemetry as **many narrow streams** (per-stream ``FleetVehicleLiveChannel``) feeding row-owned merge state, not as pulses that rebuild the whole detail shell.
+
+**Principles (do not regress without cause):**
+
+- **Parent composes; children own subscriptions.** ``MissionRunDetailView`` / ``MissionControlView`` hold routing + modal focus; deep live row bodies avoid ``@ObservedObject`` on the full ``MissionRunEnvironment`` + ``FleetLinkService``.
+- **MRE mutations stay on the run model;** SwiftUI observation for dense live tiles comes from **projections** + equatable snapshots, not from the root ``run`` object inside row bodies.
+- **Fleet row chrome** depends on **one vehicle stream** (or an equatable snapshot), not the whole ``FleetLinkService`` graph unless the row is explicitly fleet-admin chrome.
+- **Hybrid (locked):** central ``ObservableObject`` stores (``MCRLiveRosterSnapshotStore`` / ``MCRLiveTaskListSnapshotCoordinator`` on ``MissionControlLiveRunRoot``) for strip ordering + non-fleet payloads, **plus** per-stream channels for hub-heavy fields. **Deferred:** migrating those stores to ``@Observable``.
+
+**Explicit non-goals (engineering boundaries):**
+
+- **Do not** rewrite MAVSDK / gRPC threading “for UI” — keep transport as-is; fix **MainActor observation boundaries** only.
+- **Do not** merge Mission Run persistence and live projections into one god type — projections remain disposable UI adapters.
+
+**Primary file anchors (touch map):**
+
+- ``Sources/GuardianHQ/Systems/MissionControl/Views/MissionRunDetailView.swift`` — shell, setup, map digests, actions; still observes ``run`` / ``fleetLink`` broadly.
+- ``Sources/GuardianHQ/Systems/MissionControl/Views/MissionControlLiveRunRoot.swift`` — live hub tick + ``onChange`` wiring; owns snapshot stores; ``run`` / ``fleetLink`` are ``let`` (no duplicate ``ObservableObject`` subscription here).
+- ``Sources/GuardianHQ/Systems/MissionControl/Views/MissionRunDrillInMainColumn.swift`` — setup / live / completed branch switch; live subtree builder.
+- ``Sources/GuardianHQ/Systems/MissionControl/Views/MCRLiveRosterSnapshotStore.swift`` / ``MCRLiveRosterRowSnapshotFactory`` — roster projections + strip snapshots.
+- ``Sources/GuardianHQ/Systems/MissionControl/Views/MCRLiveTaskListSnapshotStore.swift`` / ``MCRLiveTaskListProgressFormatting`` / ``MCRLiveTaskListSnapshotCoordinator`` — task list projections + coordinator.
+- ``Sources/GuardianHQ/Systems/Fleet/Services/FleetLinkService.swift`` + ``Sources/GuardianHQ/Systems/Fleet/Services/FleetVehicleLiveChannel.swift`` — hub coalescing tick, per-vehicle channel registry, retain/release.
+
+**Historical delivery order (informative):** shell split (``MissionControlLiveRunRoot``) → task/roster projections + coordinator → per-vehicle channels (strategy **A**) → hybrid central stores + channels (Phase 5 lock) → triage overlays / log strip / hub tick plumbing → MCS setup keyed wrappers → projection diff tests + channel registry cleanup → tracker retired into this README (2026-05-15).
+
+#### MC‑R squad roster tile — `FleetLinkService` read surface (audit)
+
+**Scope:** squad roster strip (``MCRLiveRosterRowSnapshotFactory`` + ``MissionRunAssignmentLiveProjection``), ``resolvedFleetStreamVehicleID(assignment:fleetLink:sitl:)`` (``FleetMissionVehiclePickModels.swift``), floating pool browse/swap tiles (``MissionControlLiveReservePoolStripViews.swift``), and the fallback strip path ``MissionRunDetailView`` / ``missionLiveVehicleHealthCard``.
+
+| Kind | ``FleetLinkService`` API / read | Backing ``@Published`` (or derived) data the path couples to |
+| --- | --- | --- |
+| Resolve stream key | ``vehicleID(forSystemID:)`` | ``vehicleIDBySystemID`` |
+| Resolve stream key (live token) | ``telemetryByVehicleID`` keys + ``isGuardianManagedSitlStream(vehicleID:)`` | ``telemetryByVehicleID`` (+ internal SITL stream classification) |
+| Bracketed short id + device art class | ``vehicleModel(forVehicleID:)`` → ``displayShortID``, ``data.vehicleType`` | ``vehicleModelsByVehicleID`` |
+| Battery + lifecycle border on ``MissionLiveVehicleHealthCard`` | ``vehicleOperationalModel(forVehicleID:)`` → prefers ``vehicleModelsByVehicleID[…].collections.operational``, else ``FleetVehicleOperationalModel(hub:hubTelemetryByVehicleID[…], lifecycleStatus:vehicleStatusByVehicleID[…])`` | ``vehicleModelsByVehicleID``, ``hubTelemetryByVehicleID``, ``vehicleStatusByVehicleID`` |
+| Empty / placeholder roster row | ``primaryVehicleOperationalModel()`` | Aggregate ``hubTelemetry`` |
+
+**Not used on this MC‑R roster tile path today:** ``hubTelemetry(forVehicleID:)`` as a direct call (operational model already folds per-vehicle hub), ``logLines`` / ``logLinesByVehicleID``, ``configuration``, ``bridgePhase``, ``mcrOperatorParkAwaitingContinueVehicleIDs``, calibration publishers, recipe history mutators.
+
+#### §0.1 — ``MissionRunDetailView`` property wrappers (invalidation inventory)
+
+Source: ``Sources/GuardianHQ/Systems/MissionControl/Views/MissionRunDetailView.swift`` (counts approximate).
+
+| Kind | Symbol | Notes |
+| --- | --- | --- |
+| ``@ObservedObject`` | ``run`` : ``MissionRunEnvironment`` | Many ``@Published`` fields on MRE; any mutation repaints detail bodies that depend on ``run``. Many ``run.`` references — setup, live console, triage, overlays, MCS roster, timing, confirms, recipes. |
+| ``@ObservedObject`` | ``missionStore`` : ``MissionStore`` | Mission template sync, picker sources, drawer sidebars. |
+| ``@ObservedObject`` | ``fleetLink`` : ``FleetLinkService`` | Hub/telemetry, vehicle models, SIM spawn, live map push, roster resolution, engage, reserve ops. Coalesced ``hubFleetTelemetryTick`` still invalidates this observer’s dependents on every tick. |
+| ``@ObservedObject`` | ``sitl`` : ``SitlService`` | SIM lists, spawn, instance lookup for roster/map. |
+| ``@ObservedObject`` | ``controlStore`` : ``MissionControlStore`` | Run list / delete / start flows touching shell chrome. |
+| ``@ObservedObject`` | ``generalSettings`` : ``GeneralSettingsStore`` | SIM defaults, map style seeds, mission delay caps, MC-R settings mirror. |
+| ``@StateObject`` | ``bottomPromptCenter`` | MC-R anchored prompts. |
+| ``@StateObject`` | ``mapModel`` : ``GuardianMapModel`` | Staging + live Leaflet payloads, selection, follow. |
+| ``@StateObject`` | ``hubMarkerApplyThrottle`` | Coalesces map marker pushes (live + setup). |
+| ``@StateObject`` | ``liveOverviewVehicleBuildCache`` | MC-R live map vehicle marker digest cache. |
+| ``@StateObject`` | ``setupStagingVehicleBuildCache`` | MCS staging map vehicle digest cache. |
+| ``@StateObject`` | ``mcrLiveMissionLogStripStore`` | Live log strip tail (passed into ``MissionControlLiveRunRoot``). |
+| *(live row stores)* | — | **Owned by** ``MissionControlLiveRunRoot``: ``MCRLiveRosterSnapshotStore`` + ``MCRLiveTaskListSnapshotCoordinator`` (``@StateObject``), ``environmentObject`` to roster/task surfaces; detail shell does **not** observe these publishers. |
+
+**``@EnvironmentObject`` (window / app chrome — still invalidates when they publish):** ``AppDrawer``, ``ToastCenter``, ``OperatorPromptCenter`` / ``OperatorPromptReviewFocusController``.
+
+**Regions vs observers (high level):** Shell chrome uses ``run`` (+ ``fleetLink`` / ``sitl`` for live actions). MCS setup uses ``run``, ``missionStore``, ``fleetLink``, ``sitl``, ``generalSettings``, ``mapModel``, caches, throttle. MC-R live console uses ``run``, ``fleetLink``, ``sitl``, ``mapModel``, live caches, ``bottomPromptCenter``, plus **inside** ``MissionControlLiveRunRoot``: snapshot stores (not observed by the shell for those publishers). **Consequence:** ``@ObservedObject`` on this monolith ties **one** ``objectWillChange`` to the **entire** ``MissionRunDetailView`` body evaluation scope unless subtrees split or use narrow inputs.
+
+#### §0.2 — MC‑R live entry points (hub, focus, assignments, shell)
+
+Source: ``MissionRunDetailView.swift`` (live branch + root ``onChange`` / ``.task`` hooks). **``syncRunFromStore()``** = ``controlStore.runs.first(where: { $0.id == run.id })?.refreshDerivedTaskStates()``. **``onUpdate(run)``** = persist/replace run in ``MissionControlStore``.
+
+| Entry point | Trigger | Mutations / side effects | UI that **must** stay correct (minimal) |
+| --- | --- | --- | --- |
+| ``MissionControlLiveRunRoot`` ``onChange(fleetLink.hubFleetTelemetryTick)`` | Hub tick | Task list snapshots **before** ``onHubTick``; **deferred** roster rebuild after synchronous work; parent ``onHubTick`` runs voice, reserve suggest, slot pull, ``attachServices``, stagger | Roster strip; tasks list; live log narrative; reserve affordances; slot badges; stagger UI |
+| Live stack ``onAppear`` | First paint | Cold-start roster + task snapshots; parent live appear | Roster + tasks |
+| ``onChange(run.events.count)`` | New log lines | Reserve suggest only | Reserve suggest / auto-swap |
+| ``onChange(run.sessionPhase)`` (inner) | Lifecycle phase | Reserve suggest | Reserve chrome |
+| ``onChange(run.taskStateByTaskID)`` (live root) | Task rollup | Reserve suggest + task list snapshots | Reserve; tasks list |
+| ``onChange(focusedLiveTaskID)`` | Task focus | Parent focus handler + roster + task + log strip | Tasks card; triage; roster filter; snapshots |
+| ``onChange(liveReserveSwapPick)`` / ``liveReservePoolBrowseTaskID`` | Reserve UI modes | Roster + task snapshots | Pool vs squad strip modes |
+| ``onChange(run.assignments)`` (inner) | Roster bind/swap | Roster + task + log strip | Roster + tasks |
+| ``onChange`` on task attempt / deferrals / squad maps / cycle sets | Execution state | Task list snapshots only | Tasks + squad rows |
+| ``onChange(run.status)`` (inner live root) | Live status gate | Roster + task snapshots | Strip clears outside running/paused/recovery |
+| Root ``onChange(run.status)`` | setup ↔ live ↔ completed | Clears focus/overlays; SIM drain; prune roster; drawer | Entire shell |
+| Root ``onChange(run.sessionPhase)`` | aborting / aborted | Bottom prompt + overlay clear | Abort UX |
+| Root ``onChange(run.operatorDisplaySettings)`` | Run envelope prefs | SIM drain; push live + setup map models | Map + SIM drain |
+| Root ``onChange(run.assignments)`` | Assignment array | SIM drain policy | SIM drain |
+| Root ``onChange(run.gracefulStopKind)`` | Graceful stop | Bottom prompt sync | Anchored prompt |
+| ``liveOverviewMapMarkerCoordinateDigest`` ``onChange`` | Digest | Throttled ``pushLiveOverviewMapMarkersOnly`` | Live map markers only |
+| MCS staging ``onChange(hubFleetTelemetryTick)`` | Hub sample | ``reconcileSetupStagingSimDragOverlaysOnHubSampleIfNeeded`` | Staging SIM drag overlay |
+| ``TimelineView`` periodic | Wall clock | Scheduling adjustments | Countdown banner |
+| Operator stop/complete/scheduling | Buttons/menus | Lifecycle + scheduling + ``onUpdate`` | Shell + tasks + triage |
+| Reserve swap / pool flows | Confirms / auto | Fleet + MRE mutations | Roster; triage; toasts |
+| Subsystems outside this file | Observers, executor, store | ``MissionRunEnvironment`` ``@Published`` churn | Everything observing ``run`` |
+
+**Fleet note:** UI refresh for vehicle-bound chrome follows **per-``vehicleID``** channels where a stream id resolves; the shell may still observe the whole ``FleetLinkService`` for routing and actions.
 
 ### Fleet evidence sources (Mission Control inventory)
 

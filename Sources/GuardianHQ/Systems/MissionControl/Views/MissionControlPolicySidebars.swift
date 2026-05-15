@@ -2,8 +2,8 @@ import SwiftUI
 
 // MARK: - Task settings sidebar (MC-S task card cog + MC-R triage cog)
 
-/// Per-task **Abort** / **Complete** / **Reserve swap** policy overrides, **between-cycles** (Return to Launch / Loiter / Park)
-/// for repeating tasks, and **task run geofence augmentation** (summary + clear). All edits route through ``MissionRunEnvironment`` policy APIs as the local operator so log lines render
+/// Per-task **Abort** / **Complete** / **Reserve swap** policy overrides, and **between-cycles** (Return to Launch / Loiter / Park)
+/// for repeating tasks. All edits route through ``MissionRunEnvironment`` policy APIs as the local operator so log lines render
 /// `[Operator][<callsign>]` and persist via ``MissionRunEnvironment/missionTemplatePersister``.
 ///
 /// Lives in its own `View` struct (rather than a `@ViewBuilder` method on the parent) so
@@ -17,8 +17,6 @@ struct MissionRunTaskPolicyOverridesSidebarView: View {
     let taskId: UUID
     let taskName: String
     let onChange: () -> Void
-    /// Rebuilds the compiled Mission Control plan after run-only geofence augmentation changes (template fences unchanged).
-    let onRecompilePlanForGeofenceAugmentationPolicy: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -82,19 +80,6 @@ struct MissionRunTaskPolicyOverridesSidebarView: View {
                 MissionRunOptionalPreferentialReserveSwapPolicyEditor(
                     overrideChain: reserveSwapBinding,
                     inheritedChain: inheritedTaskReserveSwapChain
-                )
-
-                MissionRunGeofenceAugmentationRunPolicySidebarSection(
-                    run: run,
-                    scope: .task(taskId),
-                    title: "Task run geofence augmentation",
-                    caption: "Additional fences for this task merge after template mission and task fences and mission-wide run augmentation. Clear removes run-only extras for this task. Edit fence shapes on the mission Geofences tab; edit altitude envelopes below.",
-                    credential: credential,
-                    onRecompilePlanForGeofenceAugmentationPolicy: onRecompilePlanForGeofenceAugmentationPolicy,
-                    onClear: {
-                        _ = run.updateTaskGeofenceAugmentation(taskID: taskId, [], credential: credential)
-                        onRecompilePlanForGeofenceAugmentationPolicy()
-                    }
                 )
             }
             .padding(.horizontal, GuardianSpacing.md)

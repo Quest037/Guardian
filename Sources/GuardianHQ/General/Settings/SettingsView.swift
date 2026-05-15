@@ -715,6 +715,7 @@ struct SettingsView: View {
             lon: draftSimLongitudeDeg,
             label: "SIM Default",
             colorHex: "#3b82f6",
+            glyphKind: .uavArrow,
             selected: true,
             draggable: true
         )

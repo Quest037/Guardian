@@ -1525,6 +1525,21 @@ struct ThemeCatalogContent: View {
                     }
                 }
 
+                ThemeCatalogSubheading("Pulsing skeleton bars (deferred / in-flight bodies)")
+                Text(
+                    "Horizontal bars with a soft sine pulse — used while MC-R task triage defers heavy content until the sheet animation completes. Candidate for broader loading chrome."
+                )
+                .font(GuardianTypography.font(.denseCaption12Regular))
+                .foregroundStyle(theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+                    GuardianPulsingSkeletonBar(height: 12, maxWidth: 220)
+                    MissionLiveTaskTriageOverlaySkeleton()
+                        .frame(height: 220)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(theme.backgroundElevated, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+
                 ThemeCatalogSubheading("GuardianInlineError vs GuardianInlineNotice.danger")
                 GuardianInlineError(
                     title: "Link bridge failed",
@@ -1540,7 +1555,7 @@ struct ThemeCatalogContent: View {
             }
             .guardianInsetCard()
 
-            ThemeAPICaption("GuardianShellStates · GuardianEmptyState · GuardianLoadingState · GuardianInlineError")
+            ThemeAPICaption("GuardianShellStates · GuardianEmptyState · GuardianLoadingState · GuardianPulsingSkeletonBar · MissionLiveTaskTriageOverlaySkeleton · GuardianInlineError")
         }
     }
 

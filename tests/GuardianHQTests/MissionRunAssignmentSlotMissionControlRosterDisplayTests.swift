@@ -38,4 +38,30 @@ final class MissionRunAssignmentSlotMissionControlRosterDisplayTests: XCTestCase
         let a = MissionRunAssignment(rosterDeviceId: UUID(), slotName: "A")
         XCTAssertNil(MissionControlAssignmentSlotRosterAttention.worstAmong(assignments: [a]))
     }
+
+    func test_worstAmongForTaskRow_skips_between_cycles_only() {
+        let a = MissionRunAssignment(
+            rosterDeviceId: UUID(),
+            slotName: "A",
+            slotLifecycleLanes: MissionRunAssignmentSlotStateLanes(commanded: .betweenCycles, observed: .betweenCycles)
+        )
+        XCTAssertNotNil(MissionControlAssignmentSlotRosterAttention.worstAmong(assignments: [a]))
+        XCTAssertNil(MissionControlAssignmentSlotRosterAttention.worstAmongForTaskRow(assignments: [a]))
+    }
+
+    func test_worstAmongForTaskRow_still_surfaces_warning_over_between_cycles() {
+        let between = MissionRunAssignment(
+            rosterDeviceId: UUID(),
+            slotName: "B",
+            slotLifecycleLanes: MissionRunAssignmentSlotStateLanes(commanded: .betweenCycles, observed: .betweenCycles)
+        )
+        let aborting = MissionRunAssignment(
+            rosterDeviceId: UUID(),
+            slotName: "C",
+            slotLifecycleLanes: MissionRunAssignmentSlotStateLanes(commanded: .policyAborting, observed: .idle)
+        )
+        let w = MissionControlAssignmentSlotRosterAttention.worstAmongForTaskRow(assignments: [between, aborting])
+        XCTAssertEqual(w?.severity, .warning)
+        XCTAssertEqual(w?.title, "Abort in progress")
+    }
 }

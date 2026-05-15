@@ -4,8 +4,8 @@ import Foundation
 @MainActor
 enum LiveLeafletMapMarkerBuilder {
 
-    /// Builds live map vehicle markers and a motion-only digest. Icon bytes come from ``LiveLeafletMapMarkerCache``;
-    /// digest uses quantized hub coordinates only.
+    /// Builds live map vehicle markers and a motion-only digest. Live roster / pool markers use SVG glyphs (``GuardianMapVehicleGlyphKind``); ``imageCache`` is reserved for callers that still attach ``MapVehicleMarker/imageDataURL``.
+    /// Digest uses quantized hub coordinates only.
     static func build(
         inputs: LiveLeafletMapMarkerBuildInputs,
         imageCache: LiveLeafletMapMarkerCache = Utilities.liveLeafletMap.markerImageCache,
@@ -86,12 +86,8 @@ enum LiveLeafletMapMarkerBuilder {
             lon: lon,
             label: assignment.slotName,
             colorHex: colorHex,
-            imageDataURL: imageCache.imageDataURL(
-                assignment: assignment,
-                mission: inputs.mission,
-                fleetLink: inputs.fleetLink,
-                sitl: inputs.sitl
-            ),
+            glyphKind: GuardianMapVehicleGlyphKind.forRosterAssignment(assignment, mission: inputs.mission),
+            imageDataURL: nil,
             showLabel: isHighlighted && inputs.presentation.highlightShowsLabel,
             selected: selected,
             draggable: false,
@@ -145,20 +141,15 @@ enum LiveLeafletMapMarkerBuilder {
             browsingThisBerthOnTask: browsingBerth
         )
 
+        let boundType = inputs.fleetLink.vehicleModel(forVehicleID: vehicleID)?.data.vehicleType ?? .unknown
         let marker = MapVehicleMarker(
             id: markerID,
             lat: lat,
             lon: lon,
             label: "\(slot.label) · pool",
             colorHex: colorHex,
-            imageDataURL: imageCache.imageDataURL(
-                syntheticAssignment: syn,
-                poolTaskID: taskID,
-                poolSlotID: slot.id,
-                mission: inputs.mission,
-                fleetLink: inputs.fleetLink,
-                sitl: inputs.sitl
-            ),
+            glyphKind: GuardianMapVehicleGlyphKind.forFleetVehicleType(boundType),
+            imageDataURL: nil,
             showLabel: false,
             selected: selected,
             draggable: false,

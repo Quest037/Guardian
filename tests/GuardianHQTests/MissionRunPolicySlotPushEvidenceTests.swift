@@ -6,6 +6,7 @@ final class MissionRunPolicySlotPushEvidenceTests: XCTestCase {
     func test_issuer_eligible_only_abort_and_local_operator() {
         XCTAssertTrue(MissionRunPolicySlotPushEvidence.issuerEligibleForSlotPolicyPushEvidence(MissionRunCommandIssuerKey.plannerAbort))
         XCTAssertTrue(MissionRunPolicySlotPushEvidence.issuerEligibleForSlotPolicyPushEvidence(MissionRunCommandIssuerKey.localOperator))
+        XCTAssertTrue(MissionRunPolicySlotPushEvidence.issuerEligibleForSlotPolicyPushEvidence(MissionRunCommandIssuerKey.completePolicyWindDown))
         XCTAssertFalse(MissionRunPolicySlotPushEvidence.issuerEligibleForSlotPolicyPushEvidence(MissionRunCommandIssuerKey.missionExecute))
         XCTAssertFalse(MissionRunPolicySlotPushEvidence.issuerEligibleForSlotPolicyPushEvidence(MissionRunCommandIssuerKey.plannerReserveSwapPostCommit))
     }

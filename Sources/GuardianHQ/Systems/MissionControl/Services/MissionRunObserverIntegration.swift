@@ -18,6 +18,14 @@ struct MissionRunStartContext {
     let missionsProvider: @MainActor () -> [Mission]
 }
 
+/// Plugins and assistants observe Mission Control runs through this hook.
+///
+/// Callbacks receive the live ``MissionRunEnvironment`` (same instance the UI uses). For **squad**
+/// automation or prompts, read derived and scheduling state on that object — for example
+/// ``MissionRunEnvironment/squadStateByAssignmentID``,
+/// ``MissionRunEnvironment/pendingMissionSquadGracefulWindDownKindByAssignmentID``,
+/// ``MissionRunEnvironment/activeCycleSquadAssignmentIDs``, and task rollups from
+/// ``MissionRunEnvironment/taskStateByTaskID`` — rather than expecting a separate squad snapshot type.
 @MainActor
 protocol MissionControlRunObserver: AnyObject {
     func missionControlStore(

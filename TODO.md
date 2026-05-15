@@ -163,8 +163,9 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
     - I understand why this is happening, but it's not ideal
 
 #### Squads
-- **Formations:** 
-  - allow user to define a formation for the Squad to use. This overrides pattern behaviour. (see ```SquadFollow&Formation.md```)
+- **Formations (v1 convoy, v2 shapes):**
+  - v1: convoy follow only — wingmen OFFBOARD/GUIDED, primary AUTO_MISSION; MRE streams setpoints (``SquadFollow&Formation.md`` § v1).
+  - v2: user-defined formation (chevron, arrowhead, etc.) overriding pattern defaults; live formation change on the fly (same doc § v2).
 
 ### MissionRunEnvironment
 
@@ -175,9 +176,9 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 #### Logging
 
 #### Planner
-- **MissionTask Squad Formations:** 
-  - defaults to patrol (cluster) and convoy (line), but add other formations later and allow incoming changes on the fly.
-     - (see ```SquadFollow&Formation.md```)
+- **MissionTask Squad Formations:**
+  - v1: convoy (line-behind-primary) default; wingman follow pipeline in MRE (``SquadFollow&Formation.md`` § v1). Depends on ``MRESquadsToDo.md`` per-squad cycles.
+  - v2: patrol/cluster and other shapes + on-the-fly formation changes (``SquadFollow&Formation.md`` § v2).
 
 - **MissionTask Squad StaggerDelay:** - defaults to duration to first waypoint. Other options should be possible.
  - Value from MissionTask.staggerDelay object

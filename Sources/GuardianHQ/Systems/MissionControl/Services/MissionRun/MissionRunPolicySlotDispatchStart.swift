@@ -11,6 +11,7 @@ enum MissionRunPolicySlotDispatchStart {
         effectiveTaskID: UUID?,
         abortWindDownIssuedTaskIDs: Set<UUID>,
         completeWindDownIssuedTaskIDs: Set<UUID>,
+        squadCompleteWindDownIssuedAssignmentIDs: Set<UUID> = [],
         sessionPhase: MissionRunSessionPhase
     ) -> MissionRunAssignmentSlotState? {
         let key = issued.issuerKey
@@ -32,10 +33,11 @@ enum MissionRunPolicySlotDispatchStart {
         if key == MissionRunCommandIssuerKey.plannerAbort {
             return .policyAborting
         }
-        if key == MissionRunCommandIssuerKey.localOperator {
+        if key == MissionRunCommandIssuerKey.localOperator || key == MissionRunCommandIssuerKey.completePolicyWindDown {
             guard let tid = effectiveTaskID else { return nil }
             if abortWindDownIssuedTaskIDs.contains(tid) { return .policyAborting }
             if completeWindDownIssuedTaskIDs.contains(tid) { return .policyCompleting }
+            if squadCompleteWindDownIssuedAssignmentIDs.contains(issued.assignmentID) { return .policyCompleting }
             return nil
         }
         return nil

@@ -71,7 +71,7 @@ struct MissionControlView: View {
         .guardianConfirmOverlay(item: $gridDeleteConfirm, dialog: { candidate in
             GuardianConfirmDanger(
                 title: "Delete “\(candidate.missionName)”?",
-                message: "Removes the run from Mission Control. Linked simulators and mission state are cleared when needed. The mission template is not deleted.",
+                message: "Removes the run from Mission Control. Built-in SITLs bound to this run (roster and reserve pool) are stopped immediately. The mission template is not deleted.",
                 cancelTitle: "Cancel",
                 confirmTitle: "Delete run",
                 onCancel: { gridDeleteConfirm = nil },

@@ -118,11 +118,13 @@ final class LiveLeafletMapMarkerBuilderTests: XCTestCase {
         XCTAssertEqual(result.markers.count, 1)
         XCTAssertEqual(result.markers[0].id, MapVehicleMarkerIdentity.missionRunAssignment(assignID))
         XCTAssertEqual(result.markers[0].lat, -37.8)
+        XCTAssertEqual(result.markers[0].glyphKind, .uavArrow)
+        XCTAssertNil(result.markers[0].imageDataURL)
         XCTAssertFalse(result.motionDigest.isEmpty)
-        XCTAssertEqual(cache.statistics.encodes, 1)
+        XCTAssertEqual(cache.statistics.encodes, 0)
     }
 
-    func test_second_build_with_moved_coordinates_hits_image_cache() {
+    func test_second_build_with_moved_coordinates_does_not_touch_image_cache() {
         let sitlId = UUID()
         let assignID = UUID()
         let rd = RosterDevice(id: UUID(), name: "P1", vehicleClass: .uavCopter)
@@ -171,15 +173,15 @@ final class LiveLeafletMapMarkerBuilderTests: XCTestCase {
         )
 
         let first = LiveLeafletMapMarkerBuilder.build(inputs: inputs, imageCache: cache)
-        XCTAssertEqual(cache.statistics.encodes, 1)
+        XCTAssertEqual(cache.statistics.encodes, 0)
 
         seedHub(lat: 10.00002, lon: 20)
         let second = LiveLeafletMapMarkerBuilder.build(inputs: inputs, imageCache: cache)
 
         XCTAssertNotEqual(first.motionDigest, second.motionDigest)
         XCTAssertEqual(second.markers[0].lat, 10.00002)
-        XCTAssertEqual(cache.statistics.encodes, 1)
-        XCTAssertEqual(cache.statistics.hits, 1)
+        XCTAssertEqual(cache.statistics.encodes, 0)
+        XCTAssertEqual(cache.statistics.hits, 0)
     }
 
     func test_utilities_namespace_build_matches_builder() {

@@ -87,24 +87,34 @@ final class MissionRunLoggingSubsystem {
     /// Task id/label for log lines: role-track context when compiled, otherwise roster ``MissionRunAssignment/taskId`` or single enabled task.
     func effectiveTaskFields(forAssignmentID assignmentID: UUID) -> (UUID?, String?) {
         let fromTracks = taskContextForAssignment(assignmentID)
+        let base: (UUID?, String?)
         if fromTracks.0 != nil || !(fromTracks.1 ?? "").isEmpty {
-            return fromTracks
+            base = fromTracks
+        } else if let environment, let mission = environment.template,
+                  let a = environment.assignments.first(where: { $0.id == assignmentID }) {
+            if let tid = a.taskId,
+               let task = mission.routeMacro.tasks.first(where: { $0.id == tid }),
+               !task.name.isEmpty {
+                base = (tid, task.name)
+            } else {
+                let enabled = mission.routeMacro.tasks.filter(\.enabled)
+                if enabled.count == 1, let only = enabled.first, !only.name.isEmpty {
+                    base = (only.id, only.name)
+                } else {
+                    base = (nil, nil)
+                }
+            }
+        } else {
+            base = (nil, nil)
         }
         guard let environment, let mission = environment.template,
-              let a = environment.assignments.first(where: { $0.id == assignmentID })
-        else {
-            return fromTracks
-        }
-        if let tid = a.taskId,
-           let task = mission.routeMacro.tasks.first(where: { $0.id == tid }),
-           !task.name.isEmpty {
-            return (tid, task.name)
-        }
-        let enabled = mission.routeMacro.tasks.filter(\.enabled)
-        if enabled.count == 1, let only = enabled.first, !only.name.isEmpty {
-            return (only.id, only.name)
-        }
-        return (nil, nil)
+              let squad = MissionControlSquadUtilities.liveLogPrimarySquadTaskChipIfApplicable(
+                  assignmentID: assignmentID,
+                  mission: mission,
+                  assignments: environment.assignments
+              )
+        else { return base }
+        return (squad.taskID, squad.chipLabel)
     }
 
     func clearState() {

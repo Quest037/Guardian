@@ -10,6 +10,7 @@ enum MissionRunPolicySlotPushEvidence {
     static func issuerEligibleForSlotPolicyPushEvidence(_ issuerKey: String) -> Bool {
         issuerKey == MissionRunCommandIssuerKey.plannerAbort
             || issuerKey == MissionRunCommandIssuerKey.localOperator
+            || issuerKey == MissionRunCommandIssuerKey.completePolicyWindDown
     }
 
     /// Terminal slot state to apply to **both** commanded and observed lanes, or `nil` when this outcome must not

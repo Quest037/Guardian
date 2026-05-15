@@ -1,7 +1,7 @@
 import Foundation
 
 extension MissionRunEnvironment {
-    /// Same roster / task rules as MC‑R ``MissionControlSetupView/liveLogEventsFiltered`` when a task is focused.
+    /// Same roster / task rules as MC‑R ``MCRLiveMissionLogStripStore`` / ``MissionControlSetupView/liveLogEventsFiltered`` when a task is focused.
     static func filterEventsForLiveTaskLogFocus(
         events: [MissionRunEvent],
         assignments: [MissionRunAssignment],

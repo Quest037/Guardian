@@ -374,28 +374,15 @@ final class MissionRunPlannerSubsystem {
               !task.waypoints.isEmpty
         else { return [] }
         let enabledTasks = mission.routeMacro.tasks.filter(\.enabled)
-        let assignmentsForTask = environment.assignments.filter { assignment in
-            if assignment.taskId == task.id { return true }
-            if assignment.taskId == nil, enabledTasks.count == 1 { return true }
-            return false
-        }
-        let rosterByID = Dictionary(uniqueKeysWithValues: mission.rosterDevices.map { ($0.id, $0) })
-        let primaryAssignments = assignmentsForTask.compactMap { assignment -> (MissionRunAssignment, RosterDevice)? in
-            guard assignment.attachedFleetVehicleToken != nil else { return nil }
-            guard let rosterDevice = rosterByID[assignment.rosterDeviceId] else { return nil }
-            guard rosterDevice.slot == .primary else { return nil }
-            return (assignment, rosterDevice)
-        }
-        let rosterOrder = Dictionary(uniqueKeysWithValues: task.rosterDeviceIds.enumerated().map { ($1, $0) })
-        let orderedPrimaries = primaryAssignments.sorted { lhs, rhs in
-            let li = rosterOrder[lhs.1.id] ?? Int.max
-            let ri = rosterOrder[rhs.1.id] ?? Int.max
-            if li != ri { return li < ri }
-            return lhs.0.id.uuidString < rhs.0.id.uuidString
-        }
-        return orderedPrimaries.enumerated().map { idx, tuple in
-            let assignment = tuple.0
-            let primary = tuple.1
+        let orderedPrimaries = MissionControlSquadUtilities.orderedPrimarySquads(
+            task: task,
+            assignments: environment.assignments,
+            rosterDevices: mission.rosterDevices,
+            enabledTaskCount: enabledTasks.count
+        )
+        return orderedPrimaries.enumerated().map { idx, row in
+            let assignment = row.assignment
+            let primary = row.primary
             let squadFences = MissionRunGeofencePolicyResolution.squadGeofences(
                 primaryAssignment: assignment,
                 mission: mission,

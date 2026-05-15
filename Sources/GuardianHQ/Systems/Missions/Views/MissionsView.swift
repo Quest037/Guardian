@@ -4055,17 +4055,45 @@ private struct MissionTaskSettingsSidebar: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var missionTaskMethodRow: some View {
-        missionTaskSettingsFieldRow(label: "Method") {
-            Picker("", selection: $task.executionMethod) {
-                ForEach(MissionTaskExecutionMethod.allCases) { m in
-                    Text(m.displayTitle).tag(m)
+    private var missionTaskStaggerTriggerRow: some View {
+        missionTaskSettingsFieldRow(label: "Squad stagger") {
+            Picker("", selection: $task.staggerTrigger) {
+                ForEach(MissionTaskStaggerTrigger.allCases) { trigger in
+                    Text(trigger.displayTitle).tag(trigger)
                 }
             }
             .labelsHidden()
             .pickerStyle(.menu)
             .fixedSize()
         }
+        .help("How the first launch wave spaces each primary squad on this task.")
+    }
+
+    private var missionTaskStaggerIntervalRow: some View {
+        missionTaskSettingsFieldRow(label: "Stagger interval") {
+            MissionDelayValueUnitEditor(
+                label: "",
+                value: $task.staggerIntervalValue,
+                unit: $task.staggerIntervalUnit,
+                minimumTotalSeconds: 1,
+                numericFieldWidth: 96,
+                secondaryLabelColor: theme.textSecondary
+            )
+        }
+        .help("Time between each primary's first launch when stagger is fixed interval.")
+    }
+
+    private var missionTaskStaggerWaypointRow: some View {
+        missionTaskIntStepperFieldRow(
+            label: "Stagger waypoint",
+            value: Binding(
+                get: { task.staggerWaypointIndex + 1 },
+                set: { task.staggerWaypointIndex = max(0, $0 - 1) }
+            ),
+            range: 1...max(1, task.waypoints.count),
+            unitSuffix: "on path"
+        )
+        .help("Each primary after the first launches when the lead reaches this path waypoint.")
     }
 
     private var missionTaskRegularityRow: some View {
@@ -4171,7 +4199,13 @@ private struct MissionTaskSettingsSidebar: View {
 
     @ViewBuilder
     private var missionTaskExecutionSettings: some View {
-        missionTaskMethodRow
+        missionTaskStaggerTriggerRow
+        if task.staggerTrigger == .fixedInterval {
+            missionTaskStaggerIntervalRow
+        }
+        if task.staggerTrigger == .waypointReached, !task.waypoints.isEmpty {
+            missionTaskStaggerWaypointRow
+        }
         missionTaskRegularityRow
         missionTaskPatternRow
         missionTaskStartDelayRow

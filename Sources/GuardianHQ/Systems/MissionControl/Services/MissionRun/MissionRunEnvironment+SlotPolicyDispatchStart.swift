@@ -10,6 +10,7 @@ extension MissionRunEnvironment {
             effectiveTaskID: taskID,
             abortWindDownIssuedTaskIDs: missionTaskAbortWindDownIssuedTaskIDs,
             completeWindDownIssuedTaskIDs: missionTaskCompleteWindDownIssuedTaskIDs,
+            squadCompleteWindDownIssuedAssignmentIDs: squadCompletePolicyWindDownIssuedAssignmentIDs,
             sessionPhase: sessionPhase
         ) else { return }
         _ = applySlotLifecycleLaneMutation(

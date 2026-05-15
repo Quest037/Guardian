@@ -110,6 +110,8 @@ struct MissionRunLiveLogEventRow: View {
         }
         var nameCandidates: [NameCandidate] = []
         if let mission {
+            let enabledTasks = mission.routeMacro.tasks.filter(\.enabled)
+            let enabledTaskCount = enabledTasks.count
             for (idx, task) in mission.routeMacro.tasks.enumerated() where !task.name.isEmpty {
                 nameCandidates.append(
                     NameCandidate(
@@ -118,6 +120,24 @@ struct MissionRunLiveLogEventRow: View {
                         url: URL(string: "guardian://mcr/task/\(task.id.uuidString)")
                     )
                 )
+                let primaries = MissionControlSquadUtilities.orderedPrimarySquads(
+                    task: task,
+                    assignments: run.assignments,
+                    rosterDevices: mission.rosterDevices,
+                    enabledTaskCount: enabledTaskCount
+                )
+                if primaries.count > 1 {
+                    for i in 0..<primaries.count {
+                        let label = MissionControlSquadUtilities.squadDisplayName(taskName: task.name, squadIndex: i)
+                        nameCandidates.append(
+                            NameCandidate(
+                                name: label,
+                                color: MissionTaskMapColor.swiftUIColor(forTaskIndex: idx),
+                                url: URL(string: "guardian://mcr/task/\(task.id.uuidString)")
+                            )
+                        )
+                    }
+                }
             }
         }
         for assignment in run.assignments where !assignment.slotName.isEmpty {

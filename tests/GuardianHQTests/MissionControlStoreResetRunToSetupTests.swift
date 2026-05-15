@@ -62,4 +62,36 @@ final class MissionControlStoreResetRunToSetupTests: XCTestCase {
         }
         XCTAssertNil(resetRun.assignments[0].slotLifecycleLanes)
     }
+
+    func test_resetRunToSetup_clears_squad_runtime_orchestration_maps() {
+        let store = MissionControlStore()
+        let p1 = RosterDevice(name: "P1", slot: .primary)
+        let p2 = RosterDevice(name: "P2", slot: .primary)
+        let task = MissionTask(name: "Dagger", rosterDeviceIds: [p1.id, p2.id])
+        let mission = Mission(
+            name: "Op",
+            description: "",
+            type: .mobile,
+            rosterDevices: [p1, p2],
+            routeMacro: RouteMacro(tasks: [task], rules: RouteRules())
+        )
+        let run = store.createRun(from: mission, cloningMissionRunDefaultsFrom: GeneralSettingsStore())
+        XCTAssertEqual(run.assignments.count, 2)
+        let squadA = run.assignments[0].id
+        run.setPendingMissionSquadGracefulWindDown(kind: .abortAfterCycle, forAssignmentID: squadA)
+        run.markSquadActiveInCurrentCycle(squadA)
+        run.registerDeferredFirstWaveSquads(taskID: task.id, assignmentIDs: [squadA, run.assignments[1].id])
+        XCTAssertEqual(run.pendingMissionSquadGracefulWindDownKindByAssignmentID[squadA], .abortAfterCycle)
+        XCTAssertTrue(run.activeCycleSquadAssignmentIDs.contains(squadA))
+        XCTAssertEqual(run.deferredFirstWaveSquadAssignmentIDsByTaskID[task.id]?.count, 2)
+
+        store.resetRunToSetup(id: run.id)
+        guard let resetRun = store.runs.first(where: { $0.id == run.id }) else {
+            XCTFail("expected run in store")
+            return
+        }
+        XCTAssertTrue(resetRun.pendingMissionSquadGracefulWindDownKindByAssignmentID.isEmpty)
+        XCTAssertTrue(resetRun.activeCycleSquadAssignmentIDs.isEmpty)
+        XCTAssertTrue(resetRun.deferredFirstWaveSquadAssignmentIDsByTaskID.isEmpty)
+    }
 }

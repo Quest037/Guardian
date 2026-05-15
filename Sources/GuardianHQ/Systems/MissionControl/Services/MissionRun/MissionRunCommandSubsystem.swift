@@ -479,6 +479,7 @@ final class MissionRunCommandSubsystem {
                 missionTaskID: missionTaskID,
                 slotLabel: slotLabel,
                 run: self.environment,
+                recipeIssuerKey: issued.issuerKey,
                 escalation: escalation
             )
         }

@@ -133,6 +133,13 @@ final class MissionRunExecutionSubsystem {
             return processMissionCycleFinished(vehicleID: vehicleID, context: context)
         case .deferredTaskStartDue(let taskID):
             return beginStartMissionTask(taskID: taskID, context: context, allowDuringStaging: false) ? .progressed : .noOp
+        case .deferredSquadStartDue(let taskID, let assignmentID):
+            return startSquadExecution(
+                taskID: taskID,
+                primaryAssignmentID: assignmentID,
+                mission: context.missionProvider(),
+                context: context
+            ) ? .progressed : .noOp
         }
     }
 
@@ -365,7 +372,6 @@ final class MissionRunExecutionSubsystem {
                     context: context,
                     templateKey: MissionRunLogTemplateKey.runStoppedImmediate,
                     kind: .operatorStoppedImmediate,
-                    skipImplicitReturnToLaunch: !commands.isEmpty,
                     operatorWindDown: .abortProtocolPhase
                 )
             }
@@ -376,7 +382,6 @@ final class MissionRunExecutionSubsystem {
             context: context,
             templateKey: MissionRunLogTemplateKey.runStoppedImmediate,
             kind: .operatorStoppedImmediate,
-            skipImplicitReturnToLaunch: !commands.isEmpty,
             operatorWindDown: .abortProtocolPhase
         )
     }
@@ -583,28 +588,14 @@ final class MissionRunExecutionSubsystem {
         )
     }
 
-    func issueReturnToLaunchForAllAssignments() {
-        guard let environment, let fleetLink = environment.fleetLink, let sitl = environment.sitl else { return }
-        for assignment in environment.assignments {
-            guard let key = assignment.attachedFleetVehicleToken,
-                  FleetMissionVehicleToken(storageKey: key) != nil
-            else { continue }
-            let issued = MissionRunIssuedCommand(
-                assignmentID: assignment.id,
-                slotName: assignment.slotName,
-                vehicleTokenKey: key,
-                command: .returnToLaunch,
-                issuer: .missionControl,
-                issuerKey: MissionRunCommandIssuerKey.runTeardown,
-                category: .missionControl
-            )
-            environment.appendEvent(environment.systems.commands.dispatchCommand(issued, fleetLink: fleetLink, sitl: sitl))
-        }
-    }
-
     /// Per-assignment fleet commands for orderly recovery wind-down from the resolved **complete preference chain**
     /// (assignment → task → mission), using the same optimistic dispatch rules as abort planning for map-point tactics.
-    /// - Parameter limitedToAssignmentIDs: When non-nil, only these assignment rows are included (task / future squad scoping).
+    ///
+    /// **Roster scope:** with `limitedToAssignmentIDs == nil`, every roster row with a bound stream token is
+    /// considered; a row is skipped only when the resolved chain yields no dispatchable tactic (e.g. map-point needs
+    /// hub position and telemetry is missing for that stream). Wingmen therefore appear only when those preconditions
+    /// succeed — not because of a separate wingman gate.
+    /// - Parameter limitedToAssignmentIDs: When non-nil, only these assignment rows are included (task / squad scoping).
     func buildCompletePolicyWindDownCommands(limitedToAssignmentIDs: Set<UUID>? = nil) -> [MissionRunIssuedCommand] {
         guard let environment else { return [] }
         var out: [MissionRunIssuedCommand] = []
@@ -622,7 +613,7 @@ final class MissionRunExecutionSubsystem {
                 mission: mission
             ) else { continue }
             out.append(
-                issued.reattributed(issuer: .operator, issuerKey: MissionRunCommandIssuerKey.localOperator)
+                issued.reattributed(issuer: .operator, issuerKey: MissionRunCommandIssuerKey.completePolicyWindDown)
             )
         }
         return out
@@ -673,7 +664,7 @@ final class MissionRunExecutionSubsystem {
                         parameters: params
                     ),
                     issuer: .operator,
-                    issuerKey: MissionRunCommandIssuerKey.localOperator,
+                    issuerKey: MissionRunCommandIssuerKey.completePolicyWindDown,
                     category: .missionControl
                 )
 
@@ -685,7 +676,7 @@ final class MissionRunExecutionSubsystem {
                     vehicleTokenKey: tokenKey,
                     dispatch: dispatch,
                     issuer: .operator,
-                    issuerKey: MissionRunCommandIssuerKey.localOperator,
+                    issuerKey: MissionRunCommandIssuerKey.completePolicyWindDown,
                     category: .missionControl
                 )
             }
@@ -811,7 +802,6 @@ final class MissionRunExecutionSubsystem {
             context: context,
             templateKey: MissionRunLogTemplateKey.runCompleteWindDownImmediate,
             kind: .operatorCompletedImmediate,
-            skipImplicitReturnToLaunch: !windDown.isEmpty,
             operatorWindDown: .recoveryPhase
         )
     }
@@ -819,9 +809,11 @@ final class MissionRunExecutionSubsystem {
     /// Task-scoped immediate abort: dispatch abort-plan commands for assignments bound to the target task only (run continues).
     @discardableResult
     func performImmediateMissionTaskAbort(target: MissionRunCommandTarget, context: MissionRunExecutionContext) -> Bool {
-        guard let environment, case .task(let taskID) = target else { return false }
-        let bound = environment.assignmentsBoundToMissionTask(taskID: taskID)
-        let ids = Set(bound.map(\.id))
+        guard let environment,
+              let scope = commandTargetScope(target: target, environment: environment)
+        else { return false }
+        let taskID = scope.taskID
+        let ids = scope.assignmentIDs
         guard !ids.isEmpty else {
             environment.systems.logging.appendLogEvent(
                 level: .warning,
@@ -864,7 +856,11 @@ final class MissionRunExecutionSubsystem {
             Task { @MainActor [weak self] in
                 guard let self, let environment = self.environment else { return }
                 await self.dispatchCommandsRespectingMissionClearBarrier(commands, context: context)
-                environment.markMissionTaskAbortWindDownIssued(forTaskID: taskID)
+                if case .squad(let assignmentID) = target {
+                    environment.markMissionSquadAutostartSuppressed(forAssignmentID: assignmentID)
+                } else {
+                    environment.markMissionTaskAbortWindDownIssued(forTaskID: taskID)
+                }
                 environment.systems.scheduling.cancelScheduledTaskMissionStarts(forTaskID: taskID)
                 environment.systems.logging.appendLogEvent(
                     level: .info,
@@ -878,7 +874,11 @@ final class MissionRunExecutionSubsystem {
             return true
         }
         dispatchCommands(commands, context: context)
-        environment.markMissionTaskAbortWindDownIssued(forTaskID: taskID)
+        if case .squad(let assignmentID) = target {
+            environment.markMissionSquadAutostartSuppressed(forAssignmentID: assignmentID)
+        } else {
+            environment.markMissionTaskAbortWindDownIssued(forTaskID: taskID)
+        }
         environment.systems.scheduling.cancelScheduledTaskMissionStarts(forTaskID: taskID)
         environment.systems.logging.appendLogEvent(
             level: .info,
@@ -894,9 +894,11 @@ final class MissionRunExecutionSubsystem {
     /// Task-scoped immediate complete: dispatch complete-policy wind-down for bound slots only (run continues).
     @discardableResult
     func performImmediateMissionTaskComplete(target: MissionRunCommandTarget, context: MissionRunExecutionContext) -> Bool {
-        guard let environment, case .task(let taskID) = target else { return false }
-        let bound = environment.assignmentsBoundToMissionTask(taskID: taskID)
-        let ids = Set(bound.map(\.id))
+        guard let environment,
+              let scope = commandTargetScope(target: target, environment: environment)
+        else { return false }
+        let taskID = scope.taskID
+        let ids = scope.assignmentIDs
         guard !ids.isEmpty else {
             environment.systems.logging.appendLogEvent(
                 level: .warning,
@@ -931,8 +933,15 @@ final class MissionRunExecutionSubsystem {
             templateParams: ["task": taskLabel]
         )
         environment.noteMissionTaskEndAttempt(.recoveryMissionEnd, forTaskID: taskID)
+        if case .squad(let assignmentID) = target {
+            environment.markSquadCompletePolicyWindDownDispatchIssued(forAssignmentID: assignmentID)
+        }
         dispatchCommands(windDown, context: context)
-        environment.markMissionTaskCompleteWindDownIssued(forTaskID: taskID)
+        if case .squad(let assignmentID) = target {
+            environment.markMissionSquadAutostartSuppressed(forAssignmentID: assignmentID)
+        } else {
+            environment.markMissionTaskCompleteWindDownIssued(forTaskID: taskID)
+        }
         environment.systems.scheduling.cancelScheduledTaskMissionStarts(forTaskID: taskID)
         environment.systems.logging.appendLogEvent(
             level: .info,
@@ -943,6 +952,97 @@ final class MissionRunExecutionSubsystem {
             templateParams: ["task": taskLabel]
         )
         return true
+    }
+
+    /// Delivers queued per-primary-squad abort/complete wind-downs when **that squad’s** MAVLink cycle ends.
+    internal func deliverPendingSquadGracefulWindDownsIfNeeded(
+        completedSquadAssignmentIDs: Set<UUID>,
+        context: MissionRunExecutionContext
+    ) {
+        guard let environment, !completedSquadAssignmentIDs.isEmpty else { return }
+        guard let mission = context.missionProvider() else { return }
+        for assignmentID in completedSquadAssignmentIDs {
+            guard let kind = environment.consumePendingMissionSquadGracefulWindDown(forAssignmentID: assignmentID) else { continue }
+            guard let taskID = environment.resolvedTaskID(forSquadAssignmentID: assignmentID, mission: mission),
+                  let task = mission.routeMacro.tasks.first(where: { $0.id == taskID })
+            else { continue }
+            let ids: Set<UUID> = [assignmentID]
+            switch kind {
+            case .abortAfterCycle:
+                _ = environment.systems.planner.buildAbortPlan(trigger: .afterCycle)
+                let commands = (environment.systems.planner.lastBuiltAbortPlan?.entries ?? [])
+                    .filter { ids.contains($0.assignmentID) }
+                    .flatMap(\.issuedCommands)
+                    .map { $0.reattributed(issuer: .operator, issuerKey: MissionRunCommandIssuerKey.localOperator) }
+                guard !commands.isEmpty else {
+                    environment.systems.logging.appendLogEvent(
+                        level: .warning,
+                        taskID: taskID,
+                        taskLabel: task.name,
+                        speaker: .missionControl,
+                        templateKey: MissionRunLogTemplateKey.missionTaskAbortGracefulSkippedNoCommands
+                    )
+                    continue
+                }
+                let label = task.name
+                let taskLabelForLog = task.name
+                environment.noteMissionTaskEndAttempt(.abortMissionEnd, forTaskID: taskID)
+                if Self.commandsContainCatalogueMissionClear(commands) {
+                    Task { @MainActor [weak self] in
+                        guard let self, let environment = self.environment else { return }
+                        await self.dispatchCommandsRespectingMissionClearBarrier(commands, context: context)
+                        environment.markMissionSquadAutostartSuppressed(forAssignmentID: assignmentID)
+                        environment.systems.scheduling.cancelDeferredSquadMissionStartScheduling(forAssignmentID: assignmentID)
+                        environment.systems.logging.appendLogEvent(
+                            level: .info,
+                            taskID: taskID,
+                            taskLabel: taskLabelForLog,
+                            speaker: .missionControl,
+                            templateKey: MissionRunLogTemplateKey.missionTaskAbortGracefulDispatched,
+                            templateParams: ["task": label]
+                        )
+                    }
+                    continue
+                }
+                dispatchCommands(commands, context: context)
+                environment.markMissionSquadAutostartSuppressed(forAssignmentID: assignmentID)
+                environment.systems.scheduling.cancelDeferredSquadMissionStartScheduling(forAssignmentID: assignmentID)
+                environment.systems.logging.appendLogEvent(
+                    level: .info,
+                    taskID: taskID,
+                    taskLabel: task.name,
+                    speaker: .missionControl,
+                    templateKey: MissionRunLogTemplateKey.missionTaskAbortGracefulDispatched,
+                    templateParams: ["task": label]
+                )
+            case .completeAfterCycle:
+                let windDown = buildCompletePolicyWindDownCommands(limitedToAssignmentIDs: ids)
+                guard !windDown.isEmpty else {
+                    environment.systems.logging.appendLogEvent(
+                        level: .warning,
+                        taskID: taskID,
+                        taskLabel: task.name,
+                        speaker: .missionControl,
+                        templateKey: MissionRunLogTemplateKey.missionTaskCompleteGracefulSkippedNoCommands
+                    )
+                    continue
+                }
+                environment.noteMissionTaskEndAttempt(.recoveryMissionEnd, forTaskID: taskID)
+                environment.markSquadCompletePolicyWindDownDispatchIssued(forAssignmentID: assignmentID)
+                dispatchCommands(windDown, context: context)
+                environment.markMissionSquadAutostartSuppressed(forAssignmentID: assignmentID)
+                environment.systems.scheduling.cancelDeferredSquadMissionStartScheduling(forAssignmentID: assignmentID)
+                let label = task.name
+                environment.systems.logging.appendLogEvent(
+                    level: .info,
+                    taskID: taskID,
+                    taskLabel: task.name,
+                    speaker: .missionControl,
+                    templateKey: MissionRunLogTemplateKey.missionTaskCompleteGracefulDispatched,
+                    templateParams: ["task": label]
+                )
+            }
+        }
     }
 
     /// Delivers queued per-task abort/complete wind-downs for any of ``completedCycleTaskIDs`` that have
@@ -1042,62 +1142,78 @@ final class MissionRunExecutionSubsystem {
         guard let environment, environment.status == .running else { return .noOp }
         guard let mission = context.missionProvider() else { return .noOp }
 
-        let activeTasks = environment.activeCycleTaskIDs
-        guard !activeTasks.isEmpty else { return .noOp }
+        let activeSquads = environment.activeCycleSquadAssignmentIDs
+        guard !activeSquads.isEmpty else { return .noOp }
 
-        var touchesActiveTask = false
-        for taskID in activeTasks {
-            let expectedForTask = activePrimaryMissionVehicleIDs(
-                mission: mission,
-                restrictToTaskIDs: Set([taskID]),
-                fleetLink: context.fleetLink,
-                sitl: context.sitl
-            )
-            if expectedForTask.contains(vehicleID) {
-                touchesActiveTask = true
+        var touchesActiveSquad = false
+        for assignmentID in activeSquads {
+            guard let assignment = environment.assignments.first(where: { $0.id == assignmentID }),
+                  let streamID = resolvedFleetStreamVehicleID(
+                      assignment: assignment,
+                      fleetLink: context.fleetLink,
+                      sitl: context.sitl
+                  )
+            else { continue }
+            if streamID == vehicleID {
+                touchesActiveSquad = true
                 break
             }
         }
-        guard touchesActiveTask else { return .noOp }
+        guard touchesActiveSquad else { return .noOp }
 
-        var newlyCompletedTaskIDs: Set<UUID> = []
-        for taskID in activeTasks {
-            let expectedForTask = activePrimaryMissionVehicleIDs(
-                mission: mission,
-                restrictToTaskIDs: Set([taskID]),
-                fleetLink: context.fleetLink,
-                sitl: context.sitl
-            )
-            guard !expectedForTask.isEmpty, expectedForTask.contains(vehicleID) else { continue }
-            environment.markFinishedMissionCycleVehicleID(vehicleID, forTaskID: taskID)
-            let recorded = environment.finishedMissionCycleVehicleIDsByTaskID[taskID] ?? []
-            guard expectedForTask.isSubset(of: recorded) else { continue }
-            newlyCompletedTaskIDs.insert(taskID)
+        var newlyCompletedSquadAssignmentIDs: Set<UUID> = []
+        for assignmentID in activeSquads {
+            guard let assignment = environment.assignments.first(where: { $0.id == assignmentID }),
+                  let streamID = resolvedFleetStreamVehicleID(
+                      assignment: assignment,
+                      fleetLink: context.fleetLink,
+                      sitl: context.sitl
+                  ),
+                  streamID == vehicleID
+            else { continue }
+            environment.markFinishedMissionCycleVehicleID(vehicleID, forSquadAssignmentID: assignmentID)
+            newlyCompletedSquadAssignmentIDs.insert(assignmentID)
         }
 
-        guard !newlyCompletedTaskIDs.isEmpty else { return .progressed }
+        guard !newlyCompletedSquadAssignmentIDs.isEmpty else { return .progressed }
 
-        environment.setMissionCycleCount(environment.cyclesCompleted + newlyCompletedTaskIDs.count)
-        for taskID in newlyCompletedTaskIDs {
-            environment.clearFinishedMissionCycleVehicleIDs(forTaskID: taskID)
-            environment.removeTaskFromActiveCycle(taskID)
+        environment.setMissionCycleCount(environment.cyclesCompleted + newlyCompletedSquadAssignmentIDs.count)
+        for assignmentID in newlyCompletedSquadAssignmentIDs {
+            environment.clearFinishedMissionCycleVehicleIDs(forSquadAssignmentID: assignmentID)
+            environment.removeSquadFromActiveCycle(assignmentID)
         }
-        environment.recordTaskCycleCompletions(forTaskIDs: newlyCompletedTaskIDs)
-
-        deliverPendingMissionTaskGracefulWindDownsIfNeeded(
-            completedCycleTaskIDs: newlyCompletedTaskIDs,
+        let newlyCompletedTaskIDs = environment.recordSquadCycleCompletions(
+            assignmentIDs: newlyCompletedSquadAssignmentIDs,
+            mission: mission
+        )
+        deliverPendingSquadGracefulWindDownsIfNeeded(
+            completedSquadAssignmentIDs: newlyCompletedSquadAssignmentIDs,
             context: context
         )
-
-        let autoCycleRestartSuppressedForMissionEndWindDown =
-            environment.shouldSuppressBetweenCycleAutostartForMissionEndWindDown()
-        if !autoCycleRestartSuppressedForMissionEndWindDown {
-            let nextPlan = planNextAutoCycleStarts(
-                mission: mission,
+        autoDeliverPerSquadFiniteCycleCompletePolicyIfNeeded(
+            newlyCompletedSquadAssignmentIDs: newlyCompletedSquadAssignmentIDs,
+            mission: mission,
+            context: context
+        )
+        if !newlyCompletedTaskIDs.isEmpty {
+            deliverPendingMissionTaskGracefulWindDownsIfNeeded(
                 completedCycleTaskIDs: newlyCompletedTaskIDs,
-                suppressAutostartForTaskIDs: environment.unionedMissionTaskIDsSuppressingAutopilotAutostart(forMission: mission)
+                context: context
             )
-            if !nextPlan.immediateTaskIDs.isEmpty || !nextPlan.delayedTaskIDs.isEmpty {
+            autoDeliverBoundedRepeatingTaskCompleteWindDownIfNeeded(
+                taskIDs: newlyCompletedTaskIDs,
+                mission: mission,
+                context: context
+            )
+        }
+
+        let missionWideAutostartFrozen = environment.shouldSuppressMissionWideBetweenCycleAutostart()
+        if !missionWideAutostartFrozen {
+            let nextPlan = planNextAutoCycleStartsForSquads(
+                mission: mission,
+                completedSquadAssignmentIDs: newlyCompletedSquadAssignmentIDs
+            )
+            if !nextPlan.immediateSquads.isEmpty || !nextPlan.delayedSquads.isEmpty {
                 if !nextPlan.betweenCyclesCommands.isEmpty {
                     Task { @MainActor [weak self] in
                         guard let self else { return }
@@ -1105,29 +1221,13 @@ final class MissionRunExecutionSubsystem {
                         for issued in nextPlan.betweenCyclesCommands {
                             await self.dispatchBetweenCyclesIssuedCommandWithOptionalFallback(issued, context: context)
                         }
-                        self.startPlannedImmediateCycleTasks(
-                            immediateTaskIDs: nextPlan.immediateTaskIDs,
-                            mission: mission,
-                            context: context
-                        )
-                        self.scheduleAutoCycleDelayedStartsForPlannedCycle(
-                            delayedTaskIDs: nextPlan.delayedTaskIDs,
-                            mission: mission,
-                            context: context
-                        )
+                        self.startPlannedImmediateSquads(nextPlan.immediateSquads, mission: mission, context: context)
+                        self.scheduleAutoCycleDelayedSquads(nextPlan.delayedSquads, mission: mission, context: context)
                     }
                     return .progressed
                 }
-                startPlannedImmediateCycleTasks(
-                    immediateTaskIDs: nextPlan.immediateTaskIDs,
-                    mission: mission,
-                    context: context
-                )
-                scheduleAutoCycleDelayedStartsForPlannedCycle(
-                    delayedTaskIDs: nextPlan.delayedTaskIDs,
-                    mission: mission,
-                    context: context
-                )
+                startPlannedImmediateSquads(nextPlan.immediateSquads, mission: mission, context: context)
+                scheduleAutoCycleDelayedSquads(nextPlan.delayedSquads, mission: mission, context: context)
                 return .progressed
             }
         }
@@ -1138,32 +1238,110 @@ final class MissionRunExecutionSubsystem {
                 speaker: .missionControl,
                 templateKey: MissionRunLogTemplateKey.missionRunningUnboundedRegularity
             )
-            // Whole-run “after cycle” uses ``gracefulStopKind``; per-task graceful complete also suppresses autostart
-            // via issued/pending markers — do **not** treat the latter as “last autopilot cycle for the whole run”.
-            if environment.gracefulStopKind != .none,
-               autoCycleRestartSuppressedForMissionEndWindDown,
-               environment.activeCycleTaskIDs.isEmpty {
+            // Whole-run finalize requires ``gracefulStopKind`` + empty active set — not per-task wind-down alone.
+            if missionWideAutostartFrozen, environment.activeCycleTaskIDs.isEmpty {
                 return finalizeWholeRunGracefulAfterLastAutopilotCycle(context: context)
             }
             return .progressed
         }
 
-        if !autoCycleRestartSuppressedForMissionEndWindDown {
+        if !missionWideAutostartFrozen {
             if allBoundedRepeatingTasksFinishedWithNoActiveInFlightCycle(environment: environment, mission: mission) {
                 completeRun(
                     context: context,
                     templateKey: MissionRunLogTemplateKey.runOneOffFinished,
                     kind: .oneOffAutopilotFinished,
-                    skipImplicitReturnToLaunch: false,
                     operatorWindDown: .recoveryPhase
                 )
                 return .completed(.oneOffAutopilotFinished)
             }
-        } else if environment.gracefulStopKind != .none, environment.activeCycleTaskIDs.isEmpty {
+        } else if environment.activeCycleTaskIDs.isEmpty {
             return finalizeWholeRunGracefulAfterLastAutopilotCycle(context: context)
         }
 
         return .progressed
+    }
+
+    /// When a finite repeating task’s **aggregated** cycle boundary closes, operator-scheduled
+    /// ``completeMissionTaskAfterCycle`` is optional — without a pending row the next MAVLink cycle would still
+    /// autostart (``planNextAutoCycleStartsForSquads``). Seed the same ``.completeAfterCycle`` delivery path so
+    /// complete-policy recovery dispatches and per-task autostart suppresses for that path.
+    private func autoDeliverBoundedRepeatingTaskCompleteWindDownIfNeeded(
+        taskIDs: Set<UUID>,
+        mission: Mission,
+        context: MissionRunExecutionContext
+    ) {
+        guard let environment else { return }
+        for taskID in taskIDs {
+            guard let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }),
+                  task.enabled
+            else { continue }
+            let repeats = task.regularity == .continuous || task.regularity == .continuousWithDelay
+            guard repeats, task.cycles > 0 else { continue }
+            let done = environment.taskCyclesCompletedByTaskID[taskID] ?? 0
+            guard done >= task.cycles else { continue }
+            guard environment.boundPrimarySquadCount(forTaskID: taskID, mission: mission) <= 1 else { continue }
+            guard !environment.missionTaskCompleteWindDownIssuedTaskIDs.contains(taskID),
+                  !environment.missionTaskAbortWindDownIssuedTaskIDs.contains(taskID)
+            else { continue }
+            environment.setPendingMissionTaskGracefulWindDown(kind: .completeAfterCycle, forTaskID: taskID)
+            deliverPendingMissionTaskGracefulWindDownsIfNeeded(
+                completedCycleTaskIDs: [taskID],
+                context: context
+            )
+        }
+    }
+
+    /// Multi-primary finite-cycle: when **one** primary’s MAVLink cycle closes and that squad has exhausted its
+    /// ``MissionTask/cycles`` allotment, dispatch complete-policy wind-down for **that row only** (task rollup stays
+    /// ``executing`` until every primary has finished the race).
+    private func autoDeliverPerSquadFiniteCycleCompletePolicyIfNeeded(
+        newlyCompletedSquadAssignmentIDs: Set<UUID>,
+        mission: Mission,
+        context: MissionRunExecutionContext
+    ) {
+        guard let environment, !newlyCompletedSquadAssignmentIDs.isEmpty else { return }
+        for assignmentID in newlyCompletedSquadAssignmentIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
+            guard let taskID = environment.resolvedTaskID(forSquadAssignmentID: assignmentID, mission: mission),
+                  let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }),
+                  task.enabled
+            else { continue }
+            let repeats = task.regularity == .continuous || task.regularity == .continuousWithDelay
+            guard repeats, task.cycles > 0 else { continue }
+            guard environment.boundPrimarySquadCount(forTaskID: taskID, mission: mission) > 1 else { continue }
+            let squadDone = environment.squadCyclesCompletedByAssignmentID[assignmentID] ?? 0
+            guard squadDone >= task.cycles else { continue }
+            guard !environment.missionTaskAbortWindDownIssuedTaskIDs.contains(taskID),
+                  !environment.missionTaskCompleteWindDownIssuedTaskIDs.contains(taskID)
+            else { continue }
+            guard !environment.squadCompletePolicyWindDownIssuedAssignmentIDs.contains(assignmentID) else { continue }
+            let ids: Set<UUID> = [assignmentID]
+            let windDown = buildCompletePolicyWindDownCommands(limitedToAssignmentIDs: ids)
+            guard !windDown.isEmpty else {
+                environment.systems.logging.appendLogEvent(
+                    level: .warning,
+                    taskID: taskID,
+                    taskLabel: task.name,
+                    speaker: .missionControl,
+                    templateKey: MissionRunLogTemplateKey.missionTaskCompleteGracefulSkippedNoCommands
+                )
+                continue
+            }
+            environment.markSquadCompletePolicyWindDownDispatchIssued(forAssignmentID: assignmentID)
+            environment.noteMissionTaskEndAttempt(.recoveryMissionEnd, forTaskID: taskID)
+            dispatchCommands(windDown, context: context)
+            environment.markMissionSquadAutostartSuppressed(forAssignmentID: assignmentID)
+            environment.systems.scheduling.cancelDeferredSquadMissionStartScheduling(forAssignmentID: assignmentID)
+            let label = task.name
+            environment.systems.logging.appendLogEvent(
+                level: .info,
+                taskID: taskID,
+                taskLabel: task.name,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.missionTaskCompleteGracefulDispatched,
+                templateParams: ["task": label]
+            )
+        }
     }
 
     /// Whole-run “after cycle” stop: once no task is still inside an in-flight autopilot cycle, end the run the same way
@@ -1173,8 +1351,6 @@ final class MissionRunExecutionSubsystem {
     ) -> MissionRunExecutionDecision {
         guard let environment else { return .progressed }
         let toDeliver = extractAfterMissionCycleBatchesFromQueue()
-        let commandCount = toDeliver.reduce(0) { $0 + $1.commands.count }
-        let hadQueuedWindDownCommands = commandCount > 0
         let stopKind = environment.gracefulStopKind
         let needsClearBarrier = toDeliver.contains { Self.commandsContainCatalogueMissionClear($0.commands) }
         if needsClearBarrier {
@@ -1188,7 +1364,6 @@ final class MissionRunExecutionSubsystem {
                         context: context,
                         templateKey: MissionRunLogTemplateKey.runGracefulAfterCycle,
                         kind: .operatorStoppedAfterCycle,
-                        skipImplicitReturnToLaunch: hadQueuedWindDownCommands,
                         operatorWindDown: .abortProtocolPhase
                     )
                 } else {
@@ -1196,7 +1371,6 @@ final class MissionRunExecutionSubsystem {
                         context: context,
                         templateKey: MissionRunLogTemplateKey.runCompleteWindDownAfterCycle,
                         kind: .operatorCompletedAfterCycle,
-                        skipImplicitReturnToLaunch: hadQueuedWindDownCommands,
                         operatorWindDown: .recoveryPhase
                     )
                 }
@@ -1211,7 +1385,6 @@ final class MissionRunExecutionSubsystem {
                 context: context,
                 templateKey: MissionRunLogTemplateKey.runGracefulAfterCycle,
                 kind: .operatorStoppedAfterCycle,
-                skipImplicitReturnToLaunch: hadQueuedWindDownCommands,
                 operatorWindDown: .abortProtocolPhase
             )
             return .completed(.operatorStoppedAfterCycle)
@@ -1220,7 +1393,6 @@ final class MissionRunExecutionSubsystem {
             context: context,
             templateKey: MissionRunLogTemplateKey.runCompleteWindDownAfterCycle,
             kind: .operatorCompletedAfterCycle,
-            skipImplicitReturnToLaunch: hadQueuedWindDownCommands,
             operatorWindDown: .recoveryPhase
         )
         return .completed(.operatorCompletedAfterCycle)
@@ -1284,53 +1456,72 @@ final class MissionRunExecutionSubsystem {
         return ids
     }
 
+    private struct SquadCycleLaunchRef: Equatable {
+        let taskID: UUID
+        let primaryAssignmentID: UUID
+    }
+
     private struct NextCycleStartPlan {
-        var immediateTaskIDs: [UUID] = []
-        var delayedTaskIDs: [UUID] = []
+        var immediateSquads: [SquadCycleLaunchRef] = []
+        var delayedSquads: [SquadCycleLaunchRef] = []
         var betweenCyclesCommands: [MissionRunIssuedCommand] = []
     }
 
-    private func planNextAutoCycleStarts(
+    private func planNextAutoCycleStartsForSquads(
         mission: Mission,
-        completedCycleTaskIDs: Set<UUID>,
-        suppressAutostartForTaskIDs: Set<UUID>
+        completedSquadAssignmentIDs: Set<UUID>
     ) -> NextCycleStartPlan {
         guard let environment else { return NextCycleStartPlan() }
         var plan = NextCycleStartPlan()
         let tasksByID = Dictionary(uniqueKeysWithValues: mission.routeMacro.tasks.map { ($0.id, $0) })
-        for taskID in completedCycleTaskIDs {
-            guard !suppressAutostartForTaskIDs.contains(taskID) else { continue }
-            guard let task = tasksByID[taskID], task.enabled else { continue }
+        for assignmentID in completedSquadAssignmentIDs {
+            guard let taskID = environment.resolvedTaskID(forSquadAssignmentID: assignmentID, mission: mission),
+                  let task = tasksByID[taskID], task.enabled
+            else { continue }
+            if environment.shouldSuppressAutopilotAutostart(
+                forSquadAssignmentID: assignmentID,
+                taskID: taskID,
+                mission: mission
+            ) { continue }
+            let aggregatedCyclesDone = environment.taskCyclesCompletedByTaskID[taskID] ?? 0
+            if task.cycles > 0, aggregatedCyclesDone >= task.cycles { continue }
+            let squadCyclesDone = environment.squadCyclesCompletedByAssignmentID[assignmentID] ?? 0
+            let shouldStart = task.cycles == 0 || squadCyclesDone < task.cycles
+            guard shouldStart else { continue }
+            let ref = SquadCycleLaunchRef(taskID: taskID, primaryAssignmentID: assignmentID)
             switch task.regularity {
             case .continuous:
-                let done = environment.taskCyclesCompletedByTaskID[task.id] ?? 0
-                let shouldStart = task.cycles == 0 || done < task.cycles
-                if shouldStart {
-                    plan.immediateTaskIDs.append(task.id)
-                }
+                plan.immediateSquads.append(ref)
             case .continuousWithDelay:
-                let done = environment.taskCyclesCompletedByTaskID[task.id] ?? 0
-                let shouldStart = task.cycles == 0 || done < task.cycles
-                if shouldStart {
-                    plan.delayedTaskIDs.append(task.id)
-                    plan.betweenCyclesCommands.append(contentsOf: betweenCyclesCommands(for: task, mission: mission))
-                }
+                plan.delayedSquads.append(ref)
+                plan.betweenCyclesCommands.append(
+                    contentsOf: betweenCyclesCommands(
+                        for: task,
+                        mission: mission,
+                        restrictToPrimaryAssignmentIDs: Set([assignmentID])
+                    )
+                )
             case .onceAtStart, .operatorTriggered:
-                // Non-continuous regularities do not auto-start next cycles.
                 break
             }
         }
         return plan
     }
 
-    private func betweenCyclesCommands(for task: MissionTask, mission: Mission) -> [MissionRunIssuedCommand] {
+    private func betweenCyclesCommands(
+        for task: MissionTask,
+        mission: Mission,
+        restrictToPrimaryAssignmentIDs: Set<UUID>? = nil
+    ) -> [MissionRunIssuedCommand] {
         guard let environment else { return [] }
         guard let dispatch = MissionRunFleetDispatch.betweenCyclesTaskDispatch(task.betweenCycles) else { return [] }
         let squads = environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: task.id)
         return squads.compactMap { squad in
+            let aid = squad.squad.primaryAssignment.id
+            if let restrict = restrictToPrimaryAssignmentIDs, !restrict.contains(aid) { return nil }
             guard let tokenKey = squad.squad.primaryAssignment.attachedFleetVehicleToken else { return nil }
             return MissionRunIssuedCommand(
-                assignmentID: squad.squad.primaryAssignment.id,
+                assignmentID: aid,
                 slotName: squad.squad.primaryAssignment.slotName,
                 vehicleTokenKey: tokenKey,
                 dispatch: dispatch,
@@ -1341,33 +1532,45 @@ final class MissionRunExecutionSubsystem {
         }
     }
 
-    private func startPlannedImmediateCycleTasks(
-        immediateTaskIDs: [UUID],
+    private func startPlannedImmediateSquads(
+        _ squads: [SquadCycleLaunchRef],
         mission: Mission,
         context: MissionRunExecutionContext
     ) {
-        for taskID in immediateTaskIDs {
-            startTaskExecution(taskID: taskID, mission: mission, context: context)
+        for ref in squads {
+            _ = startSquadExecution(
+                taskID: ref.taskID,
+                primaryAssignmentID: ref.primaryAssignmentID,
+                mission: mission,
+                context: context
+            )
         }
     }
 
-    private func scheduleAutoCycleDelayedStartsForPlannedCycle(
-        delayedTaskIDs: [UUID],
+    private func scheduleAutoCycleDelayedSquads(
+        _ squads: [SquadCycleLaunchRef],
         mission: Mission,
         context: MissionRunExecutionContext
     ) {
         guard let environment else { return }
-        for taskID in delayedTaskIDs {
-            let task = mission.routeMacro.tasks.first(where: { $0.id == taskID })
+        for ref in squads {
+            let task = mission.routeMacro.tasks.first(where: { $0.id == ref.taskID })
             let delaySeconds = max(1, task?.regularityDelayTotalSeconds ?? 1)
             let startAt = Date().addingTimeInterval(delaySeconds)
-            environment.systems.scheduling.setTaskStartDeferral(
+            environment.setSquadStartDeferral(
                 MissionTaskStartDeferral(startAt: startAt, totalDelay: delaySeconds),
-                forTaskID: taskID
+                forAssignmentID: ref.primaryAssignmentID
             )
-            environment.systems.scheduling.armTaskMissionStartTask(taskID: taskID, startAt: startAt) { [weak self] in
+            environment.systems.scheduling.armSquadMissionStartTask(
+                taskID: ref.taskID,
+                primaryAssignmentID: ref.primaryAssignmentID,
+                startAt: startAt
+            ) { [weak self] in
                 guard let self else { return }
-                _ = self.handleEvent(.deferredTaskStartDue(taskID: taskID), context: context)
+                _ = self.handleEvent(
+                    .deferredSquadStartDue(taskID: ref.taskID, primaryAssignmentID: ref.primaryAssignmentID),
+                    context: context
+                )
             }
         }
     }
@@ -1520,7 +1723,7 @@ final class MissionRunExecutionSubsystem {
         let pass = buildPrimaryMissionPass(mission: mission, explicitTaskId: taskID)
         let dispatched = !pass.immediateCommands.isEmpty || !pass.queuedBatches.isEmpty
         if dispatched {
-            environment.markTaskActiveInCurrentCycle(taskID)
+            environment.markFirstWaveSquadsActiveInCurrentCycle(taskID: taskID, mission: mission)
         }
         pass.events.forEach { environment.appendEvent($0) }
         for issued in pass.immediateCommands {
@@ -1530,6 +1733,108 @@ final class MissionRunExecutionSubsystem {
             environment.systems.executor.enqueueCommandBatch(batch, context: context, replacingTags: [])
         }
         return dispatched
+    }
+
+    /// Launches one primary squad’s MAVLink mission (next-cycle autostart or operator release of a deferred first-wave squad).
+    @discardableResult
+    func startSquadExecution(
+        taskID: UUID,
+        primaryAssignmentID: UUID,
+        mission: Mission?,
+        context: MissionRunExecutionContext
+    ) -> Bool {
+        guard let environment else { return false }
+        guard environment.sessionPhase == .executing else { return false }
+        guard let mission = mission ?? context.missionProvider() else { return false }
+        if environment.shouldSuppressAutopilotAutostart(
+            forSquadAssignmentID: primaryAssignmentID,
+            taskID: taskID,
+            mission: mission
+        ) {
+            return false
+        }
+        if let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }),
+           task.enabled,
+           (task.regularity == .continuous || task.regularity == .continuousWithDelay),
+           task.cycles > 0 {
+            let squadDone = environment.squadCyclesCompletedByAssignmentID[primaryAssignmentID] ?? 0
+            if squadDone >= task.cycles { return false }
+            let aggregated = environment.taskCyclesCompletedByTaskID[taskID] ?? 0
+            if aggregated >= task.cycles { return false }
+        }
+        let pass = buildPrimaryMissionPass(
+            mission: mission,
+            explicitTaskId: taskID,
+            nextCyclePrimaryAssignmentIDs: Set([primaryAssignmentID])
+        )
+        let dispatched = !pass.immediateCommands.isEmpty || !pass.queuedBatches.isEmpty
+        if dispatched {
+            environment.markSquadActiveInCurrentCycle(primaryAssignmentID)
+        }
+        pass.events.forEach { environment.appendEvent($0) }
+        for issued in pass.immediateCommands {
+            environment.appendEvent(environment.systems.commands.dispatchCommand(issued, fleetLink: context.fleetLink, sitl: context.sitl))
+        }
+        for batch in pass.queuedBatches {
+            environment.systems.executor.enqueueCommandBatch(batch, context: context, replacingTags: [])
+        }
+        return dispatched
+    }
+
+    /// Operator / automation: launch the next deferred first-wave primary for this task (waypoint / operator stagger gate).
+    @discardableResult
+    func releaseNextDeferredFirstWaveSquad(taskID: UUID, context: MissionRunExecutionContext) -> Bool {
+        guard let environment,
+              let assignmentID = environment.consumeNextDeferredFirstWaveSquadAssignmentID(forTaskID: taskID)
+        else { return false }
+        guard let mission = context.missionProvider(),
+              let task = mission.routeMacro.tasks.first(where: { $0.id == taskID })
+        else { return false }
+        let squadIndex = environment.primarySquads(forTaskID: taskID, mission: mission)
+            .firstIndex(where: { $0.assignment.id == assignmentID }) ?? 0
+        let squadLog = MissionControlSquadUtilities.squadLogContext(
+            taskID: task.id,
+            taskName: task.name,
+            squadIndex: squadIndex
+        )
+        let ok = startSquadExecution(
+            taskID: taskID,
+            primaryAssignmentID: assignmentID,
+            mission: mission,
+            context: context
+        )
+        if ok {
+            environment.systems.logging.appendLogEvent(
+                level: .info,
+                taskID: squadLog.id,
+                taskLabel: squadLog.label,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.missionSquadFirstWaveReleased,
+                templateParams: ["squad": squadLog.label, "slotID": assignmentID.uuidString]
+            )
+        }
+        return ok
+    }
+
+    private struct CommandTargetScope {
+        let taskID: UUID
+        let assignmentIDs: Set<UUID>
+    }
+
+    private func commandTargetScope(
+        target: MissionRunCommandTarget,
+        environment: MissionRunEnvironment
+    ) -> CommandTargetScope? {
+        switch target {
+        case .task(let taskID):
+            let ids = Set(environment.assignmentsBoundToMissionTask(taskID: taskID).map(\.id))
+            return ids.isEmpty ? nil : CommandTargetScope(taskID: taskID, assignmentIDs: ids)
+        case .squad(let assignmentID):
+            guard let mission = environment.template,
+                  let taskID = environment.resolvedTaskID(forSquadAssignmentID: assignmentID, mission: mission)
+            else { return nil }
+            return CommandTargetScope(taskID: taskID, assignmentIDs: Set([assignmentID]))
+        }
     }
 
     private func buildStagingPass(mission: Mission?) -> MissionRunPassResult {
@@ -1605,7 +1910,11 @@ final class MissionRunExecutionSubsystem {
         case line
     }
 
-    private func buildPrimaryMissionPass(mission: Mission, explicitTaskId: UUID? = nil) -> TaskMissionLaunchPass {
+    private func buildPrimaryMissionPass(
+        mission: Mission,
+        explicitTaskId: UUID? = nil,
+        nextCyclePrimaryAssignmentIDs: Set<UUID>? = nil
+    ) -> TaskMissionLaunchPass {
         guard let environment else { return TaskMissionLaunchPass(events: [], immediateCommands: [], queuedBatches: []) }
         let fleetLink = environment.fleetLink
         let sitl = environment.sitl
@@ -1642,23 +1951,39 @@ final class MissionRunExecutionSubsystem {
         }
 
         let formation: TaskFormationIntent = (task.pattern == .convoy) ? .line : .cluster
-        let fallbackStep = fallbackStaggerStepSeconds(task: task, squads: squads, mission: mission)
-        let staggerStep = task.executionMethod == .staggered ? fallbackStep : 0
+        let staggerStep = MissionTaskStaggerPolicy.firstWaveStepSeconds(task: task, mission: mission, squads: squads)
         let now = Date()
 
+        let isNextCyclePass = nextCyclePrimaryAssignmentIDs != nil
+        var deferredFirstWaveAssignmentIDs: [UUID] = []
+
         for squad in squads {
+            let primaryID = squad.squad.primaryAssignment.id
+            if let restrict = nextCyclePrimaryAssignmentIDs {
+                guard restrict.contains(primaryID) else { continue }
+            } else if !MissionTaskStaggerPolicy.includesSquadInAutomaticFirstWave(
+                task: task,
+                squadIndex: squad.squadIndex
+            ) {
+                deferredFirstWaveAssignmentIDs.append(primaryID)
+                continue
+            }
             guard let tokenKey = squad.squad.primaryAssignment.attachedFleetVehicleToken else { continue }
+            let squadLog = MissionControlSquadUtilities.squadLogContext(
+                taskID: task.id,
+                taskName: task.name,
+                squadIndex: squad.squadIndex
+            )
             let plan = Mavsdk.Mission.MissionPlan(missionItems: squad.missionItems)
             let missionItemsJSON: String
             do {
                 missionItemsJSON = try FleetVehicleCommandMissionItemPayload.encodeMissionPlanToJSON(plan: plan)
             } catch {
-                let pc = MissionControlTaskTagName.taskContext(for: squad.squad.primaryAssignment, mission: mission)
                 events.append(
                     MissionRunEvent(
                         level: .error,
-                        taskID: pc?.id,
-                        taskLabel: pc?.label,
+                        taskID: squadLog.id,
+                        taskLabel: squadLog.label,
                         speaker: .missionControl,
                         templateKey: MissionRunLogTemplateKey.missionPlanItemsEncodeFailed,
                         templateParams: [
@@ -1688,12 +2013,11 @@ final class MissionRunExecutionSubsystem {
                     home: px4FilterHome
                 )
                 if omittedPx4Inclusions > 0 {
-                    let pc = MissionControlTaskTagName.taskContext(for: squad.squad.primaryAssignment, mission: mission)
                     events.append(
                         MissionRunEvent(
                             level: .warning,
-                            taskID: pc?.id,
-                            taskLabel: pc?.label,
+                            taskID: squadLog.id,
+                            taskLabel: squadLog.label,
                             speaker: .missionControl,
                             templateKey: MissionRunLogTemplateKey.missionGeofencePx4InclusionFencesOmitted,
                             templateParams: [
@@ -1708,12 +2032,11 @@ final class MissionRunExecutionSubsystem {
                     forGeofences: geofencesForPx4
                 )
             } catch {
-                let pc = MissionControlTaskTagName.taskContext(for: squad.squad.primaryAssignment, mission: mission)
                 events.append(
                     MissionRunEvent(
                         level: .error,
-                        taskID: pc?.id,
-                        taskLabel: pc?.label,
+                        taskID: squadLog.id,
+                        taskLabel: squadLog.label,
                         speaker: .missionControl,
                         templateKey: MissionRunLogTemplateKey.missionGeofencePolygonsEncodeFailed,
                         templateParams: [
@@ -1740,16 +2063,15 @@ final class MissionRunExecutionSubsystem {
                 issuerKey: MissionRunCommandIssuerKey.missionExecute,
                 category: .missionControl
             )
-            let offset = Double(squad.squadIndex) * staggerStep
+            let offset = isNextCyclePass ? 0 : Double(squad.squadIndex) * staggerStep
             let dispatchAt = now.addingTimeInterval(offset)
-            let pc = MissionControlTaskTagName.taskContext(for: squad.squad.primaryAssignment, mission: mission)
             let formationLabel = (formation == .line) ? "line" : "cluster"
             let timingLabel = offset > 0 ? "stagger +\(Int(offset))s" : "start now"
             events.append(
                 MissionRunEvent(
                     level: .info,
-                    taskID: pc?.id,
-                    taskLabel: pc?.label,
+                    taskID: squadLog.id,
+                    taskLabel: squadLog.label,
                     speaker: .missionControl,
                     templateKey: MissionRunLogTemplateKey.missionExecuting,
                     templateParams: [
@@ -1772,37 +2094,13 @@ final class MissionRunExecutionSubsystem {
                 )
             }
         }
+        if !isNextCyclePass, !deferredFirstWaveAssignmentIDs.isEmpty {
+            environment.registerDeferredFirstWaveSquads(
+                taskID: pid,
+                assignmentIDs: deferredFirstWaveAssignmentIDs
+            )
+        }
         return TaskMissionLaunchPass(events: events, immediateCommands: immediateCommands, queuedBatches: queuedBatches)
-    }
-
-    private func fallbackStaggerStepSeconds(
-        task: MissionTask,
-        squads: [MissionRunPlannerSubsystem.PlannedTaskSquadMission],
-        mission: Mission
-    ) -> TimeInterval {
-        guard task.executionMethod == .staggered else { return 0 }
-        guard let firstWaypoint = task.waypoints.first else { return 20 }
-        let distanceM: Double = {
-            if task.waypoints.count > 1 {
-                let second = task.waypoints[1]
-                return MissionTelemetryGeo.horizontalDistanceM(
-                    lat1: firstWaypoint.coord.lat,
-                    lon1: firstWaypoint.coord.lon,
-                    lat2: second.coord.lat,
-                    lon2: second.coord.lon
-                )
-            }
-            return 100
-        }()
-        let speedMps: Double = {
-            let maybeWaypoint = firstWaypoint.transition.targetSpeed
-            let waypointUnit = firstWaypoint.transition.speedUnit
-            let fromWaypoint = waypointUnit == .kilometersPerHour ? (maybeWaypoint * 1000 / 3600) : maybeWaypoint
-            let fallback = mission.routeMacro.rules.defaultSpeed
-            return max(1, fromWaypoint > 0 ? fromWaypoint : fallback)
-        }()
-        let estimate = distanceM / speedMps
-        return min(300, max(5, estimate))
     }
 
     private func completeRun(
@@ -1810,11 +2108,15 @@ final class MissionRunExecutionSubsystem {
         templateKey: String,
         templateParams: [String: String] = [:],
         kind: MissionRunCompletionKind,
-        skipImplicitReturnToLaunch: Bool = false,
         operatorWindDown: MissionRunOperatorWindDown
     ) {
         guard let environment else { return }
-        environment.clearMissionTaskScopedOrchestrationState()
+        let preserveMissionEndWindDownIssued: Bool
+        switch operatorWindDown {
+        case .recoveryPhase, .abortProtocolPhase:
+            preserveMissionEndWindDownIssued = true
+        }
+        environment.clearMissionTaskScopedOrchestrationState(preserveMissionEndWindDownIssued: preserveMissionEndWindDownIssued)
         environment.systems.scheduling.cancelAllScheduledTasks()
         environment.systems.scheduling.clearDeferredOneOffExecution()
         var cycleSnap = environment.cyclesCompleted
@@ -1841,9 +2143,6 @@ final class MissionRunExecutionSubsystem {
             templateKey: templateKey,
             templateParams: templateParams
         )
-        if !skipImplicitReturnToLaunch {
-            issueReturnToLaunchForAllAssignments()
-        }
     }
 }
 
@@ -1868,6 +2167,7 @@ extension MissionRunLogTemplateKey {
     static let missionGeofencePolygonsEncodeFailed = "missioncontrol.mre.mission.geofence_polygons_encode_failed"
     static let missionGeofencePx4InclusionFencesOmitted = "missioncontrol.mre.mission.geofence_px4_inclusion_fences_omitted"
     static let missionExecuting = "missioncontrol.mre.mission.executing"
+    static let missionSquadFirstWaveReleased = "missioncontrol.mre.mission.squad_first_wave_released"
     static let startMissionTaskSkippedPhase = "missioncontrol.mre.mission.start_skipped_phase"
     static let startMissionTaskNoDispatchContext = "missioncontrol.mre.mission.start_no_dispatch_context"
     static let startMissionTaskNoExecutionContext = "missioncontrol.mre.mission.start_no_execution_context"

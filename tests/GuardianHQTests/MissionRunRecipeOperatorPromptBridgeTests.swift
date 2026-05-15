@@ -5,6 +5,7 @@ import XCTest
 final class MissionRunRecipeOperatorPromptBridgeTests: XCTestCase {
 
     func test_awaitMissionRecipeEscalationAnswer_registersThenClearsActivePrompt() async {
+        OperatorPromptCenter.shared.prepareOperatorPromptRoutingSession()
         let bridge = MissionRunRecipeOperatorPromptBridge.shared
         let center = OperatorPromptCenter.shared
         let runID = UUID()
@@ -20,7 +21,11 @@ final class MissionRunRecipeOperatorPromptBridgeTests: XCTestCase {
         )
 
         center.setMCRPromptPanelHostActive(true, missionRunID: runID)
-        defer { center.setMCRPromptPanelHostActive(false, missionRunID: runID) }
+        center.noteMCRRunDetailViewPresented(missionRunID: runID)
+        defer {
+            center.setMCRPromptPanelHostActive(false, missionRunID: runID)
+            center.noteMCRRunDetailViewDismissed(missionRunID: runID)
+        }
 
         async let waiter: FleetRecipeResumptionVerb = bridge.awaitMissionRecipeEscalationAnswer(
             missionRunID: runID,
@@ -28,6 +33,7 @@ final class MissionRunRecipeOperatorPromptBridgeTests: XCTestCase {
             missionTaskID: nil,
             slotLabel: "Alpha",
             run: nil,
+            recipeIssuerKey: MissionRunCommandIssuerKey.localOperator,
             escalation: escalation
         )
         await Task.yield()
@@ -41,13 +47,17 @@ final class MissionRunRecipeOperatorPromptBridgeTests: XCTestCase {
         let prompt = center.activeMCRPrompts(forMissionRunID: runID).first
         XCTAssertNotNil(prompt)
         XCTAssertEqual(prompt?.displaySource, .mre, "mission-run MC-R recipe prompts align with MRE engagement attribution")
-        if case .recipeEscalation(let wrapped) = prompt?.origin {
+        guard let prompt else {
+            XCTFail("expected MC-R mounted prompt")
+            return
+        }
+        if case .recipeEscalation(let wrapped) = prompt.origin {
             XCTAssertEqual(wrapped.runID, escalation.runID)
         } else {
             XCTFail("expected recipeEscalation origin")
         }
 
-        let pid = prompt!.id
+        let pid = prompt.id
         XCTAssertTrue(
             center.submitAnswer(
                 OperatorPromptAnswer(
@@ -62,5 +72,40 @@ final class MissionRunRecipeOperatorPromptBridgeTests: XCTestCase {
         let verb = await waiter
         XCTAssertEqual(verb, .acknowledge)
         XCTAssertTrue(center.activeMCRPrompts(forMissionRunID: runID).isEmpty)
+    }
+
+    func test_complete_policy_wind_down_auto_acks_confirmInLiveMission_without_prompt() async {
+        OperatorPromptCenter.shared.prepareOperatorPromptRoutingSession()
+        let bridge = MissionRunRecipeOperatorPromptBridge.shared
+        let center = OperatorPromptCenter.shared
+        let runID = UUID()
+        let assignID = UUID()
+        let escalation = FleetRecipeEscalationEvent(
+            runID: FleetRecipeRunID(),
+            recipe: FleetMovePointParkRecipeRegistrations.movePointParkRecipeName,
+            vehicleID: "V-1",
+            stepID: .literal("move"),
+            reason: .confirmation(kind: .confirmInLiveMission),
+            allowedVerbs: [.acknowledge, .retry, .abort],
+            lastResponse: .success()
+        )
+
+        center.setMCRPromptPanelHostActive(true, missionRunID: runID)
+        defer { center.setMCRPromptPanelHostActive(false, missionRunID: runID) }
+
+        let verb = await bridge.awaitMissionRecipeEscalationAnswer(
+            missionRunID: runID,
+            assignmentID: assignID,
+            missionTaskID: nil,
+            slotLabel: "Alpha",
+            run: nil,
+            recipeIssuerKey: MissionRunCommandIssuerKey.completePolicyWindDown,
+            escalation: escalation
+        )
+        XCTAssertEqual(verb, .acknowledge)
+        XCTAssertTrue(
+            center.activeMCRPrompts(forMissionRunID: runID).isEmpty,
+            "complete-policy wind-down should not enqueue a per-vehicle confirmation toast"
+        )
     }
 }

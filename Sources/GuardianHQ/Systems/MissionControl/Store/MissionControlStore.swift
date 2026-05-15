@@ -34,6 +34,8 @@ final class MissionControlStore: ObservableObject {
         runEnvironment(for: runID)?.systems.scheduling.setDeferredOneOffExecution(nil)
     }
 
+    /// Creates an in-memory run fork. Roster rows follow ``MissionTask/rosterDeviceIds`` (squad topology
+    /// is template data); per-squad **runtime** maps live only on ``MissionRunEnvironment`` until reset.
     func createRun(from mission: Mission, cloningMissionRunDefaultsFrom appMissionRunDefaults: GeneralSettingsStore) -> MissionRunEnvironment {
         var assignments: [MissionRunAssignment] = []
         for path in mission.routeMacro.tasks {
@@ -135,14 +137,13 @@ final class MissionControlStore: ObservableObject {
         run.refreshDerivedTaskStates()
     }
 
-    /// Removes a run from Mission Control. When the run may still own simulator or fleet motion state, awaits the waved
-    /// SIM cleanup pass (``MissionRunEnvironment/awaitMissionRunSimCleanupBeforeRemovalIfNeeded``) before removal.
+    /// Removes a run from Mission Control. Immediately stops every **built-in SITL** bound on the run (roster + floating
+    /// reserve pool) via ``MissionRunEnvironment/hardStopAndRemoveAllRunBoundSitlsForDeletion`` — no mission-run SIM
+    /// cleanup pass (no waved mission clear / geofence / teleport / battery pipeline).
     func deleteRun(id: UUID, fleetLink: FleetLinkService, sitl: SitlService, generalSettings: GeneralSettingsStore) async {
         guard let run = runEnvironment(for: id) else { return }
         run.attachServices(fleetLink: fleetLink, sitl: sitl, generalSettings: generalSettings)
-        if run.shouldTriggerSimCleanupBeforeRemoval() {
-            await run.awaitMissionRunSimCleanupBeforeRemovalIfNeeded()
-        }
+        await run.hardStopAndRemoveAllRunBoundSitlsForDeletion(fleetLink: fleetLink, sitl: sitl)
         removeRunState(id: id)
     }
 

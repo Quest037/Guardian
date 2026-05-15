@@ -11,14 +11,25 @@ final class MissionRunRecipeOperatorPromptBridge {
     private init() {}
 
     /// Suspend until the operator answers (or timeout / cancellation resolves via the center).
+    ///
+    /// - Parameter recipeIssuerKey: ``MissionRunIssuedCommand/issuerKey`` for the in-flight recipe dispatch. When this is
+    ///   ``MissionRunCommandIssuerKey/completePolicyWindDown``, ``confirmInLiveMission`` confirmations auto-acknowledge so
+    ///   parallel per-vehicle recovery recipes do not each require a separate operator tap.
     func awaitMissionRecipeEscalationAnswer(
         missionRunID: UUID,
         assignmentID: UUID,
         missionTaskID: UUID?,
         slotLabel: String,
         run: MissionRunEnvironment?,
+        recipeIssuerKey: String,
         escalation: FleetRecipeEscalationEvent
     ) async -> FleetRecipeResumptionVerb {
+        if recipeIssuerKey == MissionRunCommandIssuerKey.completePolicyWindDown,
+           escalation.recipe == FleetMovePointParkRecipeRegistrations.movePointParkRecipeName,
+           case .confirmation(let kind) = escalation.reason,
+           kind == .confirmInLiveMission {
+            return .acknowledge
+        }
         let target = OperatorPromptTarget(
             missionRunID: missionRunID,
             missionTaskID: missionTaskID,

@@ -102,10 +102,21 @@ final class FleetLinkService: ObservableObject {
     private let vehicleStatusContextMaxLines = 12
     /// One "mission cycle finished" emission per execution; reset when progress shows `current < total`.
     private var autopilotMissionCompletionLatchByVehicleID: [String: Bool] = [:]
+    /// Last `(current,total)` mirrored to the vehicle log + Paladin for MAVSDK mission progress (drops duplicate emissions).
+    private var lastMissionProgressLoggedPairByVehicleID: [String: (cur: Int32, tot: Int32)] = [:]
+    /// Throttled clock for Mission Control / map surfaces that only need **coarse** follow of multi-vehicle hub churn.
+    @Published private(set) var hubFleetTelemetryTick: UInt64 = 0
+    private var hubFleetTickLastEmit = Date.distantPast
+    private var hubFleetTickWorkItem: DispatchWorkItem?
+    private var lastTelemetryMutationVehicleID: String?
     /// Deduplicate noisy recurring lines from SITL stdout (see `SimulationStdoutLogDedupeState`).
     private var simulationStdoutLogDedupe = SimulationStdoutLogDedupeState()
     /// Vehicle stream keys (`sysid:n`) created by `registerSimulatedVehicle` (built-in SITL only).
     private var simulatedFleetVehicleIDs: Set<String> = []
+
+    /// Per-stream narrow observation for MC‑R roster tiles (strategy **A** — ``README_FULL.md`` → **MC-R live UI row contracts** → **Fleet per-vehicle observation strategy (locked)**).
+    private var mcrRosterLiveChannelsByVehicleID: [String: FleetVehicleLiveChannel] = [:]
+    private var mcrRosterLiveChannelRefCount: [String: Int] = [:]
 
     /// Live Drive **control session**: the vehicle ID that may receive `liveDrive.*` `.manualTakeover` commands
     /// and manual-control stream updates. Set when any LD session starts (freestyle or mission, SIM or live); cleared when it ends.
@@ -121,6 +132,58 @@ final class FleetLinkService: ObservableObject {
     init(userDefaults: UserDefaults = .standard) {
         configuration = Self.load(from: userDefaults) ?? .defaults
         GuardianAppQuitCoordinator.shared.noteFleetLinkServiceCreated(self)
+    }
+
+    // MARK: - MC‑R per-vehicle live channels (roster strip)
+
+    /// Returns the per-stream live channel (creates if missing; **does not** change retain count). Pair with ``mcrRosterRetainLiveChannel(forVehicleID:)`` / ``mcrRosterReleaseLiveChannel(forVehicleID:)`` from the tile lifecycle.
+    func mcrRosterLiveChannel(forVehicleID vehicleID: String) -> FleetVehicleLiveChannel {
+        if let existing = mcrRosterLiveChannelsByVehicleID[vehicleID] { return existing }
+        let created = FleetVehicleLiveChannel(vehicleID: vehicleID)
+        mcrRosterLiveChannelsByVehicleID[vehicleID] = created
+        return created
+    }
+
+    func mcrRosterRetainLiveChannel(forVehicleID vehicleID: String) {
+        _ = mcrRosterLiveChannel(forVehicleID: vehicleID)
+        mcrRosterLiveChannelRefCount[vehicleID, default: 0] += 1
+    }
+
+    func mcrRosterReleaseLiveChannel(forVehicleID vehicleID: String) {
+        guard let current = mcrRosterLiveChannelRefCount[vehicleID] else { return }
+        let next = current - 1
+        if next <= 0 {
+            mcrRosterLiveChannelRefCount[vehicleID] = nil
+            // Drop the registry entry so long MC-R sessions do not accumulate `FleetVehicleLiveChannel`
+            // shells for stream ids that scrolled away. SwiftUI `ObservedObject` keeps the instance
+            // alive until the row tears down; the next `mcrRosterLiveChannel(forVehicleID:)` creates fresh.
+            if let channel = mcrRosterLiveChannelsByVehicleID.removeValue(forKey: vehicleID) {
+                channel.clearFleetSlice()
+            }
+        } else {
+            mcrRosterLiveChannelRefCount[vehicleID] = next
+        }
+    }
+
+    private func refreshMcrRosterLiveChannelsAfterHubTick() {
+        guard !mcrRosterLiveChannelRefCount.isEmpty else { return }
+        for vehicleID in mcrRosterLiveChannelRefCount.keys {
+            guard (mcrRosterLiveChannelRefCount[vehicleID] ?? 0) > 0 else { continue }
+            mcrRosterLiveChannelsByVehicleID[vehicleID]?.refresh(from: self)
+        }
+    }
+
+    /// Publishes ``hubFleetTelemetryTick`` then refreshes retained MC‑R channels — **single hub-facing exit** beside
+    /// ``scheduleHubFleetTelemetryTickThrottled`` / session teardown so coalesced UI never observes a tick without a channel pass.
+    private func publishHubFleetTelemetryTickAndRefreshMcrChannels() {
+        hubFleetTelemetryTick &+= 1
+        refreshMcrRosterLiveChannelsAfterHubTick()
+    }
+
+    private func clearMcrRosterLiveChannelFleetSlicesForAllKeys() {
+        for channel in mcrRosterLiveChannelsByVehicleID.values {
+            channel.clearFleetSlice()
+        }
     }
 
     /// Stops every `mavsdk_server` / `Drone` session and clears in-memory link state (logs, telemetry maps, ports).
@@ -146,6 +209,13 @@ final class FleetLinkService: ObservableObject {
         bridgePhase = .inactive
         lastError = nil
         mcrOperatorParkAwaitingContinueVehicleIDs.removeAll()
+        hubFleetTickWorkItem?.cancel()
+        hubFleetTickWorkItem = nil
+        lastTelemetryMutationVehicleID = nil
+        hubFleetTickLastEmit = .distantPast
+        lastMissionProgressLoggedPairByVehicleID.removeAll(keepingCapacity: true)
+        mcrRosterLiveChannelsByVehicleID.removeAll(keepingCapacity: true)
+        mcrRosterLiveChannelRefCount.removeAll(keepingCapacity: true)
     }
 
     /// Install or clear the Live Drive control session (see `liveDriveControlSessionVehicleID`).
@@ -674,6 +744,8 @@ final class FleetLinkService: ObservableObject {
         telemetryByVehicleID[vehicleID] = model.collections.telemetrySnapshot
         hubTelemetry = hubTelemetryByVehicleID[vehicleID]
         telemetry = telemetryByVehicleID[vehicleID]
+        lastTelemetryMutationVehicleID = vehicleID
+        scheduleHubFleetTelemetryTickThrottled()
         appendVehicleLog(
             "Hub battery patched to full (SIM cleanup) [\(source)].",
             vehicleID: vehicleID
@@ -742,6 +814,8 @@ final class FleetLinkService: ObservableObject {
         telemetryByVehicleID[vehicleID] = model.collections.telemetrySnapshot
         hubTelemetry = hubTelemetryByVehicleID[vehicleID]
         telemetry = telemetryByVehicleID[vehicleID]
+        lastTelemetryMutationVehicleID = vehicleID
+        scheduleHubFleetTelemetryTickThrottled()
         appendVehicleLog(
             "Hub telemetry hydrated from applied sim state [\(source)] (lat/lon/alt/hdg + stale motion cleared).",
             vehicleID: vehicleID
@@ -849,6 +923,8 @@ final class FleetLinkService: ObservableObject {
         }
         logLinesByVehicleID[vehicleID] = []
         simulatedFleetVehicleIDs.insert(vehicleID)
+        lastTelemetryMutationVehicleID = vehicleID
+        scheduleHubFleetTelemetryTickThrottled()
         start(session: session)
     }
 
@@ -881,6 +957,7 @@ final class FleetLinkService: ObservableObject {
         simulatedFleetVehicleIDs.removeAll(keepingCapacity: true)
         liveDriveControlSessionVehicleID = nil
         bridgePhase = .awaitingVehicle
+        clearMcrRosterLiveChannelFleetSlicesForAllKeys()
     }
 
     func vehicleStatus(forVehicleID vehicleID: String) -> VehicleLifecycleStatus? {
@@ -2440,9 +2517,14 @@ final class FleetLinkService: ObservableObject {
                             self.onAutopilotMissionCycleFinished?(vehicleID)
                         }
                     }
-                    let progLine = "Autopilot mission progress: item \(cur) of \(tot)."
-                    self.appendVehicleLog(progLine, vehicleID: vehicleID)
-                    self.onMirrorFleetLineToPaladin?(vehicleID, progLine)
+                    let pair = (cur: cur, tot: tot)
+                    let prev = self.lastMissionProgressLoggedPairByVehicleID[vehicleID]
+                    if prev?.cur != pair.cur || prev?.tot != pair.tot {
+                        self.lastMissionProgressLoggedPairByVehicleID[vehicleID] = pair
+                        let progLine = "Autopilot mission progress: item \(cur) of \(tot)."
+                        self.appendVehicleLog(progLine, vehicleID: vehicleID)
+                        self.onMirrorFleetLineToPaladin?(vehicleID, progLine)
+                    }
                 }
             })
             .disposed(by: session.bag)
@@ -2456,6 +2538,7 @@ final class FleetLinkService: ObservableObject {
         simulatedFleetVehicleIDs.remove(vehicleID)
         recentVehicleStatusMessagesByVehicleID[vehicleID] = nil
         autopilotMissionCompletionLatchByVehicleID[vehicleID] = nil
+        lastMissionProgressLoggedPairByVehicleID.removeValue(forKey: vehicleID)
         if let stream = session.manualStream {
             session.manualStream = nil
             // Best-effort: stop the manual control stream synchronously enough that the
@@ -2478,15 +2561,20 @@ final class FleetLinkService: ObservableObject {
         vehicleStatusByVehicleID.removeValue(forKey: vehicleID)
         recentVehicleStatusMessagesByVehicleID[vehicleID] = nil
         logLinesByVehicleID.removeValue(forKey: vehicleID)
+        mcrRosterLiveChannelsByVehicleID[vehicleID]?.clearFleetSlice()
         if hubTelemetryByVehicleID.isEmpty {
             telemetry = nil
             hubTelemetry = nil
             bridgePhase = .awaitingVehicle
+            lastTelemetryMutationVehicleID = nil
+            publishHubFleetTelemetryTickAndRefreshMcrChannels()
         } else {
             // Primary hub/telemetry snapshots track "last writer"; refreshing avoids leaving them on a torn-down ID.
             if let survivor = hubTelemetryByVehicleID.keys.sorted().first {
                 hubTelemetry = hubTelemetryByVehicleID[survivor]
                 telemetry = telemetryByVehicleID[survivor]
+                lastTelemetryMutationVehicleID = survivor
+                publishHubFleetTelemetryTickAndRefreshMcrChannels()
             }
         }
     }
@@ -2500,6 +2588,37 @@ final class FleetLinkService: ObservableObject {
     func appendSimulationLog(_ line: String) {
         guard let toEmit = simulationStdoutLogDedupe.lineToAppendOrNil(line) else { return }
         appendLog(toEmit)
+    }
+
+    /// Coalesces legacy `hubTelemetry` / `telemetry` snapshot updates and publishes ``hubFleetTelemetryTick`` (via
+    /// ``publishHubFleetTelemetryTickAndRefreshMcrChannels``) so Mission Control can run expensive `.onChange` hooks at
+    /// human scale instead of once per MAVSDK frame per vehicle. Retained MC‑R ``FleetVehicleLiveChannel`` rows refresh in
+    /// the **same** synchronous closure as the tick bump (``README_FULL.md`` → **MC-R live UI row contracts** → **MC-R observation restructure — archived reference (v1 complete)** — §0.2 hub entry points).
+    private func scheduleHubFleetTelemetryTickThrottled() {
+        let now = Date()
+        let minInterval: TimeInterval = 0.12
+        let elapsed = now.timeIntervalSince(hubFleetTickLastEmit)
+        let emit: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.hubFleetTickWorkItem = nil
+            self.hubFleetTickLastEmit = Date()
+            if let vid = self.lastTelemetryMutationVehicleID {
+                self.hubTelemetry = self.hubTelemetryByVehicleID[vid]
+                self.telemetry = self.telemetryByVehicleID[vid]
+            }
+            self.publishHubFleetTelemetryTickAndRefreshMcrChannels()
+        }
+        if elapsed >= minInterval {
+            hubFleetTickWorkItem?.cancel()
+            hubFleetTickWorkItem = nil
+            emit()
+            return
+        }
+        guard hubFleetTickWorkItem == nil else { return }
+        let delay = minInterval - elapsed
+        let work = DispatchWorkItem { emit() }
+        hubFleetTickWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.01, delay), execute: work)
     }
 
     private func applyNativeTelemetry(vehicleID: String, systemID: Int, mutate: (inout FleetHubVehicleTelemetry) -> Void) {
@@ -2519,8 +2638,8 @@ final class FleetLinkService: ObservableObject {
             appendVehicleLog("Telemetry active.", vehicleID: vehicleID)
         }
         applyLifecycleStatus(.init(stage: .live), vehicleID: vehicleID)
-        hubTelemetry = hubTelemetryByVehicleID[vehicleID]
-        telemetry = telemetryByVehicleID[vehicleID]
+        lastTelemetryMutationVehicleID = vehicleID
+        scheduleHubFleetTelemetryTickThrottled()
     }
 
     /// Resolves one vehicle stream from the keyed telemetry hub.

@@ -5,13 +5,54 @@ import XCTest
 final class MissionRunEnvironmentTaskDerivationTests: XCTestCase {
 
     private func environment(task: MissionTask) -> MissionRunEnvironment {
+        if !task.rosterDeviceIds.isEmpty {
+            let mission = Mission(
+                name: "M",
+                description: "",
+                type: .mobile,
+                routeMacro: RouteMacro(tasks: [task])
+            )
+            return MissionRunEnvironment(mission: mission)
+        }
+        let rd = RosterDevice(name: "RosterPrimary", slot: .primary, vehicleClass: .uavCopter)
+        let boundTask = MissionTask(
+            id: task.id,
+            name: task.name,
+            enabled: task.enabled,
+            waypoints: task.waypoints,
+            loopMode: task.loopMode,
+            cycles: task.cycles,
+            regularityDelayValue: task.regularityDelayValue,
+            regularityDelayUnit: task.regularityDelayUnit,
+            regularity: task.regularity,
+            betweenCycles: task.betweenCycles,
+            pattern: task.pattern,
+            staggerTrigger: task.staggerTrigger,
+            staggerIntervalValue: task.staggerIntervalValue,
+            staggerIntervalUnit: task.staggerIntervalUnit,
+            staggerWaypointIndex: task.staggerWaypointIndex,
+            rosterDeviceIds: [rd.id],
+            startDelayValue: task.startDelayValue,
+            startDelayUnit: task.startDelayUnit,
+            abortPreferenceChainOverride: task.abortPreferenceChainOverride,
+            completePreferenceChainOverride: task.completePreferenceChainOverride,
+            reserveSwapPreferenceChainOverride: task.reserveSwapPreferenceChainOverride,
+            geofences: task.geofences
+        )
         let mission = Mission(
             name: "M",
             description: "",
             type: .mobile,
-            routeMacro: RouteMacro(tasks: [task])
+            rosterDevices: [rd],
+            routeMacro: RouteMacro(tasks: [boundTask])
         )
-        return MissionRunEnvironment(mission: mission)
+        let assign = MissionRunAssignment(
+            taskId: boundTask.id,
+            rosterDeviceId: rd.id,
+            slotName: rd.name,
+            attachedFleetVehicleToken: "test:tok"
+        )
+        return MissionRunEnvironment(mission: mission, assignments: [assign])
     }
 
     func test_disabled_task_derives_ready() {
@@ -238,5 +279,33 @@ final class MissionRunEnvironmentTaskDerivationTests: XCTestCase {
         run.operatorMarkMissionTaskTriageState(taskID: task.id, state: .aborted)
         XCTAssertEqual(run.taskStateByTaskID[task.id], .aborted)
         XCTAssertEqual(run.operatorTriageMarkedMissionTaskStateByTaskID[task.id], .aborted)
+    }
+
+    func test_pure_continuous_between_cycles_derives_executing_not_between() {
+        let task = MissionTask(name: "Loop", enabled: true, cycles: 0, regularity: .continuous)
+        let run = environment(task: task)
+        let mission = run.template!
+        run.status = .running
+        run.setSessionPhase(.executing)
+        _ = run.recordSquadCycleCompletions(assignmentIDs: [run.assignments[0].id], mission: mission)
+        XCTAssertFalse(run.activeCycleTaskIDs.contains(task.id))
+        XCTAssertEqual(run.taskStateByTaskID[task.id], MissionTaskState.executing)
+    }
+
+    func test_single_squad_continuous_with_delay_off_cycle_derives_executing() {
+        let task = MissionTask(
+            name: "DelayLoop",
+            enabled: true,
+            cycles: 0,
+            regularityDelayValue: 30,
+            regularityDelayUnit: .secs,
+            regularity: .continuousWithDelay
+        )
+        let run = environment(task: task)
+        let mission = run.template!
+        run.status = .running
+        run.setSessionPhase(.executing)
+        _ = run.recordSquadCycleCompletions(assignmentIDs: [run.assignments[0].id], mission: mission)
+        XCTAssertEqual(run.taskStateByTaskID[task.id], MissionTaskState.executing)
     }
 }

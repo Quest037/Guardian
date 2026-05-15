@@ -90,6 +90,30 @@ final class MissionRunPolicySlotDispatchStartTests: XCTestCase {
         )
     }
 
+    func test_complete_policy_wind_down_maps_policy_completing_when_squad_dispatch_flagged() {
+        let tid = UUID()
+        let aid = UUID()
+        let issued = MissionRunIssuedCommand(
+            assignmentID: aid,
+            slotName: "S1",
+            vehicleTokenKey: "k",
+            dispatch: .catalogue(name: .fleetVehicleDoLoiter, parameters: .empty),
+            issuer: .operator,
+            issuerKey: MissionRunCommandIssuerKey.completePolicyWindDown
+        )
+        XCTAssertEqual(
+            MissionRunPolicySlotDispatchStart.commandedSlotStateIfDispatchLeavesMRE(
+                issued: issued,
+                effectiveTaskID: tid,
+                abortWindDownIssuedTaskIDs: [],
+                completeWindDownIssuedTaskIDs: [],
+                squadCompleteWindDownIssuedAssignmentIDs: [aid],
+                sessionPhase: .executing
+            ),
+            .policyCompleting
+        )
+    }
+
     func test_mission_execute_upload_recipe_staging_vs_executing_phase() {
         let tid = UUID()
         let issued = MissionRunIssuedCommand(

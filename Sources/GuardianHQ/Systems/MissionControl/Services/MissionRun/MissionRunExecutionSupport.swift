@@ -37,6 +37,7 @@ struct MissionRunExecutionContext {
 enum MissionRunExecutionEvent: Equatable {
     case missionCycleFinished(vehicleID: String)
     case deferredTaskStartDue(taskID: UUID)
+    case deferredSquadStartDue(taskID: UUID, primaryAssignmentID: UUID)
 }
 
 enum MissionRunExecutionDecision: Equatable {

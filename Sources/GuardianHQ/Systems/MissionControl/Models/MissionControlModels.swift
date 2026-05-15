@@ -27,7 +27,7 @@ enum MissionTaskState: String, Codable, CaseIterable, Equatable, Hashable {
     case staging
     /// Task force is executing its mission.
     case executing
-    /// Between-cycle behavior (delay / between-cycles commands) before the next cycle.
+    /// Between-cycle **gap** on the task rollup (repeating tasks). **v1:** Task-level MC-R chrome no longer surfaces this state — ``deriveMissionTaskState`` maps the gap to ``executing`` while end protocol is not issued; use ``MissionSquadState/between`` and roster slot ``MissionRunAssignmentSlotState/betweenCycles`` for squad- / row-scoped gaps. Retained for ``Codable`` / any legacy snapshots.
     case between
     /// Orderly wind-down after successful task completion; roster follows recovery protocol.
     case recovery
@@ -54,12 +54,38 @@ enum MissionTaskState: String, Codable, CaseIterable, Equatable, Hashable {
     }
 }
 
+/// Per-primary-squad lifecycle label (derived on ``MissionRunEnvironment``; task cards rollup from squads).
+enum MissionSquadState: String, Codable, CaseIterable, Equatable, Hashable {
+    case ready
+    case staging
+    case executing
+    case between
+    case recovery
+    case aborting
+    case aborted
+    case completed
+
+    var displayTitle: String {
+        switch self {
+        case .ready: return "Ready"
+        case .staging: return "Staging"
+        case .executing: return "Executing"
+        case .between: return "Between"
+        case .recovery: return "Recovery"
+        case .aborting: return "Aborting"
+        case .completed: return "Completed"
+        case .aborted: return "Aborted"
+        }
+    }
+}
+
 /// Mission Control **intent** for mission-end protocol on a task — distinct from settled ``MissionTaskState``.
 ///
 /// Set **before** fleet wind-down commands are issued (``MissionRunEnvironment/noteMissionTaskEndAttempt(_:forTaskID:)``),
 /// and cleared when operator triage, §3 slot-evidence auto mission-end ack, per-task restart, or scoped orchestration reset
 /// resolves that intent. **After-cycle scheduling** uses ``MissionRunEnvironment/pendingMissionTaskGracefulWindDownKindByTaskID``
-/// only (not attempting). Published UI map: ``MissionRunEnvironment/taskAttemptingByTaskID`` (refreshed with settled state).
+/// (task-wide synchronized boundary) and ``MissionRunEnvironment/pendingMissionSquadGracefulWindDownKindByAssignmentID``
+/// (one primary squad’s own cycle end) — not attempting. Published UI map: ``MissionRunEnvironment/taskAttemptingByTaskID`` (refreshed with settled state).
 enum MissionTaskAttemptState: String, Equatable, Hashable, CaseIterable {
     /// MC is driving this task into **abort** mission-end protocol (fleet may still be working or may have reported failure).
     case abortMissionEnd = "abortMissionEnd"
@@ -244,10 +270,23 @@ enum MissionRunAssignmentSlotLaneMerge {
 enum MissionControlAssignmentSlotRosterAttention {
     /// Picks the highest-precedence ``GuardianFeedbackSeverity`` among assignments’ merged slot states (for a compact task-row chip).
     static func worstAmong(assignments: [MissionRunAssignment]) -> (severity: GuardianFeedbackSeverity, title: String, help: String)? {
+        worstAmongImpl(assignments: assignments, skipBetweenCyclesForTaskRow: false)
+    }
+
+    /// Same ranking as ``worstAmong`` but **drops** ``MissionRunAssignmentSlotState/betweenCycles`` rows — between-cycle orchestration is squad/roster scoped; the MC-R **Tasks** card task header should not duplicate that as a second pill while the task rollup reads **Executing**.
+    static func worstAmongForTaskRow(assignments: [MissionRunAssignment]) -> (severity: GuardianFeedbackSeverity, title: String, help: String)? {
+        worstAmongImpl(assignments: assignments, skipBetweenCyclesForTaskRow: true)
+    }
+
+    private static func worstAmongImpl(
+        assignments: [MissionRunAssignment],
+        skipBetweenCyclesForTaskRow: Bool
+    ) -> (severity: GuardianFeedbackSeverity, title: String, help: String)? {
         var bestRank = -1
         var picked: (GuardianFeedbackSeverity, String, String)?
         for a in assignments {
             let merged = MissionRunAssignmentSlotLaneMerge.preferredDisplayState(lanes: a.effectiveSlotLifecycleLanes)
+            if skipBetweenCyclesForTaskRow, merged == .betweenCycles { continue }
             guard let sev = merged.missionControlRosterBadgeSeverity else { continue }
             let r = rank(sev)
             if r > bestRank {
@@ -317,6 +356,8 @@ enum MissionRunGracefulStopKind: String, Codable, Equatable {
 /// Fleet-command scope for Mission Control orchestration (task today; squad / single slot later).
 enum MissionRunCommandTarget: Equatable, Hashable, Sendable {
     case task(UUID)
+    /// One primary squad (``MissionRunAssignment/id`` for the primary roster row).
+    case squad(primaryAssignmentID: UUID)
 }
 
 /// Per-task “after this autopilot mission cycle” wind-down (does not use whole-run ``MissionRunGracefulStopKind``).
@@ -1371,27 +1412,46 @@ func missionRunLogResolvedTaskName(assignment: MissionRunAssignment, mission: Mi
 }
 
 extension MissionRunEvent {
-    /// Canonical `[Task]` prefix for MC-R logs: stored labels, `taskID`, roster slot, or `slot` in ``templateParams``.
+    /// Canonical `[Task]` prefix for MC-R logs: stored labels, `taskID`, roster slot, ``templateParams/slot``, or ``templateParams/slotID`` (assignment uuid).
     func resolvedTaskLogPrefix(mission: Mission?, assignments: [MissionRunAssignment]) -> String? {
         if let t = taskLabel, !t.isEmpty { return t }
-        if let tid = taskID, let mission,
-           let n = mission.routeMacro.tasks.first(where: { $0.id == tid })?.name, !n.isEmpty {
+        guard let mission else { return nil }
+
+        let assignmentForPrefix: MissionRunAssignment? = {
+            if case .vehicleSlot(let s) = speaker,
+               let a = assignments.first(where: { $0.slotName == s }) {
+                return a
+            }
+            if let raw = templateParams["slotID"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !raw.isEmpty,
+               let uuid = UUID(uuidString: raw),
+               let a = assignments.first(where: { $0.id == uuid }) {
+                return a
+            }
+            if let raw = templateParams["slot"] {
+                let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !s.isEmpty, let a = assignments.first(where: { $0.slotName == s }) {
+                    return a
+                }
+            }
+            return nil
+        }()
+
+        if let a = assignmentForPrefix,
+           let squad = MissionControlSquadUtilities.liveLogPrimarySquadTaskChipIfApplicable(
+               assignmentID: a.id,
+               mission: mission,
+               assignments: assignments
+           ) {
+            return squad.chipLabel
+        }
+        if let a = assignmentForPrefix,
+           let n = missionRunLogResolvedTaskName(assignment: a, mission: mission), !n.isEmpty {
             return n
         }
-        guard let mission else { return nil }
-        let slotKey: String? = {
-            switch speaker {
-            case .vehicleSlot(let s):
-                return s
-            case .assistant, .missionControl, .operator:
-                guard let raw = templateParams["slot"] else { return nil }
-                let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                return s.isEmpty ? nil : s
-            }
-        }()
-        if let slot = slotKey,
-           let a = assignments.first(where: { $0.slotName == slot }) {
-            return missionRunLogResolvedTaskName(assignment: a, mission: mission)
+        if let tid = taskID,
+           let n = mission.routeMacro.tasks.first(where: { $0.id == tid })?.name, !n.isEmpty {
+            return n
         }
         return nil
     }
@@ -1413,6 +1473,9 @@ enum MissionRunCommandIssuerKey {
     /// Issuer key for post–swap-in catalogue steps on the displaced stream (distinct audit trail from whole-run abort).
     static let plannerReserveSwapPostCommit = "planner.reserveSwapPostCommit"
     static let runTeardown = "run.teardown"
+    /// Orderly **complete-policy** recovery wind-down (map-point move+park, RTL, etc.) issued by MRE after cycle / task end.
+    /// Distinct from ``localOperator`` so recipe ``confirmInLiveMission`` steps can auto-ack without per-vehicle prompt spam.
+    static let completePolicyWindDown = "missioncontrol.complete_policy.wind_down"
     static let staging = "staging"
     static let missionExecute = "mission.execute"
     /// Between-cycles **fallback** fleet dispatch after the operator-selected primary between-cycles command fails (see ``MissionRunFleetDispatch/betweenCyclesFailureFallbackDispatch``).
@@ -1893,9 +1956,15 @@ enum MissionControlPlanCompiler {
         }
 
         let roleCountByTask = Dictionary(grouping: roleTracks, by: \.taskID).mapValues(\.count)
+        let primarySquadCountByTask = MissionControlSquadUtilities.boundPrimaryCountByTaskID(
+            mission: mission,
+            assignments: run.assignments
+        )
         let hasMultiVehicleTask = roleCountByTask.values.contains { $0 > 1 }
-        let teamTopology: MissionControlTeamTopology = hasMultiVehicleTask ? .multiVehicleTeam : .singleVehiclePerTask
-        let workPartitionMode: MissionControlWorkPartitionMode = hasMultiVehicleTask ? .segmentOwned : .taskOwned
+        let hasMultiPrimarySquadTask = primarySquadCountByTask.values.contains { $0 > 1 }
+        let usesTeamPartition = hasMultiVehicleTask || hasMultiPrimarySquadTask
+        let teamTopology: MissionControlTeamTopology = usesTeamPartition ? .multiVehicleTeam : .singleVehiclePerTask
+        let workPartitionMode: MissionControlWorkPartitionMode = usesTeamPartition ? .segmentOwned : .taskOwned
         let handoffMode: MissionControlHandoffMode = .none
 
         let planningGeofencesByTaskID = Dictionary(uniqueKeysWithValues: enabledTasks.map { task in

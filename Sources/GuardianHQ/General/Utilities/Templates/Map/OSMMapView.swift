@@ -118,7 +118,9 @@ struct MapVehicleMarker: Equatable {
     var lon: Double
     var label: String
     var colorHex: String
-    /// Optional embedded thumbnail (data URL) rendered inside the circular marker.
+    /// Shape drawn as inline SVG in Leaflet (see ``GuardianMapVehicleGlyphKind``).
+    var glyphKind: GuardianMapVehicleGlyphKind = .ugvSquare
+    /// Optional embedded thumbnail (data URL); live markers use ``glyphKind`` + SVG instead.
     var imageDataURL: String? = nil
     /// Whether to render the marker label as a tooltip.
     var showLabel: Bool = true
@@ -381,7 +383,7 @@ extension OSMMapView {
 }
 
 extension OSMMapView {
-    static func jsStringLiteral(_ raw: String) -> String {
+    nonisolated static func jsStringLiteral(_ raw: String) -> String {
         let escaped = raw
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
@@ -876,7 +878,7 @@ private extension OSMMapView {
       0%, 100% { filter: brightness(1); }
       50% { filter: brightness(1.07) drop-shadow(0 0 5px rgba(255,255,255,0.42)); }
     }
-    .guardian-vehicle-ring--reservePickerPulse {
+    .guardian-vehicle-shape--reservePickerPulse {
       animation: guardianReservePickerPoolMarkerPulse 1.35s ease-in-out infinite;
     }
   </style>
@@ -1267,10 +1269,10 @@ private extension OSMMapView {
     }
 
     /** Excludes **heading** (yaw updates every hub sample) — including it forced ``setIcon`` every tick and
-     *  rebuilt the DivIcon subtree under the cursor. Heading is patched separately via ``guardianPatchVehicleHeadingWedge``. */
+     *  rebuilt the DivIcon subtree under the cursor. Heading is patched separately on ``.guardian-vehicle-glyph-rotate``. */
     function guardianVehicleChromeSigNoPos(vm) {
       return [vm.selected ? 1 : 0, vm.draggable ? 1 : 0, vm.showLabel ? 1 : 0,
-        String(vm.label || ''), String(vm.color || ''), String(vm.image || ''), vm.pendingSimSync ? 1 : 0,
+        String(vm.label || ''), String(vm.color || ''), String(vm.glyph || 'ugv'), vm.pendingSimSync ? 1 : 0,
         vm.selectionAttentionPulse ? 1 : 0, String(vm.accessibilityTitle || '')].join('\u{001f}');
     }
 
@@ -1284,20 +1286,40 @@ private extension OSMMapView {
       return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
     }
 
-    function guardianPatchVehicleHeadingWedge(marker, vm, size) {
+    function guardianVehicleGlyphSvgMarkup(glyph, sizePx, fillColor, selected) {
+      const g = String(glyph || 'ugv');
+      const s = Math.max(8, sizePx | 0);
+      const fill = String(fillColor || '#94a3b8').replace(/</g, '');
+      const stroke = '#0b1220';
+      const sw = selected ? 2.1 : 1.45;
+      if (g === 'uav') {
+        return '<svg width="' + s + '" height="' + s + '" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="display:block;">'
+          + '<polygon points="12,3.2 21.2,20.8 2.8,20.8" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + sw + '" stroke-linejoin="round"/>'
+          + '</svg>';
+      }
+      if (g === 'usv') {
+        return '<svg width="' + s + '" height="' + s + '" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="display:block;">'
+          + '<rect x="9.25" y="4" width="5.5" height="16" rx="1.25" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + sw + '"/>'
+          + '<rect x="4" y="9.25" width="16" height="5.5" rx="1.25" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + sw + '"/>'
+          + '</svg>';
+      }
+      return '<svg width="' + s + '" height="' + s + '" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="display:block;">'
+        + '<rect x="3.6" y="3.6" width="16.8" height="16.8" rx="1.6" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + sw + '"/>'
+        + '</svg>';
+    }
+
+    function guardianPatchVehicleGlyphRotate(marker, vm) {
       try {
         const root = marker.getElement && marker.getElement();
         if (!root) return;
-        const wedge = root.querySelector('.guardian-vehicle-heading-wedge');
+        const rot = root.querySelector('.guardian-vehicle-glyph-rotate');
+        if (!rot) return;
         if (!Number.isFinite(vm.heading)) {
-          if (wedge) wedge.style.display = 'none';
+          rot.style.transform = '';
           return;
         }
-        if (wedge) {
-          wedge.style.display = '';
-          wedge.style.transform = 'rotate(' + vm.heading + 'deg)';
-          wedge.style.transformOrigin = '50% ' + (size / 2 + 5) + 'px';
-        }
+        rot.style.transform = 'rotate(' + vm.heading + 'deg)';
+        rot.style.transformOrigin = '50% 50%';
       } catch (e) {}
     }
 
@@ -1365,44 +1387,25 @@ private extension OSMMapView {
           if (!vm.id || !Number.isFinite(vm.lat) || !Number.isFinite(vm.lon)) return;
           const idStr = String(vm.id);
           nextVehicleIds.add(idStr);
-          const size = vm.selected ? 36 : 32;
-          const border = vm.selected ? 3 : 2;
-          const inner = Math.max(14, size - (border * 2) - 2);
+          const size = vm.selected ? 18 : 16;
           const ringColor = vm.color || '#94a3b8';
           const titleText = guardianVehicleMarkerTitleText(vm);
-          const safeImgAlt = guardianEscapeHtmlAttrStrict(titleText);
-          const headingArrow = Number.isFinite(vm.heading)
-            ? `<div class="guardian-vehicle-heading-wedge" style="
-                position:absolute;
-                top:-5px;
-                left:50%;
-                width:0;
-                height:0;
-                margin-left:-5px;
-                border-left:5px solid transparent;
-                border-right:5px solid transparent;
-                border-bottom:10px solid rgba(255,255,255,0.95);
-                transform: rotate(${vm.heading}deg);
-                transform-origin: 50% ${size/2 + 5}px;
-                filter: drop-shadow(0 0 2px rgba(0,0,0,0.9));
-                pointer-events:none;
-              "></div>`
-            : '';
-          const imageHTML = vm.image
-            ? `<img src="${vm.image}" alt="${safeImgAlt}" draggable="false" style="-webkit-user-drag:none;user-drag:none;width:${inner}px;height:${inner}px;border-radius:999px;object-fit:cover;display:block;"/>`
-            : `<div style="width:${inner}px;height:${inner}px;border-radius:999px;background:#1f2937;touch-action:none;-webkit-user-drag:none;"></div>`;
+          const glyph = String(vm.glyph || 'ugv');
+          const svgMarkup = guardianVehicleGlyphSvgMarkup(glyph, size, ringColor, !!vm.selected);
           const pendingSimSync = !!vm.pendingSimSync;
           const selectionAttentionPulse = !!vm.selectionAttentionPulse;
+          const spinBox = Math.max(10, Math.round(size * 0.61));
+          const spinRing = Math.max(5, Math.round(spinBox * 0.45));
           const syncSpinner = pendingSimSync
-            ? `<div title="Syncing vehicle position with telemetry…" style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:22px;height:22px;border-radius:999px;background:rgba(15,23,42,0.92);border:1px solid rgba(255,255,255,0.38);display:flex;align-items:center;justify-content:center;pointer-events:none;box-shadow:0 1px 5px rgba(0,0,0,0.55);z-index:4;">
-                 <span style="display:block;width:11px;height:11px;border-radius:50%;border:2px solid rgba(255,255,255,0.2);border-top-color:#fff;animation:guardianSimSyncSpin 0.72s linear infinite;"></span>
+            ? `<div title="Syncing vehicle position with telemetry…" style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:${spinBox}px;height:${spinBox}px;border-radius:999px;background:rgba(15,23,42,0.92);border:1px solid rgba(255,255,255,0.38);display:flex;align-items:center;justify-content:center;pointer-events:none;box-shadow:0 1px 5px rgba(0,0,0,0.55);z-index:4;">
+                 <span style="display:block;width:${spinRing}px;height:${spinRing}px;border-radius:50%;border:2px solid rgba(255,255,255,0.2);border-top-color:#fff;animation:guardianSimSyncSpin 0.72s linear infinite;"></span>
                </div>`
             : '';
           const vehicleZ = vm.draggable ? 2500 : (vm.selected ? 1200 : 600);
-          const ringPulseClass = selectionAttentionPulse ? ' guardian-vehicle-ring--reservePickerPulse' : '';
+          const shapePulseClass = selectionAttentionPulse ? ' guardian-vehicle-shape--reservePickerPulse' : '';
           const icon = L.divIcon({
             className: 'mission-vehicle-dot',
-            html: `<div style="position:relative;width:${size}px;height:${size}px;touch-action:none;-webkit-user-drag:none;">${headingArrow}<div class="guardian-vehicle-ring${ringPulseClass}" style="width:${size}px;height:${size}px;border-radius:999px;border:${border}px solid ${ringColor};background:#0b0f14;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 1px rgba(0,0,0,0.55);overflow:hidden;touch-action:none;">${imageHTML}</div>${syncSpinner}</div>`,
+            html: `<div style="position:relative;width:${size}px;height:${size}px;touch-action:none;-webkit-user-drag:none;"><div class="guardian-vehicle-glyph-rotate" style="position:absolute;left:0;top:0;width:${size}px;height:${size}px;"><div class="guardian-vehicle-shape${shapePulseClass}" style="width:${size}px;height:${size}px;display:flex;align-items:center;justify-content:center;box-sizing:border-box;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.55));overflow:visible;touch-action:none;">${svgMarkup}</div></div>${syncSpinner}</div>`,
             iconSize: [size, size],
             iconAnchor: [size / 2, size / 2]
           });
@@ -1434,13 +1437,13 @@ private extension OSMMapView {
               }
             } else {
               const root = marker.getElement && marker.getElement();
-              const wedge = root && root.querySelector('.guardian-vehicle-heading-wedge');
-              if (Number.isFinite(vm.heading) && !wedge) {
+              const rot = root && root.querySelector('.guardian-vehicle-glyph-rotate');
+              if (Number.isFinite(vm.heading) && !rot) {
                 marker.setIcon(icon);
               }
             }
           }
-          guardianPatchVehicleHeadingWedge(marker, vm, size);
+          guardianPatchVehicleGlyphRotate(marker, vm);
           if (vm.draggable && marker.dragging) {
             marker.dragging.enable();
           } else if (marker.dragging) {
@@ -1787,7 +1790,9 @@ private extension OSMMapView {
         allTasksCoords.forEach((taskCoords, pathIdx) => {
           if (!taskCoords || taskCoords.length === 0) return;
           const latlngs = taskCoords.map(p => [p.lat, p.lon]);
-          const idx = pathLines.length;
+          // Task path colour is keyed by **mission task index** (same as Swift ``MissionTaskMapColor``), not by how
+          // many Leaflet layers we have already pushed (wide hit-testing adds an extra invisible polyline per path).
+          const idx = pathIdx;
           const pathId = idsAligned ? taskPathIds[pathIdx] : null;
           const useWideHit = pathId && !isEditingTask;
           const line = L.polyline(latlngs, {

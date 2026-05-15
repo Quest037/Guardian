@@ -74,6 +74,8 @@ final class LiveLeafletMapMCSStagingMarkerBuilderTests: XCTestCase {
         XCTAssertEqual(result.markers.count, 1)
         XCTAssertEqual(result.markers[0].label, "Primary (SIM)")
         XCTAssertTrue(result.markers[0].draggable)
-        XCTAssertEqual(cache.statistics.encodes, 1)
+        XCTAssertEqual(result.markers[0].glyphKind, .ugvSquare)
+        XCTAssertNil(result.markers[0].imageDataURL)
+        XCTAssertEqual(cache.statistics.encodes, 0)
     }
 }

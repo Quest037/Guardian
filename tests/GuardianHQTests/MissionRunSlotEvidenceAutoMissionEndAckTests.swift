@@ -346,4 +346,72 @@ final class MissionRunSlotEvidenceAutoMissionEndAckTests: XCTestCase {
         let merged = MissionRunAssignmentSlotLaneMerge.preferredDisplayState(lanes: run.assignments[0].effectiveSlotLifecycleLanes)
         XCTAssertEqual(merged, .policySucceeded)
     }
+
+    @MainActor
+    func test_squad_scoped_complete_auto_ack_updates_squad_without_task_wide_issued() {
+        let rd = RosterDevice(name: "W1", slot: .primary, vehicleClass: .uavCopter)
+        let task = MissionTask(name: "SquadRetry", enabled: true, rosterDeviceIds: [rd.id])
+        let mission = Mission(
+            name: "M",
+            description: "",
+            type: .mobile,
+            rosterDevices: [rd],
+            routeMacro: RouteMacro(tasks: [task])
+        )
+        let lanes = MissionRunAssignmentSlotStateLanes(commanded: .policySucceeded, observed: .policySucceeded)
+        let row = MissionRunAssignment(
+            taskId: task.id,
+            rosterDeviceId: rd.id,
+            slotName: rd.name,
+            attachedFleetVehicleToken: FleetMissionVehicleToken.sitl(UUID()).storageKey,
+            slotLifecycleLanes: lanes
+        )
+        let run = MissionRunEnvironment(mission: mission, assignments: [row])
+        run.status = .running
+        run.setSessionPhase(.executing)
+        run.markSquadCompletePolicyWindDownDispatchIssued(forAssignmentID: row.id)
+        XCTAssertFalse(run.missionTaskCompleteWindDownIssuedTaskIDs.contains(task.id))
+
+        run.applySlotEvidenceAutoMissionEndAckIfNeeded(forAssignmentIDs: Set([row.id]))
+
+        XCTAssertTrue(run.squadMissionEndRecoveryCompletedByAssignmentIDs.contains(row.id))
+        XCTAssertFalse(run.squadCompletePolicyWindDownIssuedAssignmentIDs.contains(row.id))
+        XCTAssertTrue(run.taskMissionEndRecoveryCompletedByTaskID.contains(task.id))
+        run.refreshDerivedSquadStates()
+        XCTAssertEqual(run.squadStateByAssignmentID[row.id], .completed)
+    }
+
+    @MainActor
+    func test_squad_scoped_abort_auto_ack_without_task_wide_issued() {
+        let rd = RosterDevice(name: "W1", slot: .primary, vehicleClass: .uavCopter)
+        let task = MissionTask(name: "SquadAbort", enabled: true, rosterDeviceIds: [rd.id])
+        let mission = Mission(
+            name: "M",
+            description: "",
+            type: .mobile,
+            rosterDevices: [rd],
+            routeMacro: RouteMacro(tasks: [task])
+        )
+        let lanes = MissionRunAssignmentSlotStateLanes(commanded: .policySucceeded, observed: .policySucceeded)
+        let row = MissionRunAssignment(
+            taskId: task.id,
+            rosterDeviceId: rd.id,
+            slotName: rd.name,
+            attachedFleetVehicleToken: FleetMissionVehicleToken.sitl(UUID()).storageKey,
+            slotLifecycleLanes: lanes
+        )
+        let run = MissionRunEnvironment(mission: mission, assignments: [row])
+        run.status = .running
+        run.setSessionPhase(.executing)
+        run.markSquadAbortPolicyWindDownDispatchIssued(forAssignmentID: row.id)
+        XCTAssertFalse(run.missionTaskAbortWindDownIssuedTaskIDs.contains(task.id))
+
+        run.applySlotEvidenceAutoMissionEndAckIfNeeded(forAssignmentIDs: Set([row.id]))
+
+        XCTAssertTrue(run.squadMissionEndAbortCompletedByAssignmentIDs.contains(row.id))
+        XCTAssertFalse(run.squadAbortPolicyWindDownIssuedAssignmentIDs.contains(row.id))
+        XCTAssertTrue(run.taskMissionEndAbortCompletedByTaskID.contains(task.id))
+        run.refreshDerivedSquadStates()
+        XCTAssertEqual(run.squadStateByAssignmentID[row.id], .aborted)
+    }
 }

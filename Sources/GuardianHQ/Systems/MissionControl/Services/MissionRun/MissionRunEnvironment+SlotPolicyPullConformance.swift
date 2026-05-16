@@ -16,7 +16,7 @@ extension MissionRunEnvironment {
         // Recovery status is entered as soon as the operator (or automation) ends execution for “mark completed” flows;
         // hub pull must keep promoting §3 terminals until each **task-scoped** wind-down row settles, otherwise
         // ``applySlotEvidenceAutoMissionEndAckIfNeeded`` never runs and ``MissionTaskState`` stays stuck in **Recovery**.
-        guard status == .running || status == .paused || status == .recovery else { return }
+        guard allowsMissionEndAutoSettlement else { return }
         guard sessionPhase == .executing || sessionPhase == .aborting || sessionPhase == .recovery else { return }
         guard let mission = template else { return }
 
@@ -37,7 +37,12 @@ extension MissionRunEnvironment {
                 sitl: sitl
             ) else { continue }
             guard let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID) else { continue }
-            guard MissionRunPolicySlotPullConformance.hubSuggestsPolicyWindDownSettled(hub, now: now) else { continue }
+            let operatorParkLatch = fleetLink.mcrOperatorVehiclePhase(vehicleID: vehicleID) == .operatorParkAwaitingContinue
+            guard MissionRunPolicySlotPullConformance.hubSuggestsPolicyWindDownSettled(
+                hub,
+                now: now,
+                operatorParkAwaitingContinue: operatorParkLatch
+            ) else { continue }
 
             if let last = slotPolicyPullConformanceLastSuccessByAssignmentID[assignment.id],
                now.timeIntervalSince(last) < MissionRunPolicySlotPullConformance.successDebounceSeconds {
@@ -59,5 +64,7 @@ extension MissionRunEnvironment {
         guard let tid = MissionRunPolicyResolution.resolvedTaskId(for: assignment, mission: mission) else { return false }
         return missionTaskAbortWindDownIssuedTaskIDs.contains(tid)
             || missionTaskCompleteWindDownIssuedTaskIDs.contains(tid)
+            || squadCompletePolicyWindDownIssuedAssignmentIDs.contains(assignment.id)
+            || squadAbortPolicyWindDownIssuedAssignmentIDs.contains(assignment.id)
     }
 }

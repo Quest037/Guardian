@@ -401,6 +401,17 @@ final class FleetRecipeRunner: ObservableObject {
         activeTopLevelRecipeNameByVehicleID[vehicleID] != nil
     }
 
+    /// Whether a top-level recipe run is blocked on operator escalation for `vehicleID`.
+    func hasPendingWizardEscalation(forVehicleID vehicleID: String) -> Bool {
+        pendingWizardEscalations[vehicleID] != nil
+    }
+
+    /// Resumes a blocked recipe with ``FleetRecipeResumptionVerb/retry`` when the pending escalation allows it.
+    @discardableResult
+    func joltPendingWizardEscalationRetry(forVehicleID vehicleID: String) -> Bool {
+        submitWizardEscalationVerb(vehicleID: vehicleID, verb: .retry)
+    }
+
     /// Top-level recipe name currently executing for `vehicleID`, if any.
     ///
     /// Child recipes expanded from ``invokeRecipe`` do **not** register their own slot in

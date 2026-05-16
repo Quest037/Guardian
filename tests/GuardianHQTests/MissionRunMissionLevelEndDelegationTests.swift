@@ -68,7 +68,7 @@ final class MissionRunMissionLevelEndDelegationTests: XCTestCase {
         XCTAssertTrue(run.missionTaskCompleteWindDownIssuedTaskIDs.contains(taskB.id))
     }
 
-    func test_missionCompleteAfterCycle_all_tasks_recovery_does_not_set_whole_run_graceful_kind() {
+    func test_missionCompleteAfterCycle_all_tasks_recovery_enters_run_recovery_without_graceful_kind() {
         let rdA = RosterDevice(name: "Alpha", slot: .primary, vehicleClass: .uavCopter)
         let rdB = RosterDevice(name: "Bravo", slot: .primary, vehicleClass: .uavCopter)
         var rules = RouteRules()
@@ -126,6 +126,65 @@ final class MissionRunMissionLevelEndDelegationTests: XCTestCase {
         run.systems.scheduling.completeAfterCycle()
 
         XCTAssertEqual(run.gracefulStopKind, .none)
+        XCTAssertEqual(run.status, .recovery)
+        XCTAssertEqual(run.sessionPhase, .recovery)
+        XCTAssertEqual(run.completionKind, .operatorCompletedAfterCycle)
+    }
+
+    func test_missionCompleteNow_all_tasks_completed_enters_run_recovery_without_redispatch() {
+        let rd = RosterDevice(name: "Solo", slot: .primary, vehicleClass: .uavCopter)
+        var rules = RouteRules()
+        rules.missionCompletePreferenceChain = [MissionRunCompleteTactic(kind: .returnToLaunch)]
+        let task = MissionTask(name: "T", rosterDeviceIds: [rd.id])
+        let mission = Mission(
+            id: UUID(),
+            name: "M",
+            description: "",
+            type: .mobile,
+            rosterDevices: [rd],
+            routeMacro: RouteMacro(tasks: [task], rules: rules)
+        )
+        var pol = MissionRunAssignmentPolicies()
+        pol.completePreferenceChain = [MissionRunCompleteTactic(kind: .returnToLaunch)]
+        let sitlId = UUID()
+        let assign = MissionRunAssignment(
+            taskId: task.id,
+            rosterDeviceId: rd.id,
+            slotName: rd.name,
+            attachedFleetVehicleToken: FleetMissionVehicleToken.sitl(sitlId).storageKey,
+            policies: pol
+        )
+        let fleet = FleetLinkService()
+        let sitl = SitlService()
+        sitl.attachFleetLink(fleet)
+        sitl.seedMissionRunTestSitlRunningInstance(id: sitlId, stackInstanceIndex: 0)
+        let run = MissionRunEnvironment(mission: mission, assignments: [assign])
+        run.attachServices(fleetLink: fleet, sitl: sitl)
+        run.status = .running
+        run.setSessionPhase(.executing)
+        let ctx = MissionRunExecutionContext(
+            mission: mission,
+            fleetLink: fleet,
+            sitl: sitl,
+            missionProvider: { mission }
+        )
+        run.captureExecutionContext(ctx)
+        run.noteMissionTaskEndAttempt(.recoveryMissionEnd, forTaskID: task.id)
+        run.markMissionTaskCompleteWindDownIssued(forTaskID: task.id)
+        let lanes = MissionRunAssignmentSlotStateLanes(commanded: .policySucceeded, observed: .policySucceeded)
+        var settled = assign
+        settled.slotLifecycleLanes = lanes
+        run.assignments = [settled]
+        run.applySlotEvidenceAutoMissionEndAckIfNeeded(forAssignmentIDs: Set([settled.id]))
+        run.refreshDerivedTaskStates()
+        XCTAssertEqual(run.taskStateByTaskID[task.id], .completed)
+
+        run.systems.scheduling.completeNow()
+
+        XCTAssertEqual(run.status, .recovery)
+        XCTAssertEqual(run.sessionPhase, .recovery)
+        XCTAssertEqual(run.completionKind, .operatorCompletedImmediate)
+        XCTAssertFalse(run.missionTaskCompleteWindDownIssuedTaskIDs.contains(task.id))
     }
 
     func test_missionAbortAfterCycle_recovery_task_dispatches_abort_now() {
@@ -173,7 +232,7 @@ final class MissionRunMissionLevelEndDelegationTests: XCTestCase {
         run.systems.scheduling.abortAfterCycle()
 
         XCTAssertEqual(run.gracefulStopKind, .abortAfterCycle)
-        XCTAssertTrue(run.missionTaskAbortWindDownIssuedTaskIDs.contains(task.id))
+        XCTAssertEqual(run.taskAttemptingByTaskID[task.id], .abortMissionEnd)
     }
 
     func test_missionAbortNow_skips_operator_triaged_completed_task() {

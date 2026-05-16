@@ -93,14 +93,12 @@ final class MCRLiveTaskListSnapshotStoreTests: XCTestCase {
         run.setSessionPhase(.executing)
         run.operatorMarkMissionTaskTriageState(taskID: task.id, state: .aborted)
         run.registerDeferredFirstWaveSquads(taskID: task.id, assignmentIDs: [assignment.id])
-        run.systems.scheduling.abortMissionTaskAfterCycle(target: .task(task.id))
 
         let p = MCRLiveTaskListProgressFormatting.makeTaskLiveProjection(run: run, mission: mission, task: task, now: Date())
         XCTAssertEqual(p.taskID, task.id)
         XCTAssertEqual(p.operatorTriageMarkedState, .aborted)
         XCTAssertEqual(p.deferredFirstWaveSquadAssignmentIDs, [assignment.id])
-        XCTAssertTrue(p.showDeferredFirstWaveRelease)
-        XCTAssertEqual(p.pendingGracefulWindDownKind, .abortAfterCycle)
+        XCTAssertTrue(p.showOperatorTriggerNextSquad)
     }
 
     func test_makeTaskLiveProjection_embedsPrimarySquadSlicesInOrderWithDeferredFirstWaveFlags() {

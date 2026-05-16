@@ -100,8 +100,10 @@ final class FleetLinkService: ObservableObject {
     /// Last N surfaced STATUSTEXT lines per vehicle (for Paladin / command error context).
     private var recentVehicleStatusMessagesByVehicleID: [String: [String]] = [:]
     private let vehicleStatusContextMaxLines = 12
-    /// One "mission cycle finished" emission per execution; reset when progress shows `current < total`.
+    /// One "mission cycle finished" emission per execution; reset when progress advances in-leg.
     private var autopilotMissionCompletionLatchByVehicleID: [String: Bool] = [:]
+    /// True after `current` has entered an in-progress leg (`0 < current < total`, or single-item `current == total` after `0`).
+    private var autopilotMissionCycleHasInProgressLegByVehicleID: [String: Bool] = [:]
     /// Last `(current,total)` mirrored to the vehicle log + Paladin for MAVSDK mission progress (drops duplicate emissions).
     private var lastMissionProgressLoggedPairByVehicleID: [String: (cur: Int32, tot: Int32)] = [:]
     /// Throttled clock for Mission Control / map surfaces that only need **coarse** follow of multi-vehicle hub churn.
@@ -203,6 +205,7 @@ final class FleetLinkService: ObservableObject {
         vehicleStatusByVehicleID.removeAll(keepingCapacity: true)
         recentVehicleStatusMessagesByVehicleID.removeAll(keepingCapacity: true)
         autopilotMissionCompletionLatchByVehicleID.removeAll(keepingCapacity: true)
+        autopilotMissionCycleHasInProgressLegByVehicleID.removeAll(keepingCapacity: true)
         simulationStdoutLogDedupe.reset()
         simulatedFleetVehicleIDs.removeAll(keepingCapacity: true)
         liveDriveControlSessionVehicleID = nil
@@ -954,6 +957,7 @@ final class FleetLinkService: ObservableObject {
         vehicleStatusByVehicleID.removeAll(keepingCapacity: true)
         recentVehicleStatusMessagesByVehicleID.removeAll(keepingCapacity: true)
         autopilotMissionCompletionLatchByVehicleID.removeAll(keepingCapacity: true)
+        autopilotMissionCycleHasInProgressLegByVehicleID.removeAll(keepingCapacity: true)
         simulatedFleetVehicleIDs.removeAll(keepingCapacity: true)
         liveDriveControlSessionVehicleID = nil
         bridgePhase = .awaitingVehicle
@@ -1877,6 +1881,71 @@ final class FleetLinkService: ObservableObject {
         }
     }
 
+    /// Cancels an in-flight fleet recipe (e.g. move+park) and stops OFFBOARD / mission execution before operator park or policy retry.
+    func cancelActiveRecipeAndStopMotionForOperatorIntervention(vehicleID: String) async {
+        guard let session = sessionsByVehicleID[vehicleID] else { return }
+        if FleetRecipeRunner.shared.hasActiveRun(forVehicleID: vehicleID) {
+            _ = FleetRecipeRunner.shared.cancel(vehicleID: vehicleID)
+            appendVehicleLog(
+                "Operator stop: cancelled active fleet recipe before park or policy retry.",
+                vehicleID: vehicleID
+            )
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+        do {
+            try await awaitCompletableForManualStream(OffboardCoordinator.offboardStopCompletable(drone: session.drone))
+            appendVehicleLog("Operator stop: offboard stop acknowledged.", vehicleID: vehicleID)
+        } catch {
+            appendVehicleLog(
+                "Operator stop: offboard stop skipped or failed (\(mavsdkPublicErrorDescription(error))).",
+                vehicleID: vehicleID
+            )
+        }
+        await parkPauseMissionBestEffort(vehicleID: vehicleID, session: session, logContext: "Operator stop")
+    }
+
+    /// Same awaited stabilisation as operator catalogue **Park** (``runParkSequence``) — used before policy retry redispatch.
+    func awaitOperatorEngageStabilizePark(vehicleID: String) async -> Bool {
+        guard let session = sessionsByVehicleID[vehicleID] else { return false }
+        let vehicleType = vehicleModelsByVehicleID[vehicleID]?.data.vehicleType ?? .unknown
+        let universalClass = vehicleType.universalClass
+        do {
+            try await runParkSequence(
+                vehicleID: vehicleID,
+                session: session,
+                vehicleType: vehicleType,
+                universalClass: universalClass
+            )
+            return true
+        } catch {
+            appendVehicleLog(
+                "Operator policy retry: park stabilisation failed (\(error.localizedDescription)).",
+                vehicleID: vehicleID
+            )
+            return false
+        }
+    }
+
+    /// After ``cancelActiveRecipeAndStopMotionForOperatorIntervention``, wait until the per-vehicle recipe slot is free so a single redispatch does not stack on a zombie run.
+    func awaitOperatorPolicyWindDownJoltPreparation(
+        vehicleID: String,
+        maxWaitNanoseconds: UInt64 = 3_000_000_000
+    ) async {
+        await cancelActiveRecipeAndStopMotionForOperatorIntervention(vehicleID: vehicleID)
+        let deadline = DispatchTime.now().uptimeNanoseconds + maxWaitNanoseconds
+        while FleetRecipeRunner.shared.hasActiveRun(forVehicleID: vehicleID),
+              DispatchTime.now().uptimeNanoseconds < deadline {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        if FleetRecipeRunner.shared.hasActiveRun(forVehicleID: vehicleID) {
+            _ = FleetRecipeRunner.shared.cancel(vehicleID: vehicleID)
+            appendVehicleLog(
+                "Operator policy retry: recipe slot still busy after wait — requested cancel again.",
+                vehicleID: vehicleID
+            )
+        }
+    }
+
     private func runParkSequence(
         vehicleID: String,
         session: VehicleSession,
@@ -1884,15 +1953,8 @@ final class FleetLinkService: ObservableObject {
         universalClass: UniversalVehicleClass
     ) async throws {
         await stopManualControlStream(vehicleID: vehicleID)
+        await cancelActiveRecipeAndStopMotionForOperatorIntervention(vehicleID: vehicleID)
         let px4UgvOffboardPark = parkUsesPx4UgvOffboardPark(vehicleType: vehicleType, vehicleID: vehicleID)
-        if !px4UgvOffboardPark {
-            await parkPauseMissionBestEffort(vehicleID: vehicleID, session: session)
-        } else {
-            appendVehicleLog(
-                "Park: skipping mission pause for PX4 UGV offboard park (mission may keep running until continue).",
-                vehicleID: vehicleID
-            )
-        }
         switch universalClass {
         case .uuv:
             try await parkSequenceUUV(vehicleID: vehicleID, session: session)
@@ -2504,12 +2566,21 @@ final class FleetLinkService: ObservableObject {
                         hub.missionProgressCurrent = cur
                         hub.missionProgressTotal = tot
                     }
-                    if tot > 0, cur < tot {
+                    if tot > 0, cur == 0 {
+                        self.autopilotMissionCycleHasInProgressLegByVehicleID[vehicleID] = false
                         self.autopilotMissionCompletionLatchByVehicleID[vehicleID] = false
+                    } else if tot > 0, cur > 0 {
+                        if cur < tot {
+                            self.autopilotMissionCycleHasInProgressLegByVehicleID[vehicleID] = true
+                            self.autopilotMissionCompletionLatchByVehicleID[vehicleID] = false
+                        } else if cur == tot, tot == 1 {
+                            self.autopilotMissionCycleHasInProgressLegByVehicleID[vehicleID] = true
+                        }
                     }
                     if tot > 0, cur >= tot {
+                        let progressed = self.autopilotMissionCycleHasInProgressLegByVehicleID[vehicleID] ?? false
                         let latched = self.autopilotMissionCompletionLatchByVehicleID[vehicleID] ?? false
-                        if !latched {
+                        if progressed, !latched {
                             self.autopilotMissionCompletionLatchByVehicleID[vehicleID] = true
                             let doneLine = "Autopilot mission run complete (progress \(cur)/\(tot)); notifying schedule."
                             self.appendVehicleLog(doneLine, vehicleID: vehicleID)
@@ -2538,6 +2609,7 @@ final class FleetLinkService: ObservableObject {
         simulatedFleetVehicleIDs.remove(vehicleID)
         recentVehicleStatusMessagesByVehicleID[vehicleID] = nil
         autopilotMissionCompletionLatchByVehicleID[vehicleID] = nil
+        autopilotMissionCycleHasInProgressLegByVehicleID[vehicleID] = nil
         lastMissionProgressLoggedPairByVehicleID.removeValue(forKey: vehicleID)
         if let stream = session.manualStream {
             session.manualStream = nil

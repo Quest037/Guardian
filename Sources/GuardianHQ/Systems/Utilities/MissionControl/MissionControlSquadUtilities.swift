@@ -124,3 +124,244 @@ enum MissionControlSquadUtilities {
         missionTaskStateBridgedFromSquadState(squadState)
     }
 }
+
+/// MC-R task triage: which mission-end wind-down chrome rows appear for a settled task or squad lifecycle label.
+enum MissionControlMissionEndWindDownControlVisibility {
+    /// Abort now / after-cycle controls (may still be disabled by run gates).
+    static func showsAbortOptions(for squadState: MissionSquadState) -> Bool {
+        switch squadState {
+        case .aborting, .aborted:
+            return false
+        default:
+            return true
+        }
+    }
+
+    /// Complete now / after-cycle controls (may still be disabled by run gates).
+    static func showsCompleteOptions(for squadState: MissionSquadState) -> Bool {
+        switch squadState {
+        case .executing, .ready, .staging, .between:
+            return true
+        case .recovery, .completed, .aborting, .aborted:
+            return false
+        }
+    }
+
+    static func showsAbortOptions(for taskState: MissionTaskState) -> Bool {
+        switch taskState {
+        case .aborting, .aborted:
+            return false
+        default:
+            return true
+        }
+    }
+
+    static func showsCompleteOptions(for taskState: MissionTaskState) -> Bool {
+        switch taskState {
+        case .executing, .compiling, .ready, .staging, .between:
+            return true
+        case .recovery, .completed, .aborting, .aborted:
+            return false
+        }
+    }
+
+    /// MC-R triage path-level **Abort Task** row: hidden while abort-after-cycle is scheduled for this path (or a squad on it).
+    static func showsTaskPathAbortWindDownCard(
+        protocolShowsAbort: Bool,
+        taskPending: MissionRunMissionTaskGracefulPendingKind?,
+        anySquadGracefulPending: Bool
+    ) -> Bool {
+        guard protocolShowsAbort, !anySquadGracefulPending else { return false }
+        return taskPending != .abortAfterCycle
+    }
+
+    /// MC-R triage path-level **Complete Task** row: hidden while complete-after-cycle is scheduled, or while abort-after-cycle is scheduled (abort locks out all wind-down cards).
+    static func showsTaskPathCompleteWindDownCard(
+        protocolShowsComplete: Bool,
+        taskPending: MissionRunMissionTaskGracefulPendingKind?,
+        anySquadGracefulPending: Bool
+    ) -> Bool {
+        guard protocolShowsComplete, !anySquadGracefulPending else { return false }
+        switch taskPending {
+        case .abortAfterCycle, .completeAfterCycle:
+            return false
+        case nil:
+            return true
+        }
+    }
+
+    /// MC-R triage per-squad Abort / Complete rows: complete hides on complete-after-cycle; **both** hide on abort-after-cycle (squad or path-wide).
+    static func showsSquadAbortWindDownCard(
+        protocolShowsAbort: Bool,
+        squadPending: MissionRunMissionTaskGracefulPendingKind?,
+        taskPending: MissionRunMissionTaskGracefulPendingKind?
+    ) -> Bool {
+        guard protocolShowsAbort else { return false }
+        if squadPending == .abortAfterCycle || taskPending == .abortAfterCycle { return false }
+        return true
+    }
+
+    static func showsSquadCompleteWindDownCard(
+        protocolShowsComplete: Bool,
+        squadPending: MissionRunMissionTaskGracefulPendingKind?,
+        taskPending: MissionRunMissionTaskGracefulPendingKind?
+    ) -> Bool {
+        guard protocolShowsComplete else { return false }
+        if squadPending == .abortAfterCycle || taskPending == .abortAfterCycle { return false }
+        if squadPending == .completeAfterCycle || taskPending == .completeAfterCycle { return false }
+        return true
+    }
+
+    /// MC-R triage scheduled after-cycle banner title (path-wide or per-squad).
+    static func scheduledEndPolicyNoticeTitle(for kind: MissionRunMissionTaskGracefulPendingKind) -> String {
+        switch kind {
+        case .abortAfterCycle:
+            return "Scheduled abort policy"
+        case .completeAfterCycle:
+            return "Scheduled complete policy"
+        }
+    }
+
+    /// Prefer path-wide pending; otherwise any squad abort, then any squad complete.
+    static func resolvedScheduledGracefulNoticeKind(
+        taskPending: MissionRunMissionTaskGracefulPendingKind?,
+        squadPendings: [MissionRunMissionTaskGracefulPendingKind]
+    ) -> MissionRunMissionTaskGracefulPendingKind? {
+        if let taskPending { return taskPending }
+        if squadPendings.contains(.abortAfterCycle) { return .abortAfterCycle }
+        if squadPendings.contains(.completeAfterCycle) { return .completeAfterCycle }
+        return nil
+    }
+}
+
+/// What a single **Trigger next squad** press does for an operator-triggered task.
+enum MissionControlOperatorTriggerNextSquadAction: Equatable {
+    /// First path start: lead primary only; following primaries enter the first-wave deferral queue per stagger policy.
+    case coldStartTask
+    /// One primary’s next MAVLink lap (lead between cycles, or a non-deferred primary after the first wave).
+    case launchPrimary(UUID)
+    /// Release the head of ``MissionRunEnvironment/deferredFirstWaveSquadAssignmentIDsByTaskID`` (stagger **operator starts each squad**).
+    case releaseDeferredFirstWaveHead(UUID)
+}
+
+/// MC-R operator-triggered tasks: visibility and **one** primary per button press (task trigger vs first-wave stagger).
+@MainActor
+enum MissionControlOperatorTriggerNextSquadPolicy {
+    static func showsTriggerButton(
+        run: MissionRunEnvironment,
+        task: MissionTask,
+        mission: Mission,
+        now: Date = Date()
+    ) -> Bool {
+        nextLaunchAction(run: run, task: task, mission: mission, now: now) != nil
+    }
+
+    /// Next single action when the operator presses **Trigger next squad** (nil = hide control).
+    static func nextLaunchAction(
+        run: MissionRunEnvironment,
+        task: MissionTask,
+        mission: Mission,
+        now: Date = Date()
+    ) -> MissionControlOperatorTriggerNextSquadAction? {
+        guard task.enabled, task.regularity == .operatorTriggered else { return nil }
+        guard run.status == .running, run.sessionPhase == .executing else { return nil }
+
+        let primaries = run.primarySquads(forTaskID: task.id, mission: mission)
+        guard !primaries.isEmpty else { return nil }
+
+        if isColdStart(run: run, task: task, mission: mission) {
+            return .coldStartTask
+        }
+
+        // First-wave stagger: release queued primaries before offering the lead’s next lap while the queue
+        // still holds squads waiting for operator release (avoids relaunching the lead when squad 2+ are ready).
+        if task.staggerTrigger.defersSubsequentPrimariesInFirstWave {
+            let deferred = run.deferredFirstWaveSquadAssignmentIDsByTaskID[task.id] ?? []
+            if let head = deferred.first,
+               let squad = primaries.first(where: { $0.assignment.id == head }),
+               isPrimaryEligible(run: run, task: task, mission: mission, squad: squad, now: now)
+            {
+                return .releaseDeferredFirstWaveHead(head)
+            }
+        }
+
+        if let lead = primaries.first,
+           isLeadEligibleForOperatorLap(run: run, task: task, mission: mission, squad: lead, now: now)
+        {
+            return .launchPrimary(lead.assignment.id)
+        }
+
+        for squad in primaries.dropFirst() {
+            let aid = squad.assignment.id
+            let deferred = run.deferredFirstWaveSquadAssignmentIDsByTaskID[task.id] ?? []
+            if deferred.contains(aid) { continue }
+            guard (run.squadCyclesCompletedByAssignmentID[aid] ?? 0) > 0 else { continue }
+            if isPrimaryEligible(run: run, task: task, mission: mission, squad: squad, now: now) {
+                return .launchPrimary(aid)
+            }
+        }
+
+        return nil
+    }
+
+    /// First lap for the path: no squad has completed a MAVLink cycle yet and none are in-flight.
+    static func isColdStart(
+        run: MissionRunEnvironment,
+        task: MissionTask,
+        mission: Mission
+    ) -> Bool {
+        let primaries = run.primarySquads(forTaskID: task.id, mission: mission)
+        guard !primaries.isEmpty else { return false }
+        let noneActive = primaries.allSatisfy {
+            !run.activeCycleSquadAssignmentIDs.contains($0.assignment.id)
+        }
+        let allZero = primaries.allSatisfy {
+            (run.squadCyclesCompletedByAssignmentID[$0.assignment.id] ?? 0) == 0
+        }
+        return noneActive && allZero
+    }
+
+    private static func isLeadEligibleForOperatorLap(
+        run: MissionRunEnvironment,
+        task: MissionTask,
+        mission: Mission,
+        squad: (assignment: MissionRunAssignment, squadIndex: Int),
+        now: Date
+    ) -> Bool {
+        guard squad.squadIndex == 0 else { return false }
+        return isPrimaryEligible(run: run, task: task, mission: mission, squad: squad, now: now)
+    }
+
+    private static func isPrimaryEligible(
+        run: MissionRunEnvironment,
+        task: MissionTask,
+        mission: Mission,
+        squad: (assignment: MissionRunAssignment, squadIndex: Int),
+        now: Date
+    ) -> Bool {
+        let aid = squad.assignment.id
+        if run.activeCycleSquadAssignmentIDs.contains(aid) { return false }
+        if run.shouldSuppressAutopilotAutostart(forSquadAssignmentID: aid, taskID: task.id, mission: mission) {
+            return false
+        }
+        if let def = run.squadStartDeferralByAssignmentID[aid], now < def.startAt { return false }
+
+        let state = MissionRunEnvironment.deriveMissionSquadState(
+            task: task,
+            assignment: squad.assignment,
+            squadIndex: squad.squadIndex,
+            run: run,
+            now: now
+        )
+        return squadStateAllowsOperatorTriggerStart(state)
+    }
+
+    private static func squadStateAllowsOperatorTriggerStart(_ state: MissionSquadState) -> Bool {
+        switch state {
+        case .ready, .between:
+            return true
+        case .staging, .executing, .recovery, .aborting, .aborted, .completed:
+            return false
+        }
+    }
+}

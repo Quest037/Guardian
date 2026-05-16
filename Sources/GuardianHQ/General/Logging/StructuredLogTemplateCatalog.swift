@@ -119,6 +119,31 @@ enum StructuredLogTemplateCatalog: Sendable {
             mcr: "Live Drive prep · cleared {{removedCount}} queued batch(es) · @{{slotID}}"
         )
         put(
+            MissionRunLogTemplateKey.operatorContinueAfterParkQueued,
+            "Operator queued {{intent}} for slot {{slot}} (@{{slotID}}).",
+            mcr: "Operator · queued {{intent}} · {{slot}}"
+        )
+        put(
+            MissionRunLogTemplateKey.operatorContinueAfterParkUnavailable,
+            "Operator continue unavailable for slot {{slot}} (@{{slotID}}): {{reason}}.",
+            mcr: "Operator · continue unavailable · {{slot}} · {{reason}}"
+        )
+        put(
+            MissionRunLogTemplateKey.operatorPolicyWindDownJoltEscalation,
+            "Operator jolted in-flight end protocol ({{intent}}) for slot {{slot}} (@{{slotID}}) via recipe escalation retry.",
+            mcr: "Operator · jolted {{intent}} · {{slot}}"
+        )
+        put(
+            MissionRunLogTemplateKey.operatorPolicyWindDownJoltRedispatched,
+            "Operator cleared stuck fleet work and redispatched {{intent}} for slot {{slot}} (@{{slotID}}).",
+            mcr: "Operator · redispatched {{intent}} · {{slot}}"
+        )
+        put(
+            MissionRunLogTemplateKey.operatorPolicyWindDownJoltParkStabilizationFailed,
+            "Operator policy retry: park stabilisation failed for task {{task}} (vehicle {{vehicleID}}); end protocol redispatch still attempted.",
+            mcr: "Operator · policy retry park failed · {{task}}"
+        )
+        put(
             MissionRunLogTemplateKey.executorPendingBatchesCancelledForRunCompleted,
             "Cleared {{removedCount}} pending executor batch(es) after mission run completed.",
             mcr: "Run complete · cleared {{removedCount}} queued batch(es)"

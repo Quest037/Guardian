@@ -25,6 +25,7 @@ final class MissionRunLifecycleSubsystem {
 
     func markCompleted(kind: MissionRunCompletionKind? = nil) {
         guard let environment else { return }
+        environment.finalizeOrchestrationOnMarkComplete()
         environment.status = .completed
         environment.completedAt = Date()
         if let kind {

@@ -18,8 +18,7 @@ struct MCRLiveTaskListSquadRowSnapshot: Identifiable, Equatable {
 enum MCRLiveTaskListRowFooterKind: Equatable {
     case none
     case deferralControls(taskStartDef: MissionTaskStartDeferral)
-    case missionTrigger
-    case deferredFirstWaveSquadRelease
+    case operatorTriggerNextSquad
     case endProtocolAcknowledgement
 }
 
@@ -172,8 +171,7 @@ struct MissionRunTaskLiveProjection: Equatable {
     let cyclesLineText: String?
     let showPerSquadBars: Bool
     let boundPrimarySquadsCount: Int
-    let showOperatorMissionTrigger: Bool
-    let showDeferredFirstWaveRelease: Bool
+    let showOperatorTriggerNextSquad: Bool
     let endProtocolAcknowledgementVisible: Bool
 }
 
@@ -335,10 +333,19 @@ enum MCRLiveTaskListProgressFormatting {
         return nil
     }
 
-    private static func cyclesLineText(task: RoutePath, run: MissionRunEnvironment) -> String? {
+    private static func cyclesLineText(task: RoutePath, run: MissionRunEnvironment, mission: Mission) -> String? {
         guard task.enabled,
               task.regularity == .continuous || task.regularity == .continuousWithDelay
         else { return nil }
+        let primaries = run.primarySquads(forTaskID: task.id, mission: mission)
+        if primaries.count > 1 {
+            let counts = primaries.map { run.squadCyclesCompletedByAssignmentID[$0.assignment.id] ?? 0 }
+            let maxDone = counts.max() ?? 0
+            let squadsAligned = counts.allSatisfy { $0 == maxDone }
+            let suffix = squadsAligned ? "" : "*"
+            if task.cycles > 0 { return "Cycles: \(maxDone)/\(task.cycles)\(suffix)" }
+            return "Cycles: \(maxDone)/∞\(suffix)"
+        }
         let done = run.taskCyclesCompletedByTaskID[task.id] ?? 0
         if task.cycles > 0 { return "Cycles: \(done)/\(task.cycles)" }
         return "Cycles: \(done)/∞"
@@ -411,15 +418,18 @@ enum MCRLiveTaskListProgressFormatting {
         return MCRLiveRosterSlotAttentionSnapshot(severity: w.severity, title: w.title, help: w.help)
     }
 
-    private static func showMissionTaskTrigger(run: MissionRunEnvironment, task: RoutePath) -> Bool {
-        guard run.status == .running, task.enabled, task.regularity == .operatorTriggered else { return false }
-        return run.taskStateByTaskID[task.id] != .executing
-    }
-
-    private static func showDeferredFirstWaveSquadRelease(run: MissionRunEnvironment, task: RoutePath) -> Bool {
-        guard task.enabled else { return false }
-        guard run.status == .running, run.sessionPhase == .executing else { return false }
-        return !(run.deferredFirstWaveSquadAssignmentIDsByTaskID[task.id] ?? []).isEmpty
+    private static func showOperatorTriggerNextSquad(
+        run: MissionRunEnvironment,
+        task: RoutePath,
+        mission: Mission,
+        now: Date
+    ) -> Bool {
+        MissionControlOperatorTriggerNextSquadPolicy.nextLaunchAction(
+            run: run,
+            task: task,
+            mission: mission,
+            now: now
+        ) != nil
     }
 
     private static func missionLiveTaskEndProtocolAcknowledgementVisible(run: MissionRunEnvironment, task: RoutePath) -> Bool {
@@ -471,11 +481,15 @@ enum MCRLiveTaskListProgressFormatting {
             completeWindDownIssued: run.missionTaskCompleteWindDownIssuedTaskIDs.contains(tid),
             pendingGracefulWindDownKind: run.pendingMissionTaskGracefulWindDownKindByTaskID[tid],
             slotAttention: missionLiveTaskSlotAttention(run: run, task: task, mission: mission),
-            cyclesLineText: cyclesLineText(task: task, run: run),
+            cyclesLineText: cyclesLineText(task: task, run: run, mission: mission),
             showPerSquadBars: !primaries.isEmpty,
             boundPrimarySquadsCount: primaries.count,
-            showOperatorMissionTrigger: showMissionTaskTrigger(run: run, task: task),
-            showDeferredFirstWaveRelease: showDeferredFirstWaveSquadRelease(run: run, task: task),
+            showOperatorTriggerNextSquad: showOperatorTriggerNextSquad(
+                run: run,
+                task: task,
+                mission: mission,
+                now: now
+            ),
             endProtocolAcknowledgementVisible: missionLiveTaskEndProtocolAcknowledgementVisible(run: run, task: task)
         )
     }
@@ -489,11 +503,8 @@ enum MCRLiveTaskListProgressFormatting {
         if inTaskStartDeferral, let def = taskStartDef, !inlineTaskDeferralOnSquadRow {
             return .deferralControls(taskStartDef: def)
         }
-        if row.showOperatorMissionTrigger {
-            return .missionTrigger
-        }
-        if row.showDeferredFirstWaveRelease {
-            return .deferredFirstWaveSquadRelease
+        if row.showOperatorTriggerNextSquad {
+            return .operatorTriggerNextSquad
         }
         if row.endProtocolAcknowledgementVisible {
             return .endProtocolAcknowledgement

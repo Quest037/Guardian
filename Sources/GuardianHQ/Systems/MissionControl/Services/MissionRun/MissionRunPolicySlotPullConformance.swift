@@ -20,11 +20,18 @@ enum MissionRunPolicySlotPullConformance {
     static let maxHorizontalSpeedMS: Double = 1.5
 
     /// Hub-only heuristic: vehicle appears **settled** after a policy wind-down when push did not yet mark the slot.
-    static func hubSuggestsPolicyWindDownSettled(_ hub: FleetHubVehicleTelemetry, now: Date = Date()) -> Bool {
+    ///
+    /// - Parameter operatorParkAwaitingContinue: When `true` (PX4 UGV operator park latch), **armed** vehicles may
+    ///   still count as settled if they are slow and not in-air — disarm is not required for that path.
+    static func hubSuggestsPolicyWindDownSettled(
+        _ hub: FleetHubVehicleTelemetry,
+        now: Date = Date(),
+        operatorParkAwaitingContinue: Bool = false
+    ) -> Bool {
         guard now.timeIntervalSince(hub.lastUpdate) <= hubMaxAgeSeconds else { return false }
-        guard !hub.isArmed else { return false }
         if hub.inAir == true { return false }
         if let spd = hub.horizontalGroundSpeedMS, spd >= maxHorizontalSpeedMS { return false }
-        return true
+        if operatorParkAwaitingContinue { return true }
+        return !hub.isArmed
     }
 }

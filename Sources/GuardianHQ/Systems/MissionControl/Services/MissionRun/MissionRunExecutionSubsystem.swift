@@ -2,9 +2,24 @@ import Foundation
 import Mavsdk
 
 /// Whether a wind-down ends in **recovery** (success protocol) or **abort** (``MissionRunSessionPhase/aborting``).
-private enum MissionRunOperatorWindDown {
+enum MissionRunOperatorWindDown {
     case recoveryPhase
     case abortProtocolPhase
+}
+
+/// Operator **Retry recovery / abort protocol** jolt outcome (assignment triage Continue).
+enum MissionRunOperatorPolicyWindDownJoltOutcome: Equatable, Sendable {
+    /// Resumed the in-flight recipe via pending wizard escalation ``FleetRecipeResumptionVerb/retry``.
+    case joltedEscalation
+    /// Cleared a stuck fleet recipe slot and redispatched end-policy commands (awaited, single pass).
+    case redispatched
+    case failedNoCommands
+    case failedNoVehicle
+}
+
+enum MissionRunOperatorPolicyWindDownJoltMode: Equatable, Sendable {
+    case complete
+    case abort
 }
 
 @MainActor
@@ -858,6 +873,7 @@ final class MissionRunExecutionSubsystem {
                 await self.dispatchCommandsRespectingMissionClearBarrier(commands, context: context)
                 if case .squad(let assignmentID) = target {
                     environment.markMissionSquadAutostartSuppressed(forAssignmentID: assignmentID)
+                    environment.markSquadAbortPolicyWindDownDispatchIssued(forAssignmentID: assignmentID)
                 } else {
                     environment.markMissionTaskAbortWindDownIssued(forTaskID: taskID)
                 }
@@ -876,6 +892,7 @@ final class MissionRunExecutionSubsystem {
         dispatchCommands(commands, context: context)
         if case .squad(let assignmentID) = target {
             environment.markMissionSquadAutostartSuppressed(forAssignmentID: assignmentID)
+            environment.markSquadAbortPolicyWindDownDispatchIssued(forAssignmentID: assignmentID)
         } else {
             environment.markMissionTaskAbortWindDownIssued(forTaskID: taskID)
         }
@@ -952,6 +969,112 @@ final class MissionRunExecutionSubsystem {
             templateParams: ["task": taskLabel]
         )
         return true
+    }
+
+    /// Operator **Retry recovery / abort protocol**: jolt a blocked in-flight recipe when possible; otherwise cancel/wait,
+    /// run the same awaited **Park** stabilisation as Engage triage, then redispatch end-policy commands once (awaited).
+    func performOperatorJoltPolicyWindDown(
+        target: MissionRunCommandTarget,
+        mode: MissionRunOperatorPolicyWindDownJoltMode,
+        context: MissionRunExecutionContext
+    ) async -> MissionRunOperatorPolicyWindDownJoltOutcome {
+        guard let environment,
+              let scope = commandTargetScope(target: target, environment: environment)
+        else { return .failedNoCommands }
+        let taskID = scope.taskID
+        let ids = scope.assignmentIDs
+        let taskLabelForLog = environment.template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name
+        let commands: [MissionRunIssuedCommand]
+        switch mode {
+        case .complete:
+            commands = buildCompletePolicyWindDownCommands(limitedToAssignmentIDs: ids)
+                .map {
+                    $0.reattributed(
+                        issuer: .operator,
+                        issuerKey: "operator.engageLiveDrive.retryPolicyWindDown.complete"
+                    )
+                }
+        case .abort:
+            _ = environment.systems.planner.buildAbortPlan(trigger: .now)
+            commands = (environment.systems.planner.lastBuiltAbortPlan?.entries ?? [])
+                .filter { ids.contains($0.assignmentID) }
+                .flatMap(\.issuedCommands)
+                .map {
+                    $0.reattributed(
+                        issuer: .operator,
+                        issuerKey: "operator.engageLiveDrive.retryPolicyWindDown.abort"
+                    )
+                }
+        }
+        guard !commands.isEmpty else { return .failedNoCommands }
+        guard let lead = commands.first,
+              let token = FleetMissionVehicleToken(storageKey: lead.vehicleTokenKey),
+              let vehicleID = resolvedFleetStreamVehicleID(
+                token: token,
+                fleetLink: context.fleetLink,
+                sitl: context.sitl
+              )
+        else { return .failedNoVehicle }
+
+        if FleetRecipeRunner.shared.joltPendingWizardEscalationRetry(forVehicleID: vehicleID) {
+            return .joltedEscalation
+        }
+
+        await context.fleetLink.awaitOperatorPolicyWindDownJoltPreparation(vehicleID: vehicleID)
+        let parkStabilized = await context.fleetLink.awaitOperatorEngageStabilizePark(vehicleID: vehicleID)
+        if !parkStabilized {
+            environment.systems.logging.appendLogEvent(
+                level: .warning,
+                taskID: taskID,
+                taskLabel: taskLabelForLog,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.operatorPolicyWindDownJoltParkStabilizationFailed,
+                templateParams: [
+                    "task": taskLabelForLog ?? taskID.uuidString,
+                    "vehicleID": vehicleID,
+                ]
+            )
+        }
+
+        environment.captureExecutionContext(context)
+        let taskLabel = taskLabelForLog ?? taskID.uuidString
+        switch mode {
+        case .complete:
+            environment.systems.logging.appendLogEvent(
+                level: .info,
+                taskID: taskID,
+                taskLabel: taskLabelForLog,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.missionTaskRecoveryEndAttemptNoted,
+                templateParams: ["task": taskLabel]
+            )
+            environment.noteMissionTaskEndAttempt(.recoveryMissionEnd, forTaskID: taskID)
+            if case .squad(let assignmentID) = target {
+                environment.markSquadCompletePolicyWindDownDispatchIssued(forAssignmentID: assignmentID)
+                environment.markMissionSquadAutostartSuppressed(forAssignmentID: assignmentID)
+            } else {
+                environment.markMissionTaskCompleteWindDownIssued(forTaskID: taskID)
+            }
+        case .abort:
+            environment.systems.logging.appendLogEvent(
+                level: .info,
+                taskID: taskID,
+                taskLabel: taskLabelForLog,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.missionTaskAbortEndAttemptNoted,
+                templateParams: ["task": taskLabel]
+            )
+            environment.noteMissionTaskEndAttempt(.abortMissionEnd, forTaskID: taskID)
+            if case .squad(let assignmentID) = target {
+                environment.markSquadAbortPolicyWindDownDispatchIssued(forAssignmentID: assignmentID)
+                environment.markMissionSquadAutostartSuppressed(forAssignmentID: assignmentID)
+            } else {
+                environment.markMissionTaskAbortWindDownIssued(forTaskID: taskID)
+            }
+        }
+        environment.systems.scheduling.cancelScheduledTaskMissionStarts(forTaskID: taskID)
+        await dispatchCommandsRespectingMissionClearBarrier(commands, context: context)
+        return .redispatched
     }
 
     /// Delivers queued per-primary-squad abort/complete wind-downs when **that squad’s** MAVLink cycle ends.
@@ -1208,7 +1331,18 @@ final class MissionRunExecutionSubsystem {
         }
 
         let missionWideAutostartFrozen = environment.shouldSuppressMissionWideBetweenCycleAutostart()
-        if !missionWideAutostartFrozen {
+        let operatorTriggeredTaskIDs = Set(
+            mission.routeMacro.tasks
+                .filter { $0.enabled && $0.regularity == .operatorTriggered }
+                .map(\.id)
+        )
+        let completedOperatorTriggered = newlyCompletedSquadAssignmentIDs.contains { assignmentID in
+            guard let taskID = environment.resolvedTaskID(forSquadAssignmentID: assignmentID, mission: mission) else {
+                return false
+            }
+            return operatorTriggeredTaskIDs.contains(taskID)
+        }
+        if !missionWideAutostartFrozen, !completedOperatorTriggered {
             let nextPlan = planNextAutoCycleStartsForSquads(
                 mission: mission,
                 completedSquadAssignmentIDs: newlyCompletedSquadAssignmentIDs
@@ -1746,6 +1880,9 @@ final class MissionRunExecutionSubsystem {
         guard let environment else { return false }
         guard environment.sessionPhase == .executing else { return false }
         guard let mission = mission ?? context.missionProvider() else { return false }
+        if environment.activeCycleSquadAssignmentIDs.contains(primaryAssignmentID) {
+            return false
+        }
         if environment.shouldSuppressAutopilotAutostart(
             forSquadAssignmentID: primaryAssignmentID,
             taskID: taskID,
@@ -1814,6 +1951,39 @@ final class MissionRunExecutionSubsystem {
             )
         }
         return ok
+    }
+
+    /// Operator-triggered path: exactly one launch per operator press (no autopilot cycle loop).
+    @discardableResult
+    func performOperatorTriggerNextSquadAction(
+        taskID: UUID,
+        action: MissionControlOperatorTriggerNextSquadAction,
+        context: MissionRunExecutionContext
+    ) -> Bool {
+        guard let environment,
+              let mission = context.missionProvider(),
+              let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }),
+              task.regularity == .operatorTriggered
+        else { return false }
+
+        switch action {
+        case .coldStartTask:
+            return startTaskExecution(
+                taskID: taskID,
+                mission: mission,
+                context: context,
+                allowDuringStaging: true
+            )
+        case .releaseDeferredFirstWaveHead:
+            return releaseNextDeferredFirstWaveSquad(taskID: taskID, context: context)
+        case .launchPrimary(let assignmentID):
+            return startSquadExecution(
+                taskID: taskID,
+                primaryAssignmentID: assignmentID,
+                mission: mission,
+                context: context
+            )
+        }
     }
 
     private struct CommandTargetScope {
@@ -2111,32 +2281,12 @@ final class MissionRunExecutionSubsystem {
         operatorWindDown: MissionRunOperatorWindDown
     ) {
         guard let environment else { return }
-        let preserveMissionEndWindDownIssued: Bool
-        switch operatorWindDown {
-        case .recoveryPhase, .abortProtocolPhase:
-            preserveMissionEndWindDownIssued = true
-        }
-        environment.clearMissionTaskScopedOrchestrationState(preserveMissionEndWindDownIssued: preserveMissionEndWindDownIssued)
-        environment.systems.scheduling.cancelAllScheduledTasks()
-        environment.systems.scheduling.clearDeferredOneOffExecution()
-        var cycleSnap = environment.cyclesCompleted
-        if kind == .oneOffAutopilotFinished {
-            cycleSnap = max(1, cycleSnap)
-        }
-        environment.clearFinishedMissionCycleVehicleIDs()
-        environment.clearActiveCycleTasks()
-        environment.clearTaskCycleCompletionCounts()
-        environment.completedAt = nil
-        environment.gracefulStopKind = .none
-        environment.reportCyclesCompleted = cycleSnap
-        environment.completionKind = kind
-        switch operatorWindDown {
-        case .recoveryPhase:
-            environment.status = .recovery
-            environment.setSessionPhase(.recovery)
-        case .abortProtocolPhase:
-            environment.setSessionPhase(.aborting)
-        }
+        _ = context
+        environment.enterRunEndMode(
+            kind: kind,
+            operatorWindDown: operatorWindDown,
+            oneOffAutopilotFinished: kind == .oneOffAutopilotFinished
+        )
         environment.systems.logging.appendLogEvent(
             level: .info,
             speaker: .missionControl,

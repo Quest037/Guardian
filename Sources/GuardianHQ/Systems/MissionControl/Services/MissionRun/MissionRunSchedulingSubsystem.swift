@@ -34,6 +34,78 @@ final class MissionRunSchedulingSubsystem {
         }
     }
 
+    /// True when every bound enabled task is already past mission-level **complete** dispatch (nothing left to queue).
+    private func allBoundTasksAlreadySettledForMissionLevelComplete(
+        environment: MissionRunEnvironment,
+        targets: [UUID]
+    ) -> Bool {
+        guard !targets.isEmpty else { return false }
+        for taskID in targets {
+            let state = environment.taskStateByTaskID[taskID] ?? .ready
+            if !shouldLeaveTaskUnchangedForMissionLevelComplete(state: state) {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// True when every bound enabled task is already in **abort protocol** terminals (not merely **completed** recovery).
+    private func allBoundTasksAlreadyInAbortProtocolForMissionLevelAbort(
+        environment: MissionRunEnvironment,
+        targets: [UUID]
+    ) -> Bool {
+        guard !targets.isEmpty else { return false }
+        for taskID in targets {
+            switch environment.taskStateByTaskID[taskID] ?? .ready {
+            case .aborting, .aborted:
+                continue
+            case .compiling, .ready, .staging, .executing, .between, .recovery, .completed:
+                return false
+            }
+        }
+        return true
+    }
+
+    private func dispatchContextForWholeRunEnd(environment: MissionRunEnvironment) -> MissionRunExecutionContext? {
+        environment.lastExecutionContext ?? environment.effectiveExecutionContextForDispatch()
+    }
+
+    private func enterRunRecoveryEndMode(
+        environment: MissionRunEnvironment,
+        kind: MissionRunCompletionKind,
+        context: MissionRunExecutionContext?,
+        logTemplateKey: String
+    ) {
+        if let context {
+            environment.captureExecutionContext(context)
+        }
+        environment.enterRunEndMode(kind: kind, operatorWindDown: .recoveryPhase)
+        environment.systems.logging.appendLogEvent(
+            level: .info,
+            speaker: .missionControl,
+            templateKey: logTemplateKey,
+            templateParams: [:]
+        )
+    }
+
+    private func enterRunAbortEndMode(
+        environment: MissionRunEnvironment,
+        kind: MissionRunCompletionKind,
+        context: MissionRunExecutionContext?
+    ) {
+        cancelAllScheduledTasks()
+        if let context {
+            environment.captureExecutionContext(context)
+        }
+        environment.enterRunEndMode(kind: kind, operatorWindDown: .abortProtocolPhase)
+        environment.systems.logging.appendLogEvent(
+            level: .info,
+            speaker: .missionControl,
+            templateKey: MissionRunLogTemplateKey.runStoppedImmediate,
+            templateParams: [:]
+        )
+    }
+
     /// Operator intent: abort after each task’s current autopilot mission cycle. Delegates to each bound path’s
     /// ``abortMissionTaskAfterCycle`` (or ``abortMissionTaskNow`` when the task is already in **recovery**, switching it
     /// into abort protocol). Does **not** bulk-cancel other tasks’ deferrals.
@@ -71,6 +143,13 @@ final class MissionRunSchedulingSubsystem {
         }
         if anyEngaged {
             environment.gracefulStopKind = .abortAfterCycle
+        } else if allBoundTasksAlreadyInAbortProtocolForMissionLevelAbort(environment: environment, targets: targets),
+                  let ctx {
+            enterRunAbortEndMode(
+                environment: environment,
+                kind: .operatorStoppedAfterCycle,
+                context: ctx
+            )
         }
     }
 
@@ -104,6 +183,14 @@ final class MissionRunSchedulingSubsystem {
         }
         if anyEngaged {
             environment.gracefulStopKind = .completeAfterCycle
+        } else if allBoundTasksAlreadySettledForMissionLevelComplete(environment: environment, targets: targets),
+                  let ctx = dispatchContextForWholeRunEnd(environment: environment) {
+            enterRunRecoveryEndMode(
+                environment: environment,
+                kind: .operatorCompletedAfterCycle,
+                context: ctx,
+                logTemplateKey: MissionRunLogTemplateKey.runCompleteWindDownAfterCycle
+            )
         }
     }
 
@@ -111,7 +198,7 @@ final class MissionRunSchedulingSubsystem {
     func completeNow() {
         guard let environment else { return }
         revokeGracefulAfterCycleStop()
-        guard let ctx = environment.lastExecutionContext else {
+        guard let ctx = dispatchContextForWholeRunEnd(environment: environment) else {
             environment.systems.logging.appendLogEvent(
                 level: .warning,
                 speaker: .missionControl,
@@ -122,6 +209,7 @@ final class MissionRunSchedulingSubsystem {
         environment.refreshDerivedTaskStates()
         environment.systems.executor.clearCommandQueue()
         let targets = enabledMissionTaskIDsWithBoundAssignments(in: environment)
+        guard !targets.isEmpty else { return }
         var anyEngaged = false
         for taskID in targets {
             let state = environment.taskStateByTaskID[taskID] ?? .ready
@@ -130,24 +218,22 @@ final class MissionRunSchedulingSubsystem {
                 anyEngaged = true
             }
         }
-        guard anyEngaged else { return }
-        environment.captureExecutionContext(ctx)
-        environment.completionKind = .operatorCompletedImmediate
-        environment.status = .recovery
-        environment.setSessionPhase(.recovery)
-        environment.systems.logging.appendLogEvent(
-            level: .info,
-            speaker: .missionControl,
-            templateKey: MissionRunLogTemplateKey.runCompleteWindDownImmediate,
-            templateParams: [:]
-        )
+        if anyEngaged
+            || allBoundTasksAlreadySettledForMissionLevelComplete(environment: environment, targets: targets) {
+            enterRunRecoveryEndMode(
+                environment: environment,
+                kind: .operatorCompletedImmediate,
+                context: ctx,
+                logTemplateKey: MissionRunLogTemplateKey.runCompleteWindDownImmediate
+            )
+        }
     }
 
     /// Operator intent: abort immediately — dispatches each eligible path’s abort plan (``abortMissionTaskNow``).
     func abortNow() {
         guard let environment else { return }
         revokeGracefulAfterCycleStop()
-        guard let ctx = environment.lastExecutionContext else {
+        guard let ctx = dispatchContextForWholeRunEnd(environment: environment) else {
             environment.systems.logging.appendLogEvent(
                 level: .warning,
                 speaker: .missionControl,
@@ -158,6 +244,7 @@ final class MissionRunSchedulingSubsystem {
         environment.refreshDerivedTaskStates()
         environment.systems.executor.clearCommandQueue()
         let targets = enabledMissionTaskIDsWithBoundAssignments(in: environment)
+        guard !targets.isEmpty else { return }
         var anyEngaged = false
         for taskID in targets {
             let state = environment.taskStateByTaskID[taskID] ?? .ready
@@ -166,17 +253,19 @@ final class MissionRunSchedulingSubsystem {
                 anyEngaged = true
             }
         }
-        guard anyEngaged else { return }
-        cancelAllScheduledTasks()
-        environment.captureExecutionContext(ctx)
-        environment.completionKind = .operatorStoppedImmediate
-        environment.setSessionPhase(.aborting)
-        environment.systems.logging.appendLogEvent(
-            level: .info,
-            speaker: .missionControl,
-            templateKey: MissionRunLogTemplateKey.runStoppedImmediate,
-            templateParams: [:]
-        )
+        if anyEngaged {
+            enterRunAbortEndMode(
+                environment: environment,
+                kind: .operatorStoppedImmediate,
+                context: ctx
+            )
+        } else if allBoundTasksAlreadyInAbortProtocolForMissionLevelAbort(environment: environment, targets: targets) {
+            enterRunAbortEndMode(
+                environment: environment,
+                kind: .operatorStoppedImmediate,
+                context: ctx
+            )
+        }
     }
 
     /// Clears graceful after-cycle intent and removes queued abort / complete wind-down batches (if any).
@@ -639,6 +728,44 @@ final class MissionRunSchedulingSubsystem {
         environment?.clearPendingMissionTaskGracefulWindDown(forTaskID: taskID)
     }
 
+    /// Operator-triggered paths with multiple primaries: task-level “after cycle” arms **per-squad** pending rows so recovery/abort runs when each squad’s MAVLink cycle ends (not when aggregated task cycles align).
+    @discardableResult
+    private func schedulePerPrimarySquadGracefulAfterCycleIfNeeded(
+        taskID: UUID,
+        task: MissionTask,
+        mission: Mission,
+        kind: MissionRunMissionTaskGracefulPendingKind,
+        environment: MissionRunEnvironment
+    ) -> Bool {
+        guard task.regularity == .operatorTriggered else { return false }
+        guard environment.boundPrimarySquadCount(forTaskID: taskID, mission: mission) > 1 else { return false }
+        let primaries = environment.primarySquads(forTaskID: taskID, mission: mission)
+        guard !primaries.isEmpty else { return false }
+        environment.clearPendingMissionTaskGracefulWindDown(forTaskID: taskID)
+        let templateKey: String = kind == .abortAfterCycle
+            ? MissionRunLogTemplateKey.missionTaskAbortGracefulScheduled
+            : MissionRunLogTemplateKey.missionTaskCompleteGracefulScheduled
+        for squad in primaries {
+            let assignmentID = squad.assignment.id
+            environment.setPendingMissionSquadGracefulWindDown(kind: kind, forAssignmentID: assignmentID)
+            cancelDeferredStartsAndDeliverGracefulIfIdleForSquad(
+                assignmentID: assignmentID,
+                taskID: taskID,
+                environment: environment
+            )
+            let squadLog = squadLogForPrimary(environment: environment, task: task, assignmentID: assignmentID)
+            environment.systems.logging.appendLogEvent(
+                level: .info,
+                taskID: squadLog.id,
+                taskLabel: squadLog.label,
+                speaker: .missionControl,
+                templateKey: templateKey,
+                templateParams: ["task": task.name, "slotID": assignmentID.uuidString]
+            )
+        }
+        return true
+    }
+
     /// Schedules abort-policy fleet commands for one path’s bound slots after its **current** autopilot mission cycle ends, or **immediately** if the path is idle (including between-cycle delay: the deferral is cancelled).
     @discardableResult
     func abortMissionTaskAfterCycle(target: MissionRunCommandTarget) -> Bool {
@@ -670,6 +797,15 @@ final class MissionRunSchedulingSubsystem {
                     templateParams: [:]
                 )
                 return false
+            }
+            if schedulePerPrimarySquadGracefulAfterCycleIfNeeded(
+                taskID: taskID,
+                task: task,
+                mission: mission,
+                kind: .abortAfterCycle,
+                environment: environment
+            ) {
+                return true
             }
             environment.clearPendingMissionTaskGracefulWindDown(forTaskID: taskID)
             environment.setPendingMissionTaskGracefulWindDown(kind: .abortAfterCycle, forTaskID: taskID)
@@ -751,6 +887,15 @@ final class MissionRunSchedulingSubsystem {
                     templateParams: [:]
                 )
                 return false
+            }
+            if schedulePerPrimarySquadGracefulAfterCycleIfNeeded(
+                taskID: taskID,
+                task: task,
+                mission: mission,
+                kind: .completeAfterCycle,
+                environment: environment
+            ) {
+                return true
             }
             environment.clearPendingMissionTaskGracefulWindDown(forTaskID: taskID)
             environment.setPendingMissionTaskGracefulWindDown(kind: .completeAfterCycle, forTaskID: taskID)

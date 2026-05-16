@@ -208,4 +208,103 @@ final class MissionRunSquadStateDerivationTests: XCTestCase {
         )
         XCTAssertEqual(squad, .completed)
     }
+
+    func test_completed_squads_stay_completed_when_task_enters_recovery_wind_down() {
+        let rd1 = UUID()
+        let rd2 = UUID()
+        let rd3 = UUID()
+        let task = MissionTask(
+            name: "Triple",
+            enabled: true,
+            cycles: 1,
+            regularity: .continuous,
+            rosterDeviceIds: [rd1, rd2, rd3]
+        )
+        let mission = Mission(
+            name: "M",
+            description: "",
+            type: .mobile,
+            rosterDevices: [
+                RosterDevice(id: rd1, name: "P1", slot: .primary, vehicleClass: .uavCopter),
+                RosterDevice(id: rd2, name: "P2", slot: .primary, vehicleClass: .uavCopter),
+                RosterDevice(id: rd3, name: "P3", slot: .primary, vehicleClass: .uavCopter),
+            ],
+            routeMacro: RouteMacro(tasks: [task])
+        )
+        let a1 = MissionRunAssignment(
+            taskId: task.id,
+            rosterDeviceId: rd1,
+            slotName: "T1",
+            attachedFleetVehicleToken: "legacy:1"
+        )
+        let a2 = MissionRunAssignment(
+            taskId: task.id,
+            rosterDeviceId: rd2,
+            slotName: "T2",
+            attachedFleetVehicleToken: "legacy:2"
+        )
+        let a3 = MissionRunAssignment(
+            taskId: task.id,
+            rosterDeviceId: rd3,
+            slotName: "T3",
+            attachedFleetVehicleToken: "legacy:3"
+        )
+        let run = MissionRunEnvironment(mission: mission, assignments: [a1, a2, a3])
+        let taskID = task.id
+        run.status = .running
+        run.setSessionPhase(.executing)
+        run.markSquadMissionEndRecoveryCompleted(forAssignmentID: a1.id)
+        run.markSquadMissionEndRecoveryCompleted(forAssignmentID: a2.id)
+        run.refreshDerivedSquadStates()
+        XCTAssertEqual(run.squadStateByAssignmentID[a1.id], .completed)
+        XCTAssertEqual(run.squadStateByAssignmentID[a2.id], .completed)
+
+        run.markMissionTaskCompleteWindDownIssued(forTaskID: taskID)
+        run.refreshDerivedSquadStates()
+        run.refreshDerivedTaskStates()
+
+        XCTAssertEqual(run.squadStateByAssignmentID[a1.id], .completed)
+        XCTAssertEqual(run.squadStateByAssignmentID[a2.id], .completed)
+        XCTAssertEqual(run.squadStateByAssignmentID[a3.id], .recovery)
+        XCTAssertEqual(run.taskStateByTaskID[taskID], .recovery)
+    }
+
+    @MainActor
+    func test_enterRunEndMode_preserves_squad_wind_down_for_late_recipe_ack() {
+        let rd = RosterDevice(name: "P3", slot: .primary, vehicleClass: .uavCopter)
+        let task = MissionTask(name: "Triple", enabled: true, cycles: 1, regularity: .continuous, rosterDeviceIds: [rd.id])
+        let mission = Mission(
+            name: "M",
+            description: "",
+            type: .mobile,
+            rosterDevices: [rd],
+            routeMacro: RouteMacro(tasks: [task])
+        )
+        let lanes = MissionRunAssignmentSlotStateLanes(commanded: .policySucceeded, observed: .policySucceeded)
+        let row = MissionRunAssignment(
+            taskId: task.id,
+            rosterDeviceId: rd.id,
+            slotName: "T3",
+            attachedFleetVehicleToken: FleetMissionVehicleToken.sitl(UUID()).storageKey,
+            slotLifecycleLanes: lanes
+        )
+        let run = MissionRunEnvironment(mission: mission, assignments: [row])
+        run.status = .running
+        run.setSessionPhase(.executing)
+        run.markSquadCompletePolicyWindDownDispatchIssued(forAssignmentID: row.id)
+
+        run.enterRunEndMode(kind: .oneOffAutopilotFinished, operatorWindDown: .recoveryPhase, oneOffAutopilotFinished: true)
+        XCTAssertTrue(run.squadCompletePolicyWindDownIssuedAssignmentIDs.contains(row.id))
+        XCTAssertEqual(run.status, .recovery)
+
+        run.applySlotEvidenceAutoMissionEndAckIfNeeded(forAssignmentIDs: Set([row.id]))
+        run.refreshDerivedSquadStates()
+        XCTAssertEqual(run.squadStateByAssignmentID[row.id], .completed)
+
+        run.finalizeOrchestrationOnMarkComplete()
+        run.status = .completed
+        XCTAssertFalse(run.allowsMissionEndAutoSettlement)
+        run.applySlotEvidenceAutoMissionEndAckIfNeeded(forAssignmentIDs: Set([row.id]))
+        XCTAssertEqual(run.squadStateByAssignmentID[row.id], .completed)
+    }
 }

@@ -13,7 +13,11 @@ extension MissionRunEnvironment {
         if let terminal = MissionRunPolicySlotPushEvidence.terminalSlotStateIfAffected(issued: issued, success: success) {
             let changed = setSlotPolicyLanesBoth(assignmentID: issued.assignmentID, terminal: terminal)
             if changed {
-                applySlotEvidenceAutoMissionEndAckIfNeeded(forAssignmentIDs: Set([issued.assignmentID]))
+                if allowsMissionEndAutoSettlement {
+                    applySlotEvidenceAutoMissionEndAckIfNeeded(forAssignmentIDs: Set([issued.assignmentID]))
+                } else {
+                    refreshDerivedTaskStates()
+                }
             }
             return
         }

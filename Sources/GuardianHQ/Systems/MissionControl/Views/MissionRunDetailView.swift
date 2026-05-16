@@ -163,6 +163,8 @@ struct MissionRunDetailView: View {
     @State private var reserveAutoSwapLastAttemptAtByVacancyID: [UUID: Date] = [:]
     /// MC-R Engage: live **stabilize telemetry** watch (Park / Loiter) for one assignment at a time.
     @State private var missionLiveEngageStabilizeTelemetryWatch: MissionLiveEngageStabilizeTelemetryWatch?
+    /// Assignment triage overlay: async **Retry recovery / abort protocol** in flight (disables Continue + Park).
+    @State private var operatorPolicyWindDownRetryBusyAssignmentID: UUID?
     /// Deferred one-off schedule: value + unit for **Go** on the running countdown banner (same control model as MCS Timing Tasks).
     @State private var scheduledStartPostponeValue: Double = 5
     @State private var scheduledStartPostponeUnit: DelayUnit = .mins
@@ -232,15 +234,13 @@ struct MissionRunDetailView: View {
         let abortGraceful: Bool
         let completeNow: Bool
         let completeGraceful: Bool
-        let revokeTaskGraceful: Bool
-    }
+        let scheduledGracefulNoticeKind: MissionRunMissionTaskGracefulPendingKind?
+        let showAbortTaskCard: Bool
+        let showCompleteTaskCard: Bool
 
-    private struct MissionLiveSquadWindDownAvailability: Equatable {
-        let abortNow: Bool
-        let abortGraceful: Bool
-        let completeNow: Bool
-        let completeGraceful: Bool
-        let revokeSquadGraceful: Bool
+        var hasVisibleChrome: Bool {
+            showAbortTaskCard || showCompleteTaskCard || scheduledGracefulNoticeKind != nil
+        }
     }
 
     init(
@@ -1212,47 +1212,27 @@ struct MissionRunDetailView: View {
         .frame(maxWidth: .infinity, alignment: hero ? .center : .trailing)
     }
 
-    /// Operator **Trigger** only when the task is not already in an active MAVLink cycle (see ``MissionTaskState/executing``).
-    private func showMissionTaskTrigger(for task: RoutePath) -> Bool {
-        guard run.status == .running, task.enabled, task.regularity == .operatorTriggered else { return false }
-        return run.taskStateByTaskID[task.id] != .executing
+    private func showOperatorTriggerNextSquad(for task: RoutePath) -> Bool {
+        guard let mission = run.template else { return false }
+        return MissionControlOperatorTriggerNextSquadPolicy.showsTriggerButton(
+            run: run,
+            task: task,
+            mission: mission
+        )
     }
 
-    private func showDeferredFirstWaveSquadRelease(for task: RoutePath) -> Bool {
-        guard task.enabled else { return false }
-        guard run.status == .running, run.sessionPhase == .executing else { return false }
-        return !(run.deferredFirstWaveSquadAssignmentIDsByTaskID[task.id] ?? []).isEmpty
-    }
-
-    private func missionLiveTaskProgressTriggerControl(task: RoutePath, hero: Bool) -> some View {
+    private func missionLiveOperatorTriggerNextSquadControl(task: RoutePath, hero: Bool) -> some View {
         let controlSize: ControlSize = hero ? .regular : .small
-        return Button("Trigger") {
-            if run.startMissionTask(taskID: task.id) {
-                toastCenter.show("Task cycle starting: \(task.name)", style: .info)
-            } else {
-                toastCenter.show(
-                    "Could not start that task — check each slot has a primary vehicle with token, task has waypoints, and the mission log for planner errors.",
-                    style: .error
-                )
-            }
-            syncRunFromStore()
-            onUpdate(run)
-        }
-        .buttonStyle(.borderedProminent).guardianPointerOnHover()
-        .tint(.blue)
-        .controlSize(controlSize)
-    }
-
-    private func missionLiveDeferredFirstWaveSquadReleaseControl(task: RoutePath, hero: Bool) -> some View {
-        let controlSize: ControlSize = hero ? .regular : .small
-        return Button("Start next squad") {
-            applyDeferredFirstWaveSquadRelease(task: task)
+        return Button("Trigger next squad") {
+            applyOperatorTriggerNextSquad(task: task)
         }
         .buttonStyle(.borderedProminent)
         .guardianPointerOnHover()
         .tint(.blue)
         .controlSize(controlSize)
-        .help("Launch the next primary that was held for first-wave stagger (or override waypoint auto-release).")
+        .help(
+            "Start the next primary on this path: the lead’s first or next lap, the next first-wave stagger hold, or the next between-cycle lap — one primary per press."
+        )
     }
 
     private func missionLiveTaskWindDownSectionVisible(task: RoutePath, now: Date) -> Bool {
@@ -1261,7 +1241,7 @@ struct MissionRunDetailView: View {
         guard run.status == .running || run.status == .paused else { return false }
         let a = missionLiveTaskWindDownAvailability(task: task, now: now)
         let squadStrip = missionLiveMultiPrimarySquadsExist(for: task) && missionLiveAnySquadWindDownRowVisible(task: task, now: now)
-        return a.revokeTaskGraceful || a.abortNow || a.abortGraceful || a.completeNow || a.completeGraceful || squadStrip
+        return a.hasVisibleChrome || squadStrip
     }
 
     private func missionLiveMultiPrimarySquadsExist(for task: RoutePath) -> Bool {
@@ -1292,83 +1272,30 @@ struct MissionRunDetailView: View {
         let squads = run.primarySquads(forTaskID: task.id, mission: mission)
         guard squads.count > 1 else { return false }
         for s in squads {
-            let q = missionLiveSquadWindDownAvailability(task: task, assignment: s.assignment, now: now)
-            if q.revokeSquadGraceful || q.abortNow || q.abortGraceful || q.completeNow || q.completeGraceful { return true }
+            let q = MCRLiveTaskTriageSquadWindDownAvailability.resolve(
+                run: run,
+                task: task,
+                assignment: s.assignment,
+                now: now
+            )
+            if q.hasVisibleChrome { return true }
         }
         return false
-    }
-
-    private func missionLiveSquadWindDownAvailability(
-        task: RoutePath,
-        assignment: MissionRunAssignment,
-        now: Date
-    ) -> MissionLiveSquadWindDownAvailability {
-        let aid = assignment.id
-        let pendingSquad = run.pendingMissionSquadGracefulWindDownKindByAssignmentID[aid]
-        let revokeSquadGraceful = pendingSquad != nil
-        let taskPending = run.pendingMissionTaskGracefulWindDownKindByTaskID[task.id] != nil
-
-        let hasSlots = !run.assignmentsBoundToMissionTask(taskID: task.id).isEmpty
-        let runActive = run.status == .running || run.status == .paused
-        let inExecutingPhase = run.sessionPhase == .executing
-        let squadState = run.squadStateByAssignmentID[aid] ?? .ready
-        let wholeRunGraceful = run.gracefulStopKind != .none
-        let abortIssued = run.missionTaskAbortWindDownIssuedTaskIDs.contains(task.id)
-        let completeIssued = run.missionTaskCompleteWindDownIssuedTaskIDs.contains(task.id)
-        let squadSuppressed = run.missionSquadAutopilotAutostartSuppressedAssignmentIDs.contains(aid)
-
-        let squadStartDef = run.squadStartDeferralByAssignmentID[aid]
-        let inSquadDeferral = task.enabled && run.status == .running && (squadStartDef.map { now < $0.startAt } ?? false)
-
-        let baseAPI = task.enabled
-            && hasSlots
-            && runActive
-            && inExecutingPhase
-            && !wholeRunGraceful
-            && !taskPending
-
-        let protocolBlocks: Bool = {
-            switch squadState {
-            case .recovery, .aborting, .completed, .aborted:
-                return true
-            default:
-                return false
-            }
-        }()
-
-        let blockedByIssued = abortIssued || completeIssued || squadSuppressed
-
-        var abortNow = baseAPI && !protocolBlocks && !blockedByIssued
-        var abortGraceful = baseAPI && !protocolBlocks && !blockedByIssued && !inSquadDeferral
-        var completeNow = baseAPI && !protocolBlocks && !blockedByIssued
-        var completeGraceful = baseAPI && !protocolBlocks && !blockedByIssued && !inSquadDeferral
-
-        switch pendingSquad {
-        case .some(.abortAfterCycle):
-            completeNow = false
-            completeGraceful = false
-            abortGraceful = false
-        case .some(.completeAfterCycle):
-            abortNow = false
-            abortGraceful = false
-            completeGraceful = false
-        case .none:
-            break
-        }
-
-        return MissionLiveSquadWindDownAvailability(
-            abortNow: abortNow,
-            abortGraceful: abortGraceful,
-            completeNow: completeNow,
-            completeGraceful: completeGraceful,
-            revokeSquadGraceful: revokeSquadGraceful
-        )
     }
 
     private func missionLiveTaskWindDownAvailability(task: RoutePath, now: Date) -> MissionLiveTaskWindDownAvailability {
         let pending = run.pendingMissionTaskGracefulWindDownKindByTaskID[task.id]
         let anySquadPending = missionLiveAnySquadGracefulPending(forTaskID: task.id)
-        let revokeTaskGraceful = pending != nil || anySquadPending
+        let squadPendings: [MissionRunMissionTaskGracefulPendingKind] = {
+            guard let mission = run.template else { return [] }
+            return run.primarySquads(forTaskID: task.id, mission: mission).compactMap {
+                run.pendingMissionSquadGracefulWindDownKindByAssignmentID[$0.assignment.id]
+            }
+        }()
+        let scheduledGracefulNoticeKind = MissionControlMissionEndWindDownControlVisibility.resolvedScheduledGracefulNoticeKind(
+            taskPending: pending,
+            squadPendings: squadPendings
+        )
 
         let hasSlots = !run.assignmentsBoundToMissionTask(taskID: task.id).isEmpty
         let runActive = run.status == .running || run.status == .paused
@@ -1386,21 +1313,27 @@ struct MissionRunDetailView: View {
             && inExecutingPhase
             && !wholeRunGraceful
 
-        let protocolBlocksNewWindDown: Bool = {
-            switch state {
-            case .recovery, .aborting, .completed, .aborted:
-                return true
-            default:
-                return false
-            }
-        }()
+        let protocolShowsAbort = MissionControlMissionEndWindDownControlVisibility.showsAbortOptions(for: state)
+        let protocolShowsComplete = MissionControlMissionEndWindDownControlVisibility.showsCompleteOptions(for: state)
+        let showAbortTaskCard = MissionControlMissionEndWindDownControlVisibility.showsTaskPathAbortWindDownCard(
+            protocolShowsAbort: protocolShowsAbort,
+            taskPending: pending,
+            anySquadGracefulPending: anySquadPending
+        )
+        let showCompleteTaskCard = MissionControlMissionEndWindDownControlVisibility.showsTaskPathCompleteWindDownCard(
+            protocolShowsComplete: protocolShowsComplete,
+            taskPending: pending,
+            anySquadGracefulPending: anySquadPending
+        )
+        let protocolBlocksAbort = !protocolShowsAbort
+        let protocolBlocksComplete = !protocolShowsComplete
 
         let blockedByIssued = abortIssued || completeIssued
 
-        var abortNow = baseAPI && !protocolBlocksNewWindDown && !blockedByIssued
-        var abortGraceful = baseAPI && !protocolBlocksNewWindDown && !blockedByIssued && !inStartDeferral
-        var completeNow = baseAPI && !protocolBlocksNewWindDown && !blockedByIssued
-        var completeGraceful = baseAPI && !protocolBlocksNewWindDown && !blockedByIssued && !inStartDeferral
+        var abortNow = baseAPI && !protocolBlocksAbort && !blockedByIssued
+        var abortGraceful = baseAPI && !protocolBlocksAbort && !blockedByIssued && !inStartDeferral
+        var completeNow = baseAPI && !protocolBlocksComplete && !blockedByIssued
+        var completeGraceful = baseAPI && !protocolBlocksComplete && !blockedByIssued && !inStartDeferral
 
         switch pending {
         case .some(.abortAfterCycle):
@@ -1427,7 +1360,22 @@ struct MissionRunDetailView: View {
             abortGraceful: abortGraceful,
             completeNow: completeNow,
             completeGraceful: completeGraceful,
-            revokeTaskGraceful: revokeTaskGraceful
+            scheduledGracefulNoticeKind: scheduledGracefulNoticeKind,
+            showAbortTaskCard: showAbortTaskCard,
+            showCompleteTaskCard: showCompleteTaskCard
+        )
+    }
+
+    @ViewBuilder
+    private func missionLiveScheduledEndPolicyNotice(
+        task: RoutePath,
+        kind: MissionRunMissionTaskGracefulPendingKind
+    ) -> some View {
+        let pathWide = run.pendingMissionTaskGracefulWindDownKindByTaskID[task.id] == kind
+        MCRScheduledEndPolicyInlineNotice(
+            kind: kind,
+            detail: "",
+            onRevoke: { applyTaskRevokeGracefulWindDown(task: task) }
         )
     }
 
@@ -1435,6 +1383,7 @@ struct MissionRunDetailView: View {
     private func missionLiveTaskWindDownActionsSection(task: RoutePath, now: Date) -> some View {
         let a = missionLiveTaskWindDownAvailability(task: task, now: now)
         VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+            if a.showAbortTaskCard {
             missionLiveTriageActionRowCard(bodyCaption: "Abort Task") {
                 HStack(spacing: GuardianSpacing.xs) {
                     GuardianThemedButton(
@@ -1449,8 +1398,8 @@ struct MissionRunDetailView: View {
                     .guardianPointerOnHover()
                     .help(
                         a.abortNow
-                            ? "Issue abort-policy fleet commands for this path’s slots immediately."
-                            : "Unavailable while another intent blocks it, this path is in recovery/abort protocol, a whole-run end-of-cycle stop is active, or the run is not executing."
+                            ? "Issue abort-policy fleet commands for this task's slots immediately."
+                            : "Unavailable while another intent blocks it, this task is in recovery/abort protocol, a whole-run end-of-cycle stop is active, or the run is not executing."
                     )
 
                     GuardianThemedButton(
@@ -1465,12 +1414,14 @@ struct MissionRunDetailView: View {
                     .guardianPointerOnHover()
                     .help(
                         a.abortGraceful
-                            ? "Schedule abort-policy commands at the next shared autopilot mission cycle end for this path only."
+                            ? "Schedule abort-policy commands at the next shared autopilot mission cycle end for this task only."
                             : "Unavailable if complete-after-cycle is already scheduled, during MAVLink start deferral, or while a whole-run graceful stop is active."
                     )
                 }
             }
+            }
 
+            if a.showCompleteTaskCard {
             missionLiveTriageActionRowCard(bodyCaption: "Complete Task") {
                 HStack(spacing: GuardianSpacing.xs) {
                     GuardianThemedButton(
@@ -1485,8 +1436,8 @@ struct MissionRunDetailView: View {
                     .guardianPointerOnHover()
                     .help(
                         a.completeNow
-                            ? "Issue complete-policy recovery wind-down for this path’s slots immediately."
-                            : "Unavailable while another intent blocks it, this path is in recovery/abort protocol, a whole-run end-of-cycle stop is active, or the run is not executing."
+                            ? "Issue complete-policy recovery wind-down for this task's slots immediately."
+                            : "Unavailable while another intent blocks it, this task is in recovery/abort protocol, a whole-run end-of-cycle stop is active, or the run is not executing."
                     )
 
                     GuardianThemedButton(
@@ -1501,175 +1452,67 @@ struct MissionRunDetailView: View {
                     .guardianPointerOnHover()
                     .help(
                         a.completeGraceful
-                            ? "Schedule recovery wind-down at the next shared autopilot mission cycle end for this path only."
+                            ? "Schedule recovery wind-down at the next shared autopilot mission cycle end for this task only."
                             : "Unavailable if abort-after-cycle is already scheduled, during MAVLink start deferral, or while a whole-run graceful stop is active."
                     )
                 }
             }
+            }
 
-            if a.revokeTaskGraceful {
-                GuardianThemedButton(
-                    title: "Revoke scheduled path wind-down",
-                    accent: .danger,
-                    surface: .outline,
-                    size: .small,
-                    shape: .cornered,
-                    action: { applyTaskRevokeGracefulWindDown(task: task) }
-                )
-                .guardianPointerOnHover()
-                .help(
-                    "Cancel scheduled end-of-cycle wind-down for this path (path-wide or per-squad). Does not change a whole-run graceful stop."
-                )
+            if let scheduledKind = a.scheduledGracefulNoticeKind {
+                missionLiveScheduledEndPolicyNotice(task: task, kind: scheduledKind)
             }
 
             if let mission = run.template, missionLiveMultiPrimarySquadsExist(for: task) {
-                let squads = run.primarySquads(forTaskID: task.id, mission: mission)
-                ForEach(squads, id: \.assignment.id) { squad in
-                    let label = MissionControlSquadUtilities.squadDisplayName(
-                        taskName: task.name,
-                        squadIndex: squad.squadIndex
-                    )
-                    let sq = missionLiveSquadWindDownAvailability(
-                        task: task,
-                        assignment: squad.assignment,
-                        now: now
-                    )
-                    missionLiveSquadWindDownControls(
-                        task: task,
-                        squad: squad,
-                        squadLabel: label,
-                        availability: sq
-                    )
-                }
+                MCRLiveTaskTriageSquadActionsPanel(
+                    run: run,
+                    task: task,
+                    mission: mission,
+                    now: now,
+                    onSquadAbortNow: { assignmentID, label in
+                        presentedRunConfirm = .squadAbortNow(
+                            taskID: task.id,
+                            assignmentID: assignmentID,
+                            label: label
+                        )
+                    },
+                    onSquadAbortGraceful: { assignmentID, label in
+                        presentedRunConfirm = .squadAbortGraceful(
+                            taskID: task.id,
+                            assignmentID: assignmentID,
+                            label: label
+                        )
+                    },
+                    onSquadCompleteNow: { assignmentID, label in
+                        presentedRunConfirm = .squadCompleteNow(
+                            taskID: task.id,
+                            assignmentID: assignmentID,
+                            label: label
+                        )
+                    },
+                    onSquadCompleteGraceful: { assignmentID, label in
+                        presentedRunConfirm = .squadCompleteGraceful(
+                            taskID: task.id,
+                            assignmentID: assignmentID,
+                            label: label
+                        )
+                    },
+                    onRunUpdated: {
+                        syncRunFromStore()
+                        onUpdate(run)
+                    }
+                )
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    @ViewBuilder
-    private func missionLiveSquadWindDownControls(
-        task: RoutePath,
-        squad: (assignment: MissionRunAssignment, squadIndex: Int),
-        squadLabel: String,
-        availability: MissionLiveSquadWindDownAvailability
-    ) -> some View {
-        missionLiveTriageActionRowCard(bodyCaption: squadLabel) {
-            VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
-                HStack(spacing: GuardianSpacing.xs) {
-                    GuardianThemedButton(
-                        title: "Abort now",
-                        accent: .danger,
-                        surface: .solid,
-                        size: .small,
-                        shape: .cornered,
-                        action: {
-                            presentedRunConfirm = .squadAbortNow(
-                                taskID: task.id,
-                                assignmentID: squad.assignment.id,
-                                label: squadLabel
-                            )
-                        }
-                    )
-                    .disabled(!availability.abortNow)
-                    .guardianPointerOnHover()
-                    .help(
-                        availability.abortNow
-                            ? "Issue abort-policy commands for this primary squad immediately."
-                            : "Unavailable while another intent blocks it, this squad is in recovery or abort protocol, or the run is not executing."
-                    )
-                    GuardianThemedButton(
-                        title: "Abort after cycle",
-                        accent: .danger,
-                        surface: .outline,
-                        size: .small,
-                        shape: .cornered,
-                        action: {
-                            presentedRunConfirm = .squadAbortGraceful(
-                                taskID: task.id,
-                                assignmentID: squad.assignment.id,
-                                label: squadLabel
-                            )
-                        }
-                    )
-                    .disabled(!availability.abortGraceful)
-                    .guardianPointerOnHover()
-                    .help(
-                        availability.abortGraceful
-                            ? "Schedule abort-policy commands when this squad’s current MAVLink mission cycle ends."
-                            : "Unavailable if another wind-down is already scheduled, during this squad’s MAVLink start deferral, or while a whole-run graceful stop is active."
-                    )
-                }
-                HStack(spacing: GuardianSpacing.xs) {
-                    GuardianThemedButton(
-                        title: "Complete now",
-                        accent: .primary,
-                        surface: .solid,
-                        size: .small,
-                        shape: .cornered,
-                        action: {
-                            presentedRunConfirm = .squadCompleteNow(
-                                taskID: task.id,
-                                assignmentID: squad.assignment.id,
-                                label: squadLabel
-                            )
-                        }
-                    )
-                    .disabled(!availability.completeNow)
-                    .guardianPointerOnHover()
-                    .help(
-                        availability.completeNow
-                            ? "Issue complete-policy recovery wind-down for this primary squad immediately."
-                            : "Unavailable while another intent blocks it, this squad is in recovery or abort protocol, or the run is not executing."
-                    )
-                    GuardianThemedButton(
-                        title: "Complete after cycle",
-                        accent: .primary,
-                        surface: .outline,
-                        size: .small,
-                        shape: .cornered,
-                        action: {
-                            presentedRunConfirm = .squadCompleteGraceful(
-                                taskID: task.id,
-                                assignmentID: squad.assignment.id,
-                                label: squadLabel
-                            )
-                        }
-                    )
-                    .disabled(!availability.completeGraceful)
-                    .guardianPointerOnHover()
-                    .help(
-                        availability.completeGraceful
-                            ? "Schedule recovery wind-down when this squad’s current MAVLink mission cycle ends."
-                            : "Unavailable if another wind-down is already scheduled, during this squad’s MAVLink start deferral, or while a whole-run graceful stop is active."
-                    )
-                }
-                if availability.revokeSquadGraceful {
-                    GuardianThemedButton(
-                        title: "Revoke scheduled squad wind-down",
-                        accent: .danger,
-                        surface: .outline,
-                        size: .small,
-                        shape: .cornered,
-                        action: {
-                            run.revokeMissionSquadGracefulWindDown(forAssignmentID: squad.assignment.id)
-                            toastCenter.show("Revoked scheduled wind-down for \(squadLabel).", style: .info)
-                            syncRunFromStore()
-                            onUpdate(run)
-                        }
-                    )
-                    .guardianPointerOnHover()
-                    .help("Cancel the scheduled end-of-cycle wind-down for this primary squad only.")
-                }
-            }
-        }
-    }
-
     private func applyTaskAbortNow(task: RoutePath) {
         run.attachServices(fleetLink: fleetLink, sitl: sitl, generalSettings: generalSettings)
         if run.abortMissionTask(.task(task.id)) {
-            toastCenter.show("Abort issued for path \"\(task.name)\".", style: .info)
+            toastCenter.show("Abort issued for task \"\(task.name)\".", style: .info)
         } else {
-            toastCenter.show("Could not abort this path — check the mission log and that the run is executing.", style: .error)
+            toastCenter.show("Could not abort this task — check the mission log and that the run is executing.", style: .error)
         }
         syncRunFromStore()
         onUpdate(run)
@@ -1677,9 +1520,9 @@ struct MissionRunDetailView: View {
 
     private func applyTaskAbortGraceful(task: RoutePath) {
         if run.abortMissionTaskGraceful(.task(task.id)) {
-            toastCenter.show("Abort after cycle scheduled for path \"\(task.name)\".", style: .info)
+            toastCenter.show("Abort after cycle scheduled for task \"\(task.name)\".", style: .info)
         } else {
-            toastCenter.show("Could not schedule path abort after cycle — a whole-run stop may be active or there are no bound slots.", style: .error)
+            toastCenter.show("Could not schedule task abort after cycle — a whole-run stop may be active or there are no bound slots.", style: .error)
         }
         syncRunFromStore()
         onUpdate(run)
@@ -1688,9 +1531,9 @@ struct MissionRunDetailView: View {
     private func applyTaskCompleteNow(task: RoutePath) {
         run.attachServices(fleetLink: fleetLink, sitl: sitl, generalSettings: generalSettings)
         if run.completeMissionTask(.task(task.id)) {
-            toastCenter.show("Complete wind-down issued for path \"\(task.name)\".", style: .info)
+            toastCenter.show("Complete wind-down issued for task \"\(task.name)\".", style: .info)
         } else {
-            toastCenter.show("Could not complete this path — check policies, the mission log, and that the run is executing.", style: .error)
+            toastCenter.show("Could not complete this task — check policies, the mission log, and that the run is executing.", style: .error)
         }
         syncRunFromStore()
         onUpdate(run)
@@ -1698,9 +1541,9 @@ struct MissionRunDetailView: View {
 
     private func applyTaskCompleteGraceful(task: RoutePath) {
         if run.completeMissionTaskGraceful(.task(task.id)) {
-            toastCenter.show("Complete after cycle scheduled for path \"\(task.name)\".", style: .info)
+            toastCenter.show("Complete after cycle scheduled for task \"\(task.name)\".", style: .info)
         } else {
-            toastCenter.show("Could not schedule path complete after cycle — a whole-run stop may be active or there are no bound slots.", style: .error)
+            toastCenter.show("Could not schedule task complete after cycle — a whole-run stop may be active or there are no bound slots.", style: .error)
         }
         syncRunFromStore()
         onUpdate(run)
@@ -1708,18 +1551,18 @@ struct MissionRunDetailView: View {
 
     private func applyTaskRevokeGracefulWindDown(task: RoutePath) {
         run.revokeMissionTaskGracefulWindDown(forTaskID: task.id)
-        toastCenter.show("Revoked scheduled wind-down for path \"\(task.name)\".", style: .info)
+        toastCenter.show("Revoked scheduled wind-down for task \"\(task.name)\".", style: .info)
         syncRunFromStore()
         onUpdate(run)
     }
 
-    private func applyDeferredFirstWaveSquadRelease(task: RoutePath) {
+    private func applyOperatorTriggerNextSquad(task: RoutePath) {
         run.attachServices(fleetLink: fleetLink, sitl: sitl, generalSettings: generalSettings)
-        if run.releaseNextDeferredFirstWaveSquad(taskID: task.id) {
-            toastCenter.show("Next primary launching for path \"\(task.name)\".", style: .info)
+        if run.startOperatorTriggeredNextSquad(taskID: task.id) {
+            toastCenter.show("Launching next squad for task \"\(task.name)\".", style: .info)
         } else {
             toastCenter.show(
-                "Could not launch the next primary — check the mission log and that the run is executing.",
+                "Could not launch the next squad — check each slot has a vehicle, the mission log, and that the run is executing.",
                 style: .error
             )
         }
@@ -1751,19 +1594,10 @@ struct MissionRunDetailView: View {
                     listAlterNumericWidths: true
                 )
                 .padding(.top, GuardianSpacing.xxs)
-            } else if showMissionTaskTrigger(for: task) {
+            } else             if showOperatorTriggerNextSquad(for: task) {
                 HStack {
                     Spacer(minLength: 0)
-                    missionLiveTaskProgressTriggerControl(task: task, hero: true)
-                    Spacer(minLength: 0)
-                }
-                .padding(.top, GuardianSpacing.xxs)
-            }
-
-            if showDeferredFirstWaveSquadRelease(for: task) {
-                HStack {
-                    Spacer(minLength: 0)
-                    missionLiveDeferredFirstWaveSquadReleaseControl(task: task, hero: true)
+                    missionLiveOperatorTriggerNextSquadControl(task: task, hero: true)
                     Spacer(minLength: 0)
                 }
                 .padding(.top, GuardianSpacing.xxs)
@@ -1786,19 +1620,10 @@ struct MissionRunDetailView: View {
                 listAlterNumericWidths: true
             )
             .padding(.top, GuardianSpacing.xxs)
-        } else if case .missionTrigger = snapshot.footerKind {
+        } else if case .operatorTriggerNextSquad = snapshot.footerKind {
             HStack {
                 Spacer(minLength: 0)
-                missionLiveTaskProgressTriggerControl(task: task, hero: true)
-                Spacer(minLength: 0)
-            }
-            .padding(.top, GuardianSpacing.xxs)
-        }
-
-        if case .deferredFirstWaveSquadRelease = snapshot.footerKind {
-            HStack {
-                Spacer(minLength: 0)
-                missionLiveDeferredFirstWaveSquadReleaseControl(task: task, hero: true)
+                missionLiveOperatorTriggerNextSquadControl(task: task, hero: true)
                 Spacer(minLength: 0)
             }
             .padding(.top, GuardianSpacing.xxs)
@@ -4030,7 +3855,11 @@ struct MissionRunDetailView: View {
             if let id, focusedLiveAssignmentID == id {
                 focusedLiveAssignmentID = nil
                 liveReserveSwapPick = nil
+                operatorPolicyWindDownRetryBusyAssignmentID = nil
             } else {
+                if id != operatorPolicyWindDownRetryBusyAssignmentID {
+                    operatorPolicyWindDownRetryBusyAssignmentID = nil
+                }
                 if let pick = liveReserveSwapPick, pick.vacancyAssignmentID != id {
                     liveReserveSwapPick = nil
                 }
@@ -4313,51 +4142,35 @@ struct MissionRunDetailView: View {
                         sitl: sitl
                     )
 
-                    if missionLiveEngageStabilizeChromeEnabled(assignment: assignment) {
+                    if missionLiveEngageStabilizeChromeEnabled(assignment: assignment),
+                       let mission = resolvedMission {
                         let liveVid = telemetryVehicleID(for: assignment)
-                        let phase = liveVid.map { fleetLink.mcrOperatorVehiclePhase(vehicleID: $0) } ?? .unknown
-                        if phase == .operatorParkAwaitingContinue {
-                            missionLiveTriageActionRowCard(bodyCaption: "Resume after park") {
-                                GuardianPrimaryProminentButton(title: "Continue mission") {
-                                    performOperatorContinueMissionAfterPark(assignment: assignment)
-                                }
-                                .guardianPointerOnHover()
-                                .help("Set mission mode, arm if needed, and start mission execution on the autopilot.")
-                            }
-                            missionLiveTriageActionRowCard(bodyCaption: "Live Drive") {
-                                GuardianPrimaryProminentButton(title: "Engage") {
-                                    performOperatorEngageLiveDriveFromPark(assignment: assignment)
-                                }
-                                .guardianPointerOnHover()
-                                .help("Open Live Drive for this vehicle to take manual control.")
-                            }
-                        } else {
-                            missionLiveTriageActionRowCard(bodyCaption: "Stop Vehicle") {
-                                HStack(spacing: GuardianSpacing.xs) {
-                                    GuardianPrimaryProminentButton(title: "Park") {
-                                        performOperatorEngageStabilize(assignment: assignment, kind: .park)
-                                    }
-                                    .guardianPointerOnHover()
-                                    .help("Send a park catalogue command to this vehicle through the mission run log.")
-                                    if missionLiveAssignmentTriageStabilizeOffersLoiter(
-                                        assignment: assignment,
-                                        rosterDevice: rosterDevice
-                                    ) {
-                                        GuardianThemedButton(
-                                            title: "Loiter",
-                                            accent: .primary,
-                                            surface: .outline,
-                                            size: .small,
-                                            shape: .cornered,
-                                            action: { performOperatorEngageStabilize(assignment: assignment, kind: .loiter) }
-                                        )
-                                        .guardianPointerOnHover()
-                                        .help("Send a loiter / hold catalogue command to this vehicle through the mission run log.")
-                                    }
-                                }
-                            }
-                            missionLiveEngageStabilizeTelemetryNotice(assignment: assignment)
-                        }
+                        MCRAssignmentTriageEngageStabilizeActions(
+                            fleetLink: fleetLink,
+                            vehicleID: liveVid,
+                            operatorPhase: liveVid.map { fleetLink.mcrOperatorVehiclePhase(vehicleID: $0) } ?? .unknown,
+                            continueIntent: run.resolveOperatorContinueAfterParkIntent(
+                                assignment: assignment,
+                                rosterDevice: rosterDevice,
+                                mission: mission,
+                                fleetLink: fleetLink,
+                                vehicleID: liveVid
+                            ),
+                            isPolicyWindDownRetryBusy: operatorPolicyWindDownRetryBusyAssignmentID == assignment.id,
+                            offersLoiter: missionLiveAssignmentTriageStabilizeOffersLoiter(
+                                assignment: assignment,
+                                rosterDevice: rosterDevice
+                            ),
+                            onPark: { performOperatorEngageStabilize(assignment: assignment, kind: .park) },
+                            onLoiter: { performOperatorEngageStabilize(assignment: assignment, kind: .loiter) },
+                            onContinue: {
+                                performOperatorContinueAfterPark(assignment: assignment, rosterDevice: rosterDevice)
+                            },
+                            onEngageLiveDrive: { performOperatorEngageLiveDriveFromPark(assignment: assignment) },
+                            stabilizeTelemetryNotice: missionLiveEngageStabilizeTelemetryNoticeIfWatching(
+                                assignment: assignment
+                            )
+                        )
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -4409,48 +4222,35 @@ struct MissionRunDetailView: View {
                         sitl: sitl
                     )
 
-                    if missionLiveEngageStabilizeChromeEnabled(assignment: syn) {
+                    if missionLiveEngageStabilizeChromeEnabled(assignment: syn),
+                       let mission = resolvedMission {
                         let liveVid = telemetryVehicleID(for: syn)
-                        let phase = liveVid.map { fleetLink.mcrOperatorVehiclePhase(vehicleID: $0) } ?? .unknown
-                        if phase == .operatorParkAwaitingContinue {
-                            missionLiveTriageActionRowCard(bodyCaption: "Resume after park") {
-                                GuardianPrimaryProminentButton(title: "Continue mission") {
-                                    performOperatorContinueMissionAfterPark(assignment: syn)
-                                }
-                                .guardianPointerOnHover()
-                                .help("Set mission mode, arm if needed, and start mission execution on the autopilot.")
-                            }
-                            missionLiveTriageActionRowCard(bodyCaption: "Live Drive") {
-                                GuardianPrimaryProminentButton(title: "Engage") {
-                                    performOperatorEngageLiveDriveFromPark(assignment: syn)
-                                }
-                                .guardianPointerOnHover()
-                                .help("Open Live Drive for this vehicle to take manual control.")
-                            }
-                        } else {
-                            missionLiveTriageActionRowCard(bodyCaption: "Stop Vehicle") {
-                                HStack(spacing: GuardianSpacing.xs) {
-                                    GuardianPrimaryProminentButton(title: "Park") {
-                                        performOperatorEngageStabilize(assignment: syn, kind: .park)
-                                    }
-                                    .guardianPointerOnHover()
-                                    .help("Send a park catalogue command to this berth’s vehicle through the mission run log.")
-                                    if missionLiveAssignmentTriageStabilizeOffersLoiter(assignment: syn, rosterDevice: nil) {
-                                        GuardianThemedButton(
-                                            title: "Loiter",
-                                            accent: .primary,
-                                            surface: .outline,
-                                            size: .small,
-                                            shape: .cornered,
-                                            action: { performOperatorEngageStabilize(assignment: syn, kind: .loiter) }
-                                        )
-                                        .guardianPointerOnHover()
-                                        .help("Send a loiter / hold catalogue command to this berth’s vehicle through the mission run log.")
-                                    }
-                                }
-                            }
-                            missionLiveEngageStabilizeTelemetryNotice(assignment: syn)
-                        }
+                        MCRAssignmentTriageEngageStabilizeActions(
+                            fleetLink: fleetLink,
+                            vehicleID: liveVid,
+                            operatorPhase: liveVid.map { fleetLink.mcrOperatorVehiclePhase(vehicleID: $0) } ?? .unknown,
+                            continueIntent: run.resolveOperatorContinueAfterParkIntent(
+                                assignment: syn,
+                                rosterDevice: nil,
+                                mission: mission,
+                                fleetLink: fleetLink,
+                                vehicleID: liveVid
+                            ),
+                            isPolicyWindDownRetryBusy: operatorPolicyWindDownRetryBusyAssignmentID == syn.id,
+                            offersLoiter: missionLiveAssignmentTriageStabilizeOffersLoiter(
+                                assignment: syn,
+                                rosterDevice: nil
+                            ),
+                            onPark: { performOperatorEngageStabilize(assignment: syn, kind: .park) },
+                            onLoiter: { performOperatorEngageStabilize(assignment: syn, kind: .loiter) },
+                            onContinue: {
+                                performOperatorContinueAfterPark(assignment: syn, rosterDevice: nil)
+                            },
+                            onEngageLiveDrive: { performOperatorEngageLiveDriveFromPark(assignment: syn) },
+                            stabilizeTelemetryNotice: missionLiveEngageStabilizeTelemetryNoticeIfWatching(
+                                assignment: syn
+                            )
+                        )
                     }
 
                     if poolMutationLocked {
@@ -4617,29 +4417,130 @@ struct MissionRunDetailView: View {
         }
     }
 
-    private func performOperatorContinueMissionAfterPark(assignment: MissionRunAssignment) {
+    private func missionLiveEngageStabilizeTelemetryNoticeIfWatching(assignment: MissionRunAssignment) -> AnyView? {
+        guard let watch = missionLiveEngageStabilizeTelemetryWatch, watch.assignmentID == assignment.id else {
+            return nil
+        }
+        return AnyView(missionLiveEngageStabilizeTelemetryNotice(assignment: assignment))
+    }
+
+    private func performOperatorContinueAfterPark(
+        assignment: MissionRunAssignment,
+        rosterDevice: RosterDevice?
+    ) {
+        guard let mission = resolvedMission else {
+            toastCenter.show("Mission template is not available.", style: .warning)
+            return
+        }
         guard let vid = telemetryVehicleID(for: assignment) else {
             toastCenter.show("No linked vehicle telemetry for this slot.", style: .warning)
             return
         }
         run.attachServices(fleetLink: fleetLink, sitl: sitl, generalSettings: generalSettings)
-        let kind = MissionRunOperatorContinueMissionAfterParkDispatchKind.armModeMissionStart
-        let event = run.issueOperatorContinueMissionAfterParkDispatch(
+        let intent = run.resolveOperatorContinueAfterParkIntent(
             assignment: assignment,
-            kind: kind,
+            rosterDevice: rosterDevice,
+            mission: mission,
             fleetLink: fleetLink,
-            sitl: sitl
+            vehicleID: vid
+        )
+        let label = intent.operatorShortLabel
+        let slotName = assignment.slotName
+        if intent.isPolicyWindDownRetry {
+            guard operatorPolicyWindDownRetryBusyAssignmentID != assignment.id else { return }
+            operatorPolicyWindDownRetryBusyAssignmentID = assignment.id
+            let event = run.issueOperatorContinueAfterPark(
+                assignment: assignment,
+                rosterDevice: rosterDevice,
+                mission: mission,
+                fleetLink: fleetLink,
+                sitl: sitl,
+                generalSettings: generalSettings,
+                onPolicyWindDownJoltFinished: { outcome in
+                    self.finishOperatorPolicyWindDownRetryUI(
+                        slotName: slotName,
+                        intentLabel: label,
+                        outcome: outcome
+                    )
+                }
+            )
+            onUpdate(run)
+            applyOperatorContinueAfterParkImmediateFeedback(
+                event: event,
+                intent: intent,
+                label: label,
+                slotName: slotName,
+                vehicleID: vid
+            )
+            return
+        }
+        let event = run.issueOperatorContinueAfterPark(
+            assignment: assignment,
+            rosterDevice: rosterDevice,
+            mission: mission,
+            fleetLink: fleetLink,
+            sitl: sitl,
+            generalSettings: generalSettings
         )
         onUpdate(run)
-        let label = kind.operatorShortLabel
+        applyOperatorContinueAfterParkImmediateFeedback(
+            event: event,
+            intent: intent,
+            label: label,
+            slotName: slotName,
+            vehicleID: vid
+        )
+    }
+
+    private func applyOperatorContinueAfterParkImmediateFeedback(
+        event: MissionRunEvent,
+        intent: MissionRunOperatorContinueAfterParkIntent,
+        label: String,
+        slotName: String,
+        vehicleID: String
+    ) {
         switch event.level {
         case .info:
-            fleetLink.clearMcrOperatorParkAwaitingContinue(vehicleID: vid)
-            toastCenter.show("Queued \(label) for \(assignment.slotName).", style: .info)
+            if intent == .resumeMission {
+                fleetLink.clearMcrOperatorParkAwaitingContinue(vehicleID: vehicleID)
+                toastCenter.show("Queued \(label) for \(slotName).", style: .info)
+            } else if intent.isPolicyWindDownRetry {
+                toastCenter.show("Retrying end protocol for \(slotName)…", style: .info)
+            } else {
+                toastCenter.show("Queued \(label) for \(slotName).", style: .info)
+            }
         case .warning:
+            operatorPolicyWindDownRetryBusyAssignmentID = nil
             toastCenter.show("\(label): \(event.message)", style: .warning)
         case .error:
+            operatorPolicyWindDownRetryBusyAssignmentID = nil
             toastCenter.show("\(label): \(event.message)", style: .error)
+        }
+    }
+
+    private func finishOperatorPolicyWindDownRetryUI(
+        slotName: String,
+        intentLabel: String,
+        outcome: MissionRunOperatorPolicyWindDownJoltOutcome
+    ) {
+        operatorPolicyWindDownRetryBusyAssignmentID = nil
+        syncRunFromStore()
+        onUpdate(run)
+        switch outcome {
+        case .joltedEscalation:
+            toastCenter.show("\(intentLabel) resumed the in-flight recipe for \(slotName).", style: .info)
+        case .redispatched:
+            toastCenter.show("\(intentLabel) finished for \(slotName).", style: .info)
+        case .failedNoCommands:
+            toastCenter.show(
+                "\(intentLabel) could not run — check complete/abort policy and the mission log.",
+                style: .warning
+            )
+        case .failedNoVehicle:
+            toastCenter.show(
+                "\(intentLabel) could not run — no linked vehicle stream for \(slotName).",
+                style: .warning
+            )
         }
     }
 
@@ -4934,15 +4835,10 @@ struct MissionRunDetailView: View {
                     )
                 }
             }
-        case .missionTrigger:
+        case .operatorTriggerNextSquad:
             HStack {
                 Spacer(minLength: 0)
-                missionLiveTaskProgressTriggerControl(task: task, hero: false)
-            }
-        case .deferredFirstWaveSquadRelease:
-            HStack {
-                Spacer(minLength: 0)
-                missionLiveDeferredFirstWaveSquadReleaseControl(task: task, hero: false)
+                missionLiveOperatorTriggerNextSquadControl(task: task, hero: false)
             }
         case .endProtocolAcknowledgement:
             missionLiveTaskEndProtocolAcknowledgementBlock(task: task, compact: true)

@@ -976,7 +976,10 @@ struct RouteMacro: Codable, Equatable {
 }
 
 extension RouteMacro {
-    /// Launch / map reference derived from the first waypoint of an enabled task (or any task).
+    /// Map / geofence authoring reference from the first waypoint of an enabled task (or any task).
+    ///
+    /// **Not** the per-vehicle operator launch used for Return to Launch — that is
+    /// ``MissionRunEnvironment/operatorLaunchPoseByAssignmentID`` (captured in MCS at **Start Run**).
     var home: RouteHome? {
         for task in tasks where task.enabled {
             guard let wp = task.waypoints.first else { continue }

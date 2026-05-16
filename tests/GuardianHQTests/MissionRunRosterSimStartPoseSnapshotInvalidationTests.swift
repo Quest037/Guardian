@@ -55,6 +55,25 @@ final class MissionRunRosterSimStartPoseSnapshotInvalidationTests: XCTestCase {
         XCTAssertTrue(run.rosterSimStartPoseSnapshotByAssignmentID.isEmpty)
     }
 
+    func test_updateTemplate_nil_clears_operator_launch_poses() {
+        let (mission, task, rd1, _) = sampleMissionWithTwoRosterSlots()
+        let aid = UUID()
+        let row = MissionRunAssignment(
+            id: aid,
+            taskId: task.id,
+            rosterDeviceId: rd1,
+            slotName: "S1",
+            attachedDevice: "CALL1"
+        )
+        let run = MissionRunEnvironment(mission: mission, assignments: [row])
+        run.unitTestingReplaceOperatorLaunchPoses([aid: dummySimState()])
+        XCTAssertNotNil(run.operatorLaunchPoseByAssignmentID[aid])
+
+        run.updateTemplate(nil)
+
+        XCTAssertTrue(run.operatorLaunchPoseByAssignmentID.isEmpty)
+    }
+
     func test_updateTemplate_nil_clears_reserve_pool_sim_snapshots() {
         let (mission, task, _, _) = sampleMissionWithTwoRosterSlots()
         let slotID = UUID()

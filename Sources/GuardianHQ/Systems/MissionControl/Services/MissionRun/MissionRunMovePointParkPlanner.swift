@@ -110,4 +110,22 @@ enum MissionRunMovePointParkPlanner: Sendable {
             "yawDeg": .double(yawDeg),
         ])
     }
+
+    /// Explicit WGS84 target (e.g. MCS operator launch at **Start Run**).
+    static func buildExplicitMovePointParkRecipeParameters(
+        latitudeDeg: Double,
+        longitudeDeg: Double,
+        relativeAltitudeM: Double,
+        yawDeg: Double = 0,
+        procedureLogSummary: String
+    ) throws -> FleetRecipeParameters {
+        FleetRecipeParameters(values: [
+            "procedureLogSummary": .string(procedureLogSummary),
+            "pointKind": .string(FleetVehicleCoreCommandPointKind.explicit.rawValue),
+            "latitudeDeg": .double(latitudeDeg),
+            "longitudeDeg": .double(longitudeDeg),
+            "relativeAltitudeM": .double(relativeAltitudeM),
+            "yawDeg": .double(yawDeg),
+        ])
+    }
 }

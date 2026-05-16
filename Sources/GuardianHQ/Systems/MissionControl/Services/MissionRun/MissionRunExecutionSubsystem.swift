@@ -77,6 +77,7 @@ final class MissionRunExecutionSubsystem {
         environment.setMissionCycleCount(0)
         environment.systems.logging.clearState()
         environment.systems.lifecycle.markExecuting()
+        environment.captureOperatorLaunchPosesAtRunStart(fleetLink: context.fleetLink, sitl: context.sitl)
         environment.captureRosterSimStartPoseSnapshotsIfNeeded(fleetLink: context.fleetLink, sitl: context.sitl)
         if environment.startedAt == nil {
             environment.startedAt = Date()
@@ -683,7 +684,22 @@ final class MissionRunExecutionSubsystem {
                     category: .missionControl
                 )
 
-            case .returnToLaunch, .loiter, .park:
+            case .returnToLaunch:
+                let dispatch = environment.returnToLaunchFleetDispatch(
+                    assignmentID: assignment.id,
+                    planningHub: hub
+                )
+                return MissionRunIssuedCommand(
+                    assignmentID: assignment.id,
+                    slotName: assignment.slotName,
+                    vehicleTokenKey: tokenKey,
+                    dispatch: dispatch,
+                    issuer: .operator,
+                    issuerKey: MissionRunCommandIssuerKey.completePolicyWindDown,
+                    category: .missionControl
+                )
+
+            case .loiter, .park:
                 guard let dispatch = MissionRunFleetDispatch.preferentialCompleteTacticDispatch(tactic.kind) else { continue }
                 return MissionRunIssuedCommand(
                     assignmentID: assignment.id,
@@ -788,7 +804,22 @@ final class MissionRunExecutionSubsystem {
                     category: .missionControl
                 )
 
-            case .returnToLaunch, .loiter, .park:
+            case .returnToLaunch:
+                let dispatch = environment.returnToLaunchFleetDispatch(
+                    assignmentID: assignment.id,
+                    planningHub: hub
+                )
+                return MissionRunIssuedCommand(
+                    assignmentID: assignment.id,
+                    slotName: assignment.slotName,
+                    vehicleTokenKey: tokenKey,
+                    dispatch: dispatch,
+                    issuer: .missionControl,
+                    issuerKey: MissionRunCommandIssuerKey.plannerReserveSwapPostCommit,
+                    category: .missionControl
+                )
+
+            case .loiter, .park:
                 guard let dispatch = MissionRunFleetDispatch.preferentialReserveSwapTacticDispatch(tactic.kind) else { continue }
                 return MissionRunIssuedCommand(
                     assignmentID: assignment.id,
@@ -1648,15 +1679,27 @@ final class MissionRunExecutionSubsystem {
         restrictToPrimaryAssignmentIDs: Set<UUID>? = nil
     ) -> [MissionRunIssuedCommand] {
         guard let environment else { return [] }
-        guard let dispatch = MissionRunFleetDispatch.betweenCyclesTaskDispatch(task.betweenCycles) else { return [] }
         let squads = environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: task.id)
         return squads.compactMap { squad in
             let aid = squad.squad.primaryAssignment.id
             if let restrict = restrictToPrimaryAssignmentIDs, !restrict.contains(aid) { return nil }
             guard let tokenKey = squad.squad.primaryAssignment.attachedFleetVehicleToken else { return nil }
+            let assignment = squad.squad.primaryAssignment
+            let hub = environment.abortPlanningHubTelemetry(for: assignment)
+            let dispatch: MissionRunFleetDispatch
+            switch task.betweenCycles {
+            case .returnToLaunch:
+                dispatch = environment.returnToLaunchFleetDispatch(assignmentID: aid, planningHub: hub)
+            case .holdPosition:
+                guard let d = MissionRunFleetDispatch.betweenCyclesTaskDispatch(.holdPosition) else { return nil }
+                dispatch = d
+            case .park:
+                guard let d = MissionRunFleetDispatch.betweenCyclesTaskDispatch(.park) else { return nil }
+                dispatch = d
+            }
             return MissionRunIssuedCommand(
                 assignmentID: aid,
-                slotName: squad.squad.primaryAssignment.slotName,
+                slotName: assignment.slotName,
                 vehicleTokenKey: tokenKey,
                 dispatch: dispatch,
                 issuer: .missionControl,

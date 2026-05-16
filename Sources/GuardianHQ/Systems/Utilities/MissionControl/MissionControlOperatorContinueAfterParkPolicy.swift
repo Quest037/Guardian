@@ -67,6 +67,12 @@ enum MissionControlOperatorContinueAfterParkPolicy {
         let mergedSlot = MissionRunAssignmentSlotLaneMerge.preferredDisplayState(
             lanes: assignment.effectiveSlotLifecycleLanes
         )
+        switch mergedSlot {
+        case .policySucceeded, .policyFailed:
+            return .unavailable(reason: "End protocol has finished for this slot.")
+        default:
+            break
+        }
         let slot = rosterDevice?.slot ?? .primary
         let squadState = squadStateForContinueDecision(
             assignment: assignment,
@@ -110,8 +116,19 @@ enum MissionControlOperatorContinueAfterParkPolicy {
             return .retryAbortWindDown
         }
 
+        if run.missionSquadOperatorPausedAssignmentIDs.contains(assignment.id),
+           squadState.map(resumeMissionEligibleSquadState) == true,
+           run.sessionPhase == .executing,
+           !abortIssued,
+           !completeIssued {
+            return .resumeMission
+        }
+
         if let vehicleID,
-           fleetLink.mcrOperatorVehiclePhase(vehicleID: vehicleID) == .operatorParkAwaitingContinue {
+           fleetLink.mcrOperatorVehiclePhase(vehicleID: vehicleID) == .operatorParkAwaitingContinue,
+           run.sessionPhase == .executing,
+           !abortIssued,
+           !completeIssued {
             return .resumeMission
         }
 
@@ -225,7 +242,7 @@ enum MissionControlOperatorContinueAfterParkPolicy {
 
     private static func resumeMissionEligibleSquadState(_ state: MissionSquadState) -> Bool {
         switch state {
-        case .ready, .staging, .executing, .between: return true
+        case .ready, .staging, .executing, .between, .paused: return true
         case .recovery, .aborting, .aborted, .completed: return false
         }
     }

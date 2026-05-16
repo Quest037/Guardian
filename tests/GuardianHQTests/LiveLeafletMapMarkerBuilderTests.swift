@@ -184,6 +184,57 @@ final class LiveLeafletMapMarkerBuilderTests: XCTestCase {
         XCTAssertEqual(cache.statistics.hits, 0)
     }
 
+    func test_roster_marker_selected_assignment_shows_map_label_without_ld_highlight() {
+        let sitlId = UUID()
+        let assignID = UUID()
+        let rd = RosterDevice(id: UUID(), name: "P1", vehicleClass: .uavCopter)
+        let task = MissionTask(name: "T", enabled: true, waypoints: [])
+        let mission = Mission(
+            id: UUID(),
+            name: "M",
+            description: "",
+            type: .mobile,
+            rosterDevices: [rd],
+            routeMacro: RouteMacro(tasks: [task])
+        )
+        let assign = MissionRunAssignment(
+            id: assignID,
+            taskId: task.id,
+            rosterDeviceId: rd.id,
+            slotName: "Echo-1",
+            attachedFleetVehicleToken: FleetMissionVehicleToken.sitl(sitlId).storageKey
+        )
+        let fleet = FleetLinkService()
+        let sitl = SitlService()
+        sitl.attachFleetLink(fleet)
+        sitl.seedMissionRunTestSitlRunningInstance(id: sitlId, stackInstanceIndex: 0)
+        guard let vid = resolvedFleetStreamVehicleID(assignment: assign, fleetLink: fleet, sitl: sitl) else {
+            XCTFail("Expected stream id")
+            return
+        }
+        var hub = FleetHubVehicleTelemetry.empty
+        hub.latitudeDeg = -37.8
+        hub.longitudeDeg = 144.9
+        fleet.seedMissionRunTestSitlCleanupStream(vehicleID: vid, systemID: 1, hub: hub)
+
+        let run = MissionRunEnvironment(mission: mission, assignments: [assign])
+        let inputs = LiveLeafletMapMarkerBuildInputs.missionControlLiveOverview(
+            run: run,
+            mission: mission,
+            fleetLink: fleet,
+            sitl: sitl,
+            isolateMapToSelectedTask: false,
+            triageFocusedTaskID: nil,
+            presentation: LiveLeafletMapMarkerPresentationState(selectedAssignmentID: assignID),
+            reservePoolPresentation: LiveLeafletMapReservePoolPresentationState()
+        )
+        let result = LiveLeafletMapMarkerBuilder.build(inputs: inputs)
+        XCTAssertEqual(result.markers.count, 1)
+        XCTAssertTrue(result.markers[0].selected)
+        XCTAssertTrue(result.markers[0].showLabel)
+        XCTAssertEqual(result.markers[0].label, "Echo-1")
+    }
+
     func test_utilities_namespace_build_matches_builder() {
         let mission = Mission(id: UUID(), name: "M", description: "", type: .mobile)
         let inputs = LiveLeafletMapMarkerBuildInputs(

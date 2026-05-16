@@ -42,6 +42,19 @@ final class MissionRunSquadStateDerivationTests: XCTestCase {
         return (mission, run, a1.id, a2.id)
     }
 
+    func test_operator_paused_derivation_while_executing_session() {
+        let (mission, run, a1, _) = twoSquadMission()
+        let task = mission.routeMacro.tasks[0]
+        run.status = .running
+        run.setSessionPhase(.executing)
+        run.markSquadActiveInCurrentCycle(a1)
+        run.markMissionSquadOperatorPaused(forAssignmentID: a1)
+        run.refreshDerivedTaskStates()
+        XCTAssertEqual(run.squadStateByAssignmentID[a1], .paused)
+        XCTAssertFalse(run.activeCycleSquadAssignmentIDs.contains(a1))
+        XCTAssertTrue(run.shouldSuppressAutopilotAutostart(forSquadAssignmentID: a1, taskID: task.id, mission: mission))
+    }
+
     func test_multi_squad_task_rollup_executing_when_one_squad_in_cycle() {
         let (_, run, a1, _) = twoSquadMission()
         let taskID = run.template!.routeMacro.tasks[0].id

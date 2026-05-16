@@ -368,11 +368,17 @@ struct MCRLiveTaskTriageSquadActionsPanel: View {
     @ObservedObject var run: MissionRunEnvironment
     let task: RoutePath
     let mission: Mission
+    let fleetLink: FleetLinkService
+    let sitl: SitlService
     let now: Date
+    let policyWindDownRetryBusyAssignmentID: UUID?
     let onSquadAbortNow: (UUID, String) -> Void
     let onSquadAbortGraceful: (UUID, String) -> Void
     let onSquadCompleteNow: (UUID, String) -> Void
     let onSquadCompleteGraceful: (UUID, String) -> Void
+    let onEngageStabilize: (MissionRunAssignment, MissionRunEngageStabilizeDispatchKind) -> Void
+    let onContinueAfterPark: (MissionRunAssignment) -> Void
+    let onReturnToLaunch: (MissionRunAssignment) -> Void
     let onRunUpdated: () -> Void
 
     @State private var selectedAssignmentID: UUID?
@@ -434,7 +440,42 @@ struct MCRLiveTaskTriageSquadActionsPanel: View {
         confirmLabel: String,
         availability: MCRLiveTaskTriageSquadWindDownAvailability
     ) -> some View {
+        let squadState = run.squadStateByAssignmentID[squad.assignment.id] ?? .ready
+        let rosterDevice = mission.rosterDevices.first(where: { $0.id == squad.assignment.rosterDeviceId })
+        let vehicleID = resolvedFleetStreamVehicleID(
+            assignment: squad.assignment,
+            fleetLink: fleetLink,
+            sitl: sitl
+        )
+        let missionControlRow = MissionControlOperatorSquadTriageMissionControlPolicy.resolvedMissionControlRow(
+            run: run,
+            task: task,
+            assignment: squad.assignment,
+            rosterDevice: rosterDevice,
+            mission: mission,
+            fleetLink: fleetLink,
+            sitl: sitl,
+            vehicleID: vehicleID,
+            squadState: squadState,
+            now: now
+        )
+        let continueIntent = run.resolveOperatorContinueAfterParkIntent(
+            assignment: squad.assignment,
+            rosterDevice: rosterDevice,
+            mission: mission,
+            fleetLink: fleetLink,
+            vehicleID: vehicleID
+        )
+
         VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+            if let missionControlRow {
+                squadMissionControlRow(
+                    row: missionControlRow,
+                    assignment: squad.assignment,
+                    continueIntent: continueIntent,
+                    confirmLabel: confirmLabel
+                )
+            }
             if availability.hasVisibleChrome {
                 if availability.showAbortCard {
                     windDownModeRowCard(
@@ -545,6 +586,158 @@ struct MCRLiveTaskTriageSquadActionsPanel: View {
                 trailing()
             }
         })
+    }
+
+    @ViewBuilder
+    private func squadMissionControlRow(
+        row: MCRLiveTaskTriageSquadMissionControlRow,
+        assignment: MissionRunAssignment,
+        continueIntent: MissionRunOperatorContinueAfterParkIntent,
+        confirmLabel: String
+    ) -> some View {
+        let retryBusy = policyWindDownRetryBusyAssignmentID == assignment.id
+        switch row {
+        case .mission(let mode):
+            switch mode {
+            case .onMissionPark(let offersLoiter):
+                triageActionRowCard(bodyCaption: "Mission") {
+                    HStack(spacing: GuardianSpacing.xs) {
+                        GuardianThemedButton(
+                            title: "Park",
+                            accent: .primary,
+                            surface: .solid,
+                            size: .small,
+                            shape: .cornered,
+                            isEnabled: !retryBusy,
+                            action: { onEngageStabilize(assignment, .park) }
+                        )
+                        .guardianPointerOnHover()
+                        .help("Stop active fleet work and park this vehicle.")
+                        if offersLoiter {
+                            GuardianThemedButton(
+                                title: "Loiter",
+                                accent: .primary,
+                                surface: .outline,
+                                size: .small,
+                                shape: .cornered,
+                                isEnabled: !retryBusy,
+                                action: { onEngageStabilize(assignment, .loiter) }
+                            )
+                            .guardianPointerOnHover()
+                            .help("Hold this vehicle in loiter through the mission run log.")
+                        }
+                    }
+                }
+            case .pausedContinue:
+                triageActionRowCard(bodyCaption: "Mission") {
+                    GuardianThemedButton(
+                        title: "Continue mission",
+                        accent: .primary,
+                        surface: .solid,
+                        size: .small,
+                        shape: .cornered,
+                        isEnabled: {
+                            if case .resumeMission = continueIntent { return true }
+                            return false
+                        }(),
+                        action: { onContinueAfterPark(assignment) }
+                    )
+                    .guardianPointerOnHover()
+                    .help(continueIntent.operatorHelp)
+                }
+            }
+        case .recovery:
+            triageActionRowCard(bodyCaption: "Recovery") {
+                protocolRetryTrailing(
+                    assignment: assignment,
+                    continueIntent: continueIntent,
+                    retryBusy: retryBusy,
+                    retryLabel: "Retry recovery"
+                )
+            }
+        case .aborting:
+            triageActionRowCard(bodyCaption: "Aborting") {
+                protocolRetryTrailing(
+                    assignment: assignment,
+                    continueIntent: continueIntent,
+                    retryBusy: retryBusy,
+                    retryLabel: "Retry abort protocol"
+                )
+            }
+        case .completedTerminal:
+            triageActionRowCard(bodyCaption: "Completed") {
+                HStack(spacing: GuardianSpacing.xs) {
+                    GuardianThemedButton(
+                        title: "Abort",
+                        accent: .danger,
+                        surface: .solid,
+                        size: .small,
+                        shape: .cornered,
+                        action: { onSquadAbortNow(assignment.id, confirmLabel) }
+                    )
+                    .guardianPointerOnHover()
+                    .help("Issue abort-policy commands for this squad.")
+                    GuardianThemedButton(
+                        title: "Go Home",
+                        accent: .primary,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        action: { onReturnToLaunch(assignment) }
+                    )
+                    .guardianPointerOnHover()
+                    .help("Send this vehicle home using the autopilot return-home action.")
+                }
+            }
+        case .abortedTerminal:
+            triageActionRowCard(bodyCaption: "Aborted") {
+                GuardianThemedButton(
+                    title: "Go Home",
+                    accent: .primary,
+                    surface: .solid,
+                    size: .small,
+                    shape: .cornered,
+                    action: { onReturnToLaunch(assignment) }
+                )
+                .guardianPointerOnHover()
+                .help("Send this vehicle home using the autopilot return-home action.")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func protocolRetryTrailing(
+        assignment: MissionRunAssignment,
+        continueIntent: MissionRunOperatorContinueAfterParkIntent,
+        retryBusy: Bool,
+        retryLabel: String
+    ) -> some View {
+        HStack(spacing: GuardianSpacing.xs) {
+            GuardianThemedButton(
+                title: "Park",
+                accent: .primary,
+                surface: .solid,
+                size: .small,
+                shape: .cornered,
+                isEnabled: !retryBusy,
+                action: { onEngageStabilize(assignment, .park) }
+            )
+            .guardianPointerOnHover()
+            .help("Park this vehicle before retrying end protocol.")
+            if continueIntent.isPolicyWindDownRetry {
+                GuardianThemedButton(
+                    title: retryBusy ? "Retrying…" : retryLabel,
+                    accent: .primary,
+                    surface: .outline,
+                    size: .small,
+                    shape: .cornered,
+                    isEnabled: !retryBusy,
+                    action: { onContinueAfterPark(assignment) }
+                )
+                .guardianPointerOnHover()
+                .help(continueIntent.operatorHelp)
+            }
+        }
     }
 
     private struct ResolvedSquadSelection {

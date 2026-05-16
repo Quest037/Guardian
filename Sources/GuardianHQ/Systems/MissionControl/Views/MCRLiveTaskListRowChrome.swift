@@ -50,6 +50,33 @@ private func mcrLiveTaskStateForeground(_ state: MissionTaskState, theme: Guardi
     }
 }
 
+private func mcrLiveSquadStateBadge(
+    _ squad: MCRLiveTaskListSquadRowSnapshot,
+    theme: GuardianThemePalette
+) -> some View {
+    let title = squad.rawSquadState.displayTitle
+    let fg: Color = {
+        if squad.rawSquadState == .paused {
+            return GuardianSemanticColors.warningForeground
+        }
+        return mcrLiveTaskStateForeground(squad.displayState, theme: theme)
+    }()
+    return Text(title.uppercased())
+        .font(GuardianTypography.font(.mapWaypointMicroHeavy))
+        .tracking(0.4)
+        .padding(.horizontal, GuardianSpacing.xsTight)
+        .padding(.vertical, GuardianSpacing.titleStackTight)
+        .foregroundStyle(fg)
+        .background(
+            Capsule()
+                .fill(theme.backgroundElevated)
+                .overlay(
+                    Capsule()
+                        .strokeBorder(fg.opacity(0.4), lineWidth: 1)
+                )
+        )
+}
+
 private func mcrLiveTaskStateBadge(_ state: MissionTaskState, theme: GuardianThemePalette) -> some View {
     let fg = mcrLiveTaskStateForeground(state, theme: theme)
     return Text(state.displayTitle.uppercased())
@@ -242,7 +269,7 @@ struct MCRLiveSquadRowsFromSnapshot: View {
                             .font(nameFont)
                             .foregroundStyle(labelTint)
                         Spacer(minLength: 0)
-                        mcrLiveTaskStateBadge(squad.displayState, theme: theme)
+                        mcrLiveSquadStateBadge(squad, theme: theme)
                     }
                     MCRLiveCapsuleProgressBar(
                         fraction: squad.progressFraction,

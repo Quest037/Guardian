@@ -99,6 +99,12 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     /// Last **bulk** MCS “Set reserve pool home” lat/lon per task (run envelope). Powers **Reapply reserve pool home** without re-arming the map.
     @Published private(set) var reservePoolBulkSimHomeByTaskID: [UUID: RouteCoordinate] = [:]
 
+    /// Per-roster **operator launch** pose (lat/lon/alt/yaw) captured in MCS at **Start Run** — Return to Launch / Go Home navigate here, not ``RouteMacro/home``.
+    @Published private(set) var operatorLaunchPoseByAssignmentID: [UUID: FleetSimState] = [:]
+
+    /// MCS staging map drag coordinates consumed on the next ``captureOperatorLaunchPosesAtRunStart`` (then cleared).
+    var pendingMCSLaunchCaptureOverridesByAssignmentID: [UUID: RouteCoordinate] = [:]
+
     /// One-time hub-derived SIM pose per **roster** assignment, captured on the first execution start (v1 SIM home reset). Keys are ``MissionRunAssignment/id``.
     @Published private(set) var rosterSimStartPoseSnapshotByAssignmentID: [UUID: FleetSimState] = [:]
 
@@ -142,6 +148,9 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
 
     /// Primary squads that must not receive automatic next-cycle MAVLink starts (squad-scoped wind-down).
     @Published private(set) var missionSquadAutopilotAutostartSuppressedAssignmentIDs: Set<UUID> = []
+
+    /// Primary squads the operator parked mid-task (``MissionSquadState/paused``); cleared on **Continue mission**.
+    @Published private(set) var missionSquadOperatorPausedAssignmentIDs: Set<UUID> = []
 
     /// First-wave primaries waiting operator / waypoint release (ordered), keyed by mission task id.
     @Published private(set) var deferredFirstWaveSquadAssignmentIDsByTaskID: [UUID: [UUID]] = [:]
@@ -1252,13 +1261,87 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             runtimeMissionPoints = []
             reservePoolByTaskID = [:]
             reservePoolBulkSimHomeByTaskID = [:]
+            operatorLaunchPoseByAssignmentID = [:]
+            pendingMCSLaunchCaptureOverridesByAssignmentID = [:]
             rosterSimStartPoseSnapshotByAssignmentID = [:]
             reservePoolSimStartPoseSnapshotBySlotID = [:]
             writtenOffFleetVehicleStorageKeysForReservePool = []
         }
+        pruneOperatorLaunchPosesToCurrentAssignments()
         pruneRosterSimStartPoseSnapshotsToCurrentAssignments()
         pruneReservePoolSimStartPoseSnapshotsToCurrentSlots()
         refreshDerivedTaskStates()
+    }
+
+    // MARK: - Operator launch pose (MCS Start Run → Return to Launch)
+
+    private func pruneOperatorLaunchPosesToCurrentAssignments() {
+        let valid = Set(assignments.map(\.id))
+        let pruned = operatorLaunchPoseByAssignmentID.filter { valid.contains($0.key) }
+        guard pruned.count != operatorLaunchPoseByAssignmentID.count else { return }
+        operatorLaunchPoseByAssignmentID = pruned
+    }
+
+    func clearOperatorLaunchPoses(forAssignmentIDs ids: [UUID]) {
+        guard !ids.isEmpty else { return }
+        var m = operatorLaunchPoseByAssignmentID
+        var touched = false
+        for id in ids {
+            if m.removeValue(forKey: id) != nil { touched = true }
+        }
+        guard touched else { return }
+        operatorLaunchPoseByAssignmentID = m
+    }
+
+    /// Unit tests only: replaces ``operatorLaunchPoseByAssignmentID``.
+    internal func unitTestingReplaceOperatorLaunchPoses(_ next: [UUID: FleetSimState]) {
+        operatorLaunchPoseByAssignmentID = next
+    }
+
+    /// Records each bound roster row's MCS pose at **Start Run** (hub telemetry, optional staging-map override).
+    func captureOperatorLaunchPosesAtRunStart(fleetLink: FleetLinkService, sitl: SitlService) {
+        let overrides = pendingMCSLaunchCaptureOverridesByAssignmentID
+        pendingMCSLaunchCaptureOverridesByAssignmentID = [:]
+        var next: [UUID: FleetSimState] = [:]
+        for assignment in assignments {
+            guard assignment.hasFleetOrLegacyAssignment else { continue }
+            guard let raw = assignment.attachedFleetVehicleToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty,
+                  let token = FleetMissionVehicleToken(storageKey: raw),
+                  let vehicleID = resolvedFleetStreamVehicleID(token: token, fleetLink: fleetLink, sitl: sitl)
+            else { continue }
+            let hub = fleetLink.hubTelemetryByVehicleID[vehicleID]
+            if let override = overrides[assignment.id] {
+                let alt = hub?.absoluteAltM ?? hub?.altitudeAmslM
+                let heading = hub?.headingDeg ?? hub?.yawDeg ?? 0
+                next[assignment.id] = FleetSimState(
+                    latitudeDeg: override.lat,
+                    longitudeDeg: override.lon,
+                    absoluteAltitudeM: alt,
+                    yawDeg: Float(heading),
+                    batteryVoltageV: nil,
+                    ardupilotSimBattCapAh: nil,
+                    px4SimBatDrain: nil
+                )
+                continue
+            }
+            guard let hub, let snap = FleetSimState(simHomeRestoreSnapshotFrom: hub) else { continue }
+            next[assignment.id] = snap
+        }
+        operatorLaunchPoseByAssignmentID = next
+    }
+
+    /// Return to Launch / Go Home dispatch for one roster row (move+park to MCS launch, else stack RTL).
+    func returnToLaunchFleetDispatch(
+        assignmentID: UUID,
+        planningHub: FleetHubVehicleTelemetry?
+    ) -> MissionRunFleetDispatch {
+        let relAlt = planningHub?.guardianAbortPlanningRelativeAltitudeM ?? 0
+        return MissionControlOperatorLaunchPosePolicy.resolvedReturnToLaunchDispatch(
+            assignmentID: assignmentID,
+            launchPoseByAssignmentID: operatorLaunchPoseByAssignmentID,
+            planningRelativeAltitudeM: relAlt
+        )
     }
 
     // MARK: - Roster SIM start pose (run-complete home reset, v1)
@@ -1968,6 +2051,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             mutatedRows: &next
         )
         assignments = next
+        clearOperatorLaunchPoses(forAssignmentIDs: [vac.id, res.id])
         clearRosterSimStartPoseSnapshots(forAssignmentIDs: [vac.id, res.id])
 
         let taskLabel = template?.routeMacro.tasks.first(where: { $0.id == taskID })?.name
@@ -2063,6 +2147,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         nilOutSlotLifecycleLanesOnRosterRowsAfterReserveBindingChange(assignmentIDs: [assignmentID], mutatedRows: &nextAssignments)
 
         assignments = nextAssignments
+        clearOperatorLaunchPoses(forAssignmentIDs: [assignmentID])
         clearRosterSimStartPoseSnapshots(forAssignmentIDs: [assignmentID])
         clearReservePoolSimStartPoseSnapshots(forSlotIDs: [poolSlotID])
         var nextReservePools = reservePoolByTaskID
@@ -3032,10 +3117,37 @@ extension MissionRunEnvironment {
         if !deferredFirstWaveSquadAssignmentIDsByTaskID.isEmpty { deferredFirstWaveSquadAssignmentIDsByTaskID = [:] }
         if !squadStartDeferralByAssignmentID.isEmpty { squadStartDeferralByAssignmentID = [:] }
         if !squadCompletePolicyWindDownIssuedAssignmentIDs.isEmpty { squadCompletePolicyWindDownIssuedAssignmentIDs = [] }
+        if !missionSquadOperatorPausedAssignmentIDs.isEmpty { missionSquadOperatorPausedAssignmentIDs = [] }
     }
 
     internal func markMissionSquadAutostartSuppressed(forAssignmentID assignmentID: UUID) {
         missionSquadAutopilotAutostartSuppressedAssignmentIDs.insert(assignmentID)
+        refreshDerivedTaskStates()
+    }
+
+    /// Operator **Park** on an in-flight primary squad: hold MAVLink autostart / stagger until **Continue mission**.
+    func markMissionSquadOperatorPaused(forAssignmentID assignmentID: UUID) {
+        var paused = missionSquadOperatorPausedAssignmentIDs
+        guard paused.insert(assignmentID).inserted else {
+            removeSquadFromActiveCycle(assignmentID)
+            markMissionSquadAutostartSuppressed(forAssignmentID: assignmentID)
+            return
+        }
+        missionSquadOperatorPausedAssignmentIDs = paused
+        removeSquadFromActiveCycle(assignmentID)
+        markMissionSquadAutostartSuppressed(forAssignmentID: assignmentID)
+    }
+
+    /// Clears operator park hold after **Continue mission** (does not clear wind-down autostart suppress).
+    func clearMissionSquadOperatorPaused(forAssignmentID assignmentID: UUID) {
+        guard missionSquadOperatorPausedAssignmentIDs.remove(assignmentID) != nil else { return }
+        if pendingMissionSquadGracefulWindDownKindByAssignmentID[assignmentID] == nil,
+           !squadCompletePolicyWindDownIssuedAssignmentIDs.contains(assignmentID),
+           !squadAbortPolicyWindDownIssuedAssignmentIDs.contains(assignmentID) {
+            var suppressed = missionSquadAutopilotAutostartSuppressedAssignmentIDs
+            suppressed.remove(assignmentID)
+            missionSquadAutopilotAutostartSuppressedAssignmentIDs = suppressed
+        }
         refreshDerivedTaskStates()
     }
 
@@ -3316,6 +3428,9 @@ extension MissionRunEnvironment {
                 || (run.squadStartDeferralByAssignmentID[assignment.id].map { now < $0.startAt } ?? false) {
                 return .staging
             }
+            if run.missionSquadOperatorPausedAssignmentIDs.contains(assignment.id) {
+                return .paused
+            }
             if run.activeCycleSquadAssignmentIDs.contains(assignment.id) { return .executing }
             let cyclesDone = run.squadCyclesCompletedByAssignmentID[assignment.id] ?? 0
             let repeats = task.regularity == .continuous || task.regularity == .continuousWithDelay
@@ -3385,7 +3500,7 @@ extension MissionRunEnvironment {
         if states.allSatisfy({ $0 == .ready }) { return .ready }
         if states.allSatisfy({ $0 == .staging }) { return .staging }
 
-        let stillContest: Set<MissionSquadState> = [.executing, .between, .staging, .ready]
+        let stillContest: Set<MissionSquadState> = [.executing, .between, .staging, .ready, .paused]
         if states.contains(where: { stillContest.contains($0) }) {
             return .executing
         }

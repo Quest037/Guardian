@@ -60,6 +60,8 @@ enum MissionSquadState: String, Codable, CaseIterable, Equatable, Hashable {
     case staging
     case executing
     case between
+    /// Operator held this primary squad mid-task (park) while the run remains in **executing** session phase.
+    case paused
     case recovery
     case aborting
     case aborted
@@ -71,6 +73,7 @@ enum MissionSquadState: String, Codable, CaseIterable, Equatable, Hashable {
         case .staging: return "Staging"
         case .executing: return "Executing"
         case .between: return "Between"
+        case .paused: return "Paused"
         case .recovery: return "Recovery"
         case .aborting: return "Aborting"
         case .completed: return "Completed"
@@ -1500,15 +1503,14 @@ enum MissionRunFleetDispatch: Equatable {
 }
 
 extension MissionRunFleetDispatch {
-    /// Preferential **abort** tactics (non–map-point): RTL uses the Layer‑1 return-home recipe; loiter / park use catalogue atoms.
+    /// Preferential **abort** tactics (non–map-point). **Return to Launch** in production uses
+    /// ``MissionRunEnvironment/returnToLaunchFleetDispatch(assignmentID:planningHub:)`` (MCS launch at Start Run);
+    /// this static helper’s RTL case is the stack ``returnToLaunch()`` fallback only.
     @MainActor
     static func preferentialAbortTacticDispatch(_ kind: MissionRunAbortTactic.Kind) -> MissionRunFleetDispatch? {
         switch kind {
         case .returnToLaunch:
-            return .recipe(
-                name: FleetMissionRecipeRegistrations.doReturnHomeRecipeName,
-                parameters: .empty
-            )
+            return MissionControlOperatorLaunchPosePolicy.stackReturnToLaunchFallback
         case .loiter:
             return .catalogue(name: .fleetVehicleDoLoiter, parameters: .empty)
         case .park:
@@ -1523,10 +1525,7 @@ extension MissionRunFleetDispatch {
     static func preferentialCompleteTacticDispatch(_ kind: MissionRunCompleteTactic.Kind) -> MissionRunFleetDispatch? {
         switch kind {
         case .returnToLaunch:
-            return .recipe(
-                name: FleetMissionRecipeRegistrations.doReturnHomeRecipeName,
-                parameters: .empty
-            )
+            return MissionControlOperatorLaunchPosePolicy.stackReturnToLaunchFallback
         case .loiter:
             return .catalogue(name: .fleetVehicleDoLoiter, parameters: .empty)
         case .park:
@@ -1541,10 +1540,7 @@ extension MissionRunFleetDispatch {
     static func preferentialReserveSwapTacticDispatch(_ kind: MissionRunReserveSwapTactic.Kind) -> MissionRunFleetDispatch? {
         switch kind {
         case .returnToLaunch:
-            return .recipe(
-                name: FleetMissionRecipeRegistrations.doReturnHomeRecipeName,
-                parameters: .empty
-            )
+            return MissionControlOperatorLaunchPosePolicy.stackReturnToLaunchFallback
         case .loiter:
             return .catalogue(name: .fleetVehicleDoLoiter, parameters: .empty)
         case .park:
@@ -1559,10 +1555,7 @@ extension MissionRunFleetDispatch {
     static func betweenCyclesTaskDispatch(_ action: MissionTaskBetweenCyclesAction) -> MissionRunFleetDispatch? {
         switch action {
         case .returnToLaunch:
-            return .recipe(
-                name: FleetMissionRecipeRegistrations.doReturnHomeRecipeName,
-                parameters: .empty
-            )
+            return MissionControlOperatorLaunchPosePolicy.stackReturnToLaunchFallback
         case .holdPosition:
             return .catalogue(name: .fleetVehicleDoLoiter, parameters: .empty)
         case .park:
@@ -1586,8 +1579,13 @@ extension MissionRunFleetDispatch {
     @MainActor
     var betweenCyclesPolicyLogLabel: String {
         switch self {
-        case .recipe(let name, _):
+        case .recipe(let name, let params):
             if name == FleetMissionRecipeRegistrations.doReturnHomeRecipeName {
+                return "Return to Launch"
+            }
+            if name == FleetMovePointParkRecipeRegistrations.movePointParkRecipeName,
+               params.string(named: "procedureLogSummary")
+                   == MissionControlOperatorLaunchPosePolicy.returnToLaunchProcedureLogSummary {
                 return "Return to Launch"
             }
             return name.rawValue

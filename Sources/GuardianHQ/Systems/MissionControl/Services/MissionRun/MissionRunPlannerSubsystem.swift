@@ -201,7 +201,23 @@ final class MissionRunPlannerSubsystem {
                 )
                 return (tactic, issued)
 
-            case .returnToLaunch, .loiter, .park:
+            case .returnToLaunch:
+                let dispatch = environment.returnToLaunchFleetDispatch(
+                    assignmentID: assignment.id,
+                    planningHub: hub
+                )
+                let issued = MissionRunIssuedCommand(
+                    assignmentID: assignment.id,
+                    slotName: assignment.slotName,
+                    vehicleTokenKey: tokenKey,
+                    dispatch: dispatch,
+                    issuer: .missionControl,
+                    issuerKey: MissionRunCommandIssuerKey.plannerAbort,
+                    category: .missionControl
+                )
+                return (tactic, issued)
+
+            case .loiter, .park:
                 guard let dispatch = MissionRunFleetDispatch.preferentialAbortTacticDispatch(tactic.kind) else { continue }
                 let issued = MissionRunIssuedCommand(
                     assignmentID: assignment.id,
@@ -482,11 +498,13 @@ final class MissionRunPlannerSubsystem {
             environment.taskStartDelays.removeAll { $0.taskId == taskID }
             return true
         case let .replaceAssignmentVehicleToken(assignmentID, vehicleTokenKey):
+            environment.clearOperatorLaunchPoses(forAssignmentIDs: [assignmentID])
             environment.clearRosterSimStartPoseSnapshots(forAssignmentIDs: [assignmentID])
             guard let idx = environment.assignments.firstIndex(where: { $0.id == assignmentID }) else { return false }
             environment.assignments[idx].attachedFleetVehicleToken = vehicleTokenKey
             return true
         case let .updateAssignmentTask(assignmentID, taskID):
+            environment.clearOperatorLaunchPoses(forAssignmentIDs: [assignmentID])
             environment.clearRosterSimStartPoseSnapshots(forAssignmentIDs: [assignmentID])
             guard let idx = environment.assignments.firstIndex(where: { $0.id == assignmentID }) else { return false }
             environment.assignments[idx].taskId = taskID

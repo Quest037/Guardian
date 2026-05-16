@@ -1468,7 +1468,10 @@ struct MissionRunDetailView: View {
                     run: run,
                     task: task,
                     mission: mission,
+                    fleetLink: fleetLink,
+                    sitl: sitl,
                     now: now,
+                    policyWindDownRetryBusyAssignmentID: operatorPolicyWindDownRetryBusyAssignmentID,
                     onSquadAbortNow: { assignmentID, label in
                         presentedRunConfirm = .squadAbortNow(
                             taskID: task.id,
@@ -1496,6 +1499,16 @@ struct MissionRunDetailView: View {
                             assignmentID: assignmentID,
                             label: label
                         )
+                    },
+                    onEngageStabilize: { assignment, kind in
+                        performOperatorEngageStabilize(assignment: assignment, kind: kind)
+                    },
+                    onContinueAfterPark: { assignment in
+                        let device = mission.rosterDevices.first(where: { $0.id == assignment.rosterDeviceId })
+                        performOperatorContinueAfterPark(assignment: assignment, rosterDevice: device)
+                    },
+                    onReturnToLaunch: { assignment in
+                        performOperatorSquadReturnToLaunch(assignment: assignment)
                     },
                     onRunUpdated: {
                         syncRunFromStore()
@@ -2379,6 +2392,8 @@ struct MissionRunDetailView: View {
                                         fleetVehicles: fleet
                                     )
                                 }
+                                run.pendingMCSLaunchCaptureOverridesByAssignmentID =
+                                    setupStagingSimDragCoordByAssignmentID.mapValues(\.coordinate)
                                 run.status = .running
                                 let deferOneOff: Bool = {
                                     guard let t = run.oneOffStartAt else { return false }
@@ -4405,6 +4420,10 @@ struct MissionRunDetailView: View {
         switch event.level {
         case .info:
             toastCenter.show("Queued \(label) for \(assignment.slotName).", style: .info)
+            if kind == .park {
+                run.markMissionSquadOperatorPaused(forAssignmentID: assignment.id)
+                onUpdate(run)
+            }
             missionLiveEngageStabilizeTelemetryWatch = MissionLiveEngageStabilizeTelemetryWatch(
                 assignmentID: assignment.id,
                 kind: kind,
@@ -4470,7 +4489,8 @@ struct MissionRunDetailView: View {
                 intent: intent,
                 label: label,
                 slotName: slotName,
-                vehicleID: vid
+                vehicleID: vid,
+                assignmentID: assignment.id
             )
             return
         }
@@ -4488,8 +4508,27 @@ struct MissionRunDetailView: View {
             intent: intent,
             label: label,
             slotName: slotName,
-            vehicleID: vid
+            vehicleID: vid,
+            assignmentID: assignment.id
         )
+    }
+
+    private func performOperatorSquadReturnToLaunch(assignment: MissionRunAssignment) {
+        run.attachServices(fleetLink: fleetLink, sitl: sitl, generalSettings: generalSettings)
+        let event = run.issueOperatorSquadReturnToLaunchDispatch(
+            assignment: assignment,
+            fleetLink: fleetLink,
+            sitl: sitl
+        )
+        onUpdate(run)
+        switch event.level {
+        case .info:
+            toastCenter.show("Queued Go Home for \(assignment.slotName).", style: .info)
+        case .warning:
+            toastCenter.show("Go Home: \(event.message)", style: .warning)
+        case .error:
+            toastCenter.show("Go Home: \(event.message)", style: .error)
+        }
     }
 
     private func applyOperatorContinueAfterParkImmediateFeedback(
@@ -4497,12 +4536,15 @@ struct MissionRunDetailView: View {
         intent: MissionRunOperatorContinueAfterParkIntent,
         label: String,
         slotName: String,
-        vehicleID: String
+        vehicleID: String,
+        assignmentID: UUID
     ) {
         switch event.level {
         case .info:
             if intent == .resumeMission {
                 fleetLink.clearMcrOperatorParkAwaitingContinue(vehicleID: vehicleID)
+                run.clearMissionSquadOperatorPaused(forAssignmentID: assignmentID)
+                onUpdate(run)
                 toastCenter.show("Queued \(label) for \(slotName).", style: .info)
             } else if intent.isPolicyWindDownRetry {
                 toastCenter.show("Retrying end protocol for \(slotName)…", style: .info)
@@ -5606,7 +5648,8 @@ struct MissionRunDetailView: View {
                 focusLiveAssignment(presentation.assignmentID)
             },
             slotAttention: s.slotAttention.map { ($0.severity, $0.title, $0.help) },
-            accessibilitySummary: s.accessibilitySummary
+            accessibilitySummary: s.accessibilitySummary,
+            isFocusedInLiveConsole: focusedLiveAssignmentID == presentation.assignmentID
         )
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -5667,7 +5710,8 @@ struct MissionRunDetailView: View {
                 focusLiveAssignment(assignment.id)
             },
             slotAttention: slotAttention,
-            accessibilitySummary: reserveSwapStripAccessibilitySummary
+            accessibilitySummary: reserveSwapStripAccessibilitySummary,
+            isFocusedInLiveConsole: focusedLiveAssignmentID == assignment.id
         )
         .frame(maxWidth: .infinity, alignment: .leading)
     }

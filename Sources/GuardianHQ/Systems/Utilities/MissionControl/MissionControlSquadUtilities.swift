@@ -111,6 +111,7 @@ enum MissionControlSquadUtilities {
         case .staging: return .staging
         case .executing: return .executing
         case .between: return .between
+        case .paused: return .between
         case .recovery: return .recovery
         case .aborting: return .aborting
         case .aborted: return .aborted
@@ -142,7 +143,7 @@ enum MissionControlMissionEndWindDownControlVisibility {
         switch squadState {
         case .executing, .ready, .staging, .between:
             return true
-        case .recovery, .completed, .aborting, .aborted:
+        case .paused, .recovery, .completed, .aborting, .aborted:
             return false
         }
     }
@@ -360,7 +361,7 @@ enum MissionControlOperatorTriggerNextSquadPolicy {
         switch state {
         case .ready, .between:
             return true
-        case .staging, .executing, .recovery, .aborting, .aborted, .completed:
+        case .staging, .executing, .paused, .recovery, .aborting, .aborted, .completed:
             return false
         }
     }

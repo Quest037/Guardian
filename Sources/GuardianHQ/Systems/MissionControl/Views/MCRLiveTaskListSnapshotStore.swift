@@ -6,6 +6,7 @@ import SwiftUI
 struct MCRLiveTaskListSquadRowSnapshot: Identifiable, Equatable {
     let assignmentID: UUID
     let squadLabel: String
+    let rawSquadState: MissionSquadState
     let displayState: MissionTaskState
     let progressFraction: Double
     /// Active MAVLink start deferral for this squad row (task-level or squad-scoped), when `now < startAt` at snapshot time.
@@ -561,6 +562,7 @@ enum MCRLiveTaskListProgressFormatting {
                             taskName: task.name,
                             squadIndex: squad.squadIndex
                         ),
+                        rawSquadState: slice.rawSquadState,
                         displayState: displayState,
                         progressFraction: frac,
                         activeStartDeferral: slice.activeStartDeferral

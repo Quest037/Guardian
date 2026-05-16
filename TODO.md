@@ -140,9 +140,6 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 
 - **MC-R reserve swap picker:** merit-ranked ordering (battery, proximity, link quality, etc.) for floating-pool health cards in the live roster strip; v1 uses ``enumerateReserveSwapCandidates`` order only (see ``MissionRunEnvironment/swapRosterAssignmentWithFloatingReservePoolSlot``).
 
-- **Tasks:**
-  - add functionality to tell task to complete/abort. (buggy & no callback)
-
 - **Task Controls (Sidebar):**
 
 - **Map:** 
@@ -154,9 +151,6 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
   - Functionality to release a vehicle from a roster slot
   - Functionality to select a new vehicle for a roster slot (empty)
   - Functionality to switch a vehicle for a roster slot
-
-- **Squads:**
-  - Permanent Delay (delay squads cycles permanently until manually restated)
 
 - **MissionCleanUp:**
   - Prompts firing after mission has moved into .setup again
@@ -180,45 +174,23 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
   - v1: convoy (line-behind-primary) default; wingman follow pipeline in MRE (``SquadFollow&Formation.md`` § v1). Depends on ``MRESquadsToDo.md`` per-squad cycles.
   - v2: patrol/cluster and other shapes + on-the-fly formation changes (``SquadFollow&Formation.md`` § v2).
 
-- **MissionTask Squad StaggerDelay:** - defaults to duration to first waypoint. Other options should be possible.
- - Value from MissionTask.staggerDelay object
- - Message from previous squad (squad primary radios in, next squad triggered) (fallback needed)
- - Operator triggered (not for continuous cycles)
-
 - **MissionTask Squad vehicle promotion:** 
   - build logic for wingman to be promoted to leader, and squad to update accordingly.
   - this is an RoE, that can be autonomous, ask etc.
 
 - **MissionTask Squad vehicle release:** 
-  - build logic for planner/operator/assistant to release a vehicle from roster slot completely. (Void the roster slot)
+  - build logic for planner/operator/assistant to release a vehicle from roster slot completely.
     - Retain the vehicle in new MRE list (voidedVehicles) so that we can keep as map marker (different style), so we can do things like marking it as manually recovered etc.
   - this is an RoE, that can be autonomous, ask etc.
   - Note that user will likely want to swap in a reserve
 
 - **Testing:** - test working with RoE.
-- **Testing:** - test working with prompts.
-- **Bug:** - mission builder not respecting heading: "follow path" when it is selected. Example mission had drone pointing in wrong direction. (Test Operation Themistokles) (Or drone not understanding)
 
 #### Scheduling
-
-- **MRE Scheduling:**
-  
-- **AbortPolicy:** 
-  - Trigger a task to move into aborting/aborted (buggy)
-    - Abort policy is triggered but switching from "Executing" to "Aborting" waits until vehicles have finished their abort policy. It should happen before they start. (See new attemptingStates)
-
-- **CompletePolicy:** 
-  - Trigger a task to move into recovery/completed (buggy)
-    - Complete policy is triggered but switching from "Executing" to "Recovery" waits until vehicles have finished their complete policy. It should happen before they start. (See new attemptingStates)
 
 #### Logging
 
 #### Tasks
-  
-  - **Complete:**
-    - Currently we have to manually mark a task as complete after it begins that process. This should become autonomous as assignments check in that they have completed, and when all are there task is completed automatically.
-  - **Abort:**
-    - Currently we have to manually mark a task as aborted after it begins that process. This should become autonomous as assignments check in that they have aborted, and when all are there task is aborted automatically.
 
   - **Operator prompts:**
     - **User Notifications:**

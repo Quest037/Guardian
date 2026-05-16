@@ -173,6 +173,8 @@ struct MissionLiveVehicleHealthCard: View {
     /// When set, the card is exposed as a single VoiceOver element with this label (swap / browse pool context).
     var accessibilitySummary: String? = nil
     var accessibilityHint: String? = nil
+    /// MC-R live roster: vehicle overlay is open for this slot (matches map selection ring).
+    var isFocusedInLiveConsole: Bool = false
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -286,6 +288,13 @@ struct MissionLiveVehicleHealthCard: View {
             RoundedRectangle(cornerRadius: 10)
                 .strokeBorder(lifecycleBorderColor, lineWidth: 1.6)
         )
+        .overlay {
+            if isFocusedInLiveConsole {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(GuardianSemanticColors.infoForeground.opacity(0.55), lineWidth: 2)
+                    .allowsHitTesting(false)
+            }
+        }
     }
 
     private func vehicleThumbnailColumn(width: CGFloat, height: CGFloat) -> some View {

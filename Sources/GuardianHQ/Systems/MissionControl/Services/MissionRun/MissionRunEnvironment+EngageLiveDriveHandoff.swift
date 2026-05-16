@@ -47,6 +47,52 @@ extension MissionRunEnvironment {
         return event
     }
 
+    /// Operator **Return to Launch** for one roster row (preferential abort RTL recipe).
+    @discardableResult
+    func issueOperatorSquadReturnToLaunchDispatch(
+        assignment: MissionRunAssignment,
+        fleetLink: FleetLinkService,
+        sitl: SitlService
+    ) -> MissionRunEvent {
+        let tokenKey = (assignment.attachedFleetVehicleToken ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let fields = systems.logging.effectiveTaskFields(forAssignmentID: assignment.id)
+        guard !tokenKey.isEmpty else {
+            let event = MissionRunEvent(
+                level: .warning,
+                taskID: fields.0,
+                taskLabel: fields.1,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.commandInvalidToken,
+                templateParams: [
+                    "slot": assignment.slotName,
+                    "slotID": assignment.id.uuidString,
+                ]
+            )
+            appendEvent(event)
+            return event
+        }
+        let planningHub: FleetHubVehicleTelemetry? = {
+            guard let token = FleetMissionVehicleToken(storageKey: tokenKey),
+                  let vehicleID = resolvedFleetStreamVehicleID(token: token, fleetLink: fleetLink, sitl: sitl)
+            else { return nil }
+            return fleetLink.hubTelemetry(forVehicleID: vehicleID)
+        }()
+        let dispatch = returnToLaunchFleetDispatch(assignmentID: assignment.id, planningHub: planningHub)
+        let issued = MissionRunIssuedCommand(
+            assignmentID: assignment.id,
+            slotName: assignment.slotName,
+            vehicleTokenKey: tokenKey,
+            dispatch: dispatch,
+            issuer: .operator,
+            issuerKey: "operator.squadTriage.returnToLaunch",
+            category: .missionControl
+        )
+        let event = systems.commands.dispatchCommand(issued, fleetLink: fleetLink, sitl: sitl)
+        appendEvent(event)
+        return event
+    }
+
     func resolveOperatorContinueAfterParkIntent(
         assignment: MissionRunAssignment,
         rosterDevice: RosterDevice?,

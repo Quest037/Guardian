@@ -78,6 +78,8 @@ enum LiveLeafletMapMarkerBuilder {
         let highlightID = inputs.presentation.highlightedFleetVehicleID
         let isHighlighted = highlightID.map { vehicleID == $0 } ?? false
         let selected = inputs.presentation.selectedAssignmentID == assignment.id || isHighlighted
+        let showLabel = selected
+            || (isHighlighted && inputs.presentation.highlightShowsLabel)
         let a11y = rosterAccessibilityTitle?(assignment, inputs.mission)
 
         let marker = MapVehicleMarker(
@@ -88,7 +90,7 @@ enum LiveLeafletMapMarkerBuilder {
             colorHex: colorHex,
             glyphKind: GuardianMapVehicleGlyphKind.forRosterAssignment(assignment, mission: inputs.mission),
             imageDataURL: nil,
-            showLabel: isHighlighted && inputs.presentation.highlightShowsLabel,
+            showLabel: showLabel,
             selected: selected,
             draggable: false,
             headingDeg: heading,

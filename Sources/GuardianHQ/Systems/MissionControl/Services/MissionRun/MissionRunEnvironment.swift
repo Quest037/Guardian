@@ -148,9 +148,20 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
 
     /// Primary squads that must not receive automatic next-cycle MAVLink starts (squad-scoped wind-down).
     @Published private(set) var missionSquadAutopilotAutostartSuppressedAssignmentIDs: Set<UUID> = []
+    /// Primary held while wingmen assemble/rebuild convoy on heading-based slots (cleared when formation is ready to launch).
+    @Published private(set) var missionSquadConvoyAssemblyHoldAssignmentIDs: Set<UUID> = []
 
     /// Primary squads the operator parked mid-task (``MissionSquadState/paused``); cleared on **Continue mission**.
     @Published private(set) var missionSquadOperatorPausedAssignmentIDs: Set<UUID> = []
+
+    /// Primary squads held after wingman OFFBOARD/GUIDED reconnect exhaustion (primary mission paused; operator prompt).
+    @Published private(set) var missionSquadFormationFollowHaltedPrimaryAssignmentIDs: Set<UUID> = []
+
+    /// Bumps when wingman follow phases change so MC-R roster snapshots refresh.
+    @Published private(set) var squadFollowStatusRevision: Int = 0
+
+    /// Wingman slots released from squad follow (map / triage chrome; run session RAM only).
+    @Published private(set) var missionRunRosterReleasedAssignmentIDs: Set<UUID> = []
 
     /// First-wave primaries waiting operator / waypoint release (ordered), keyed by mission task id.
     @Published private(set) var deferredFirstWaveSquadAssignmentIDsByTaskID: [UUID: [UUID]] = [:]
@@ -196,7 +207,8 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             projections: MissionRunProjectionsSubsystem(),
             executor: MissionRunExecutionSubsystem(),
             scheduling: MissionRunSchedulingSubsystem(),
-            policyAuthority: MissionRunPolicyAuthoritySubsystem()
+            policyAuthority: MissionRunPolicyAuthoritySubsystem(),
+            squadFollow: MissionRunSquadFollowSubsystem()
         )
         self.id = id
         self.missionId = mission.id
@@ -220,6 +232,8 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         self.systems.executor.environment = self
         self.systems.scheduling.environment = self
         self.systems.policyAuthority.environment = self
+        self.systems.squadFollow.environment = self
+        self.systems.squadFollow.cycleLaunchExecutor = self.systems.executor
         refreshDerivedTaskStates()
         syncRosterRoleResolutions(from: mission)
         syncRuntimeMissionPointsFromTemplate(mission, reason: .initial)
@@ -322,11 +336,30 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     /// when ``shouldTriggerSimCleanupBeforeRemoval()`` is true. Caller should ``attachServices`` first.
     func awaitMissionRunSimCleanupBeforeRemovalIfNeeded() async {
         guard shouldTriggerSimCleanupBeforeRemoval() else { return }
-        while isMissionRunSimCleanupPassRunning {
-            try? await Task.sleep(nanoseconds: 50_000_000)
-        }
+        await awaitInFlightMissionRunSimCleanupPassIfNeeded()
         guard let fleetLink, let sitl else { return }
         await performMissionRunSimCleanupPassIfNeeded(fleetLink: fleetLink, sitl: sitl)
+    }
+
+    private static let simCleanupPassWaitPollNs: UInt64 = 50_000_000
+    private static let simCleanupPassWaitMaxPolls = 600
+
+    /// Blocks until the run-complete SIM cleanup latch clears (or ~30s), then stops squad convoy follow streams.
+    ///
+    /// Call before **delete run**, **back to setup**, or other run-shell transitions so MAVSDK kill/hold work does not
+    /// race ``SitlService/stop`` / unregister.
+    func awaitFleetWindDownBeforeRunShellChange(fleetLink: FleetLinkService, sitl _: SitlService) async {
+        await awaitInFlightMissionRunSimCleanupPassIfNeeded()
+        await systems.squadFollow.stopAllFollowStreams(fleetLink: fleetLink)
+        systems.squadFollow.resetAllFollowState()
+    }
+
+    private func awaitInFlightMissionRunSimCleanupPassIfNeeded() async {
+        var polls = 0
+        while isMissionRunSimCleanupPassRunning, polls < Self.simCleanupPassWaitMaxPolls {
+            polls += 1
+            try? await Task.sleep(nanoseconds: Self.simCleanupPassWaitPollNs)
+        }
     }
 
     func captureExecutionContext(_ context: MissionRunExecutionContext?) {
@@ -527,6 +560,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             if !missionTaskCompleteWindDownIssuedTaskIDs.isEmpty { missionTaskCompleteWindDownIssuedTaskIDs = [] }
             if !missionTaskAutopilotAutostartSuppressedTaskIDs.isEmpty { missionTaskAutopilotAutostartSuppressedTaskIDs = [] }
             if !missionSquadAutopilotAutostartSuppressedAssignmentIDs.isEmpty { missionSquadAutopilotAutostartSuppressedAssignmentIDs = [] }
+            if !missionSquadConvoyAssemblyHoldAssignmentIDs.isEmpty { missionSquadConvoyAssemblyHoldAssignmentIDs = [] }
             if !squadCompletePolicyWindDownIssuedAssignmentIDs.isEmpty { squadCompletePolicyWindDownIssuedAssignmentIDs = [] }
             if !squadAbortPolicyWindDownIssuedAssignmentIDs.isEmpty { squadAbortPolicyWindDownIssuedAssignmentIDs = [] }
             if !squadMissionEndRecoveryCompletedByAssignmentIDs.isEmpty { squadMissionEndRecoveryCompletedByAssignmentIDs = [] }
@@ -3118,6 +3152,12 @@ extension MissionRunEnvironment {
         if !squadStartDeferralByAssignmentID.isEmpty { squadStartDeferralByAssignmentID = [:] }
         if !squadCompletePolicyWindDownIssuedAssignmentIDs.isEmpty { squadCompletePolicyWindDownIssuedAssignmentIDs = [] }
         if !missionSquadOperatorPausedAssignmentIDs.isEmpty { missionSquadOperatorPausedAssignmentIDs = [] }
+        if !missionSquadConvoyAssemblyHoldAssignmentIDs.isEmpty { missionSquadConvoyAssemblyHoldAssignmentIDs = [] }
+        if !missionSquadFormationFollowHaltedPrimaryAssignmentIDs.isEmpty {
+            missionSquadFormationFollowHaltedPrimaryAssignmentIDs = []
+        }
+        if squadFollowStatusRevision != 0 { squadFollowStatusRevision = 0 }
+        if !missionRunRosterReleasedAssignmentIDs.isEmpty { missionRunRosterReleasedAssignmentIDs = [] }
     }
 
     internal func markMissionSquadAutostartSuppressed(forAssignmentID assignmentID: UUID) {
@@ -3126,7 +3166,10 @@ extension MissionRunEnvironment {
     }
 
     /// Operator **Park** on an in-flight primary squad: hold MAVLink autostart / stagger until **Continue mission**.
-    func markMissionSquadOperatorPaused(forAssignmentID assignmentID: UUID) {
+    func markMissionSquadOperatorPaused(
+        forAssignmentID assignmentID: UUID,
+        beginConvoyRebuildWhenPaused: Bool = true
+    ) {
         var paused = missionSquadOperatorPausedAssignmentIDs
         guard paused.insert(assignmentID).inserted else {
             removeSquadFromActiveCycle(assignmentID)
@@ -3136,6 +3179,14 @@ extension MissionRunEnvironment {
         missionSquadOperatorPausedAssignmentIDs = paused
         removeSquadFromActiveCycle(assignmentID)
         markMissionSquadAutostartSuppressed(forAssignmentID: assignmentID)
+        if beginConvoyRebuildWhenPaused, let ctx = effectiveExecutionContextForDispatch() {
+            systems.squadFollow.beginConvoyRebuild(
+                primaryAssignmentID: assignmentID,
+                fleetLink: ctx.fleetLink,
+                sitl: ctx.sitl,
+                launchPrimaryWhenReady: false
+            )
+        }
     }
 
     /// Clears operator park hold after **Continue mission** (does not clear wind-down autostart suppress).
@@ -3147,6 +3198,13 @@ extension MissionRunEnvironment {
             var suppressed = missionSquadAutopilotAutostartSuppressedAssignmentIDs
             suppressed.remove(assignmentID)
             missionSquadAutopilotAutostartSuppressedAssignmentIDs = suppressed
+        }
+        if let ctx = effectiveExecutionContextForDispatch() {
+            systems.squadFollow.resumeConvoyAssemblyForPrimaryLaunch(
+                primaryAssignmentID: assignmentID,
+                fleetLink: ctx.fleetLink,
+                sitl: ctx.sitl
+            )
         }
         refreshDerivedTaskStates()
     }
@@ -3187,7 +3245,68 @@ extension MissionRunEnvironment {
         if pendingMissionSquadGracefulWindDownKindByAssignmentID[assignmentID] != nil {
             return true
         }
+        if missionSquadConvoyAssemblyHoldAssignmentIDs.contains(assignmentID) {
+            return true
+        }
         return missionSquadAutopilotAutostartSuppressedAssignmentIDs.contains(assignmentID)
+    }
+
+    internal func markMissionSquadConvoyAssemblyHold(forAssignmentID assignmentID: UUID) {
+        guard missionSquadConvoyAssemblyHoldAssignmentIDs.insert(assignmentID).inserted else { return }
+        refreshDerivedTaskStates()
+    }
+
+    internal func clearMissionSquadConvoyAssemblyHold(forAssignmentID assignmentID: UUID) {
+        guard missionSquadConvoyAssemblyHoldAssignmentIDs.remove(assignmentID) != nil else { return }
+        refreshDerivedTaskStates()
+    }
+
+    func isMissionSquadFormationFollowHalted(forAssignmentID assignmentID: UUID) -> Bool {
+        missionSquadFormationFollowHaltedPrimaryAssignmentIDs.contains(assignmentID)
+    }
+
+    func wingmanFollowPhase(forAssignmentID assignmentID: UUID) -> MissionRunSquadWingmanFollowPhase? {
+        systems.squadFollow.wingmanFollowPhase(forAssignmentID: assignmentID)
+    }
+
+    func bumpSquadFollowStatusRevision() {
+        squadFollowStatusRevision &+= 1
+    }
+
+    func markMissionRunRosterReleasedFromSquadFollow(assignmentID: UUID) {
+        missionRunRosterReleasedAssignmentIDs.insert(assignmentID)
+    }
+
+    /// Wingman stream reconnect budget exhausted — pause primary, suppress autostart, surface operator prompt.
+    func reportFormationFollowStreamExhausted(
+        primaryAssignmentID: UUID,
+        failedWingmanAssignmentIDs: [UUID],
+        fleetLink: FleetLinkService,
+        sitl: SitlService
+    ) {
+        guard missionSquadFormationFollowHaltedPrimaryAssignmentIDs.insert(primaryAssignmentID).inserted else {
+            return
+        }
+        markMissionSquadAutostartSuppressed(forAssignmentID: primaryAssignmentID)
+        systems.executor.handleFormationFollowStreamExhausted(
+            primaryAssignmentID: primaryAssignmentID,
+            failedWingmanAssignmentIDs: failedWingmanAssignmentIDs,
+            fleetLink: fleetLink,
+            sitl: sitl
+        )
+    }
+
+    func clearMissionSquadFormationFollowHalt(forAssignmentID assignmentID: UUID) {
+        guard missionSquadFormationFollowHaltedPrimaryAssignmentIDs.remove(assignmentID) != nil else { return }
+        if pendingMissionSquadGracefulWindDownKindByAssignmentID[assignmentID] == nil,
+           !squadCompletePolicyWindDownIssuedAssignmentIDs.contains(assignmentID),
+           !squadAbortPolicyWindDownIssuedAssignmentIDs.contains(assignmentID),
+           !missionSquadOperatorPausedAssignmentIDs.contains(assignmentID) {
+            var suppressed = missionSquadAutopilotAutostartSuppressedAssignmentIDs
+            suppressed.remove(assignmentID)
+            missionSquadAutopilotAutostartSuppressedAssignmentIDs = suppressed
+        }
+        refreshDerivedTaskStates()
     }
 
     internal func resolvedTaskID(forSquadAssignmentID assignmentID: UUID, mission: Mission) -> UUID? {

@@ -33,20 +33,49 @@ enum OffboardCoordinator {
         return "OffboardCoordinator: setVelocityBody(zero) tick #\(iteration) horizontal|v|=\(speedStr) m/s stableTicks=\(stableTicks)/\(stableNeed)"
     }
 
+    /// Fixed global pose streamed during PX4 park so heading does not drift under velocity-only OFFBOARD.
+    struct Px4ParkPoseHold: Equatable, Sendable {
+        let latitudeDeg: Double
+        let longitudeDeg: Double
+        let absoluteAltitudeM: Float
+        let yawDeg: Float
+    }
+
     /// Seeds zero velocity, ``Offboard/start``, then pushes zero ``setVelocityBody`` until horizontal speed is low (debounced) or timeout.
+    ///
+    /// When ``poseHold`` is set, each tick also streams ``Offboard/setPositionGlobal`` at the snapshot
+    /// lat/lon/alt/yaw captured when park began (PX4 rover OFFBOARD otherwise slews heading arbitrarily).
     ///
     /// - Parameters:
     ///   - awaitCompletable: Bridge to ``FleetLinkService/awaitCompletableForManualStream`` (or equivalent).
     ///   - horizontalGroundSpeedMS: Hub N–E horizontal speed (m/s), or `nil` if unknown.
+    ///   - poseHold: Optional pose captured at park command entry.
     ///   - appendDiagnostic: Lines are prefixed by the caller (e.g. `"Park: …"`).
     @MainActor
     static func runPx4ParkZeroVelocityBrakeLoop(
         drone: Drone,
         awaitCompletable: @MainActor (Completable) async throws -> Void,
         horizontalGroundSpeedMS: @MainActor () -> Double?,
+        poseHold: Px4ParkPoseHold? = nil,
         appendDiagnostic: @MainActor (String) -> Void
     ) async throws {
         let zero = Offboard.VelocityBodyYawspeed(forwardMS: 0, rightMS: 0, downMS: 0, yawspeedDegS: 0)
+        if let poseHold {
+            let position = Offboard.PositionGlobalYaw(
+                latDeg: poseHold.latitudeDeg,
+                lonDeg: poseHold.longitudeDeg,
+                altM: poseHold.absoluteAltitudeM,
+                yawDeg: poseHold.yawDeg,
+                altitudeType: .amsl
+            )
+            try await awaitCompletable(drone.offboard.setPositionGlobal(positionGlobalYaw: position))
+            appendDiagnostic(
+                String(
+                    format: "OffboardCoordinator: seed setPositionGlobal hold (yaw=%.1f°) before brake loop.",
+                    poseHold.yawDeg
+                )
+            )
+        }
         try await awaitCompletable(drone.offboard.setVelocityBody(velocityBodyYawspeed: zero))
         appendDiagnostic("OffboardCoordinator: seed setVelocityBody(zero) before Offboard.start.")
         try await awaitCompletable(drone.offboard.start())
@@ -58,6 +87,16 @@ enum OffboardCoordinator {
         var iteration = 0
         while true {
             iteration += 1
+            if let poseHold {
+                let position = Offboard.PositionGlobalYaw(
+                    latDeg: poseHold.latitudeDeg,
+                    lonDeg: poseHold.longitudeDeg,
+                    altM: poseHold.absoluteAltitudeM,
+                    yawDeg: poseHold.yawDeg,
+                    altitudeType: .amsl
+                )
+                try await awaitCompletable(drone.offboard.setPositionGlobal(positionGlobalYaw: position))
+            }
             try await awaitCompletable(drone.offboard.setVelocityBody(velocityBodyYawspeed: zero))
 
             if let speed = horizontalGroundSpeedMS(), speed < horizontalSpeedStopThresholdMS {

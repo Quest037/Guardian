@@ -391,6 +391,76 @@ enum StructuredLogTemplateCatalog: Sendable {
             "First-wave squad released for {{squad}} (@{{slotID}}); MAVLink execution starting.",
             mcr: "First wave · {{squad}} · @{{slotID}} · executing"
         )
+        put(
+            MissionRunLogTemplateKey.squadFollowConvoyTargetsComputed,
+            "Convoy follow targets computed for {{squad}} ({{wingmanCount}} wingman): {{targets}}.",
+            mcr: "Convoy targets · {{squad}} · {{wingmanCount}} wingman"
+        )
+        put(
+            MissionRunLogTemplateKey.squadFollowStreamStarted,
+            "Wingman {{slot}} (@{{slotID}}) convoy follow stream started for {{squad}}.",
+            mcr: "Convoy follow · {{squad}} · {{slot}} streaming"
+        )
+        put(
+            MissionRunLogTemplateKey.squadFollowStreamStopped,
+            "Wingman convoy follow stream stopped for {{squad}} (@{{slotID}}).",
+            mcr: "Convoy follow stopped · {{squad}}"
+        )
+        put(
+            MissionRunLogTemplateKey.squadFollowStreamFailed,
+            "Wingman {{slot}} (@{{slotID}}) convoy follow stream failed for {{squad}}.",
+            mcr: "Convoy follow failed · {{squad}} · {{slot}}"
+        )
+        put(
+            MissionRunLogTemplateKey.squadFollowSkipped,
+            "Convoy wingman follow not started for {{squad}} ({{reason}}).",
+            mcr: "Convoy follow skipped · {{squad}} · {{reason}}"
+        )
+        put(
+            MissionRunLogTemplateKey.squadFollowConvoyAssemblyStarted,
+            "Convoy assembly started for {{squad}} ({{wingmanCount}} wingman); primary held until formation is ready.",
+            mcr: "Convoy assembly · {{squad}} · {{wingmanCount}} wingman"
+        )
+        put(
+            MissionRunLogTemplateKey.squadFollowConvoyRebuildStarted,
+            "Convoy rebuild started for {{squad}} (primary heading slots).",
+            mcr: "Convoy rebuild · {{squad}}"
+        )
+        put(
+            MissionRunLogTemplateKey.squadFollowConvoyAssemblyReady,
+            "Convoy formation ready for {{squad}} (timedOut={{timedOut}}).",
+            mcr: "Convoy ready · {{squad}}"
+        )
+        put(
+            MissionRunLogTemplateKey.squadFollowConvoyPrimaryLaunchSkipped,
+            "Primary mission launch skipped after convoy assembly (@{{slotID}}): {{reason}}.",
+            mcr: "Convoy primary launch skipped · @{{slotID}}"
+        )
+        put(
+            MissionRunLogTemplateKey.squadFollowBetweenCyclesHold,
+            "Between cycles: {{squad}} wingmen holding last formation pose.",
+            mcr: "Convoy hold · {{squad}}"
+        )
+        put(
+            MissionRunLogTemplateKey.squadFollowBetweenCyclesWingmenReleased,
+            "Between cycles: {{squad}} wingmen released from follow ({{tactic}}).",
+            mcr: "Convoy between cycles · {{squad}} · {{tactic}}"
+        )
+        put(
+            MissionRunLogTemplateKey.squadFollowStreamExhausted,
+            "Wingman formation follow lost for {{squad}} — primary {{primary}} paused (wingmen: {{wingmen}}).",
+            mcr: "Formation lost · {{squad}} · primary paused"
+        )
+        put(
+            MissionRunLogTemplateKey.squadFollowWingmanPromotedToPrimary,
+            "Wingman promoted to squad primary for {{squad}} (@{{promotedSlotID}}; former primary @{{formerPrimarySlotID}}).",
+            mcr: "Squad promote · {{squad}}"
+        )
+        put(
+            MissionRunLogTemplateKey.squadFollowOffboardStreamLost,
+            "Wingman {{slot}} (@{{slotID}}) OFFBOARD/GUIDED setpoint stream ended unexpectedly for {{squad}}; reconnecting.",
+            mcr: "Convoy stream lost · {{squad}} · {{slot}}"
+        )
 
         put(
             MissionRunLogTemplateKey.startMissionTaskSkippedPhase,

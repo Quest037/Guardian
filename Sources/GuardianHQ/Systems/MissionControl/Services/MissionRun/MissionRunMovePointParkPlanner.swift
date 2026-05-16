@@ -16,6 +16,11 @@ enum MissionRunMovePointParkPlannerError: Error, Equatable {
 /// so hub latitude/longitude/AGL stay fresh.
 enum MissionRunMovePointParkPlanner: Sendable {
 
+    /// Yaw for move+park recipes: prefer hub ``headingDeg`` (attitude), then ``yawDeg``.
+    static func resolvedVehicleYawDeg(headingDeg: Double?, yawDeg: Double?) -> Double {
+        headingDeg ?? yawDeg ?? 0
+    }
+
     /// MC-R style one-liner, e.g. `Move to rally point [RP:1]` (matches ``MissionPoint/mapChipLabel``).
     static func procedureLogSummary(for point: MissionPoint) -> String {
         let kindWord = point.kind.rawValue

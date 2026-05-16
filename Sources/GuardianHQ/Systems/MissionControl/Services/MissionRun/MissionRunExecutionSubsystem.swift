@@ -77,6 +77,9 @@ final class MissionRunExecutionSubsystem {
         environment.setMissionCycleCount(0)
         environment.systems.logging.clearState()
         environment.systems.lifecycle.markExecuting()
+        // Synchronous only — an async stop/reset here raced mission launch and cleared
+        // `activePrimaries` after wingman follow registered, so the tick loop never retargeted wingmen.
+        environment.systems.squadFollow.resetAllFollowState()
         environment.captureOperatorLaunchPosesAtRunStart(fleetLink: context.fleetLink, sitl: context.sitl)
         environment.captureRosterSimStartPoseSnapshotsIfNeeded(fleetLink: context.fleetLink, sitl: context.sitl)
         if environment.startedAt == nil {
@@ -380,6 +383,10 @@ final class MissionRunExecutionSubsystem {
         clearCommandQueue()
         environment.captureExecutionContext(context)
         environment.systems.scheduling.cancelAllScheduledTasks()
+        Task {
+            await environment.systems.squadFollow.stopAllFollowStreams(fleetLink: context.fleetLink)
+            environment.systems.squadFollow.resetAllFollowState()
+        }
         if Self.commandsContainCatalogueMissionClear(commands) {
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -424,11 +431,14 @@ final class MissionRunExecutionSubsystem {
     }
 
     private func deliverWallClockBatchIfStillPending(batchID: UUID, context: MissionRunExecutionContext) {
+        guard let environment else { return }
         guard let idx = pendingCommandBatches.firstIndex(where: { $0.id == batchID }) else { return }
         let batch = pendingCommandBatches[idx]
         guard case .at = batch.dispatch else { return }
         pendingCommandBatches.remove(at: idx)
         wallClockBatchTasks.removeValue(forKey: batchID)
+        // Staggered squads with wingmen use ``beginConvoyAssemblyForPlannedSquads`` (convoy before primary);
+        // wall-clock mission-start batches here are primary-only squads with no wingman follow hook.
         dispatchCommands(batch.commands, context: context)
     }
 
@@ -591,6 +601,14 @@ final class MissionRunExecutionSubsystem {
                 )
             }
         }
+        if let mission = environment.template {
+            environment.systems.squadFollow.resumeWingmanFollowAfterReserveSwapIfNeeded(
+                vacancyAssignmentID: ack.correlation.vacancyAssignmentID,
+                mission: mission,
+                fleetLink: context.fleetLink,
+                sitl: context.sitl
+            )
+        }
     }
 
     private static func postReserveSwapPostCommitOperatorToast(message: String, style: GuardianFeedbackSeverity) {
@@ -669,7 +687,10 @@ final class MissionRunExecutionSubsystem {
                     vehicleLatitudeDeg: lat,
                     vehicleLongitudeDeg: lon,
                     currentRelativeAltitudeM: relAlt,
-                    yawDeg: hub.yawDeg ?? 0
+                    yawDeg: MissionRunMovePointParkPlanner.resolvedVehicleYawDeg(
+                        headingDeg: hub.headingDeg,
+                        yawDeg: hub.yawDeg
+                    )
                 ) else { continue }
                 return MissionRunIssuedCommand(
                     assignmentID: assignment.id,
@@ -789,7 +810,10 @@ final class MissionRunExecutionSubsystem {
                     vehicleLatitudeDeg: lat,
                     vehicleLongitudeDeg: lon,
                     currentRelativeAltitudeM: relAlt,
-                    yawDeg: hub.yawDeg ?? 0
+                    yawDeg: MissionRunMovePointParkPlanner.resolvedVehicleYawDeg(
+                        headingDeg: hub.headingDeg,
+                        yawDeg: hub.yawDeg
+                    )
                 ) else { continue }
                 return MissionRunIssuedCommand(
                     assignmentID: assignment.id,
@@ -842,6 +866,10 @@ final class MissionRunExecutionSubsystem {
         environment.captureExecutionContext(context)
         environment.systems.scheduling.cancelAllScheduledTasks()
         environment.gracefulStopKind = .none
+        Task {
+            await environment.systems.squadFollow.stopAllFollowStreams(fleetLink: context.fleetLink)
+            environment.systems.squadFollow.resetAllFollowState()
+        }
         let windDown = buildCompletePolicyWindDownCommands()
         dispatchCommands(windDown, context: context)
         completeRun(
@@ -898,6 +926,7 @@ final class MissionRunExecutionSubsystem {
             templateParams: ["task": taskLabel]
         )
         environment.noteMissionTaskEndAttempt(.abortMissionEnd, forTaskID: taskID)
+        stopSquadFollowForWindDownTarget(target, taskID: taskID, context: context)
         if Self.commandsContainCatalogueMissionClear(commands) {
             Task { @MainActor [weak self] in
                 guard let self, let environment = self.environment else { return }
@@ -981,6 +1010,7 @@ final class MissionRunExecutionSubsystem {
             templateParams: ["task": taskLabel]
         )
         environment.noteMissionTaskEndAttempt(.recoveryMissionEnd, forTaskID: taskID)
+        stopSquadFollowForWindDownTarget(target, taskID: taskID, context: context)
         if case .squad(let assignmentID) = target {
             environment.markSquadCompletePolicyWindDownDispatchIssued(forAssignmentID: assignmentID)
         }
@@ -1038,6 +1068,7 @@ final class MissionRunExecutionSubsystem {
                 }
         }
         guard !commands.isEmpty else { return .failedNoCommands }
+        stopSquadFollowForWindDownTarget(target, taskID: taskID, context: context)
         guard let lead = commands.first,
               let token = FleetMissionVehicleToken(storageKey: lead.vehicleTokenKey),
               let vehicleID = resolvedFleetStreamVehicleID(
@@ -1335,6 +1366,11 @@ final class MissionRunExecutionSubsystem {
         for assignmentID in newlyCompletedSquadAssignmentIDs {
             environment.clearFinishedMissionCycleVehicleIDs(forSquadAssignmentID: assignmentID)
             environment.removeSquadFromActiveCycle(assignmentID)
+            environment.systems.squadFollow.onPrimarySquadCycleEnded(
+                primaryAssignmentID: assignmentID,
+                fleetLink: context.fleetLink,
+                sitl: context.sitl
+            )
         }
         let newlyCompletedTaskIDs = environment.recordSquadCycleCompletions(
             assignmentIDs: newlyCompletedSquadAssignmentIDs,
@@ -1680,33 +1716,65 @@ final class MissionRunExecutionSubsystem {
     ) -> [MissionRunIssuedCommand] {
         guard let environment else { return [] }
         let squads = environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: task.id)
-        return squads.compactMap { squad in
+        var commands: [MissionRunIssuedCommand] = []
+        for squad in squads {
             let aid = squad.squad.primaryAssignment.id
-            if let restrict = restrictToPrimaryAssignmentIDs, !restrict.contains(aid) { return nil }
-            guard let tokenKey = squad.squad.primaryAssignment.attachedFleetVehicleToken else { return nil }
-            let assignment = squad.squad.primaryAssignment
-            let hub = environment.abortPlanningHubTelemetry(for: assignment)
-            let dispatch: MissionRunFleetDispatch
+            if let restrict = restrictToPrimaryAssignmentIDs, !restrict.contains(aid) { continue }
+            guard let primaryTokenKey = squad.squad.primaryAssignment.attachedFleetVehicleToken else { continue }
+            let primaryAssignment = squad.squad.primaryAssignment
+            let hub = environment.abortPlanningHubTelemetry(for: primaryAssignment)
+            let primaryDispatch: MissionRunFleetDispatch
             switch task.betweenCycles {
             case .returnToLaunch:
-                dispatch = environment.returnToLaunchFleetDispatch(assignmentID: aid, planningHub: hub)
+                primaryDispatch = environment.returnToLaunchFleetDispatch(assignmentID: aid, planningHub: hub)
             case .holdPosition:
-                guard let d = MissionRunFleetDispatch.betweenCyclesTaskDispatch(.holdPosition) else { return nil }
-                dispatch = d
+                guard let d = MissionRunFleetDispatch.betweenCyclesTaskDispatch(.holdPosition) else { continue }
+                primaryDispatch = d
             case .park:
-                guard let d = MissionRunFleetDispatch.betweenCyclesTaskDispatch(.park) else { return nil }
-                dispatch = d
+                guard let d = MissionRunFleetDispatch.betweenCyclesTaskDispatch(.park) else { continue }
+                primaryDispatch = d
             }
-            return MissionRunIssuedCommand(
-                assignmentID: aid,
-                slotName: assignment.slotName,
-                vehicleTokenKey: tokenKey,
-                dispatch: dispatch,
-                issuer: .missionControl,
-                issuerKey: MissionRunCommandIssuerKey.missionExecute,
-                category: .missionControl
+            commands.append(
+                MissionRunIssuedCommand(
+                    assignmentID: aid,
+                    slotName: primaryAssignment.slotName,
+                    vehicleTokenKey: primaryTokenKey,
+                    dispatch: primaryDispatch,
+                    issuer: .missionControl,
+                    issuerKey: MissionRunCommandIssuerKey.missionExecute,
+                    category: .missionControl
+                )
             )
+            if task.betweenCycles == .holdPosition { continue }
+            for wingman in squad.squad.wingmanBindings {
+                guard let wingTokenKey = wingman.assignment.attachedFleetVehicleToken else { continue }
+                let wingDispatch: MissionRunFleetDispatch
+                switch task.betweenCycles {
+                case .returnToLaunch:
+                    wingDispatch = environment.returnToLaunchFleetDispatch(
+                        assignmentID: wingman.assignment.id,
+                        planningHub: environment.abortPlanningHubTelemetry(for: wingman.assignment)
+                    )
+                case .holdPosition:
+                    continue
+                case .park:
+                    guard let d = MissionRunFleetDispatch.betweenCyclesTaskDispatch(.park) else { continue }
+                    wingDispatch = d
+                }
+                commands.append(
+                    MissionRunIssuedCommand(
+                        assignmentID: wingman.assignment.id,
+                        slotName: wingman.assignment.slotName,
+                        vehicleTokenKey: wingTokenKey,
+                        dispatch: wingDispatch,
+                        issuer: .missionControl,
+                        issuerKey: MissionRunCommandIssuerKey.missionExecute,
+                        category: .missionControl
+                    )
+                )
+            }
         }
+        return commands
     }
 
     private func startPlannedImmediateSquads(
@@ -1899,12 +1967,24 @@ final class MissionRunExecutionSubsystem {
         }
         let pass = buildPrimaryMissionPass(mission: mission, explicitTaskId: taskID)
         let dispatched = !pass.immediateCommands.isEmpty || !pass.queuedBatches.isEmpty
+            || !pass.convoyAssemblyImmediatePrimaryIDs.isEmpty || !pass.convoyAssemblyDelayed.isEmpty
         if dispatched {
-            environment.markFirstWaveSquadsActiveInCurrentCycle(taskID: taskID, mission: mission)
+            beginConvoyAssemblyForPlannedSquads(
+                taskID: taskID,
+                mission: mission,
+                immediatePrimaryIDs: pass.convoyAssemblyImmediatePrimaryIDs,
+                delayed: pass.convoyAssemblyDelayed,
+                context: context,
+                launchPrimaryWhenReady: true
+            )
         }
         pass.events.forEach { environment.appendEvent($0) }
         for issued in pass.immediateCommands {
+            environment.markSquadActiveInCurrentCycle(issued.assignmentID)
             environment.appendEvent(environment.systems.commands.dispatchCommand(issued, fleetLink: context.fleetLink, sitl: context.sitl))
+        }
+        if dispatched, pass.convoyAssemblyImmediatePrimaryIDs.isEmpty, pass.convoyAssemblyDelayed.isEmpty {
+            environment.markFirstWaveSquadsActiveInCurrentCycle(taskID: taskID, mission: mission)
         }
         for batch in pass.queuedBatches {
             environment.systems.executor.enqueueCommandBatch(batch, context: context, replacingTags: [])
@@ -1947,6 +2027,27 @@ final class MissionRunExecutionSubsystem {
             explicitTaskId: taskID,
             nextCyclePrimaryAssignmentIDs: Set([primaryAssignmentID])
         )
+        let hasWingmen = environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: taskID)
+            .first(where: { $0.squad.primaryAssignment.id == primaryAssignmentID })
+            .map { !$0.squad.wingmanBindings.isEmpty } ?? false
+
+        if hasWingmen {
+            guard let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }),
+                  let squadPlan = environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: taskID)
+                    .first(where: { $0.squad.primaryAssignment.id == primaryAssignmentID })
+            else { return false }
+            environment.systems.squadFollow.preparePrimaryCycleLaunch(
+                mission: mission,
+                task: task,
+                plannedSquad: squadPlan,
+                fleetLink: context.fleetLink,
+                sitl: context.sitl,
+                launchContext: context,
+                launchPrimaryWhenReady: true
+            )
+            return true
+        }
+
         let dispatched = !pass.immediateCommands.isEmpty || !pass.queuedBatches.isEmpty
         if dispatched {
             environment.markSquadActiveInCurrentCycle(primaryAssignmentID)
@@ -2034,6 +2135,26 @@ final class MissionRunExecutionSubsystem {
         let assignmentIDs: Set<UUID>
     }
 
+    private func stopSquadFollowForWindDownTarget(
+        _ target: MissionRunCommandTarget,
+        taskID: UUID,
+        context: MissionRunExecutionContext
+    ) {
+        guard let environment else { return }
+        switch target {
+        case .squad(let primaryAssignmentID):
+            environment.systems.squadFollow.tearDownSquadFollow(
+                primaryAssignmentID: primaryAssignmentID,
+                fleetLink: context.fleetLink
+            )
+        case .task:
+            environment.systems.squadFollow.onTaskWindDownStarted(
+                taskID: taskID,
+                fleetLink: context.fleetLink
+            )
+        }
+    }
+
     private func commandTargetScope(
         target: MissionRunCommandTarget,
         environment: MissionRunEnvironment
@@ -2116,6 +2237,99 @@ final class MissionRunExecutionSubsystem {
         var events: [MissionRunEvent]
         var immediateCommands: [MissionRunIssuedCommand]
         var queuedBatches: [MissionRunQueuedCommandBatch]
+        /// Primary squads whose MAVLink mission launches in the first immediate batch (not stagger wall-clock).
+        var immediateLaunchPrimaryAssignmentIDs: Set<UUID> = []
+        /// Squads with wingmen: assemble convoy before primary mission (immediate).
+        var convoyAssemblyImmediatePrimaryIDs: Set<UUID> = []
+        /// Squads with wingmen: begin assembly at stagger time, then launch primary when ready.
+        var convoyAssemblyDelayed: [(primaryAssignmentID: UUID, startAt: Date)] = []
+    }
+
+    private func beginConvoyAssemblyForPlannedSquads(
+        taskID: UUID,
+        mission: Mission,
+        immediatePrimaryIDs: Set<UUID>,
+        delayed: [(primaryAssignmentID: UUID, startAt: Date)],
+        context: MissionRunExecutionContext,
+        launchPrimaryWhenReady: Bool
+    ) {
+        guard let environment else { return }
+        guard let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }) else { return }
+        let planned = environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: taskID)
+        let plannedByPrimary = Dictionary(uniqueKeysWithValues: planned.map { ($0.squad.primaryAssignment.id, $0) })
+
+        for primaryID in immediatePrimaryIDs {
+            guard let squadPlan = plannedByPrimary[primaryID] else { continue }
+            environment.systems.squadFollow.preparePrimaryCycleLaunch(
+                mission: mission,
+                task: task,
+                plannedSquad: squadPlan,
+                fleetLink: context.fleetLink,
+                sitl: context.sitl,
+                launchContext: context,
+                launchPrimaryWhenReady: launchPrimaryWhenReady
+            )
+        }
+
+        for entry in delayed {
+            guard let squadPlan = plannedByPrimary[entry.primaryAssignmentID] else { continue }
+            let delay = entry.startAt.timeIntervalSinceNow
+            Task { @MainActor [weak environment] in
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
+                guard let environment, !Task.isCancelled else { return }
+                environment.systems.squadFollow.preparePrimaryCycleLaunch(
+                    mission: mission,
+                    task: task,
+                    plannedSquad: squadPlan,
+                    fleetLink: context.fleetLink,
+                    sitl: context.sitl,
+                    launchContext: context,
+                    launchPrimaryWhenReady: launchPrimaryWhenReady
+                )
+            }
+        }
+    }
+
+    /// Primary MAVLink mission after wingmen reach heading-based convoy slots.
+    func launchPrimaryMissionAfterConvoyAssembly(
+        taskID: UUID,
+        primaryAssignmentID: UUID,
+        context: MissionRunExecutionContext
+    ) {
+        guard let environment else { return }
+        guard let mission = context.missionProvider() else { return }
+        environment.clearMissionSquadConvoyAssemblyHold(forAssignmentID: primaryAssignmentID)
+        let pass = buildPrimaryMissionPass(
+            mission: mission,
+            explicitTaskId: taskID,
+            nextCyclePrimaryAssignmentIDs: Set([primaryAssignmentID]),
+            skipConvoyAssemblyGate: true
+        )
+        guard !pass.immediateCommands.isEmpty || !pass.queuedBatches.isEmpty else {
+            environment.systems.logging.appendLogEvent(
+                level: .warning,
+                taskID: taskID,
+                taskLabel: mission.routeMacro.tasks.first(where: { $0.id == taskID })?.name,
+                speaker: .missionControl,
+                templateKey: MissionRunLogTemplateKey.squadFollowConvoyPrimaryLaunchSkipped,
+                templateParams: [
+                    "slotID": primaryAssignmentID.uuidString,
+                    "reason": "no_mission_commands",
+                ]
+            )
+            return
+        }
+        environment.markSquadActiveInCurrentCycle(primaryAssignmentID)
+        environment.systems.squadFollow.onPrimaryMissionUnderway(primaryAssignmentID: primaryAssignmentID)
+        pass.events.forEach { environment.appendEvent($0) }
+        for issued in pass.immediateCommands {
+            environment.appendEvent(environment.systems.commands.dispatchCommand(issued, fleetLink: context.fleetLink, sitl: context.sitl))
+        }
+        for batch in pass.queuedBatches {
+            environment.systems.executor.enqueueCommandBatch(batch, context: context, replacingTags: [])
+        }
     }
 
     private enum TaskFormationIntent {
@@ -2126,14 +2340,20 @@ final class MissionRunExecutionSubsystem {
     private func buildPrimaryMissionPass(
         mission: Mission,
         explicitTaskId: UUID? = nil,
-        nextCyclePrimaryAssignmentIDs: Set<UUID>? = nil
+        nextCyclePrimaryAssignmentIDs: Set<UUID>? = nil,
+        skipConvoyAssemblyGate: Bool = false
     ) -> TaskMissionLaunchPass {
-        guard let environment else { return TaskMissionLaunchPass(events: [], immediateCommands: [], queuedBatches: []) }
+        guard let environment else {
+            return TaskMissionLaunchPass(events: [], immediateCommands: [], queuedBatches: [])
+        }
         let fleetLink = environment.fleetLink
         let sitl = environment.sitl
         var events: [MissionRunEvent] = []
         var immediateCommands: [MissionRunIssuedCommand] = []
         var queuedBatches: [MissionRunQueuedCommandBatch] = []
+        var immediateLaunchPrimaryAssignmentIDs: Set<UUID> = []
+        var convoyAssemblyImmediatePrimaryIDs: Set<UUID> = []
+        var convoyAssemblyDelayed: [(primaryAssignmentID: UUID, startAt: Date)] = []
         let resolvedTaskId: UUID? = {
             if let explicitTaskId { return explicitTaskId }
             let enabledTasks = mission.routeMacro.tasks.filter(\.enabled)
@@ -2182,6 +2402,17 @@ final class MissionRunExecutionSubsystem {
                 continue
             }
             guard let tokenKey = squad.squad.primaryAssignment.attachedFleetVehicleToken else { continue }
+            let hasWingmen = !squad.squad.wingmanBindings.isEmpty
+            if hasWingmen, !skipConvoyAssemblyGate {
+                let offset = isNextCyclePass ? 0 : Double(squad.squadIndex) * staggerStep
+                let dispatchAt = now.addingTimeInterval(offset)
+                if offset <= 0 {
+                    convoyAssemblyImmediatePrimaryIDs.insert(primaryID)
+                } else {
+                    convoyAssemblyDelayed.append((primaryAssignmentID: primaryID, startAt: dispatchAt))
+                }
+                continue
+            }
             let squadLog = MissionControlSquadUtilities.squadLogContext(
                 taskID: task.id,
                 taskName: task.name,
@@ -2297,6 +2528,7 @@ final class MissionRunExecutionSubsystem {
             )
             if offset <= 0 {
                 immediateCommands.append(issued)
+                immediateLaunchPrimaryAssignmentIDs.insert(primaryID)
             } else {
                 queuedBatches.append(
                     MissionRunQueuedCommandBatch(
@@ -2313,7 +2545,14 @@ final class MissionRunExecutionSubsystem {
                 assignmentIDs: deferredFirstWaveAssignmentIDs
             )
         }
-        return TaskMissionLaunchPass(events: events, immediateCommands: immediateCommands, queuedBatches: queuedBatches)
+        return TaskMissionLaunchPass(
+            events: events,
+            immediateCommands: immediateCommands,
+            queuedBatches: queuedBatches,
+            immediateLaunchPrimaryAssignmentIDs: immediateLaunchPrimaryAssignmentIDs,
+            convoyAssemblyImmediatePrimaryIDs: convoyAssemblyImmediatePrimaryIDs,
+            convoyAssemblyDelayed: convoyAssemblyDelayed
+        )
     }
 
     private func completeRun(
@@ -2336,6 +2575,133 @@ final class MissionRunExecutionSubsystem {
             templateKey: templateKey,
             templateParams: templateParams
         )
+    }
+
+    // MARK: - Squad formation follow operator escalation
+
+    func handleFormationFollowStreamExhausted(
+        primaryAssignmentID: UUID,
+        failedWingmanAssignmentIDs: [UUID],
+        fleetLink: FleetLinkService,
+        sitl: SitlService
+    ) {
+        guard let environment,
+              let mission = environment.template,
+              let assignment = environment.assignments.first(where: { $0.id == primaryAssignmentID }),
+              let tokenKey = assignment.attachedFleetVehicleToken,
+              !tokenKey.isEmpty,
+              let taskID = assignment.taskId ?? environment.resolvedTaskID(
+                forSquadAssignmentID: primaryAssignmentID,
+                mission: mission
+              ),
+              let task = mission.routeMacro.tasks.first(where: { $0.id == taskID })
+        else { return }
+
+        let squads = environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: task.id)
+        let squadIdx = squads.first(where: { $0.squad.primaryAssignment.id == primaryAssignmentID })?.squadIndex ?? 0
+        let squadLog = MissionControlSquadUtilities.squadLogContext(
+            taskID: task.id,
+            taskName: task.name,
+            squadIndex: squadIdx
+        )
+
+        let pauseIssued = MissionRunIssuedCommand(
+            assignmentID: primaryAssignmentID,
+            slotName: assignment.slotName,
+            vehicleTokenKey: tokenKey,
+            dispatch: .catalogue(name: .fleetVehicleDoMissionPause, parameters: .empty),
+            issuer: .missionControl,
+            issuerKey: MissionRunCommandIssuerKey.missionExecute,
+            category: .missionControl
+        )
+        environment.appendEvent(
+            environment.systems.commands.dispatchCommand(pauseIssued, fleetLink: fleetLink, sitl: sitl)
+        )
+
+        let failedRows: [(assignmentID: UUID, slotName: String)] = failedWingmanAssignmentIDs.compactMap { wid in
+            guard let row = environment.assignments.first(where: { $0.id == wid }) else { return nil }
+            return (wid, row.slotName)
+        }
+        let wingmanSummary = failedRows.map(\.slotName).joined(separator: ", ")
+        environment.systems.logging.appendLogEvent(
+            level: .error,
+            taskID: squadLog.id,
+            taskLabel: squadLog.label,
+            speaker: .missionControl,
+            templateKey: MissionRunLogTemplateKey.squadFollowStreamExhausted,
+            templateParams: [
+                "squad": squadLog.label,
+                "primary": assignment.slotName,
+                "wingmen": wingmanSummary.isEmpty ? "—" : wingmanSummary,
+            ]
+        )
+
+        MissionRunSquadFollowOperatorPromptBridge.presentFormationFollowFailure(
+            missionRunID: environment.id,
+            primaryAssignmentID: primaryAssignmentID,
+            primarySlotName: assignment.slotName,
+            taskID: task.id,
+            taskName: task.name,
+            failedWingmen: failedRows
+        ) { [weak self] verb in
+            guard let self, let environment = self.environment else { return }
+            self.handleFormationFollowPromptResolution(
+                verb: verb,
+                primaryAssignmentID: primaryAssignmentID,
+                mission: mission,
+                fleetLink: fleetLink,
+                sitl: sitl
+            )
+        }
+    }
+
+    private func handleFormationFollowPromptResolution(
+        verb: FleetRecipeResumptionVerb,
+        primaryAssignmentID: UUID,
+        mission: Mission,
+        fleetLink: FleetLinkService,
+        sitl: SitlService
+    ) {
+        guard let environment else { return }
+        switch verb {
+        case .acknowledge:
+            environment.clearMissionSquadFormationFollowHalt(forAssignmentID: primaryAssignmentID)
+            environment.systems.squadFollow.retryFormationFollowAfterOperatorAck(
+                primaryAssignmentID: primaryAssignmentID,
+                fleetLink: fleetLink,
+                sitl: sitl
+            )
+            guard let assignment = environment.assignments.first(where: { $0.id == primaryAssignmentID }),
+                  let tokenKey = assignment.attachedFleetVehicleToken,
+                  !tokenKey.isEmpty
+            else { return }
+            let resumeIssued = MissionRunIssuedCommand(
+                assignmentID: primaryAssignmentID,
+                slotName: assignment.slotName,
+                vehicleTokenKey: tokenKey,
+                dispatch: .catalogue(name: .fleetVehicleDoMissionStart, parameters: .empty),
+                issuer: .operator,
+                issuerKey: "operator.squad_follow.retry_formation",
+                category: .missionControl
+            )
+            environment.appendEvent(
+                environment.systems.commands.dispatchCommand(resumeIssued, fleetLink: fleetLink, sitl: sitl)
+            )
+        case .abort:
+            environment.clearMissionSquadFormationFollowHalt(forAssignmentID: primaryAssignmentID)
+            environment.systems.squadFollow.parkSquadAfterFormationFollowAbort(
+                primaryAssignmentID: primaryAssignmentID,
+                mission: mission,
+                fleetLink: fleetLink,
+                sitl: sitl
+            )
+            environment.markMissionSquadOperatorPaused(
+                forAssignmentID: primaryAssignmentID,
+                beginConvoyRebuildWhenPaused: false
+            )
+        default:
+            break
+        }
     }
 }
 
@@ -2361,6 +2727,20 @@ extension MissionRunLogTemplateKey {
     static let missionGeofencePx4InclusionFencesOmitted = "missioncontrol.mre.mission.geofence_px4_inclusion_fences_omitted"
     static let missionExecuting = "missioncontrol.mre.mission.executing"
     static let missionSquadFirstWaveReleased = "missioncontrol.mre.mission.squad_first_wave_released"
+    static let squadFollowConvoyTargetsComputed = "missioncontrol.mre.squad_follow.convoy_targets_computed"
+    static let squadFollowStreamStarted = "missioncontrol.mre.squad_follow.stream_started"
+    static let squadFollowStreamStopped = "missioncontrol.mre.squad_follow.stream_stopped"
+    static let squadFollowStreamFailed = "missioncontrol.mre.squad_follow.stream_failed"
+    static let squadFollowSkipped = "missioncontrol.mre.squad_follow.skipped"
+    static let squadFollowConvoyAssemblyStarted = "missioncontrol.mre.squad_follow.convoy_assembly_started"
+    static let squadFollowConvoyRebuildStarted = "missioncontrol.mre.squad_follow.convoy_rebuild_started"
+    static let squadFollowConvoyAssemblyReady = "missioncontrol.mre.squad_follow.convoy_assembly_ready"
+    static let squadFollowConvoyPrimaryLaunchSkipped = "missioncontrol.mre.squad_follow.convoy_primary_launch_skipped"
+    static let squadFollowBetweenCyclesHold = "missioncontrol.mre.squad_follow.between_cycles_hold"
+    static let squadFollowBetweenCyclesWingmenReleased = "missioncontrol.mre.squad_follow.between_cycles_wingmen_released"
+    static let squadFollowStreamExhausted = "missioncontrol.mre.squad_follow.stream_exhausted"
+    static let squadFollowWingmanPromotedToPrimary = "missioncontrol.mre.squad_follow.wingman_promoted_to_primary"
+    static let squadFollowOffboardStreamLost = "missioncontrol.mre.squad_follow.offboard_stream_lost"
     static let startMissionTaskSkippedPhase = "missioncontrol.mre.mission.start_skipped_phase"
     static let startMissionTaskNoDispatchContext = "missioncontrol.mre.mission.start_no_dispatch_context"
     static let startMissionTaskNoExecutionContext = "missioncontrol.mre.mission.start_no_execution_context"

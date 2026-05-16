@@ -135,7 +135,7 @@ extension MissionRunEnvironment {
             var killTasks: [Task<FleetLinkService.RunCleanupSimKillOutcome, Never>] = []
             killTasks.reserveCapacity(killWave.count)
             for vehicleID in killWave {
-                killTasks.append(Task { @MainActor in
+                killTasks.append(Task {
                     await fleetLink.performRunCleanupSimKill(vehicleID: vehicleID)
                 })
             }

@@ -3,6 +3,21 @@ import XCTest
 
 final class MissionRunMovePointParkPlannerTests: XCTestCase {
 
+    func test_resolvedVehicleYawDeg_prefersHeadingOverYaw() {
+        XCTAssertEqual(
+            MissionRunMovePointParkPlanner.resolvedVehicleYawDeg(headingDeg: 90, yawDeg: 12),
+            90
+        )
+        XCTAssertEqual(
+            MissionRunMovePointParkPlanner.resolvedVehicleYawDeg(headingDeg: nil, yawDeg: 45),
+            45
+        )
+        XCTAssertEqual(
+            MissionRunMovePointParkPlanner.resolvedVehicleYawDeg(headingDeg: nil, yawDeg: nil),
+            0
+        )
+    }
+
     func test_procedureLogSummary_usesMapChipLabel() {
         let p = MissionPoint(
             pointId: "rally.2",

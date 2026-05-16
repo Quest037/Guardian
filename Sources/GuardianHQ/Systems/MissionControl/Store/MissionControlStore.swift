@@ -143,6 +143,7 @@ final class MissionControlStore: ObservableObject {
     func deleteRun(id: UUID, fleetLink: FleetLinkService, sitl: SitlService, generalSettings: GeneralSettingsStore) async {
         guard let run = runEnvironment(for: id) else { return }
         run.attachServices(fleetLink: fleetLink, sitl: sitl, generalSettings: generalSettings)
+        await run.awaitFleetWindDownBeforeRunShellChange(fleetLink: fleetLink, sitl: sitl)
         await run.hardStopAndRemoveAllRunBoundSitlsForDeletion(fleetLink: fleetLink, sitl: sitl)
         removeRunState(id: id)
     }
@@ -186,9 +187,20 @@ final class MissionControlStore: ObservableObject {
     /// Delegates to ``MissionRunLifecycleSubsystem/resetToSetup()`` so mission-end ack sets, triage pins, slot lane
     /// evidence, events, compiled plan, and scheduling state match a **fresh** MCS pass (roster rows and template fork
     /// stay on the run; operator recompiles before the next start).
-    func resetRunToSetup(id: UUID) {
+    /// Returns the run to MCS immediately; fleet wind-down (squad follow stop, in-flight SIM cleanup latch) continues in a background task.
+    func resetRunToSetup(
+        id: UUID,
+        fleetLink: FleetLinkService,
+        sitl: SitlService,
+        generalSettings: GeneralSettingsStore
+    ) {
         guard let idx = runs.firstIndex(where: { $0.id == id }) else { return }
+        let run = runs[idx]
+        run.attachServices(fleetLink: fleetLink, sitl: sitl, generalSettings: generalSettings)
         runs[idx].systems.lifecycle.resetToSetup()
+        Task { @MainActor in
+            await run.awaitFleetWindDownBeforeRunShellChange(fleetLink: fleetLink, sitl: sitl)
+        }
     }
 
     /// Routes cycle-finished callbacks to active run environments.

@@ -15,6 +15,125 @@ private final class FleetLinkMavsdkBlockingRpcSchedulerBox: @unchecked Sendable 
 
 private let fleetLinkMavsdkBlockingRpcBox = FleetLinkMavsdkBlockingRpcSchedulerBox()
 
+/// Delivers Rx `Completable` terminal events from async work without blocking the subscribing thread.
+private final class FleetLinkCompletableSink: @unchecked Sendable {
+    private let observer: (CompletableEvent) -> Void
+
+    init(_ observer: @escaping (CompletableEvent) -> Void) {
+        self.observer = observer
+    }
+
+    func completed() {
+        observer(.completed)
+    }
+
+    func failed(_ error: Error) {
+        observer(.error(error))
+    }
+}
+
+/// Rx bridge for ``FleetLinkService/awaitCompletableForManualStream`` — must be `nonisolated` so
+/// `subscribe(on:)` / `observe(on:)` callbacks are not `@MainActor`-isolated while running off the UI thread.
+private enum FleetLinkMavsdkCompletableBridge {
+    nonisolated static func awaitBridged(_ completable: Completable) async throws {
+        try await withCheckedThrowingContinuation { cont in
+            _ = subscribe(
+                completable,
+                onCompleted: { cont.resume() },
+                onError: { cont.resume(throwing: $0) }
+            )
+        }
+    }
+
+    nonisolated static func subscribe(
+        _ completable: Completable,
+        onCompleted: @escaping @Sendable () -> Void,
+        onError: @escaping @Sendable (Error) -> Void
+    ) -> Disposable {
+        completable
+            .subscribe(on: fleetLinkMavsdkBlockingRpcBox.scheduler)
+            .observe(on: MainScheduler.asyncInstance)
+            .subscribe(onCompleted: onCompleted, onError: onError)
+    }
+
+    /// `Completable.create` subscribe handler for PX4 raw SET_MODE — factory is `nonisolated` so
+    /// ``awaitBridged`` does not execute a `@MainActor` closure on the MAVSDK worker queue.
+    nonisolated static func px4SetModeCompletable(
+        port: UInt16,
+        targetSystem: UInt8,
+        mainMode: Px4ModeCommander.MainMode,
+        subMode: UInt8,
+        logTag: String,
+        appendLog: @escaping @Sendable (String) -> Void
+    ) -> Completable {
+        Completable.create { observer in
+            let sink = FleetLinkCompletableSink(observer)
+            Task {
+                await Px4ModeCommander.setMode(
+                    port: port,
+                    targetSystem: targetSystem,
+                    mainMode: mainMode,
+                    subMode: subMode
+                )
+                appendLog(
+                    "PX4 SET_MODE \(mainMode) (sub=\(subMode)) sent (\(logTag), gcs udp 127.0.0.1:\(port), target_system=\(targetSystem))."
+                )
+                sink.completed()
+            }
+            return Disposables.create()
+        }
+    }
+
+    nonisolated static func mavlinkCommandLongCompletable(
+        request: MavlinkCommandLongRequest,
+        port: UInt16,
+        targetSystem: UInt8,
+        appendLog: @escaping @Sendable (String) -> Void,
+        appendError: @escaping @Sendable (String, Error) -> Void
+    ) -> Completable {
+        Completable.create { observer in
+            let sink = FleetLinkCompletableSink(observer)
+            Task {
+                do {
+                    try await MavlinkCommandLongSender.send(
+                        request: request,
+                        port: port,
+                        targetSystem: targetSystem
+                    )
+                    appendLog(
+                        "MAVLink COMMAND_LONG \(request.command) (\(request.humanLabel)) sent (udp 127.0.0.1:\(port), target_system=\(targetSystem))."
+                    )
+                    sink.completed()
+                } catch {
+                    appendError(
+                        "MAVLink COMMAND_LONG \(request.command) failed (\(request.humanLabel)).",
+                        error
+                    )
+                    sink.failed(error)
+                }
+            }
+            return Disposables.create()
+        }
+    }
+
+    nonisolated static func px4GotoOffboardCompletable(
+        performMove: @escaping @MainActor @Sendable () async throws -> Void
+    ) -> Completable {
+        Completable.create { observer in
+            let sink = FleetLinkCompletableSink(observer)
+            Task { @MainActor in
+                do {
+                    try await performMove()
+                    sink.completed()
+                } catch {
+                    sink.failed(error)
+                }
+            }
+            return Disposables.create()
+        }
+    }
+}
+
 /// Phase of the Python MAVSDK bridge relative to the vehicle on the wire.
 enum TelemetryBridgePhase: Equatable {
     case inactive
@@ -82,6 +201,8 @@ final class FleetLinkService: ObservableObject {
         /// Continuous body-velocity / virtual-stick streamer. Created on demand when the
         /// operator activates a Live Drive freestyle session and torn down when the session ends.
         var manualStream: ManualControlStream?
+        /// Mission Control squad convoy wingman OFFBOARD / Guided position stream (not Live Drive).
+        var formationFollowStream: FormationFollowStream?
         /// One-shot: after MAVSDK reports connected, `applySimState` reinforces spawn pose/SIM fields from `SimSpawnDefaults`.
         var pendingSpawnSimState: FleetSimState?
 
@@ -1223,6 +1344,7 @@ final class FleetLinkService: ObservableObject {
         }
 
         completion
+            .subscribe(on: fleetLinkMavsdkBlockingRpcBox.scheduler)
             .observe(on: MainScheduler.asyncInstance)
             .subscribe(
                 onCompleted: { [weak self] in
@@ -1369,6 +1491,132 @@ final class FleetLinkService: ObservableObject {
         } else {
             appendVehicleLog("Live Drive RTL→park: already disarmed; skipping explicit disarm.", vehicleID: vehicleID)
         }
+    }
+
+    // MARK: - Formation follow stream (Mission Control wingmen)
+
+    func isFormationFollowStreaming(vehicleID: String) -> Bool {
+        sessionsByVehicleID[vehicleID]?.formationFollowStream?.isRunning == true
+    }
+
+    /// Pause and clear onboard mission so wingman OFFBOARD is not competing with AUTO/navigator (v1 convoy follow).
+    func prepareVehicleForFormationFollow(vehicleID: String) async {
+        guard let session = sessionsByVehicleID[vehicleID] else {
+            appendVehicleLog("Formation follow prep: no MAVSDK session.", vehicleID: vehicleID)
+            return
+        }
+        do {
+            try await awaitCompletableForManualStream(session.drone.mission.pauseMission())
+            appendVehicleLog("Formation follow prep: mission pause acknowledged.", vehicleID: vehicleID)
+        } catch {
+            appendVehicleLog(
+                "Formation follow prep: mission pause skipped (\(mavsdkPublicErrorDescription(error))).",
+                vehicleID: vehicleID
+            )
+        }
+        do {
+            try await awaitCompletableForManualStream(session.drone.mission.clearMission())
+            appendVehicleLog("Formation follow prep: mission clear acknowledged.", vehicleID: vehicleID)
+        } catch {
+            appendVehicleLog(
+                "Formation follow prep: mission clear skipped (\(mavsdkPublicErrorDescription(error))).",
+                vehicleID: vehicleID
+            )
+        }
+    }
+
+    /// Start ~10 Hz global setpoint streaming for a wingman (caller primes ArduPilot **guided** when needed).
+    @discardableResult
+    func startFormationFollowStream(
+        vehicleID: String,
+        initialTarget: FormationFollowStream.Target
+    ) async -> Bool {
+        guard let session = sessionsByVehicleID[vehicleID] else {
+            appendVehicleLog("Formation follow: no MAVSDK session.", vehicleID: vehicleID)
+            return false
+        }
+        if let existing = session.formationFollowStream, existing.isRunning {
+            existing.updateTarget(initialTarget)
+            return true
+        }
+        let renewWithoutMissionPrep = session.formationFollowStream != nil
+        session.formationFollowStream = nil
+        if !renewWithoutMissionPrep {
+            await prepareVehicleForFormationFollow(vehicleID: vehicleID)
+        }
+        let stack = vehicleModelsByVehicleID[vehicleID]?.data.telemetry?.autopilotStack
+            ?? hubTelemetryByVehicleID[vehicleID]?.autopilotStack
+            ?? .unknown
+        if stack == .ardupilot {
+            let uClass = vehicleModelsByVehicleID[vehicleID]?.data.vehicleType.universalClass ?? .unknown
+            if uClass == .uav || uClass == .ugv || uClass == .usv {
+                do {
+                    try await awaitCompletableForManualStream(
+                        ardupilotSetModeCompletable(
+                            mode: .guided,
+                            vehicleID: vehicleID,
+                            session: session,
+                            vehicleClass: uClass
+                        )
+                    )
+                } catch {
+                    appendVehicleLog(
+                        "Formation follow: guided mode failed (\(mavsdkPublicErrorDescription(error))).",
+                        vehicleID: vehicleID
+                    )
+                    return false
+                }
+            }
+        }
+        let uClass = vehicleModelsByVehicleID[vehicleID]?.data.vehicleType.universalClass ?? .unknown
+        let stream = FormationFollowStream(
+            drone: session.drone,
+            stack: stack,
+            universalClass: uClass,
+            initialTarget: initialTarget,
+            awaitCompletable: { [weak self] c in
+                guard let self else { return }
+                try await self.awaitCompletableForManualStream(c)
+            },
+            log: { [weak self] line in
+                self?.appendVehicleLog(line, vehicleID: vehicleID)
+            }
+        )
+        session.formationFollowStream = stream
+        let started = await stream.start()
+        if !started {
+            session.formationFollowStream = nil
+            appendVehicleLog("Formation follow: stream failed to enter OFFBOARD/GUIDED.", vehicleID: vehicleID)
+            return false
+        }
+        let mode = hubTelemetryByVehicleID[vehicleID]?.flightMode.lowercased() ?? ""
+        if stack == .px4, !mode.contains("offboard") {
+            appendVehicleLog(
+                "Formation follow: stream active but flight mode is '\(hubTelemetryByVehicleID[vehicleID]?.flightMode ?? "unknown")' (expected OFFBOARD).",
+                vehicleID: vehicleID
+            )
+        }
+        return true
+    }
+
+    /// When `true`, MRE should not push new formation setpoints (catalogue recipe or manual stream owns the vehicle).
+    func shouldDeferFormationFollowSetpoints(vehicleID: String) -> Bool {
+        if isManualControlStreaming(vehicleID: vehicleID) { return true }
+        if FleetRecipeRunner.shared.hasActiveRun(forVehicleID: vehicleID) { return true }
+        return false
+    }
+
+    func updateFormationFollowTarget(vehicleID: String, target: FormationFollowStream.Target) {
+        guard !shouldDeferFormationFollowSetpoints(vehicleID: vehicleID) else { return }
+        sessionsByVehicleID[vehicleID]?.formationFollowStream?.updateTarget(target)
+    }
+
+    func stopFormationFollowStream(vehicleID: String) async {
+        guard let session = sessionsByVehicleID[vehicleID],
+              let stream = session.formationFollowStream
+        else { return }
+        session.formationFollowStream = nil
+        await stream.stop()
     }
 
     // MARK: - Manual Control Stream (Live Drive continuous setpoints)
@@ -1530,13 +1778,11 @@ final class FleetLinkService: ObservableObject {
 
     /// Bridge a single-shot RxSwift `Completable` to async/await. The Rx pipeline keeps itself
     /// alive until it terminates; dropping the returned Disposable is safe and intentional.
+    ///
+    /// MAVSDK generated plugins may call blocking NIO `wait()` inside `subscribe`; always schedule on
+    /// ``fleetLinkMavsdkBlockingRpcBox`` so the main thread never runs `CurrentThreadScheduler` work.
     private func awaitCompletableForManualStream(_ completable: Completable) async throws {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            _ = completable.subscribe(
-                onCompleted: { cont.resume() },
-                onError: { error in cont.resume(throwing: error) }
-            )
-        }
+        try await FleetLinkMavsdkCompletableBridge.awaitBridged(completable)
     }
 
     /// Walks `NSError` / `NSUnderlyingErrorKey` to surface gRPC / transport wrappers above a MAVSDK plugin error.
@@ -1952,6 +2198,7 @@ final class FleetLinkService: ObservableObject {
         vehicleType: FleetVehicleType,
         universalClass: UniversalVehicleClass
     ) async throws {
+        let parkPoseSnapshot = px4ParkPoseHold(for: vehicleID)
         await stopManualControlStream(vehicleID: vehicleID)
         await cancelActiveRecipeAndStopMotionForOperatorIntervention(vehicleID: vehicleID)
         let px4UgvOffboardPark = parkUsesPx4UgvOffboardPark(vehicleType: vehicleType, vehicleID: vehicleID)
@@ -1960,12 +2207,17 @@ final class FleetLinkService: ObservableObject {
             try await parkSequenceUUV(vehicleID: vehicleID, session: session)
         case .ugv, .usv:
             if px4UgvOffboardPark, universalClass == .ugv {
-                try await parkSequencePx4UgvOffboardZeroVelocityPark(vehicleID: vehicleID, session: session)
+                try await parkSequencePx4UgvOffboardZeroVelocityPark(
+                    vehicleID: vehicleID,
+                    session: session,
+                    poseHold: parkPoseSnapshot
+                )
             } else {
                 try await parkSequenceSurfaceGround(
                     vehicleID: vehicleID,
                     session: session,
-                    vehicleType: vehicleType
+                    vehicleType: vehicleType,
+                    poseHold: parkPoseSnapshot
                 )
             }
         case .uav, .unknown:
@@ -1983,6 +2235,26 @@ final class FleetLinkService: ObservableObject {
 
     private func parkHub(_ vehicleID: String) -> FleetHubVehicleTelemetry? {
         hubTelemetryByVehicleID[vehicleID]
+    }
+
+    /// Hub heading for park / hold (prefer attitude-derived ``FleetHubVehicleTelemetry/headingDeg``).
+    private func resolvedParkHeadingDeg(for hub: FleetHubVehicleTelemetry?) -> Double {
+        hub?.headingDeg ?? hub?.yawDeg ?? 0
+    }
+
+    private func px4ParkPoseHold(for vehicleID: String) -> OffboardCoordinator.Px4ParkPoseHold? {
+        guard let hub = parkHub(vehicleID),
+              let lat = hub.latitudeDeg,
+              let lon = hub.longitudeDeg
+        else { return nil }
+        let alt = Float(hub.absoluteAltM ?? hub.altitudeAmslM ?? 0)
+        let yaw = Float(resolvedParkHeadingDeg(for: hub))
+        return OffboardCoordinator.Px4ParkPoseHold(
+            latitudeDeg: lat,
+            longitudeDeg: lon,
+            absoluteAltitudeM: alt,
+            yawDeg: yaw
+        )
     }
 
     /// Best-effort ``Mission/pauseMission()`` before land/hold/disarm so onboard mission execution stops
@@ -2036,8 +2308,25 @@ final class FleetLinkService: ObservableObject {
     }
 
     /// PX4 **UGV** park: OFFBOARD zero body-velocity brake (no `Mission.pauseMission` — see ``runParkSequence``), **no disarm** (stays armed), **no `Offboard.stop`** until continue recipe.
-    private func parkSequencePx4UgvOffboardZeroVelocityPark(vehicleID: String, session: VehicleSession) async throws {
-        appendVehicleLog("Park: PX4 UGV OFFBOARD zero-velocity path (armed hold — no disarm in this path).", vehicleID: vehicleID)
+    private func parkSequencePx4UgvOffboardZeroVelocityPark(
+        vehicleID: String,
+        session: VehicleSession,
+        poseHold: OffboardCoordinator.Px4ParkPoseHold?
+    ) async throws {
+        if let poseHold {
+            appendVehicleLog(
+                String(
+                    format: "Park: PX4 UGV OFFBOARD hold at current pose (heading %.1f°).",
+                    poseHold.yawDeg
+                ),
+                vehicleID: vehicleID
+            )
+        } else {
+            appendVehicleLog(
+                "Park: PX4 UGV OFFBOARD zero-velocity path (no hub pose — heading not locked).",
+                vehicleID: vehicleID
+            )
+        }
         try await awaitCompletableForManualStream(
             completionForSetMode(mode: .guided, vehicleID: vehicleID, session: session)
         )
@@ -2055,6 +2344,7 @@ final class FleetLinkService: ObservableObject {
                 try await self.awaitCompletableForManualStream(c)
             },
             horizontalGroundSpeedMS: { [weak self] in self?.parkHub(vehicleID)?.horizontalGroundSpeedMS },
+            poseHold: poseHold,
             appendDiagnostic: { [weak self] line in
                 self?.appendVehicleLog("Park: \(line)", vehicleID: vehicleID)
             }
@@ -2087,8 +2377,35 @@ final class FleetLinkService: ObservableObject {
     private func parkSequenceSurfaceGround(
         vehicleID: String,
         session: VehicleSession,
-        vehicleType: FleetVehicleType
+        vehicleType: FleetVehicleType,
+        poseHold: OffboardCoordinator.Px4ParkPoseHold?
     ) async throws {
+        if let poseHold {
+            do {
+                try await awaitCompletableForManualStream(
+                    completionForGotoCoordinate(
+                        coord: RouteCoordinate(lat: poseHold.latitudeDeg, lon: poseHold.longitudeDeg),
+                        relativeAltitudeM: Double(parkHub(vehicleID)?.relativeAltM ?? 0),
+                        yawDeg: Double(poseHold.yawDeg),
+                        vehicleID: vehicleID,
+                        session: session
+                    )
+                )
+                appendVehicleLog(
+                    String(format: "Park: hold current pose (heading %.1f°) before stop/disarm.", poseHold.yawDeg),
+                    vehicleID: vehicleID
+                )
+                try await awaitCompletableForManualStream(
+                    OffboardCoordinator.offboardStopCompletable(drone: session.drone)
+                )
+            } catch {
+                appendVehicleLog(
+                    "Park: pose hold skipped (\(mavsdkPublicErrorDescription(error))); continuing stop/disarm.",
+                    vehicleID: vehicleID
+                )
+            }
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
         if parkShouldUsePx4SetModeHoldForFirstSurfaceStop(vehicleType: vehicleType, vehicleID: vehicleID) {
             do {
                 try await awaitCompletableForManualStream(
@@ -2617,6 +2934,10 @@ final class FleetLinkService: ObservableObject {
             // disconnected drone doesn't keep getting setpoints. The Task is fire-and-forget
             // because the gRPC pipe is about to be closed by `drone.disconnect()` anyway.
             Task { await stream.stop() }
+        }
+        if let formation = session.formationFollowStream {
+            session.formationFollowStream = nil
+            Task { await formation.stop() }
         }
         session.bag = DisposeBag()
         session.drone.disconnect()
@@ -3300,26 +3621,15 @@ final class FleetLinkService: ObservableObject {
         vehicleID: String,
         session: VehicleSession
     ) -> Completable {
-        Completable.create { [weak self] completable in
-            guard let self else {
-                completable(.completed)
-                return Disposables.create()
-            }
-            let task = Task { @MainActor in
-                do {
-                    try await self.runPx4MovePointOffboardStreamingThenStop(
-                        coord: coord,
-                        targetAbsoluteAlt: targetAbsoluteAlt,
-                        yawDeg: yawDeg,
-                        vehicleID: vehicleID,
-                        session: session
-                    )
-                    completable(.completed)
-                } catch {
-                    completable(.error(error))
-                }
-            }
-            return Disposables.create { task.cancel() }
+        FleetLinkMavsdkCompletableBridge.px4GotoOffboardCompletable { [weak self] in
+            guard let self else { return }
+            try await self.runPx4MovePointOffboardStreamingThenStop(
+                coord: coord,
+                targetAbsoluteAlt: targetAbsoluteAlt,
+                yawDeg: yawDeg,
+                vehicleID: vehicleID,
+                session: session
+            )
         }
     }
 
@@ -3805,25 +4115,19 @@ final class FleetLinkService: ObservableObject {
             ))
         }
         let target = UInt8(clamping: session.systemID)
-        return Completable.create { [weak self] observer in
-            Task { @MainActor [weak self] in
-                // No log closure — see `startManualControlStream` for the
-                // strict-concurrency rationale. We bracket the call with
-                // explicit `appendVehicleLog` lines on success.
-                await Px4ModeCommander.setMode(
-                    port: port,
-                    targetSystem: target,
-                    mainMode: mainMode,
-                    subMode: subMode
-                )
-                self?.appendVehicleLog(
-                    "PX4 SET_MODE \(mainMode) (sub=\(subMode)) sent (\(logTag), gcs udp 127.0.0.1:\(port), target_system=\(target)).",
-                    vehicleID: vehicleID
-                )
-                observer(.completed)
+        let vehicleID = vehicleID
+        return FleetLinkMavsdkCompletableBridge.px4SetModeCompletable(
+            port: port,
+            targetSystem: target,
+            mainMode: mainMode,
+            subMode: subMode,
+            logTag: logTag,
+            appendLog: { [weak self] line in
+                Task { @MainActor [weak self] in
+                    self?.appendVehicleLog(line, vehicleID: vehicleID)
+                }
             }
-            return Disposables.create()
-        }
+        )
     }
 
     /// Wrap one raw MAVLink v2 `COMMAND_LONG` send in a `Completable`. This is the
@@ -3845,25 +4149,25 @@ final class FleetLinkService: ObservableObject {
             ))
         }
         let target = UInt8(clamping: session.systemID)
-        return Completable.create { [weak self] observer in
-            Task { @MainActor [weak self] in
-                do {
-                    try await MavlinkCommandLongSender.send(
-                        request: request,
-                        port: port,
-                        targetSystem: target
-                    )
+        let vehicleID = vehicleID
+        return FleetLinkMavsdkCompletableBridge.mavlinkCommandLongCompletable(
+            request: request,
+            port: port,
+            targetSystem: target,
+            appendLog: { [weak self] line in
+                Task { @MainActor [weak self] in
+                    self?.appendVehicleLog(line, vehicleID: vehicleID)
+                }
+            },
+            appendError: { [weak self] line, error in
+                Task { @MainActor [weak self] in
                     self?.appendVehicleLog(
-                        "MAVLink COMMAND_LONG \(request.command) (\(request.humanLabel)) sent (udp 127.0.0.1:\(port), target_system=\(target)).",
+                        "\(line) \(error.localizedDescription)",
                         vehicleID: vehicleID
                     )
-                    observer(.completed)
-                } catch {
-                    observer(.error(error))
                 }
             }
-            return Disposables.create()
-        }
+        )
     }
 
     // MARK: - PARAM_SET with read-back verification (catalogue calibration path)

@@ -7,6 +7,8 @@ final class MissionRunPlannerSubsystem {
         let primaryAssignment: MissionRunAssignment
         let primaryRosterDevice: RosterDevice
         let wingmanRosterDevices: [RosterDevice]
+        /// Bound wingman roster rows for this primary (fleet token required), template order.
+        let wingmanBindings: [MissionRunSquadWingmanBinding]
     }
 
     struct PlannedTaskSquadMission: Equatable {
@@ -185,7 +187,10 @@ final class MissionRunPlannerSubsystem {
                     vehicleLatitudeDeg: lat,
                     vehicleLongitudeDeg: lon,
                     currentRelativeAltitudeM: relAlt,
-                    yawDeg: hub.yawDeg ?? 0
+                    yawDeg: MissionRunMovePointParkPlanner.resolvedVehicleYawDeg(
+                        headingDeg: hub.headingDeg,
+                        yawDeg: hub.yawDeg
+                    )
                 ) else { continue }
                 let issued = MissionRunIssuedCommand(
                     assignmentID: assignment.id,
@@ -408,6 +413,12 @@ final class MissionRunPlannerSubsystem {
             let wingmen = mission.rosterDevices.filter { rd in
                 rd.slot == .wingman && rd.leaderRosterDeviceId == primary.id
             }
+            let wingmanBindings = MissionControlSquadFollowBindingUtilities.wingmanBindings(
+                primaryRosterDeviceID: primary.id,
+                taskID: task.id,
+                mission: mission,
+                assignments: environment.assignments
+            )
             var items: [Mavsdk.Mission.MissionItem] = []
             for (index, wp) in task.waypoints.enumerated() {
                 let ignoreDelay = Utilities.mission.path.waypoint.shouldIgnoreClosingWaypointDelay(
@@ -430,7 +441,8 @@ final class MissionRunPlannerSubsystem {
                 squad: MissionTaskSquad(
                     primaryAssignment: assignment,
                     primaryRosterDevice: primary,
-                    wingmanRosterDevices: wingmen
+                    wingmanRosterDevices: wingmen,
+                    wingmanBindings: wingmanBindings
                 ),
                 missionItems: items,
                 effectiveGeofencesForSquad: squadFences
@@ -500,12 +512,20 @@ final class MissionRunPlannerSubsystem {
         case let .replaceAssignmentVehicleToken(assignmentID, vehicleTokenKey):
             environment.clearOperatorLaunchPoses(forAssignmentIDs: [assignmentID])
             environment.clearRosterSimStartPoseSnapshots(forAssignmentIDs: [assignmentID])
+            environment.systems.squadFollow.clearFollowState(
+                forAssignmentIDs: [assignmentID],
+                fleetLink: environment.fleetLink
+            )
             guard let idx = environment.assignments.firstIndex(where: { $0.id == assignmentID }) else { return false }
             environment.assignments[idx].attachedFleetVehicleToken = vehicleTokenKey
             return true
         case let .updateAssignmentTask(assignmentID, taskID):
             environment.clearOperatorLaunchPoses(forAssignmentIDs: [assignmentID])
             environment.clearRosterSimStartPoseSnapshots(forAssignmentIDs: [assignmentID])
+            environment.systems.squadFollow.clearFollowState(
+                forAssignmentIDs: [assignmentID],
+                fleetLink: environment.fleetLink
+            )
             guard let idx = environment.assignments.firstIndex(where: { $0.id == assignmentID }) else { return false }
             environment.assignments[idx].taskId = taskID
             return true

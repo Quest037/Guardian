@@ -20,6 +20,8 @@ struct MissionControlView: View {
     @State private var selectedRunID: UUID?
     @State private var showingAddRunSheet = false
     @State private var gridDeleteConfirm: MissionControlGridDeleteRunCandidate?
+    /// Grid cards (and MCS-initiated deletes) show a deleting overlay until ``MissionControlStore/deleteRun`` finishes.
+    @State private var deletingRunIDs: Set<UUID> = []
     /// Captured with ``pendingMissionControlRunID`` before ``consumeMissionControlDrillIn()`` clears the focus controller (Live Drive return / Decisions drill-in).
     @State private var pendingPostOpenLiveMissionTaskID: UUID?
     /// Live Drive return: open MC‑R with this roster assignment focused (vehicle overlay).
@@ -51,13 +53,9 @@ struct MissionControlView: View {
                             missionsProvider: { missionStore.missions }
                         )
                     },
-                    onDelete: { id in
-                        await controlStore.deleteRun(
-                            id: id,
-                            fleetLink: fleetLink,
-                            sitl: sitl,
-                            generalSettings: generalSettings
-                        )
+                    onRequestDeleteRun: { id in
+                        selectedRunID = nil
+                        performDeleteRun(id)
                     },
                     pendingPostOpenLiveMissionTaskID: $pendingPostOpenLiveMissionTaskID,
                     pendingPostOpenLiveMissionAssignmentID: $pendingPostOpenLiveMissionAssignmentID
@@ -78,17 +76,10 @@ struct MissionControlView: View {
                 onConfirm: {
                     let runID = candidate.id
                     gridDeleteConfirm = nil
-                    Task { @MainActor in
-                        await controlStore.deleteRun(
-                            id: runID,
-                            fleetLink: fleetLink,
-                            sitl: sitl,
-                            generalSettings: generalSettings
-                        )
-                        if selectedRunID == runID {
-                            selectedRunID = nil
-                        }
+                    if selectedRunID == runID {
+                        selectedRunID = nil
                     }
+                    performDeleteRun(runID)
                 }
             )
         })
@@ -144,6 +135,21 @@ struct MissionControlView: View {
         return controlStore.runs.first(where: { $0.id == selectedRunID })
     }
 
+    @MainActor
+    private func performDeleteRun(_ runID: UUID) {
+        guard !deletingRunIDs.contains(runID) else { return }
+        deletingRunIDs.insert(runID)
+        Task { @MainActor in
+            await controlStore.deleteRun(
+                id: runID,
+                fleetLink: fleetLink,
+                sitl: sitl,
+                generalSettings: generalSettings
+            )
+            deletingRunIDs.remove(runID)
+        }
+    }
+
     /// Picks up ``OperatorPromptReviewFocusController`` drill-in (e.g. Live Drive **Return to Mission**) when this view mounts or when pending ids change.
     private func applyPendingMissionControlDrillInFromFocusIfNeeded() {
         guard let newRunID = operatorPromptReviewFocus.pendingMissionControlRunID else { return }
@@ -181,14 +187,17 @@ struct MissionControlView: View {
                         spacing: GuardianSpacing.sm
                     ) {
                         ForEach(controlStore.runs) { run in
+                            let isDeleting = deletingRunIDs.contains(run.id)
                             ZStack(alignment: .topTrailing) {
                                 MissionRunCard(
                                     run: run,
                                     mission: run.template ?? missionStore.missions.first { $0.id == run.missionId },
-                                    isSelected: selectedRunID == run.id
+                                    isSelected: selectedRunID == run.id,
+                                    isDeleting: isDeleting
                                 )
                                 .contentShape(Rectangle())
                                 .onTapGesture {
+                                    guard !isDeleting else { return }
                                     selectedRunID = run.id
                                 }
 
@@ -205,14 +214,25 @@ struct MissionControlView: View {
                                         )
                                     },
                                     label: {
-                                        Image(systemName: "trash")
-                                            .font(GuardianTypography.font(.sectionHeadingSemibold))
+                                        if isDeleting {
+                                            ProgressView()
+                                                .controlSize(.small)
+                                        } else {
+                                            Image(systemName: "trash")
+                                                .font(GuardianTypography.font(.sectionHeadingSemibold))
+                                        }
                                     }
                                 )
-                                .help("Delete run")
-                                .accessibilityLabel("Delete run")
+                                .disabled(isDeleting)
+                                .help(isDeleting ? "Deleting run…" : "Delete run")
+                                .accessibilityLabel(isDeleting ? "Deleting run" : "Delete run")
                                 .guardianPointerOnHover()
                                 .padding(GuardianSpacing.xs)
+                            }
+                            .overlay {
+                                if isDeleting {
+                                    missionRunGridDeletingOverlay
+                                }
                             }
                         }
                     }
@@ -294,11 +314,28 @@ private func gracefulStopKindGridLabel(_ kind: MissionRunGracefulStopKind) -> St
     }
 }
 
+private var missionRunGridDeletingOverlay: some View {
+    ZStack {
+        RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous)
+            .fill(Color.black.opacity(0.28))
+        VStack(spacing: GuardianSpacing.xs) {
+            ProgressView()
+                .controlSize(.regular)
+                .tint(.white)
+            Text("Deleting…")
+                .font(GuardianTypography.font(.denseCaption12Medium))
+                .foregroundStyle(.white)
+        }
+    }
+    .allowsHitTesting(true)
+}
+
 private struct MissionRunCard: View {
     let run: MissionRunEnvironment
     /// Template whose mission-card JPEG is shown (same asset as Missions grid / Add Run).
     let mission: Mission?
     let isSelected: Bool
+    var isDeleting: Bool = false
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -329,7 +366,12 @@ private struct MissionRunCard: View {
                             .foregroundStyle(theme.textPrimary)
                             .lineLimit(1)
                         Spacer()
-                        MissionRunStatusBadge(status: run.status, sessionPhase: run.sessionPhase)
+                        if isDeleting {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            MissionRunStatusBadge(status: run.status, sessionPhase: run.sessionPhase)
+                        }
                     }
 
                     HStack(spacing: GuardianSpacing.xs) {

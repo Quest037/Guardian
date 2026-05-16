@@ -105,7 +105,11 @@ struct MissionGeofence: Identifiable, Equatable, Sendable {
     }
 
     /// Template row for a new **polygon** near ``center`` (~220 m triangle).
-    static func newPolygon(name: String, around center: RouteCoordinate) -> MissionGeofence {
+    static func newPolygon(
+        name: String,
+        around center: RouteCoordinate,
+        boundary: MissionGeofenceBoundaryKind = .inclusion
+    ) -> MissionGeofence {
         let d = 0.002
         let verts: [RouteCoordinate] = [
             RouteCoordinate(lat: center.lat + d, lon: center.lon - d),
@@ -114,7 +118,7 @@ struct MissionGeofence: Identifiable, Equatable, Sendable {
         ]
         return MissionGeofence(
             name: name,
-            boundary: .inclusion,
+            boundary: boundary,
             shape: .polygon,
             polygonVertices: verts,
             circleCenter: center,
@@ -122,10 +126,14 @@ struct MissionGeofence: Identifiable, Equatable, Sendable {
         )
     }
 
-    static func newCircle(name: String, center: RouteCoordinate) -> MissionGeofence {
+    static func newCircle(
+        name: String,
+        center: RouteCoordinate,
+        boundary: MissionGeofenceBoundaryKind = .inclusion
+    ) -> MissionGeofence {
         MissionGeofence(
             name: name,
-            boundary: .inclusion,
+            boundary: boundary,
             shape: .circle,
             polygonVertices: [],
             circleCenter: center,

@@ -10,6 +10,33 @@ struct MissionTemplateGeofenceUtilities: Sendable {
     /// - A task **cannot** combine a mission-wide inclusion with any task-scoped inclusion (task-level is the preferred scope when both would exist — reject the combined state).
     /// - For each task, merged fences are ``Mission/missionGeofences`` + that task’s ``MissionTask/geofences``. If that merged list contains any exclusion, it must also contain at least one inclusion. With **no** tasks, only ``Mission/missionGeofences`` is checked the same way.
     ///
+    /// Default boundary for a **new** mission-wide fence: inclusion when the template has no inclusion yet; otherwise exclusion.
+    func defaultBoundaryForNewMissionWideFence(in mission: Mission) -> MissionGeofenceBoundaryKind {
+        if mission.missionGeofences.contains(where: { $0.boundary == .inclusion }) {
+            return .exclusion
+        }
+        if mission.routeMacro.tasks.contains(where: { task in
+            task.geofences.contains(where: { $0.boundary == .inclusion })
+        }) {
+            return .exclusion
+        }
+        return .inclusion
+    }
+
+    /// Default boundary for a **new** task-scoped fence (see ``defaultBoundaryForNewMissionWideFence`` for mission-wide rules).
+    func defaultBoundaryForNewTaskScopedFence(taskID: UUID, in mission: Mission) -> MissionGeofenceBoundaryKind {
+        if mission.missionGeofences.contains(where: { $0.boundary == .inclusion }) {
+            return .exclusion
+        }
+        guard let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }) else {
+            return defaultBoundaryForNewMissionWideFence(in: mission)
+        }
+        if task.geofences.contains(where: { $0.boundary == .inclusion }) {
+            return .exclusion
+        }
+        return .inclusion
+    }
+
     /// Returns `nil` when valid, otherwise a short message for operator toasts.
     func inclusionConstraintViolationMessage(for mission: Mission) -> String? {
         let missionInclusions = mission.missionGeofences.filter { $0.boundary == .inclusion }

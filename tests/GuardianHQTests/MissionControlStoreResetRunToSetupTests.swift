@@ -21,7 +21,12 @@ final class MissionControlStoreResetRunToSetupTests: XCTestCase {
         XCTAssertEqual(run.taskStateByTaskID[taskID], .completed)
         XCTAssertTrue(run.taskMissionEndRecoveryCompletedByTaskID.contains(taskID))
 
-        store.resetRunToSetup(id: run.id)
+        store.resetRunToSetup(
+            id: run.id,
+            fleetLink: FleetLinkService(),
+            sitl: SitlService(),
+            generalSettings: GeneralSettingsStore()
+        )
         guard let resetRun = store.runs.first(where: { $0.id == run.id }) else {
             XCTFail("expected run in store")
             return
@@ -55,7 +60,12 @@ final class MissionControlStoreResetRunToSetupTests: XCTestCase {
         run.assignments = rows
         XCTAssertNotNil(run.assignments[0].slotLifecycleLanes)
 
-        store.resetRunToSetup(id: run.id)
+        store.resetRunToSetup(
+            id: run.id,
+            fleetLink: FleetLinkService(),
+            sitl: SitlService(),
+            generalSettings: GeneralSettingsStore()
+        )
         guard let resetRun = store.runs.first(where: { $0.id == run.id }) else {
             XCTFail("expected run in store")
             return
@@ -85,7 +95,12 @@ final class MissionControlStoreResetRunToSetupTests: XCTestCase {
         XCTAssertTrue(run.activeCycleSquadAssignmentIDs.contains(squadA))
         XCTAssertEqual(run.deferredFirstWaveSquadAssignmentIDsByTaskID[task.id]?.count, 2)
 
-        store.resetRunToSetup(id: run.id)
+        store.resetRunToSetup(
+            id: run.id,
+            fleetLink: FleetLinkService(),
+            sitl: SitlService(),
+            generalSettings: GeneralSettingsStore()
+        )
         guard let resetRun = store.runs.first(where: { $0.id == run.id }) else {
             XCTFail("expected run in store")
             return

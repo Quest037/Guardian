@@ -118,6 +118,18 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 
 ### Policies
 
+### Pathfinding & geofence avoidance
+
+**Product lock:** Exclusion geofences are **keep-out obstacles** — vehicles must **skirt** them. Inclusion is the operable outer boundary. Do **not** rely on autopilot geofence breach for routing in AUTO or OFFBOARD/GUIDED; FC fences are backup only.
+
+**Observed gap:** Primary AUTO can fly straight legs through exclusions; wingman v1 only holds last valid setpoint (`MissionControlSquadConvoySetpointGeofenceUtilities`). See ``SquadFollow&Formation.md`` § v2 **P — Pathfinding**.
+
+- **Guardian 2D router** (Utilities / Mission Control): exclusions non-traversable; stay in inclusion; skirt with clearance; unit tests (hole between start/goal, nested fences, multi-hole).
+- **Mission compile / upload:** Reroute or insert WPs so legs do not intersect exclusions; log detoured vs author path.
+- **Runtime setpoint follower:** Shared API for formation streams, park, reposition, policy moves — replace hold-last-valid as sole geofence strategy.
+- **Consumers:** primary AUTO upload; wingman convoy; reserve reposition; between-cycles / end-policy OFFBOARD/GUIDED; **convoy trail** (``SquadFollow&Formation.md`` § v2 **T** — trail motion on top of router, not separate avoidance).
+- **SIM smoke:** launch separated from route by exclusion; track outside red zones.
+- **v3 road layer** (after v2 open-field router): task domain classification (road vs open-field); OSM snap like mission workspace map; UGV on roads + UAV overwatch on routed track — ``SquadFollow&Formation.md`` § v3 **R**.
 
 ### Rules of Engagement
 - **Rules:**
@@ -157,9 +169,12 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
     - I understand why this is happening, but it's not ideal
 
 #### Squads
-- **Formations (v1 convoy, v2 shapes):**
-  - v1: convoy follow only — wingmen OFFBOARD/GUIDED, primary AUTO_MISSION; MRE streams setpoints (``SquadFollow&Formation.md`` § v1).
-  - v2: user-defined formation (chevron, arrowhead, etc.) overriding pattern defaults; live formation change on the fly (same doc § v2).
+- **Formations (v1 convoy, v2 pathfinding + trail + shapes):**
+  - v1: convoy follow shipped — ``SquadFollow&Formation.md`` § v1.
+  - v2 **pathfinding** (prerequisite): § v2 **P** + this section **Pathfinding & geofence avoidance**.
+  - v2 **convoy trail:** § v2 **T** — trail arc-length + assembly; **depends on pathfinding** for approach and streamed setpoints.
+  - v2 **shapes:** chevron, arrowhead, live formation change — § v2 **F** (offsets still pathfound).
+- **Squad convoy spacing (authoring):** Per-task or per-squad operator-configurable along-track gap and lateral lane offset (replace locked ``MissionSquadConvoySpacingPolicy`` defaults; UGV v1 SIM uses 3 m astern per ordinal for testing).
 
 ### MissionRunEnvironment
 
@@ -171,8 +186,10 @@ Mission Control includes Setup, Running, Recovery Completed as the main four sta
 
 #### Planner
 - **MissionTask Squad Formations:**
-  - v1: convoy (line-behind-primary) default; wingman follow pipeline in MRE (``SquadFollow&Formation.md`` § v1). Depends on ``MRESquadsToDo.md`` per-squad cycles.
-  - v2: patrol/cluster and other shapes + on-the-fly formation changes (``SquadFollow&Formation.md`` § v2).
+  - v1: convoy + wingman follow pipeline (``SquadFollow&Formation.md`` § v1). Depends on ``MRESquadsToDo.md`` per-squad cycles.
+  - v2: **pathfinding** at mission upload + runtime (``SquadFollow&Formation.md`` § v2 **P**).
+  - v2: **convoy trail** — § v2 **T** (blocked on pathfinding).
+  - v2: formation shapes + live change — § v2 **F**.
 
 - **MissionTask Squad vehicle promotion:** 
   - build logic for wingman to be promoted to leader, and squad to update accordingly.

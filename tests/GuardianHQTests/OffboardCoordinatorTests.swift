@@ -24,4 +24,14 @@ final class OffboardCoordinatorTests: XCTestCase {
         XCTAssertTrue(line.contains("tick #1"))
         XCTAssertTrue(line.contains("horizontal|v|=nil m/s"))
     }
+
+    func test_px4ParkPoseHold_carriesSnapshotYaw() {
+        let hold = OffboardCoordinator.Px4ParkPoseHold(
+            latitudeDeg: 50.753,
+            longitudeDeg: -1.618,
+            absoluteAltitudeM: 0,
+            yawDeg: 127.5
+        )
+        XCTAssertEqual(hold.yawDeg, 127.5)
+    }
 }

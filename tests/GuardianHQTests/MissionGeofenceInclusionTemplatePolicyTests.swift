@@ -150,4 +150,52 @@ final class MissionGeofenceInclusionTemplatePolicyTests: XCTestCase {
         )
         XCTAssertNotNil(util.inclusionConstraintViolationMessage(for: m))
     }
+
+    func test_defaultBoundaryForNewMissionWideFence_inclusionWhenNone() {
+        let m = Mission(name: "M", description: "", type: .mobile, routeMacro: RouteMacro(tasks: []))
+        XCTAssertEqual(util.defaultBoundaryForNewMissionWideFence(in: m), .inclusion)
+    }
+
+    func test_defaultBoundaryForNewMissionWideFence_exclusionWhenMissionWideInclusionExists() {
+        let m = Mission(
+            name: "M",
+            description: "",
+            type: .mobile,
+            routeMacro: RouteMacro(tasks: []),
+            missionGeofences: [MissionGeofence(name: "A", boundary: .inclusion, shape: .circle)]
+        )
+        XCTAssertEqual(util.defaultBoundaryForNewMissionWideFence(in: m), .exclusion)
+    }
+
+    func test_defaultBoundaryForNewMissionWideFence_exclusionWhenTaskInclusionExists() {
+        var t = MissionTask(name: "Route")
+        t.geofences = [MissionGeofence(name: "T", boundary: .inclusion, shape: .circle)]
+        let m = Mission(name: "M", description: "", type: .mobile, routeMacro: RouteMacro(tasks: [t]))
+        XCTAssertEqual(util.defaultBoundaryForNewMissionWideFence(in: m), .exclusion)
+    }
+
+    func test_defaultBoundaryForNewTaskScopedFence_inclusionWhenTaskHasNone() {
+        let t = MissionTask(name: "Route")
+        let m = Mission(name: "M", description: "", type: .mobile, routeMacro: RouteMacro(tasks: [t]))
+        XCTAssertEqual(util.defaultBoundaryForNewTaskScopedFence(taskID: t.id, in: m), .inclusion)
+    }
+
+    func test_defaultBoundaryForNewTaskScopedFence_exclusionWhenTaskAlreadyHasInclusion() {
+        var t = MissionTask(name: "Route")
+        t.geofences = [MissionGeofence(name: "A", boundary: .inclusion, shape: .circle)]
+        let m = Mission(name: "M", description: "", type: .mobile, routeMacro: RouteMacro(tasks: [t]))
+        XCTAssertEqual(util.defaultBoundaryForNewTaskScopedFence(taskID: t.id, in: m), .exclusion)
+    }
+
+    func test_defaultBoundaryForNewTaskScopedFence_exclusionWhenMissionWideInclusionExists() {
+        let t = MissionTask(name: "Route")
+        let m = Mission(
+            name: "M",
+            description: "",
+            type: .mobile,
+            routeMacro: RouteMacro(tasks: [t]),
+            missionGeofences: [MissionGeofence(name: "M", boundary: .inclusion, shape: .circle)]
+        )
+        XCTAssertEqual(util.defaultBoundaryForNewTaskScopedFence(taskID: t.id, in: m), .exclusion)
+    }
 }

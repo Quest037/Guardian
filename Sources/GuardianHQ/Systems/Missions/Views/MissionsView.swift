@@ -1368,6 +1368,7 @@ private struct MissionWorkspaceView: View {
                         get: { draft.routeMacro.tasks[taskIndex] },
                         set: { draft.routeMacro.tasks[taskIndex] = $0 }
                     ),
+                    rosterDevices: draft.rosterDevices,
                     onSave: {
                         persistMissionToStoreNow()
                         dismissMissionTaskSettingsOverlay()
@@ -1510,7 +1511,12 @@ private struct MissionWorkspaceView: View {
 
     private func addMissionGeofencePolygon() {
         let n = draft.missionGeofences.count + 1
-        let fence = MissionGeofence.newPolygon(name: "Mission fence \(n)", around: missionGeofenceDefaultCenter)
+        let boundary = Utilities.mission.templateGeofences.defaultBoundaryForNewMissionWideFence(in: draft)
+        let fence = MissionGeofence.newPolygon(
+            name: "Mission fence \(n)",
+            around: missionGeofenceDefaultCenter,
+            boundary: boundary
+        )
         guard applyGeofenceTemplateMutation(successToast: "Fence added — drag vertices or the square handle on the map to adjust", { $0.missionGeofences.append(fence) }) else { return }
         selectedGeofenceID = fence.id
         missionWorkspaceGeofencesListScrollTargetRow = fence.id
@@ -1519,7 +1525,12 @@ private struct MissionWorkspaceView: View {
 
     private func addMissionGeofenceCircle() {
         let n = draft.missionGeofences.count + 1
-        let fence = MissionGeofence.newCircle(name: "Mission fence \(n)", center: missionGeofenceDefaultCenter)
+        let boundary = Utilities.mission.templateGeofences.defaultBoundaryForNewMissionWideFence(in: draft)
+        let fence = MissionGeofence.newCircle(
+            name: "Mission fence \(n)",
+            center: missionGeofenceDefaultCenter,
+            boundary: boundary
+        )
         guard applyGeofenceTemplateMutation(successToast: "Fence added — drag the center and rim on the map to adjust", { $0.missionGeofences.append(fence) }) else { return }
         selectedGeofenceID = fence.id
         missionWorkspaceGeofencesListScrollTargetRow = fence.id
@@ -1551,6 +1562,7 @@ private struct MissionWorkspaceView: View {
         if let i = draft.missionGeofences.firstIndex(where: { $0.id == id }) {
             var dup = draft.missionGeofences[i].duplicatedForClonedMission()
             dup.name = dup.name + " copy"
+            dup.boundary = Utilities.mission.templateGeofences.defaultBoundaryForNewMissionWideFence(in: draft)
             guard applyGeofenceTemplateMutation(successToast: nil, { $0.missionGeofences.append(dup) }) else { return }
             selectedGeofenceID = dup.id
             missionWorkspaceGeofencesListScrollTargetRow = dup.id
@@ -1561,6 +1573,8 @@ private struct MissionWorkspaceView: View {
             if let i = draft.routeMacro.tasks[ti].geofences.firstIndex(where: { $0.id == id }) {
                 var dup = draft.routeMacro.tasks[ti].geofences[i].duplicatedForClonedMission()
                 dup.name = dup.name + " copy"
+                let taskID = draft.routeMacro.tasks[ti].id
+                dup.boundary = Utilities.mission.templateGeofences.defaultBoundaryForNewTaskScopedFence(taskID: taskID, in: draft)
                 guard applyGeofenceTemplateMutation(successToast: nil, { $0.routeMacro.tasks[ti].geofences.append(dup) }) else { return }
                 selectedGeofenceID = dup.id
                 missionWorkspaceGeofencesListScrollTargetRow = dup.id
@@ -4025,10 +4039,24 @@ private struct MissionRosterDeviceSettingsSidebar: View {
 /// Tasks-tab sidebar: edit ``MissionTask`` fields that are not waypoint geometry.
 private struct MissionTaskSettingsSidebar: View {
     @Binding var task: MissionTask
+    let rosterDevices: [RosterDevice]
     let onSave: () -> Void
     @Environment(\.colorScheme) private var colorScheme
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
+    private var taskHasSquadWingmen: Bool {
+        MissionControlSquadFollowBindingUtilities.taskHasWingmen(
+            rosterDevices: rosterDevices,
+            task: task
+        )
+    }
+
+    private func enforceConvoyPatternWhenWingmenPresent() {
+        if taskHasSquadWingmen, task.pattern != .convoy {
+            task.pattern = .convoy
+        }
+    }
 
     private var showsCycles: Bool {
         task.regularity == .continuous || task.regularity == .continuousWithDelay
@@ -4111,15 +4139,26 @@ private struct MissionTaskSettingsSidebar: View {
 
     private var missionTaskPatternRow: some View {
         missionTaskSettingsFieldRow(label: "Pattern") {
-            Picker("", selection: $task.pattern) {
-                ForEach(MissionTaskPattern.allCases) { p in
-                    Text(p.displayTitle).tag(p)
+            if taskHasSquadWingmen {
+                Text(MissionTaskPattern.convoy.displayTitle)
+                    .font(fieldRowLabelFont)
+                    .foregroundStyle(theme.textSecondary)
+            } else {
+                Picker("", selection: $task.pattern) {
+                    ForEach(MissionTaskPattern.allCases) { p in
+                        Text(p.displayTitle).tag(p)
+                    }
                 }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
             }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .fixedSize()
         }
+        .help(
+            taskHasSquadWingmen
+                ? "Convoy formation is required when this task includes squad wingmen."
+                : "Mission pattern for this task."
+        )
     }
 
     private var missionTaskStartDelayRow: some View {
@@ -4240,6 +4279,10 @@ private struct MissionTaskSettingsSidebar: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+        }
+        .onAppear(perform: enforceConvoyPatternWhenWingmenPresent)
+        .onChange(of: task.rosterDeviceIds) { _ in
+            enforceConvoyPatternWhenWingmenPresent()
         }
     }
 

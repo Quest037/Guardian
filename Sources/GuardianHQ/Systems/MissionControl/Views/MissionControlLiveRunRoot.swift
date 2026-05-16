@@ -165,6 +165,12 @@ struct MissionControlLiveRunRoot<Content: View>: View {
             refreshMcrLiveTaskListSnapshotsIfNeeded()
             refreshMcrLiveMissionLogStripIfNeeded()
         }
+        .onChange(of: run.squadFollowStatusRevision) { _ in
+            refreshMcrLiveRosterStripSnapshotsIfNeeded()
+        }
+        .onChange(of: run.missionRunRosterReleasedAssignmentIDs) { _ in
+            refreshMcrLiveRosterStripSnapshotsIfNeeded()
+        }
         .onChange(of: run.taskAttemptingByTaskID) { _ in
             refreshMcrLiveTaskListSnapshotsIfNeeded()
         }
@@ -237,6 +243,7 @@ struct MissionControlLiveRunRoot<Content: View>: View {
                     projection: projection,
                     assignment: a,
                     mission: mission,
+                    run: run,
                     runStatus: run.status,
                     fleetLink: fleetLink,
                     sitl: sitl,

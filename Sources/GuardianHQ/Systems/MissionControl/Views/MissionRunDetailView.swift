@@ -89,7 +89,7 @@ struct MissionRunDetailView: View {
     let onBack: () -> Void
     let onUpdate: (MissionRunEnvironment) -> Void
     let onStart: (MissionRunEnvironment) -> Void
-    let onDelete: (UUID) async -> Void
+    let onRequestDeleteRun: (UUID) -> Void
 
     @State private var setupSelectedAssignmentId: UUID?
     /// MCS staging SITL: operator-dragged lat/lon applied **synchronously** to the map payload so Leaflet is not
@@ -254,7 +254,7 @@ struct MissionRunDetailView: View {
         onBack: @escaping () -> Void,
         onUpdate: @escaping (MissionRunEnvironment) -> Void,
         onStart: @escaping (MissionRunEnvironment) -> Void,
-        onDelete: @escaping (UUID) async -> Void,
+        onRequestDeleteRun: @escaping (UUID) -> Void,
         pendingPostOpenLiveMissionTaskID: Binding<UUID?>,
         pendingPostOpenLiveMissionAssignmentID: Binding<UUID?>
     ) {
@@ -269,7 +269,7 @@ struct MissionRunDetailView: View {
         self.onBack = onBack
         self.onUpdate = onUpdate
         self.onStart = onStart
-        self.onDelete = onDelete
+        self.onRequestDeleteRun = onRequestDeleteRun
         _setupSelectedAssignmentId = State(initialValue: nil)
         _mapModel = StateObject(
             wrappedValue: GuardianMapModel(
@@ -657,10 +657,7 @@ struct MissionRunDetailView: View {
                         onConfirm: {
                             let id = run.id
                             presentedRunConfirm = nil
-                            Task { @MainActor in
-                                await onDelete(id)
-                                onBack()
-                            }
+                            onRequestDeleteRun(id)
                         }
                     )
                 case .skipScheduledMissionStart:
@@ -1801,8 +1798,29 @@ struct MissionRunDetailView: View {
     }
 
     private func applyResetToSetup() {
-        controlStore.resetRunToSetup(id: run.id)
+        controlStore.resetRunToSetup(
+            id: run.id,
+            fleetLink: fleetLink,
+            sitl: sitl,
+            generalSettings: generalSettings
+        )
         syncRunFromStore()
+        onUpdate(run)
+    }
+
+    private var mcsSimCleanupInProgressBanner: some View {
+        GuardianInlineNotice(
+            kind: .informational,
+            title: "SIM cleanup in progress",
+            detail: "Connected simulators are resetting in the background. You can keep configuring this run while cleanup finishes.",
+            trailing: {
+                ProgressView()
+                    .controlSize(.small)
+            }
+        )
+        .padding(.horizontal, GuardianSpacing.sm)
+        .padding(.vertical, GuardianSpacing.xs)
+        .background(theme.backgroundRaised)
     }
 
     private func isSimulationVehicleID(_ vehicleID: String) -> Bool {
@@ -2229,9 +2247,20 @@ struct MissionRunDetailView: View {
                                     && (run.sessionPhase == .aborting || run.sessionPhase == .aborted))
                             {
                                 GuardianPrimaryProminentButton(title: "Mark Completed") {
-                                    run.systems.lifecycle.markCompleted(kind: run.completionKind)
-                                    syncRunFromStore()
-                                    onUpdate(run)
+                                    Task { @MainActor in
+                                        run.attachServices(
+                                            fleetLink: fleetLink,
+                                            sitl: sitl,
+                                            generalSettings: generalSettings
+                                        )
+                                        await run.awaitFleetWindDownBeforeRunShellChange(
+                                            fleetLink: fleetLink,
+                                            sitl: sitl
+                                        )
+                                        run.systems.lifecycle.markCompleted(kind: run.completionKind)
+                                        syncRunFromStore()
+                                        onUpdate(run)
+                                    }
                                 }
                             } else if run.status == .running || run.status == .paused {
                                 Menu {
@@ -2308,6 +2337,9 @@ struct MissionRunDetailView: View {
                     .frame(maxWidth: .infinity)
                     .background(theme.backgroundRaised)
 
+                    if run.status == .setup, run.isMissionRunSimCleanupPassRunning {
+                        mcsSimCleanupInProgressBanner
+                    }
                 }
                 ZStack(alignment: .topLeading) {
                     // Main column: setup / completed / live are explicit siblings; preflight overlay remains here (setup-only).
@@ -3538,12 +3570,14 @@ struct MissionRunDetailView: View {
         guard mutateLiveRuntimeGeofenceDraft({ mission in
             if let tid = focusedLiveTaskID, let ti = mission.routeMacro.tasks.firstIndex(where: { $0.id == tid }) {
                 let n = mission.routeMacro.tasks[ti].geofences.count + 1
-                var fence = MissionGeofence.newPolygon(name: "Task fence \(n)", around: coord)
+                let boundary = Utilities.mission.templateGeofences.defaultBoundaryForNewTaskScopedFence(taskID: tid, in: mission)
+                var fence = MissionGeofence.newPolygon(name: "Task fence \(n)", around: coord, boundary: boundary)
                 fence.id = newID
                 mission.routeMacro.tasks[ti].geofences.append(fence)
             } else {
                 let n = mission.missionGeofences.count + 1
-                var fence = MissionGeofence.newPolygon(name: "Mission fence \(n)", around: coord)
+                let boundary = Utilities.mission.templateGeofences.defaultBoundaryForNewMissionWideFence(in: mission)
+                var fence = MissionGeofence.newPolygon(name: "Mission fence \(n)", around: coord, boundary: boundary)
                 fence.id = newID
                 mission.missionGeofences.append(fence)
             }
@@ -3571,12 +3605,14 @@ struct MissionRunDetailView: View {
         guard mutateLiveRuntimeGeofenceDraft({ mission in
             if let tid = focusedLiveTaskID, let ti = mission.routeMacro.tasks.firstIndex(where: { $0.id == tid }) {
                 let n = mission.routeMacro.tasks[ti].geofences.count + 1
-                var fence = MissionGeofence.newCircle(name: "Task fence \(n)", center: coord)
+                let boundary = Utilities.mission.templateGeofences.defaultBoundaryForNewTaskScopedFence(taskID: tid, in: mission)
+                var fence = MissionGeofence.newCircle(name: "Task fence \(n)", center: coord, boundary: boundary)
                 fence.id = newID
                 mission.routeMacro.tasks[ti].geofences.append(fence)
             } else {
                 let n = mission.missionGeofences.count + 1
-                var fence = MissionGeofence.newCircle(name: "Mission fence \(n)", center: coord)
+                let boundary = Utilities.mission.templateGeofences.defaultBoundaryForNewMissionWideFence(in: mission)
+                var fence = MissionGeofence.newCircle(name: "Mission fence \(n)", center: coord, boundary: boundary)
                 fence.id = newID
                 mission.missionGeofences.append(fence)
             }
@@ -8593,7 +8629,8 @@ struct MissionRunDetailView: View {
         let newID = UUID()
         persistMissionMutation { mission in
             let n = mission.missionGeofences.count + 1
-            var fence = MissionGeofence.newPolygon(name: "Mission fence \(n)", around: coord)
+            let boundary = Utilities.mission.templateGeofences.defaultBoundaryForNewMissionWideFence(in: mission)
+            var fence = MissionGeofence.newPolygon(name: "Mission fence \(n)", around: coord, boundary: boundary)
             fence.id = newID
             mission.missionGeofences.append(fence)
         }
@@ -8612,7 +8649,8 @@ struct MissionRunDetailView: View {
         let newID = UUID()
         persistMissionMutation { mission in
             let n = mission.missionGeofences.count + 1
-            var fence = MissionGeofence.newCircle(name: "Mission fence \(n)", center: coord)
+            let boundary = Utilities.mission.templateGeofences.defaultBoundaryForNewMissionWideFence(in: mission)
+            var fence = MissionGeofence.newCircle(name: "Mission fence \(n)", center: coord, boundary: boundary)
             fence.id = newID
             mission.missionGeofences.append(fence)
         }

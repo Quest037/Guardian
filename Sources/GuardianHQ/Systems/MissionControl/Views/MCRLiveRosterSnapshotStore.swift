@@ -176,6 +176,7 @@ enum MCRLiveRosterRowSnapshotFactory {
         projection: MissionRunAssignmentLiveProjection,
         assignment: MissionRunAssignment,
         mission: Mission?,
+        run: MissionRunEnvironment,
         runStatus: MissionRunStatus,
         fleetLink: FleetLinkService,
         sitl: SitlService,
@@ -202,11 +203,30 @@ enum MCRLiveRosterRowSnapshotFactory {
         let bracketed = shortRaw.isEmpty ? "—" : "[\(shortRaw)]"
         let missionLiveShowsSlotBadge = runStatus == .running || runStatus == .paused || runStatus == .recovery
         let mergedSlot = projection.mergedSlotState
-        let slotAttention: MCRLiveRosterSlotAttentionSnapshot? = missionLiveShowsSlotBadge
-            ? mergedSlot.missionControlRosterBadgeSeverity.map {
+        let wingmanPhase = run.wingmanFollowPhase(forAssignmentID: assignment.id)
+        let wingmanFollowLabel = wingmanPhase?.operatorStatusLabel
+        let releasedFromSquadFollow = run.isMissionRunRosterReleasedFromSquadFollow(assignmentID: assignment.id)
+        let slotAttention: MCRLiveRosterSlotAttentionSnapshot? = {
+            guard missionLiveShowsSlotBadge else { return nil }
+            if releasedFromSquadFollow {
+                return MCRLiveRosterSlotAttentionSnapshot(
+                    severity: .info,
+                    title: "Released from squad",
+                    help: "This wingman slot is no longer in convoy follow for this run."
+                )
+            }
+            if let wingmanFollowLabel,
+               mission?.rosterDevices.first(where: { $0.id == assignment.rosterDeviceId })?.slot == .wingman {
+                return MCRLiveRosterSlotAttentionSnapshot(
+                    severity: wingmanPhase == .streamFailed ? .warning : .info,
+                    title: wingmanFollowLabel,
+                    help: "Convoy wingman follow state for this slot."
+                )
+            }
+            return mergedSlot.missionControlRosterBadgeSeverity.map {
                 MCRLiveRosterSlotAttentionSnapshot(severity: $0, title: mergedSlot.displayTitle, help: mergedSlot.rosterSlotChipHelp)
             }
-            : nil
+        }()
         let reserveSwapStripAccessibilitySummary: String? = {
             guard let pick = liveReserveSwapPick,
                   let mission,
@@ -247,6 +267,7 @@ enum MCRLiveRosterRowSnapshotFactory {
     static func make(
         assignment: MissionRunAssignment,
         mission: Mission?,
+        run: MissionRunEnvironment,
         runStatus: MissionRunStatus,
         fleetLink: FleetLinkService,
         sitl: SitlService,
@@ -265,6 +286,7 @@ enum MCRLiveRosterRowSnapshotFactory {
             projection: projection,
             assignment: assignment,
             mission: mission,
+            run: run,
             runStatus: runStatus,
             fleetLink: fleetLink,
             sitl: sitl,

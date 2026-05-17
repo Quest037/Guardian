@@ -29,7 +29,6 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     @Published var policies: MissionRunPolicies = MissionRunPolicies()
     /// Run-only **additional** geofences for a specific task id (merged after mission-wide augmentation).
     @Published var taskGeofenceAugmentationsByTaskID: [UUID: [MissionGeofence]] = [:]
-
     /// Per-run Mission Control chrome and completion side-effects (cloned from app Mission Run defaults at create time).
     @Published var operatorDisplaySettings: MissionRunOperatorDisplaySettings = .default
 
@@ -1283,8 +1282,16 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     }
 
     func updateTemplate(_ mission: Mission?) {
-        self.template = mission
-        if let mission {
+        if var mission {
+            mission.routeMacro.rules.missionCompletePreferenceChain =
+                MissionRunCompleteTactic.upgradingStoredMissionWideChain(
+                    mission.routeMacro.rules.missionCompletePreferenceChain
+                )
+            self.template = mission
+        } else {
+            self.template = nil
+        }
+        if let mission = template {
             missionId = mission.id
             missionName = mission.name
             syncRosterRoleResolutions(from: mission)
@@ -1367,12 +1374,13 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
 
     /// Return to Launch / Go Home dispatch for one roster row (move+park to MCS launch, else stack RTL).
     func returnToLaunchFleetDispatch(
-        assignmentID: UUID,
+        assignment: MissionRunAssignment,
+        mission: Mission?,
         planningHub: FleetHubVehicleTelemetry?
     ) -> MissionRunFleetDispatch {
         let relAlt = planningHub?.guardianAbortPlanningRelativeAltitudeM ?? 0
         return MissionControlOperatorLaunchPosePolicy.resolvedReturnToLaunchDispatch(
-            assignmentID: assignmentID,
+            assignmentID: assignment.id,
             launchPoseByAssignmentID: operatorLaunchPoseByAssignmentID,
             planningRelativeAltitudeM: relAlt
         )

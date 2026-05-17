@@ -166,6 +166,8 @@ struct GuardianRouteMapGeometry: Equatable {
     var geofenceOverlays: [GuardianGeofenceMapOverlay]
     /// Mission workspace **Geofences** tab: fence layers accept primary clicks and post ``geofenceClick`` to Swift.
     var geofenceMapLayerPointerSelectsFence: Bool
+    /// Debug overlays (e.g. GR launch→WP1) — dashed polylines, non-interactive.
+    var debugOverlayPolylines: [[RouteCoordinate]] = []
 
     static let empty = GuardianRouteMapGeometry(
         home: nil,
@@ -516,6 +518,7 @@ struct GuardianMapView: View {
                 geofenceOverlays: model.routeGeometry.geofenceOverlays,
                 geofenceLeafletChrome: GuardianGeofenceLeafletChrome(colorScheme: colorScheme),
                 geofenceMapLayerPointerSelectsFence: model.routeGeometry.geofenceMapLayerPointerSelectsFence,
+                debugOverlayPolylines: model.routeGeometry.debugOverlayPolylines,
                 contextMenuPolicy: contextMenuPolicy,
                 onMapClick: onMapClick,
                 onVehicleMarkerMoved: onVehicleMarkerMoved,

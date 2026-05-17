@@ -182,7 +182,7 @@ struct MissionRunControlsSidebarView: View {
             get: {
                 let mission = run.template ?? missionStore.missions.first(where: { $0.id == run.missionId })
                 let chain = mission?.routeMacro.rules.missionCompletePreferenceChain ?? []
-                return MissionRunCompleteTactic.normalizedPreferenceChain(chain)
+                return MissionRunCompleteTactic.upgradingStoredMissionWideChain(chain)
             },
             set: { newValue in
                 _ = run.updateMissionCompletePreferenceChain(newValue, credential: credential)

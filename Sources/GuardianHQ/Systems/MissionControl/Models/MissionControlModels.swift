@@ -592,10 +592,36 @@ struct MissionRunCompleteTactic: Identifiable, Codable, Equatable, Hashable, Sen
         }
     }
 
+    /// Default mission-wide chain: nearest open extraction point (move+park), then RTL, then park.
     static let defaultMissionCompletePreferenceChain: [MissionRunCompleteTactic] = [
+        MissionRunCompleteTactic(kind: .nearestOpenMapPoint, mapPointKind: .extraction),
         MissionRunCompleteTactic(kind: .returnToLaunch),
         MissionRunCompleteTactic(kind: .park),
     ]
+
+    /// Previous product default (RTL → park only). Missions persisted with this shape pick up ``defaultMissionCompletePreferenceChain``.
+    static let supersededMissionCompletePreferenceChain: [MissionRunCompleteTactic] = [
+        MissionRunCompleteTactic(kind: .returnToLaunch),
+        MissionRunCompleteTactic(kind: .park),
+    ]
+
+    /// `true` when `chain` is exactly the old mission-wide default (RTL then park, no map-point step).
+    static func isSupersededMissionWideCompleteChain(_ chain: [MissionRunCompleteTactic]) -> Bool {
+        guard chain.count == 2 else { return false }
+        return chain[0].kind == .returnToLaunch
+            && chain[1].kind == .park
+            && chain[0].mapPointKind == nil
+            && chain[1].mapPointKind == nil
+    }
+
+    /// Normalizes stored mission-wide complete policy and upgrades the superseded RTL→park default to ``defaultMissionCompletePreferenceChain``.
+    static func upgradingStoredMissionWideChain(_ stored: [MissionRunCompleteTactic]) -> [MissionRunCompleteTactic] {
+        let normalized = normalizedPreferenceChain(stored)
+        if isSupersededMissionWideCompleteChain(normalized) {
+            return normalizedPreferenceChain(defaultMissionCompletePreferenceChain)
+        }
+        return normalized
+    }
 
     static var addMenuKindOrdering: [Kind] {
         [.nearestOpenMapPoint, .returnToLaunch, .loiter, .none, .park]
@@ -907,11 +933,15 @@ enum MissionRunPolicyResolution {
            !override.isEmpty {
             return MissionRunCompleteTactic.normalizedPreferenceChain(override)
         }
-        return MissionRunCompleteTactic.normalizedPreferenceChain(mission?.routeMacro.rules.missionCompletePreferenceChain ?? [])
+        return MissionRunCompleteTactic.upgradingStoredMissionWideChain(
+            mission?.routeMacro.rules.missionCompletePreferenceChain ?? []
+        )
     }
 
     static func missionTemplateCompletePreferenceChain(mission: Mission?) -> [MissionRunCompleteTactic] {
-        MissionRunCompleteTactic.normalizedPreferenceChain(mission?.routeMacro.rules.missionCompletePreferenceChain ?? [])
+        MissionRunCompleteTactic.upgradingStoredMissionWideChain(
+            mission?.routeMacro.rules.missionCompletePreferenceChain ?? []
+        )
     }
 
     static func inheritedCompletePreferenceChainForSlot(assignment: MissionRunAssignment, mission: Mission?) -> [MissionRunCompleteTactic] {
@@ -967,7 +997,25 @@ enum MissionRunGeofencePolicyResolution {
         return base + missionWideRunAugmentation + perTaskRunAugmentation
     }
 
-    /// Full fence list for one primary squad’s MAVLink plan row (planning fences + this slot’s augmentation).
+    /// Effective fences for one roster assignment (task template + run augmentations + slot augmentation).
+    static func assignmentGeofences(
+        assignment: MissionRunAssignment,
+        mission: Mission,
+        missionWideRunAugmentation: [MissionGeofence],
+        perTaskRunAugmentationByTaskID: [UUID: [MissionGeofence]]
+    ) -> [MissionGeofence] {
+        guard let tid = MissionRunPolicyResolution.resolvedTaskId(for: assignment, mission: mission) else {
+            return missionWideRunAugmentation + assignment.policies.geofenceAugmentation
+        }
+        let taskAug = perTaskRunAugmentationByTaskID[tid] ?? []
+        return planningGeofences(
+            taskID: tid,
+            mission: mission,
+            missionWideRunAugmentation: missionWideRunAugmentation,
+            perTaskRunAugmentation: taskAug
+        ) + assignment.policies.geofenceAugmentation
+    }
+
     static func squadGeofences(
         primaryAssignment: MissionRunAssignment,
         mission: Mission,
@@ -1504,7 +1552,7 @@ enum MissionRunFleetDispatch: Equatable {
 
 extension MissionRunFleetDispatch {
     /// Preferential **abort** tactics (non–map-point). **Return to Launch** in production uses
-    /// ``MissionRunEnvironment/returnToLaunchFleetDispatch(assignmentID:planningHub:)`` (MCS launch at Start Run);
+    /// ``MissionRunEnvironment/returnToLaunchFleetDispatch(assignment:mission:planningHub:)`` (MCS launch at Start Run);
     /// this static helper’s RTL case is the stack ``returnToLaunch()`` fallback only.
     @MainActor
     static func preferentialAbortTacticDispatch(_ kind: MissionRunAbortTactic.Kind) -> MissionRunFleetDispatch? {

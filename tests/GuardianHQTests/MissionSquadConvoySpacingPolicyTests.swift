@@ -20,9 +20,9 @@ final class MissionSquadConvoySpacingPolicyTests: XCTestCase {
         XCTAssertEqual(spacing.alongTrackMetersPerOrdinal, 25)
     }
 
-    func test_lockedSpacing_singlePath_ugv_uses_tight_test_gap() {
+    func test_lockedSpacing_patrol_ugv_uses_tight_test_gap() {
         let spacing = MissionSquadConvoySpacingPolicy.lockedSpacing(
-            taskPattern: .singlePath,
+            taskPattern: .patrol,
             primaryGranularClass: .ugvWheeled
         )
         XCTAssertEqual(spacing.alongTrackMetersPerOrdinal, 3)

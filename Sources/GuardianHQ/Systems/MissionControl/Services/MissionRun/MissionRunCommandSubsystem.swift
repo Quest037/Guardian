@@ -433,7 +433,8 @@ final class MissionRunCommandSubsystem {
 
     private func ensureRecipeDescriptorsLoadedIfNeeded(name: FleetRecipeName) {
         if name == FleetMissionRecipeRegistrations.doMissionUploadStartRecipeName
-            || name == FleetMissionRecipeRegistrations.doMissionUploadStartItemRecipeName,
+            || name == FleetMissionRecipeRegistrations.doMissionUploadStartItemRecipeName
+            || name == FleetMissionRecipeRegistrations.doContinueMissionAfterOperatorParkRecipeName,
            FleetRecipesCatalogue.shared.descriptor(for: name) == nil {
             FleetRecipesCatalogueBootstrap.ensureRegistered()
             FleetMissionRecipeRegistrations.registerAll()

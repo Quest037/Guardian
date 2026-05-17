@@ -45,6 +45,8 @@ enum MissionSquadConvoySpacingPolicy {
 enum MissionSquadConvoyFollowControlPolicy {
     /// Wingman within this distance of its heading-based slot counts as in formation (m).
     static let convoyAssemblyArrivalM: Double = 1.5
+    /// Primary ground speed at or below this counts as stationary for wingman in-slot hold (m/s).
+    static let primaryConvoyStationaryMaxGroundSpeedMS: Double = 0.2
     /// Abort assembly wait and release the primary anyway (s).
     static let convoyAssemblyTimeoutS: Double = 120
     /// Matches ``MissionRunSquadFollowSubsystem`` tick interval (~10 Hz).
@@ -85,6 +87,35 @@ enum MissionSquadConvoyFollowControlPolicy {
     /// Ahead of slot by more than this (m) — command reverse body speed (ArduPilot / PX4 copter).
     static let pursuitReverseAheadThresholdM: Double = 2.5
     static let pursuitMaxReverseMS: Double = 0.9
+    /// Remaining distance along the GR polyline at or below this ends launch approach and starts AUTO (m).
+    /// Crow-flies distance to WP1 is **not** used — a path can pass near WP1 while still having long distance left.
+    static let guardianRouterFirstWaypointArrivalM: Double = 6.0
+
+    /// True when the primary has reached the end of the routed launch leg (path distance only).
+    static func guardianRouterLaunchApproachArrived(remainingAlongRouteM: Double) -> Bool {
+        remainingAlongRouteM <= guardianRouterFirstWaypointArrivalM
+    }
+    /// Wingman slot on GR launch polyline: max lateral error from routed spine (m).
+    static let launchApproachPathAnchorMaxLateralM: Double = 30
+    /// Launch→WP1: wingman farther than this from its convoy slot counts as lagging (m).
+    static let launchLegWingmanLagBehindSlotM: Double = 5.0
+    /// Launch→WP1: primary pursuit speed while waiting for lagging wingmen (m/s).
+    static let launchLegPrimaryWaitSpeedMS: Double = 0.25
+
+    /// Hold primary in place on the launch leg when wingmen lag or when within this band of WP1 (m).
+    static var launchLegPrimaryHoldBandM: Double { guardianRouterFirstWaypointArrivalM * 2 }
+
+    /// Primary OFFBOARD hold during launch→WP1 (wingman catch-up or pre-WP1 deceleration).
+    static func launchLegShouldHoldPrimaryInPlace(
+        distToFirstWaypointM: Double,
+        remainingAlongRouteM: Double,
+        wingmenLagging: Bool
+    ) -> Bool {
+        if wingmenLagging { return true }
+        let band = launchLegPrimaryHoldBandM
+        return distToFirstWaypointM <= band || remainingAlongRouteM <= band
+    }
+
 }
 
 /// Runtime follow state for one wingman assignment.
@@ -92,6 +123,8 @@ enum MissionRunSquadWingmanFollowPhase: String, Equatable, Sendable {
     case idle
     case targetsComputed
     case assemblingConvoy
+    /// GR launch→first-WP approach leg (OFFBOARD/GUIDED) before primary AUTO mission.
+    case approachingRoute
     case following
     /// Between-cycle hold: stream last pose without chasing a moving primary.
     case holdingBetweenCycles
@@ -104,6 +137,8 @@ enum MissionRunSquadWingmanFollowPhase: String, Equatable, Sendable {
             return nil
         case .assemblingConvoy:
             return "Forming convoy"
+        case .approachingRoute:
+            return "Approaching route"
         case .following:
             return "Following convoy"
         case .holdingBetweenCycles:

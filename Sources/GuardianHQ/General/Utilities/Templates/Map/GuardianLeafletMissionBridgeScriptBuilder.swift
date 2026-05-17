@@ -77,6 +77,9 @@ extension OSMMapView {
         }.joined(separator: ",")
         let geofenceChromeJSON = payload.geofenceLeafletChrome.jsonObjectFragmentEscapedForJS()
         let geofencePtrSelJS = payload.geofenceMapLayerPointerSelectsFence ? "true" : "false"
-        return "setMissionData(\(homeJSON), [\(allPathsJSON)], \(taskPathIDsJSON), [\(waypointsJSON)], \(selectedWaypointIndexJS), [\(vehicleMarkersJSON)], \"\(payload.mapStyle.rawValue)\", \(payload.recenterNonce), \(headingPreviewJSON), \(cameraPreviewJSON), \(followedVehicleMarkerIDJSON), \(contextMenuPolicyJSON), \(payload.preserveView ? "true" : "false"), \(payload.isEditingTask ? "true" : "false"), \(payload.missionPointPlacementArmed ? "true" : "false"), \(mcsPoolHomeArmedJS), [\(missionPointsJSON)], [\(geofencesJSON)], \(geofenceChromeJSON), \(geofencePtrSelJS));"
+        let debugPathsJSON = payload.debugOverlayPolylines.map { path in
+            "[\(path.map { "{\"lat\":\($0.lat),\"lon\":\($0.lon)}" }.joined(separator: ","))]"
+        }.joined(separator: ",")
+        return "setMissionData(\(homeJSON), [\(allPathsJSON)], \(taskPathIDsJSON), [\(waypointsJSON)], \(selectedWaypointIndexJS), [\(vehicleMarkersJSON)], \"\(payload.mapStyle.rawValue)\", \(payload.recenterNonce), \(headingPreviewJSON), \(cameraPreviewJSON), \(followedVehicleMarkerIDJSON), \(contextMenuPolicyJSON), \(payload.preserveView ? "true" : "false"), \(payload.isEditingTask ? "true" : "false"), \(payload.missionPointPlacementArmed ? "true" : "false"), \(mcsPoolHomeArmedJS), [\(missionPointsJSON)], [\(geofencesJSON)], \(geofenceChromeJSON), \(geofencePtrSelJS), [\(debugPathsJSON)]);"
     }
 }

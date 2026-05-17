@@ -50,12 +50,14 @@ struct MissionRunPreferentialAbortPolicyEditor: View {
                             }
                             .foregroundStyle(theme.textSecondary)
 
-                            tacticRow(binding: rowBinding(at: idx))
+                            tacticRow(at: idx)
                                 .frame(maxWidth: .infinity, alignment: .leading)
 
                             Button {
-                                chain.remove(at: idx)
-                                normalize()
+                                commitChain { rows in
+                                    guard idx < rows.count else { return }
+                                    rows.remove(at: idx)
+                                }
                             } label: {
                                 Image(systemName: "trash")
                             }
@@ -93,32 +95,30 @@ struct MissionRunPreferentialAbortPolicyEditor: View {
                 }
             }
         }
-        .onAppear { normalize() }
+        .onAppear { chain = MissionRunAbortTactic.normalizedPreferenceChain(chain) }
     }
 
-    private func rowBinding(at index: Int) -> Binding<MissionRunAbortTactic> {
-        Binding(
-            get: { chain[index] },
-            set: { chain[index] = $0; normalize() }
-        )
+    /// Assign through the binding — in-place `append` / `swapAt` / subscript sets are dropped when the getter rebuilds from mission template.
+    private func commitChain(_ mutate: (inout [MissionRunAbortTactic]) -> Void) {
+        var next = chain
+        mutate(&next)
+        chain = MissionRunAbortTactic.normalizedPreferenceChain(next)
     }
 
     private func moveUp(index: Int) {
         guard index > 0 else { return }
-        chain.swapAt(index, index - 1)
-        normalize()
+        commitChain { rows in rows.swapAt(index, index - 1) }
     }
 
     private func moveDown(index: Int) {
         guard index < chain.count - 1 else { return }
-        chain.swapAt(index, index + 1)
-        normalize()
+        commitChain { rows in rows.swapAt(index, index + 1) }
     }
 
     @ViewBuilder
-    private func tacticRow(binding: Binding<MissionRunAbortTactic>) -> some View {
+    private func tacticRow(at index: Int) -> some View {
         HStack(alignment: .center, spacing: GuardianSpacing.sm) {
-            Picker("", selection: kindPickerSelection(for: binding)) {
+            Picker("", selection: kindPickerSelection(at: index)) {
                 ForEach(MissionRunAbortTactic.addMenuKindOrdering, id: \.self) { k in
                     Text(MissionRunAbortTactic(kind: k, mapPointKind: k == .nearestOpenMapPoint ? .rally : nil).setupMenuLabel)
                         .tag(k)
@@ -127,8 +127,8 @@ struct MissionRunPreferentialAbortPolicyEditor: View {
             .labelsHidden()
             .frame(minWidth: 170, alignment: .leading)
 
-            if binding.wrappedValue.kind == .nearestOpenMapPoint {
-                Picker("", selection: mapPointKindBinding(for: binding)) {
+            if index < chain.count, chain[index].kind == .nearestOpenMapPoint {
+                Picker("", selection: mapPointKindBinding(at: index)) {
                     ForEach(MissionPointKind.allCases) { k in
                         Text(k.rawValue.capitalized).tag(k)
                     }
@@ -141,39 +141,40 @@ struct MissionRunPreferentialAbortPolicyEditor: View {
         .padding(.vertical, GuardianSpacing.xxs)
     }
 
-    private func kindPickerSelection(for binding: Binding<MissionRunAbortTactic>) -> Binding<MissionRunAbortTactic.Kind> {
+    private func kindPickerSelection(at index: Int) -> Binding<MissionRunAbortTactic.Kind> {
         Binding(
-            get: { binding.wrappedValue.kind },
+            get: { chain[index].kind },
             set: { new in
-                binding.wrappedValue.kind = new
-                if new != .nearestOpenMapPoint {
-                    binding.wrappedValue.mapPointKind = nil
-                } else if binding.wrappedValue.mapPointKind == nil {
-                    binding.wrappedValue.mapPointKind = .rally
+                commitChain { rows in
+                    guard index < rows.count else { return }
+                    rows[index].kind = new
+                    if new != .nearestOpenMapPoint {
+                        rows[index].mapPointKind = nil
+                    } else if rows[index].mapPointKind == nil {
+                        rows[index].mapPointKind = .rally
+                    }
                 }
-                normalize()
             }
         )
     }
 
-    private func mapPointKindBinding(for binding: Binding<MissionRunAbortTactic>) -> Binding<MissionPointKind> {
+    private func mapPointKindBinding(at index: Int) -> Binding<MissionPointKind> {
         Binding(
-            get: { binding.wrappedValue.mapPointKind ?? .rally },
+            get: { chain[index].mapPointKind ?? .rally },
             set: { new in
-                binding.wrappedValue.mapPointKind = new
-                normalize()
+                commitChain { rows in
+                    guard index < rows.count else { return }
+                    rows[index].mapPointKind = new
+                }
             }
         )
     }
 
     private func append(_ kind: MissionRunAbortTactic.Kind) {
         let mk: MissionPointKind? = kind == .nearestOpenMapPoint ? .rally : nil
-        chain.append(MissionRunAbortTactic(kind: kind, mapPointKind: mk))
-        normalize()
-    }
-
-    private func normalize() {
-        chain = MissionRunAbortTactic.normalizedPreferenceChain(chain)
+        commitChain { rows in
+            rows.append(MissionRunAbortTactic(kind: kind, mapPointKind: mk))
+        }
     }
 }
 
@@ -274,12 +275,14 @@ struct MissionRunPreferentialCompletePolicyEditor: View {
                             }
                             .foregroundStyle(theme.textSecondary)
 
-                            tacticRow(binding: rowBinding(at: idx))
+                            tacticRow(at: idx)
                                 .frame(maxWidth: .infinity, alignment: .leading)
 
                             Button {
-                                chain.remove(at: idx)
-                                normalize()
+                                commitChain { rows in
+                                    guard idx < rows.count else { return }
+                                    rows.remove(at: idx)
+                                }
                             } label: {
                                 Image(systemName: "trash")
                             }
@@ -317,32 +320,29 @@ struct MissionRunPreferentialCompletePolicyEditor: View {
                 }
             }
         }
-        .onAppear { normalize() }
+        .onAppear { chain = MissionRunCompleteTactic.normalizedPreferenceChain(chain) }
     }
 
-    private func rowBinding(at index: Int) -> Binding<MissionRunCompleteTactic> {
-        Binding(
-            get: { chain[index] },
-            set: { chain[index] = $0; normalize() }
-        )
+    private func commitChain(_ mutate: (inout [MissionRunCompleteTactic]) -> Void) {
+        var next = chain
+        mutate(&next)
+        chain = MissionRunCompleteTactic.normalizedPreferenceChain(next)
     }
 
     private func moveUp(index: Int) {
         guard index > 0 else { return }
-        chain.swapAt(index, index - 1)
-        normalize()
+        commitChain { rows in rows.swapAt(index, index - 1) }
     }
 
     private func moveDown(index: Int) {
         guard index < chain.count - 1 else { return }
-        chain.swapAt(index, index + 1)
-        normalize()
+        commitChain { rows in rows.swapAt(index, index + 1) }
     }
 
     @ViewBuilder
-    private func tacticRow(binding: Binding<MissionRunCompleteTactic>) -> some View {
+    private func tacticRow(at index: Int) -> some View {
         HStack(alignment: .center, spacing: GuardianSpacing.sm) {
-            Picker("", selection: kindPickerSelection(for: binding)) {
+            Picker("", selection: kindPickerSelection(at: index)) {
                 ForEach(MissionRunCompleteTactic.addMenuKindOrdering, id: \.self) { k in
                     Text(MissionRunCompleteTactic(kind: k, mapPointKind: k == .nearestOpenMapPoint ? .rally : nil).setupMenuLabel)
                         .tag(k)
@@ -351,8 +351,8 @@ struct MissionRunPreferentialCompletePolicyEditor: View {
             .labelsHidden()
             .frame(minWidth: 170, alignment: .leading)
 
-            if binding.wrappedValue.kind == .nearestOpenMapPoint {
-                Picker("", selection: mapPointKindBinding(for: binding)) {
+            if index < chain.count, chain[index].kind == .nearestOpenMapPoint {
+                Picker("", selection: mapPointKindBinding(at: index)) {
                     ForEach(MissionPointKind.allCases) { k in
                         Text(k.rawValue.capitalized).tag(k)
                     }
@@ -365,39 +365,40 @@ struct MissionRunPreferentialCompletePolicyEditor: View {
         .padding(.vertical, GuardianSpacing.xxs)
     }
 
-    private func kindPickerSelection(for binding: Binding<MissionRunCompleteTactic>) -> Binding<MissionRunCompleteTactic.Kind> {
+    private func kindPickerSelection(at index: Int) -> Binding<MissionRunCompleteTactic.Kind> {
         Binding(
-            get: { binding.wrappedValue.kind },
+            get: { chain[index].kind },
             set: { new in
-                binding.wrappedValue.kind = new
-                if new == .nearestOpenMapPoint, binding.wrappedValue.mapPointKind == nil {
-                    binding.wrappedValue.mapPointKind = .rally
-                } else if new != .nearestOpenMapPoint {
-                    binding.wrappedValue.mapPointKind = nil
+                commitChain { rows in
+                    guard index < rows.count else { return }
+                    rows[index].kind = new
+                    if new == .nearestOpenMapPoint, rows[index].mapPointKind == nil {
+                        rows[index].mapPointKind = .rally
+                    } else if new != .nearestOpenMapPoint {
+                        rows[index].mapPointKind = nil
+                    }
                 }
-                normalize()
             }
         )
     }
 
-    private func mapPointKindBinding(for binding: Binding<MissionRunCompleteTactic>) -> Binding<MissionPointKind> {
+    private func mapPointKindBinding(at index: Int) -> Binding<MissionPointKind> {
         Binding(
-            get: { binding.wrappedValue.mapPointKind ?? .rally },
+            get: { chain[index].mapPointKind ?? .rally },
             set: { new in
-                binding.wrappedValue.mapPointKind = new
-                normalize()
+                commitChain { rows in
+                    guard index < rows.count else { return }
+                    rows[index].mapPointKind = new
+                }
             }
         )
     }
 
     private func append(_ kind: MissionRunCompleteTactic.Kind) {
         let mk: MissionPointKind? = kind == .nearestOpenMapPoint ? .rally : nil
-        chain.append(MissionRunCompleteTactic(kind: kind, mapPointKind: mk))
-        normalize()
-    }
-
-    private func normalize() {
-        chain = MissionRunCompleteTactic.normalizedPreferenceChain(chain)
+        commitChain { rows in
+            rows.append(MissionRunCompleteTactic(kind: kind, mapPointKind: mk))
+        }
     }
 }
 
@@ -495,12 +496,14 @@ struct MissionRunPreferentialReserveSwapPolicyEditor: View {
                             }
                             .foregroundStyle(theme.textSecondary)
 
-                            tacticRow(binding: rowBinding(at: idx))
+                            tacticRow(at: idx)
                                 .frame(maxWidth: .infinity, alignment: .leading)
 
                             Button {
-                                chain.remove(at: idx)
-                                normalize()
+                                commitChain { rows in
+                                    guard idx < rows.count else { return }
+                                    rows.remove(at: idx)
+                                }
                             } label: {
                                 Image(systemName: "trash")
                             }
@@ -538,32 +541,29 @@ struct MissionRunPreferentialReserveSwapPolicyEditor: View {
                 }
             }
         }
-        .onAppear { normalize() }
+        .onAppear { chain = MissionRunReserveSwapTactic.normalizedPreferenceChain(chain) }
     }
 
-    private func rowBinding(at index: Int) -> Binding<MissionRunReserveSwapTactic> {
-        Binding(
-            get: { chain[index] },
-            set: { chain[index] = $0; normalize() }
-        )
+    private func commitChain(_ mutate: (inout [MissionRunReserveSwapTactic]) -> Void) {
+        var next = chain
+        mutate(&next)
+        chain = MissionRunReserveSwapTactic.normalizedPreferenceChain(next)
     }
 
     private func moveUp(index: Int) {
         guard index > 0 else { return }
-        chain.swapAt(index, index - 1)
-        normalize()
+        commitChain { rows in rows.swapAt(index, index - 1) }
     }
 
     private func moveDown(index: Int) {
         guard index < chain.count - 1 else { return }
-        chain.swapAt(index, index + 1)
-        normalize()
+        commitChain { rows in rows.swapAt(index, index + 1) }
     }
 
     @ViewBuilder
-    private func tacticRow(binding: Binding<MissionRunReserveSwapTactic>) -> some View {
+    private func tacticRow(at index: Int) -> some View {
         HStack(alignment: .center, spacing: GuardianSpacing.sm) {
-            Picker("", selection: kindPickerSelection(for: binding)) {
+            Picker("", selection: kindPickerSelection(at: index)) {
                 ForEach(MissionRunReserveSwapTactic.addMenuKindOrdering, id: \.self) { k in
                     Text(MissionRunReserveSwapTactic(kind: k, mapPointKind: k == .nearestOpenMapPoint ? .rally : nil).setupMenuLabel)
                         .tag(k)
@@ -572,8 +572,8 @@ struct MissionRunPreferentialReserveSwapPolicyEditor: View {
             .labelsHidden()
             .frame(minWidth: 170, alignment: .leading)
 
-            if binding.wrappedValue.kind == .nearestOpenMapPoint {
-                Picker("", selection: mapPointKindBinding(for: binding)) {
+            if index < chain.count, chain[index].kind == .nearestOpenMapPoint {
+                Picker("", selection: mapPointKindBinding(at: index)) {
                     ForEach(MissionPointKind.allCases) { k in
                         Text(k.rawValue.capitalized).tag(k)
                     }
@@ -586,39 +586,40 @@ struct MissionRunPreferentialReserveSwapPolicyEditor: View {
         .padding(.vertical, GuardianSpacing.xxs)
     }
 
-    private func kindPickerSelection(for binding: Binding<MissionRunReserveSwapTactic>) -> Binding<MissionRunReserveSwapTactic.Kind> {
+    private func kindPickerSelection(at index: Int) -> Binding<MissionRunReserveSwapTactic.Kind> {
         Binding(
-            get: { binding.wrappedValue.kind },
+            get: { chain[index].kind },
             set: { new in
-                binding.wrappedValue.kind = new
-                if new == .nearestOpenMapPoint, binding.wrappedValue.mapPointKind == nil {
-                    binding.wrappedValue.mapPointKind = .rally
-                } else if new != .nearestOpenMapPoint {
-                    binding.wrappedValue.mapPointKind = nil
+                commitChain { rows in
+                    guard index < rows.count else { return }
+                    rows[index].kind = new
+                    if new == .nearestOpenMapPoint, rows[index].mapPointKind == nil {
+                        rows[index].mapPointKind = .rally
+                    } else if new != .nearestOpenMapPoint {
+                        rows[index].mapPointKind = nil
+                    }
                 }
-                normalize()
             }
         )
     }
 
-    private func mapPointKindBinding(for binding: Binding<MissionRunReserveSwapTactic>) -> Binding<MissionPointKind> {
+    private func mapPointKindBinding(at index: Int) -> Binding<MissionPointKind> {
         Binding(
-            get: { binding.wrappedValue.mapPointKind ?? .rally },
+            get: { chain[index].mapPointKind ?? .rally },
             set: { new in
-                binding.wrappedValue.mapPointKind = new
-                normalize()
+                commitChain { rows in
+                    guard index < rows.count else { return }
+                    rows[index].mapPointKind = new
+                }
             }
         )
     }
 
     private func append(_ kind: MissionRunReserveSwapTactic.Kind) {
         let mk: MissionPointKind? = kind == .nearestOpenMapPoint ? .rally : nil
-        chain.append(MissionRunReserveSwapTactic(kind: kind, mapPointKind: mk))
-        normalize()
-    }
-
-    private func normalize() {
-        chain = MissionRunReserveSwapTactic.normalizedPreferenceChain(chain)
+        commitChain { rows in
+            rows.append(MissionRunReserveSwapTactic(kind: kind, mapPointKind: mk))
+        }
     }
 }
 

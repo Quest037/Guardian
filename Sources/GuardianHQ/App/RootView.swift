@@ -346,6 +346,23 @@ struct RootView: View {
                 .help("Simulate")
             }
 
+            HStack(spacing: GuardianSpacing.xs) {
+                Text("Debug")
+                    .font(GuardianTypography.font(.inlineNoticeTitle))
+                    .foregroundStyle(theme.textSecondary)
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { fleetLinkService.isDebugEnabled },
+                        set: { fleetLinkService.setDebugEnabled($0) }
+                    )
+                )
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .controlSize(.small)
+                .help("Show debug overlays and diagnostics")
+            }
+
             Button {
                 toggleAppearanceMode()
             } label: {

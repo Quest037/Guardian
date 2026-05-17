@@ -182,6 +182,7 @@ struct MissionRunDetailView: View {
     @State private var presentedRunConfirm: MissionRunPresentedConfirm?
     @State private var rosterBulkSimSpawnBusy: MissionRunBulkSimSpawnBusyKind?
     @State private var rosterBulkSimSpawnWorkingAssignmentId: UUID?
+    @State private var rosterBulkSimSpawnWorkingReservePoolBerth: LiveReservePoolBerthFocus?
     /// Stack segment for **Sim** on empty roster cards (`SimulationVehiclePickerSidebar`, same as Vehicles → Add Sim).
     @State private var rosterSimSidebarSpawnPlatform: SimulationPlatform = .ardupilot
     @State private var rostersSidebarListTab: MissionControlSetupRostersSidebarTab = .tasks
@@ -301,6 +302,7 @@ struct MissionRunDetailView: View {
         await Task.yield()
         await Task.yield()
         rosterBulkSimSpawnWorkingAssignmentId = nil
+        rosterBulkSimSpawnWorkingReservePoolBerth = nil
     }
 
     /// Present MC-R **switch.2** → app-wide Mission Run toggles (same rows as Setup → **Settings** / App Settings → Missions → Mission Run; not wrapped in a card).
@@ -507,7 +509,7 @@ struct MissionRunDetailView: View {
         }
     }
 
-    /// Empty roster slots across every task plus legacy mission roster rows.
+    /// Empty roster slots across every task plus legacy mission roster rows and empty floating reserve berths.
     private func emptyRosterSlotCountAcrossMission(mission: Mission) -> Int {
         var n = 0
         for task in mission.routeMacro.tasks {
@@ -515,9 +517,37 @@ struct MissionRunDetailView: View {
                 run.missionControlAssignmentBelongsToTask(run.assignments[$0], task: task, mission: mission)
             }
             n += indices.filter { !run.assignments[$0].hasFleetOrLegacyAssignment }.count
+            n += MissionControlMcsBulkSimSpawnUtilities.emptyReservePoolSlotCount(run: run, taskID: task.id)
         }
         n += legacyUnassignedIndices.filter { !run.assignments[$0].hasFleetOrLegacyAssignment }.count
         return n
+    }
+
+    @MainActor
+    private func spawnBuiltInSitlPickable(preset: SimulationVehiclePreset) -> MissionPickableFleetVehicle? {
+        let platform = generalSettings.defaultSimulationPlatform
+        let defaults = generalSettings.simSpawnDefaults
+        let beforeIDs = Set(sitl.instances.map(\.id))
+        sitl.spawn(preset: preset, platform: platform, defaults: defaults)
+        guard let inst = sitl.instances.first(where: { !beforeIDs.contains($0.id) }) else { return nil }
+        let systemID = inst.stackInstanceIndex + 1
+        let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
+        let resolvedShortID = fleetLink.vehicleModel(forVehicleID: vehicleID)?.displayShortID
+            ?? "\(inst.preset.fleetVehicleType.classCode):\(systemID)"
+        let lifecycle = fleetLink.vehicleStatus(forVehicleID: vehicleID)
+            ?? (inst.isAlive ? VehicleLifecycleStatus(stage: .awaitingTelemetry) : VehicleLifecycleStatus(stage: .stopped))
+        return MissionPickableFleetVehicle(
+            token: .sitl(inst.id),
+            title: inst.preset.displayName,
+            detailLine: inst.platform.displayName,
+            vehicleIDText: "\(systemID)",
+            vehicleShortID: resolvedShortID,
+            lifecycleStatus: lifecycle,
+            autopilotStack: FleetAutopilotStack(simulationPlatform: inst.platform),
+            domain: inst.preset.vehicleDomain,
+            simulationImageBasenames: inst.preset.simulationDeviceImageBasenames,
+            isSimulation: true
+        )
     }
 
     /// Spawns and assigns one built-in SITL per empty slot along ``rows`` (caller owns busy / confirm UI).
@@ -535,38 +565,44 @@ struct MissionRunDetailView: View {
             await Task.yield()
             let rosterClass = mission.rosterDevices.first(where: { $0.id == assignment.rosterDeviceId })?.vehicleClass ?? .unknown
             let preset = rosterClass.builtInSimulationVehiclePreset
-            let platform = generalSettings.defaultSimulationPlatform
-            let defaults = generalSettings.simSpawnDefaults
-            let beforeIDs = Set(sitl.instances.map(\.id))
-            sitl.spawn(preset: preset, platform: platform, defaults: defaults)
             await Task.yield()
-            guard let inst = sitl.instances.first(where: { !beforeIDs.contains($0.id) }) else {
+            guard let pickable = spawnBuiltInSitlPickable(preset: preset) else {
                 rosterBulkSimSpawnWorkingAssignmentId = nil
                 continue
             }
-            let systemID = inst.stackInstanceIndex + 1
-            let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
-            let resolvedShortID = fleetLink.vehicleModel(forVehicleID: vehicleID)?.displayShortID
-                ?? "\(inst.preset.fleetVehicleType.classCode):\(systemID)"
-            let lifecycle = fleetLink.vehicleStatus(forVehicleID: vehicleID)
-                ?? (inst.isAlive ? VehicleLifecycleStatus(stage: .awaitingTelemetry) : VehicleLifecycleStatus(stage: .stopped))
-            let pickable = MissionPickableFleetVehicle(
-                token: .sitl(inst.id),
-                title: inst.preset.displayName,
-                detailLine: inst.platform.displayName,
-                vehicleIDText: "\(systemID)",
-                vehicleShortID: resolvedShortID,
-                lifecycleStatus: lifecycle,
-                autopilotStack: FleetAutopilotStack(simulationPlatform: inst.platform),
-                domain: inst.preset.vehicleDomain,
-                simulationImageBasenames: inst.preset.simulationDeviceImageBasenames,
-                isSimulation: true
-            )
             guard rosterPickDisabledReason(pickable, assignmentId: assignment.id) == nil else {
                 rosterBulkSimSpawnWorkingAssignmentId = nil
                 continue
             }
             applyFleetVehicle(pickable, assignmentId: assignment.id)
+            assignedAny = true
+            await clearRosterBulkSimSpawnWorkingAfterLayoutCatchup()
+        }
+        return assignedAny
+    }
+
+    /// Spawns and binds one built-in SITL per empty floating reserve berth on ``taskID`` (caller owns busy / confirm UI).
+    private func bulkSpawnAndAssignEmptyReservePoolSlots(taskID: UUID, mission: Mission) async -> Bool {
+        guard let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }) else { return false }
+        let emptySlots = run.reservePool(forTaskID: taskID).entries.filter { !$0.hasFleetOrLegacyBinding }
+        guard !emptySlots.isEmpty else { return false }
+        let preset = MissionControlMcsBulkSimSpawnUtilities.builtInSimulationPresetForTaskReservePoolBulkSpawn(
+            task: task,
+            mission: mission
+        )
+        var assignedAny = false
+        for slot in emptySlots {
+            rosterBulkSimSpawnWorkingReservePoolBerth = LiveReservePoolBerthFocus(taskID: taskID, slotID: slot.id)
+            await Task.yield()
+            guard let pickable = spawnBuiltInSitlPickable(preset: preset) else {
+                rosterBulkSimSpawnWorkingReservePoolBerth = nil
+                continue
+            }
+            guard reservePoolFleetPickDisabledReason(pickable, taskID: taskID, slotID: slot.id) == nil else {
+                rosterBulkSimSpawnWorkingReservePoolBerth = nil
+                continue
+            }
+            applyFleetVehicleToReservePoolSlot(vehicle: pickable, taskID: taskID, slotID: slot.id)
             assignedAny = true
             await clearRosterBulkSimSpawnWorkingAfterLayoutCatchup()
         }
@@ -580,9 +616,13 @@ struct MissionRunDetailView: View {
         defer {
             rosterBulkSimSpawnBusy = nil
             rosterBulkSimSpawnWorkingAssignmentId = nil
+            rosterBulkSimSpawnWorkingReservePoolBerth = nil
         }
         let rows = run.missionControlTaskRosterOrderedSlotAssignmentIndices(task: task, mission: mission)
-        let assignedAny = await bulkSpawnAndAssignAlongOrderedRows(rows, mission: mission)
+        var assignedAny = await bulkSpawnAndAssignAlongOrderedRows(rows, mission: mission)
+        if await bulkSpawnAndAssignEmptyReservePoolSlots(taskID: task.id, mission: mission) {
+            assignedAny = true
+        }
         if assignedAny {
             onUpdate(run)
         }
@@ -595,11 +635,15 @@ struct MissionRunDetailView: View {
         defer {
             rosterBulkSimSpawnBusy = nil
             rosterBulkSimSpawnWorkingAssignmentId = nil
+            rosterBulkSimSpawnWorkingReservePoolBerth = nil
         }
         var assignedAny = false
         for task in mission.routeMacro.tasks {
             let rows = run.missionControlTaskRosterOrderedSlotAssignmentIndices(task: task, mission: mission)
             if await bulkSpawnAndAssignAlongOrderedRows(rows, mission: mission) {
+                assignedAny = true
+            }
+            if await bulkSpawnAndAssignEmptyReservePoolSlots(taskID: task.id, mission: mission) {
                 assignedAny = true
             }
         }
@@ -635,11 +679,11 @@ struct MissionRunDetailView: View {
         case .singleTask(let taskID):
             if let mission = resolvedMission,
                let t = mission.routeMacro.tasks.first(where: { $0.id == taskID }) {
-                return "Spawn one built-in simulator for each empty roster slot in “\(t.name)”? Each uses that slot’s vehicle class and your default simulation stack and spawn location from Settings."
+                return "Spawn one built-in simulator for each empty roster slot and empty floating reserve berth in “\(t.name)”? Roster slots use each slot’s vehicle class; reserve berths use this task’s roster class when known. Your default simulation stack and spawn location from Settings apply to each spawn."
             }
-            return "Spawn one built-in simulator for each empty roster slot? Each uses that slot’s vehicle class and your default simulation stack and spawn location from Settings."
+            return "Spawn one built-in simulator for each empty roster slot and empty floating reserve berth? Roster slots use each slot’s vehicle class; reserve berths use the task’s roster class when known. Your default simulation stack and spawn location from Settings apply to each spawn."
         case .allMissionSlots:
-            return "Spawn a suitable sim for every empty roster slot? Each empty slot uses that slot’s vehicle class and your default simulation stack and spawn location from Settings."
+            return "Spawn a suitable sim for every empty roster slot and empty floating reserve berth in this mission? Roster slots use each slot’s vehicle class; reserve berths use their task’s roster class when known. Your default simulation stack and spawn location from Settings apply to each spawn."
         }
     }
 
@@ -1368,7 +1412,6 @@ struct MissionRunDetailView: View {
         task: RoutePath,
         kind: MissionRunMissionTaskGracefulPendingKind
     ) -> some View {
-        let pathWide = run.pendingMissionTaskGracefulWindDownKindByTaskID[task.id] == kind
         MCRScheduledEndPolicyInlineNotice(
             kind: kind,
             detail: "",
@@ -2170,6 +2213,14 @@ struct MissionRunDetailView: View {
         return true
     }
 
+    private func mergedLaunchCoordinateOverridesForStartRunPreflight() -> [UUID: RouteCoordinate] {
+        var merged = run.pendingMCSLaunchCaptureOverridesByAssignmentID
+        for (assignmentID, overlay) in setupStagingSimDragCoordByAssignmentID {
+            merged[assignmentID] = overlay.coordinate
+        }
+        return merged
+    }
+
     @ViewBuilder
     private func runSetupActionButtons(referenceNow: Date) -> some View {
         HStack(spacing: GuardianSpacing.denseGutter) {
@@ -2415,6 +2466,7 @@ struct MissionRunDetailView: View {
                             controlStore: controlStore,
                             contentSpring: triageSheetSpring,
                             resolveTelemetryVehicleID: { telemetryVehicleID(for: $0) },
+                            launchCoordinateOverrides: mergedLaunchCoordinateOverridesForStartRunPreflight(),
                             onSuccess: {
                                 if let mission = resolvedMission {
                                     let fleet = buildMissionPickableVehicles(fleetLink: fleetLink, sitl: sitl)
@@ -4605,8 +4657,6 @@ struct MissionRunDetailView: View {
         syncRunFromStore()
         onUpdate(run)
         switch outcome {
-        case .joltedEscalation:
-            toastCenter.show("\(intentLabel) resumed the in-flight recipe for \(slotName).", style: .info)
         case .redispatched:
             toastCenter.show("\(intentLabel) finished for \(slotName).", style: .info)
         case .failedNoCommands:
@@ -5148,7 +5198,6 @@ struct MissionRunDetailView: View {
                 .task(id: liveOverviewMapStructureIdentity) {
                     liveOverviewVehicleBuildCache.invalidate()
                     pushLiveOverviewMapModelFromMission()
-                    fitLiveOverviewMapToVisibleMissionContent()
                 }
                 .onChange(of: liveOverviewMapMarkerCoordinateDigest) { _ in
                     hubMarkerApplyThrottle.requestCoalesced { pushLiveOverviewMapMarkersOnly() }
@@ -5406,7 +5455,8 @@ struct MissionRunDetailView: View {
                     run: run,
                     mapSelectionFenceID: liveRuntimeGeofenceDraftMission != nil ? liveRuntimeGeofenceMapSelectedFenceID : nil
                 ),
-                geofenceMapLayerPointerSelectsFence: liveRuntimeGeofenceDraftMission != nil
+                geofenceMapLayerPointerSelectsFence: liveRuntimeGeofenceDraftMission != nil,
+                debugOverlayPolylines: []
             )
             mapModel.applyMapContent(routeGeometry: geo, vehicleMarkers: missionLiveVehicleMarkers)
         } else {
@@ -6680,9 +6730,9 @@ struct MissionRunDetailView: View {
                 .guardianPointerOnHover()
                 .controlSize(.small)
                 .disabled(emptyAll == 0 || bulkSpawnSimsConfirmIsActive || busy)
-                .accessibilityLabel("Spawn simulators for all empty roster slots")
+                .accessibilityLabel("Spawn simulators for all empty roster slots and reserve berths")
                 .help(
-                    "Spawn a sim for every empty roster slot in this mission (all tasks and the mission roster, if any). Uses each slot’s class and your default stack and spawn location from Settings."
+                    "Spawn a sim for every empty roster slot and empty floating reserve berth in this mission (all tasks and the mission roster, if any). Roster slots use each slot’s class; reserve berths use their task’s roster class when known. Uses your default stack and spawn location from Settings."
                 )
             }
 
@@ -6974,6 +7024,7 @@ struct MissionRunDetailView: View {
         let indices = run.assignments.indices.filter { run.missionControlAssignmentBelongsToTask(run.assignments[$0], task: task, mission: mission) }
         let filled = indices.filter { run.assignments[$0].hasFleetOrLegacyAssignment }.count
         let emptyRosterSlotCount = indices.count - filled
+            + MissionControlMcsBulkSimSpawnUtilities.emptyReservePoolSlotCount(run: run, taskID: task.id)
         let rows = run.missionControlTaskRosterOrderedSlotAssignmentIndices(task: task, mission: mission)
         let eligiblePoolHomeReapply = MCSReservePoolHomeStagingMapEligibility.eligibleSitlReservePoolSlotCount(
             entries: run.reservePool(forTaskID: task.id).entries,
@@ -7025,8 +7076,8 @@ struct MissionRunDetailView: View {
                             || bulkSpawnSimsConfirmIsActive
                             || rosterBulkSimSpawnBusy != nil
                     )
-                    .accessibilityLabel("Spawn simulators for empty roster slots in this task")
-                    .help("Spawn a sim for each empty roster slot (class + default stack in Settings).")
+                    .accessibilityLabel("Spawn simulators for empty roster slots and reserve berths in this task")
+                    .help("Spawn a sim for each empty roster slot and empty floating reserve berth on this task (class + default stack in Settings).")
                 }
 
                 Menu {
@@ -7306,7 +7357,7 @@ struct MissionRunDetailView: View {
         Binding(
             get: {
                 let chain = resolvedMission?.routeMacro.rules.missionCompletePreferenceChain ?? []
-                return MissionRunCompleteTactic.normalizedPreferenceChain(chain)
+                return MissionRunCompleteTactic.upgradingStoredMissionWideChain(chain)
             },
             set: { newValue in
                 _ = run.updateMissionCompletePreferenceChain(newValue, credential: localOperatorCredential)
@@ -9070,7 +9121,10 @@ struct MissionRunDetailView: View {
                 && !mcrReservePoolSlotMutationLocked(taskID: taskID, slotID: slot.id)
                 ? { presentReservePoolSimPicker(taskID: taskID, slotID: slot.id) }
                 : nil,
-            showsWorkingOverlay: false,
+            showsWorkingOverlay: rosterBulkSimSpawnWorkingReservePoolBerth == LiveReservePoolBerthFocus(
+                taskID: taskID,
+                slotID: slot.id
+            ),
             onOpenSettings: nil
         )
         .disabled(!taskEnabled)

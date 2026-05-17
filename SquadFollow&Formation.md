@@ -2,7 +2,7 @@
 
 Actionable tracker for **wingman follow** and **formation control** in Mission Control runs. Squad **lifecycle** (per-primary cycles, stagger, rollup, operator complete/abort) lives in **`MRESquadsToDo.md`**. This file covers **how wingmen move** relative to the primary and what MRE must own.
 
-Related: **`TODO.md`** → **Pathfinding & geofence avoidance** (shared router; primary AUTO + all OFFBOARD/GUIDED motion); Mission Control → Squads / Planner formations; **`README_FULL.md`** → Mission task authoring, reserve swap geometry.
+Related: **`TODO.md`** → **Pathfinding & geofence avoidance** (shared router; § **P.1** exclusion approach → MRE recovery; primary AUTO + all OFFBOARD/GUIDED motion); Mission Control → Squads / Planner formations; **`README_FULL.md`** → Mission task authoring, reserve swap geometry.
 
 ---
 
@@ -10,13 +10,14 @@ Related: **`TODO.md`** → **Pathfinding & geofence avoidance** (shared router; 
 
 | Role | Autopilot mode | Who decides movement |
 |------|----------------|----------------------|
-| **Primary** (squad leader) | **AUTO_MISSION** (PX4) / **AUTO** (ArduPilot) | Autopilot executes uploaded mission; MRE owns cycle start/stop and mission boundaries. |
+| **Primary** (squad leader) | **OFFBOARD/GUIDED** launch→WP1, then **AUTO_MISSION** / **AUTO** | GR plans launch leg; MRE streams setpoints until WP1; then autopilot executes uploaded mission for remaining legs (v2). |
 | **Wingmen** | **OFFBOARD** (PX4) / **GUIDED** (ArduPilot) | **MRE** streams setpoints continuously; wingmen do **not** independently execute the mission path while following. |
 | **Formation geometry** | External to autopilot | Guardian formation controller computes offset targets from primary telemetry; wingmen fly/drive toward those targets via OFFBOARD/GUIDED. |
 
 **Principles (do not regress):**
 
-- Every vehicle may **store** the same mission onboard; only the **primary** has **mission authority** (active execution) while the squad is in follow mode.
+- Every vehicle may **store** the same mission onboard; **AUTO** runs only **after** the GR launch leg to WP1 — not from the pad on first start.
+- Only the **primary** has **mission authority** (active AUTO execution) after the launch leg; wingmen stay on OFFBOARD/GUIDED while following.
 - Do **not** put all vehicles in AUTO_MISSION at once — causes drift, timing divergence, and formation instability.
 - OFFBOARD/GUIDED setpoints are a **heartbeat**: stream at a stable rate (target ~20 Hz); loss triggers autopilot offboard-loss / guided failsafe (HOLD, RTL, LOITER, etc. per vehicle params).
 - Prefer **OFFBOARD/GUIDED + streamed targets** over **AUTO_LOITER** for wingmen holding formation — loiter keeps internal nav active and fights formation control on rovers and tight offsets.
@@ -25,9 +26,11 @@ Related: **`TODO.md`** → **Pathfinding & geofence avoidance** (shared router; 
 
 **MRE ownership:** While a wingman is bound and following, **MRE controls that vehicle at all times** — mode entry, setpoint stream, pause/hold between cycles, promotion handoff, release, reserve swap reposition, abort/complete wind-down, and teardown. No “wingman runs its own AUTO mission” during active follow.
 
-**v1 geofence note (known gap):** Uploaded autopilot geofences are enforced by the FC, not by Guardian path planning. **AUTO_MISSION** respects **exclusion** zones by **stopping** when the vehicle reaches the boundary — it does **not** plan a detour around them. Wingman v1 only **gates** streamed setpoints (`MissionControlSquadConvoySetpointGeofenceUtilities`: hold last valid; no detour). **Skirting exclusions** is a **v2 pathfinding** responsibility (see § v2 — Pathfinding).
+**v1 geofence note (known gap):** Uploaded autopilot geofences are enforced by the FC, not by Guardian path planning. **AUTO_MISSION** respects **exclusion** zones by **stopping** when the vehicle reaches the boundary — it does **not** plan a detour around them. Wingman v1 only **gates** streamed setpoints (`MissionControlSquadConvoySetpointGeofenceUtilities`: hold last valid; no detour). **Skirting exclusions** and **reporting approach → MRE recovery** are **v2** (§ P router + § P.1 primary vs wingman goals).
 
-**Long-term primary mode (v3 direction):** Once MRE’s pathfinding + runtime setpoint follower (“brain”) is mature enough, we may **drop AUTO_MISSION** for squad **primary** mission execution and run the **same OFFBOARD/GUIDED stack as wingmen**, with MRE owning legs, cycle boundaries, and replanning. That unlocks behaviours AUTO_MISSION is unlikely to offer (e.g. **increase/decrease speed** along route, coordinated skirt with wingmen, richer abort/between-cycles motion). Until then, primary stays on AUTO_MISSION / AUTO per the table above.
+**Launch → first waypoint (v1 today):** Convoy squads **assemble** on the pad, upload mission in **`compiling`**, then primary starts **AUTO** via ``launchPrimaryMissionAfterConvoyAssembly`` (no OFFBOARD GR launch leg until § **P** pathfinding v1 ships). Routed OFFBOARD launch→WP1 is deferred — see § **P** checklist.
+
+**Long-term primary mode (v3 direction):** Extend GR + OFFBOARD beyond the launch leg to **full mission legs** (replace AUTO_MISSION for primary mid-run). Until then, primary uses AUTO only **after** the GR launch approach completes.
 
 ---
 
@@ -36,11 +39,12 @@ Related: **`TODO.md`** → **Pathfinding & geofence avoidance** (shared router; 
 1. **`MRESquadsToDo.md`** — per-squad primary lifecycle and MAVLink cycle boundaries on **primary only** (scheduling / MC-R items shipped there) — wingman follow must respect squad cycle keys and not block sibling squads.
 2. This file **§ v1** — wingman pipeline on top of stable primary squads (shipped).
 3. **`MRESquadsToDo.md`** promotion / release RoE — uses mode switches defined in v1.
-4. **`TODO.md` → Pathfinding & geofence avoidance** — shared Guardian router (exclusions as obstacles; skirt inside inclusion). **Blocks** meaningful geofence behaviour for primary AUTO and all OFFBOARD/GUIDED motion (wingmen, park/reposition, end-policy moves).
+4. **`TODO.md` → Pathfinding & geofence avoidance** — shared Guardian router (exclusions as obstacles; skirt inside inclusion) + **§ P.1** exclusion approach reporting and role-specific MRE recovery. **Blocks** meaningful geofence behaviour for primary AUTO and all OFFBOARD/GUIDED motion (wingmen, park/reposition, end-policy moves).
 5. This file **§ v2 — Convoy trail** — trail motion model **on top of** pathfinding (approach legs route around exclusions; trail arc-length is how wingmen lag the primary, not how they avoid fences).
 6. This file **§ v2 — Formations** — additional shapes, live formation change, tactical offsets (can parallelize after pathfinding; trail still recommended before polyline handoff in cluttered maps).
 7. This file **§ v3 — Road network routing** — task **domain classification** (open vs road-following); snap routes to OSM roads when appropriate; **UGV and UAV** (mixed squads, overwatch). Extends § P router; does not replace open-field skirt.
-8. This file **§ v3 — MRE-owned primary mission** — evaluate dropping AUTO_MISSION for primary once § P (+ § R where road-based) and runtime follower are proven in SIM and production-like runs.
+8. This file **§ v3 — 3D geofences & router** — promote § P **2D** router to **3D** (floor + ceiling bands); airborne exclusion volumes (e.g. radar keep-outs). Can parallelize with § R once § P is stable; required for altitude-aware § P.1 recovery on aerial tasks.
+9. This file **§ v3 — MRE-owned primary mission** — evaluate dropping AUTO_MISSION for primary once § P (+ § R where road-based, § 3D where vertical fences matter) and runtime follower are proven in SIM and production-like runs.
 
 ---
 
@@ -98,6 +102,19 @@ Related: **`TODO.md`** → **Pathfinding & geofence avoidance** (shared router; 
 
 ---
 
+## Field bugs — launch leg & convoy (fix backlog)
+
+SIM/field findings on shipped **GR launch→WP1**, **convoy assembly**, and formation streams. Close these before treating § **P** / § **T** launch-leg behaviour as done.
+
+- [x] **Convoy assembly — wingman heading:** During `staging` / `assemblingConvoy`, wingman stream **yaw** uses **primary hub heading** (not path tangent). See ``MissionRunSquadFollowSubsystem`` tick + assembly streams.
+- [x] **Convoy hold — primary heading on stop:** While primary waits for wingmen (`launchToWaypoint` catch-up) or during `staging` / `compiling`, primary OFFBOARD holds **current position + locked hub heading** (``convoyHoldHeadingDeg`` / ``convoyHoldCoordinate``) — not carrot bearing toward the next route point. **LtWP must not hold** when wingmen are in slot — only ``wingmenLaggingLaunchLegConvoy`` (not zero ground speed alone).
+- [x] **GR launch→WP1 — route quality:** ``GuardianGeofenceRouter`` skirts exclusions; visibility-graph **A\*** with turn/detour/backward cost; **string-pull** + pull-toward-goal; **Bezier corner smoothing**; **second string-pull after smoothing**; 10 m clearance. **Debug:** MC-R fleet **Debug** draws primary GR polyline (black dashed). Reopen if SIM still shows bad detours.
+- [x] **Launch→WP1 — primary catch-up speed:** Primary slows to ``launchLegPrimaryWaitSpeedMS`` while wingmen lag on ``launchToWaypoint``.
+- [x] **GR → AUTO handoff (path distance):** Launch leg completes on **remaining distance along the routed polyline** only (not crow-flies to WP1); one-shot MRE handoff guard. See ``MissionSquadConvoyFollowControlPolicy/guardianRouterLaunchApproachArrived``.
+- [x] **Wingmen hold through compile:** After convoy assembly, wingmen **freeze in slot** during `compiling` (mission upload) — no bunching chase toward a stationary primary.
+
+---
+
 ## v2 — Pathfinding, convoy trail, formations (deferred)
 
 Do not block v1 on these. **Pathfinding (§ P)** is the shared foundation; **convoy trail (§ T)** is a squad-follow consumer of that router, not a separate obstacle-avoidance system.
@@ -108,20 +125,55 @@ Do not block v1 on these. **Pathfinding (§ P)** is the shared foundation; **con
 
 | Surface | v1 behaviour | v2 target |
 |---------|----------------|-----------|
-| **Primary AUTO** | FC stops at exclusion boundary; no detour around keep-outs | Planner reroutes / inserts WPs so **no leg intersects** an exclusion (v2); v3 may replace AUTO legs entirely with MRE-streamed path |
-| **Wingmen OFFBOARD/GUIDED** | Hold last valid setpoint on violation | Stream **next point on a legal path** toward tactical target |
+| **Primary AUTO** | FC stops at exclusion boundary; no detour around keep-outs | **Launch→WP1:** GR + OFFBOARD always (convoy); then AUTO. Mission legs: planner reroute at upload + § P.1 recovery; v3 replaces remaining AUTO legs with MRE-streamed path |
+| **Wingmen OFFBOARD/GUIDED** | Hold last valid setpoint on violation | Stream **next point on a legal path** toward **formation target** (§ P.1); convoy/trail slot, not solo mission reroute |
+| **Exclusion approach / breach** | No structured report to MRE; FC may stop/RTL per params | Vehicle **reports** approach; MRE **captures** and pathfinds — role-specific goals (§ P.1) |
 | **Park / reposition / between-cycles** | Direct goto where used | Same router API |
 | **Convoy trail approach** | Heading-astern / chord through holes | Trail targets sampled along **routed** path to join route |
 
-**Checklist (canonical detail in `TODO.md` → Pathfinding & geofence avoidance):**
+**Checklist (canonical — do not duplicate in `TODO.md`):**
 
-- [ ] **Guardian 2D router:** Start → goal inside effective fence union (mission-wide + task); exclusions non-traversable; skirt with clearance margin; deterministic unit tests (hole between start and goal, nested exclusion inside inclusion, multi-hole).
+- [ ] **Guardian 2D pathfinding system (proper v1 — not incremental patches):** One shared router under Global Utilities / Mission Control — free-space or corridor/medial nodes (not fence-offset vertices); single clearance model on every leg (A* + string-pull, optional corner smoothing); deterministic unit tests (hole between start and goal, nested exclusion inside inclusion, multi-hole); **no illegal straight-chord fallbacks** when routing fails; MC-R map overlay matches execution geometry. **Reverted (2026-05):** experimental ``GuardianGeofenceRouter`` removed from tree; v1 convoy uses direct AUTO after assembly + upload until this ships. Consumers (staged): mission compile/upload leg repair; OFFBOARD launch→WP1; policy move+park / RTL / reposition; wingman formation streams; reserve swap join pose.
+- [ ] **Launch→WP1 OFFBOARD leg (deferred):** After pathfinding v1, convoy squads may again run routed OFFBOARD to first waypoint before AUTO; until then primary starts AUTO after assembly + mission upload (``launchPrimaryMissionAfterConvoyAssembly``).
 - [ ] **Mission compile / upload:** Reroute legs at upload (launch → WP1, inter-WP, etc.); log detoured vs author path.
-- [ ] **Runtime setpoint follower:** Shared service for formation streams, park, reposition, policy moves — replan from current pose when target or fences change.
-- [ ] **Replace** `filteredFormationTarget` hold-last-valid as the **only** geofence strategy for wingmen once router ships.
+- [ ] **Runtime setpoint follower:** Shared service for formation streams, park, reposition, policy moves — replan from current pose when target or fences change (replace hold-last-valid as sole strategy; ``MissionControlSquadConvoySetpointGeofenceUtilities`` today).
+- [ ] **Replace** hold-last-valid as the **only** geofence strategy for wingmen — extend GR follower to all convoy phases and primary mission legs (not only blocked chords).
 - [ ] **SIM smoke:** Launch and path separated by exclusion; track stays outside red zones (primary + wingmen).
-- [ ] **`README_FULL.md`:** Obstacle skirt vs FC breach; router call sites.
+- [ ] **`README_FULL.md`:** Obstacle skirt vs FC breach; router call sites; exclusion approach reporting and primary vs wingman recovery (§ P.1).
 - [ ] **Open-field only in v2:** Road snap and task domain classification — **§ v3 R** (same router API, graph layer on top).
+- [ ] **GR → AUTO handoff (primary):** Mission is already onboard from the compiling phase — after GR arrival, drop `recipe.fleet.do.mission.continue.after.operator.park` (offboard stop + mode mission + arm + mission start). Stop the primary OFFBOARD stream, then dispatch catalogue `command.fleet.vehicle.do.mission.start` only (arm/set mode only if telemetry still requires it).
+
+### P.1 — Exclusion approach reporting & MRE recovery (depends on § P router)
+
+**Intent:** When a vehicle **would enter** or **has entered** an exclusion zone, it **reports** to MRE; MRE **captures** the event and uses the shared pathfinder to get motion legal again. **Primary** and **wingman** use the **same router** but **different pathfinding goals** — mission progress vs formation fidelity.
+
+| Role | Pathfinding goal | Success criterion |
+|------|------------------|-------------------|
+| **Primary** | Rejoin **mission track** for the active squad cycle — along the task polyline / next mission leg / routed spine toward cycle completion | Vehicle resumes progress toward mission intent (not merely “outside the red zone”) |
+| **Wingman** | Reach the **current formation target** (convoy offset on polyline, trail arc-length point, or assembly seed) while skirting exclusions | Best-effort **formation** relative to primary telemetry; may lag if primary cuts through a hole — do **not** upload or execute an independent AUTO mission path |
+
+**Report sources (combine; dedupe per vehicle):**
+
+- **Guardian-predicted:** Proposed setpoint, next AUTO leg, or chord to formation target would violate squad **effective geofences** (same geometry as `MissionControlSquadConvoySetpointGeofenceUtilities` — report *before* streaming or before relying on FC stop).
+- **FC / telemetry (optional):** Fence breach STATUSTEXT, geofence prearm failures, primary **stopped at fence** with mission still active — correlate with assignment + squad context.
+
+**MRE behaviour (high level):**
+
+- [ ] **Event model:** Typed exclusion-approach / breach signal per assignment (fence id optional, coordinate, source: predicted vs FC); enqueue on MRE executor; distinct mission log templates (squad label, slot, primary vs wingman).
+- [ ] **Primary handler:** Pause or hold primary mission authority as needed; pathfind **current pose → rejoin point** on mission spine (inside inclusion, outside exclusions); re-upload mission segment or switch to streamed legs when § M ships — v2 may be **upload patch** only while primary stays AUTO.
+- [ ] **Wingman handler:** Do not change wingman mission authority; pathfind **current pose → current formation target** from `MissionRunSquadFollowSubsystem` (convoy / trail phase); continue streaming setpoints along the legal path; replan when primary or target moves.
+- [ ] **Coordination:** If primary is recovering, wingmen still target formation relative to **live** primary pose — wingman detour must not chord through the same exclusion; primary recovery takes precedence for squad pause policy (document: freeze wingmen vs allow skirt-only).
+- [ ] **FC params (safety net only):** Document recommended `FENCE_ACTION` (or stack equivalent) so FC does not fight MRE; Guardian owns detour geometry — see `TODO.md` FC breach params bullet.
+- [ ] **Tests:** Unit — predicted violation emits event; router goals differ for primary rejoin vs wingman-to-slot. SIM — primary stalls at exclusion → MRE detour → mission advances; wingman chord blocked → reports → skirts while primary on-route.
+- [ ] **Operator:** MC-R / mission log shows exclusion recovery in progress; optional prompt when recovery exhausts retries (reuse squad follow prompt patterns).
+
+### P.2 — Mid-run mission join (reserve swap / vacancy — decide later)
+
+**Defer** until launch→WP1 GR is exercised in SIM. **Decision:** When a vehicle binds mid-run (reserve swap post-commit, floating-pool vacancy), does mission execution use **GR + OFFBOARD** to the join pose / first mission leg, or stay on direct ``do.mission.upload.start`` / ``do.mission.upload.start.item``?
+
+- [ ] **Product decision:** GR approach vs AUTO upload for ``MissionRunEnvironment+ReserveSwapPostCommitHandoff`` and ``MissionRunReserveSwapPostCommitVacancyMissionRecipeSelection``.
+- [ ] **If GR:** Reuse ``approachingFirstWaypoint`` / launch-leg subsystem; define join goal (hub pose vs WP index vs squad primary track).
+- [ ] **If AUTO (interim):** Document why join path differs from first-start launch leg until unified OFFBOARD mission model (§ M).
 
 ### T — Convoy trail (pre-path follow; **depends on § P**)
 
@@ -157,9 +209,9 @@ Three stages in ``MissionRunSquadFollowSubsystem``:
 
 ---
 
-## v3 — Road routing & MRE-owned primary (deferred)
+## v3 — Road routing, 3D geofences & MRE-owned primary (deferred)
 
-Do not block v2. **§ R** extends the § P router with a **road graph** and **task-domain inference**; **§ M** moves the **primary** onto the same streamed-motion stack as wingmen once routing is trusted.
+Do not block v2. **§ R** extends the § P router with a **road graph** and **task-domain inference**; **§ 3D** promotes the § P **2D** router to full **vertical** geofence-aware routing (floor + ceiling); **§ M** moves the **primary** onto the same streamed-motion stack as wingmen once routing is trusted.
 
 ### R — Road network routing & task domain (extends § P)
 
@@ -171,7 +223,7 @@ Do not block v2. **§ R** extends the § P router with a **road graph** and **ta
 |-------|------|
 | **Author task path** (waypoints + pattern) | Hint geometry for classification and fallback |
 | **OSM / road graph** (extract, cache, offline-capable) | Snap graph; driveable centerlines |
-| **Effective geofences** | Still hard constraints — road snap must not cut through exclusions |
+| **Effective geofences** | Still hard constraints — road snap must not cut through exclusions (horizontal § P until § 3D ships) |
 | **Vehicle class + squad role** | UGV: on-road follower; UAV: overwatch offset from routed track |
 
 **Task domain classification (analyse path, decide mode):**
@@ -198,7 +250,30 @@ Do not block v2. **§ R** extends the § P router with a **road graph** and **ta
 
 **Do not** snap UAV-only patrol tasks to roads unless operator enables **Follow roads** or Auto confidence is high and policy allows aerial road corridor.
 
-### M — MRE-owned primary mission (OFFBOARD/GUIDED; **depends on § P**, § T, § R for road tasks)
+### 3D — Vertical geofences & router (extends § P; **depends on § P**, § P.1)
+
+**Product lock:** v2 § P routes in the **horizontal plane** only (altitude on mission items / setpoints is separate). v3 promotes the shared Guardian router to **3D** so geofences are **volume** constraints: each fence has a **floor** and **ceiling** (see ``MissionGeofence`` `min_altitude` / `max_altitude` + reference). Operators can place **exclusion zones that float in the air** — required for tactics such as **radar coverage**, NOTAM-style volumes, or layered airspace — without treating every keep-out as a column from ground to sky.
+
+| Concern | v2 (§ P) | v3 (§ 3D) |
+|---------|----------|-----------|
+| **Exclusion shape** | Horizontal polygon/circle only on fleet wire | Full **altitude band** enforced in planner, follower, and approach reporting |
+| **Router** | 2D skirt inside inclusion | **3D** path: route around/over/under airborne exclusions per vehicle class and mission policy |
+| **Authoring / map** | 2D map overlays | Extruded volume preview (floor/ceiling); validate band vs vehicle class |
+| **FC upload** | Horizontal geometry to MAVSDK geofence | Stack-capable **3D** fence upload where autopilot supports it; Guardian still owns detour geometry |
+
+**Checklist:**
+
+- [ ] **Model & wire:** Use mission fence altitude bands end-to-end (authoring → effective geofences → router → optional FC upload); extend fleet `geofencePolygonsJSON` / MAVSDK path only when stack supports vertical fences — until then Guardian enforces 3D in MRE only.
+- [ ] **3D router API:** `route3D(start, goal, fences, …)` — same consumers as § P (mission compile, runtime follower, § P.1 recovery, § T trail, § R snap + graph); exclusions are **non-traversable volumes**; inclusion is a bounded operable volume.
+- [ ] **Airborne exclusions:** Support keep-outs that do not touch the ground (radar umbrella, transit corridors); primary and wingman paths may pass **under** or **around** per RoE / task policy — document defaults (UAV: avoid volume; UGV: N/A unless mast height modeled).
+- [ ] **§ P.1 in 3D:** Predicted approach and breach recovery use vertical intersection (setpoint leg vs volume), not horizontal-only `MissionControlSquadConvoySetpointGeofenceUtilities`.
+- [ ] **Wingman overwatch (§ R):** UAV formation offsets respect airborne exclusions on the routed track (climb/descend or lateral detour with primary).
+- [ ] **Tests:** Unit — point/segment inside floating exclusion; route passes below floor or around volume. SIM — mission with mid-air exclusion; track never enters volume.
+- [ ] **`README_FULL.md`:** 3D fence authoring, v2 horizontal-only vs v3 volume routing, FC vs Guardian enforcement split.
+
+**Do not** block v2 § P on 3D — ship horizontal skirt first; § 3D extends the same router API once 2D behaviour is proven.
+
+### M — MRE-owned primary mission (OFFBOARD/GUIDED; **depends on § P**, § T, § R for road tasks; **§ 3D** for altitude-band / airborne-exclusion tasks)
 
 **Why consider this:** Field behaviour shows **AUTO_MISSION respects exclusion geofences** by **stopping** at the boundary — not by detouring. The limitation is **planning** (no skirt, no speed shaping, tight coupling to uploaded WP semantics), not “ignores geofences.” Running the **primary** on **OFFBOARD/GUIDED + streamed setpoints** — with MRE owning route progress, replanning, and cycle boundaries — aligns primary and wingmen under one controller and enables tactics AUTO_MISSION is poor at (dynamic **speed**, coordinated detours, road-following snap for UGV primaries, overwatch-aligned UAV motion).
 
@@ -207,6 +282,7 @@ Do not block v2. **§ R** extends the § P router with a **road graph** and **ta
 - **§ P — Pathfinding & geofence avoidance** shipped for wingman streams (and park/reposition).
 - **§ T — Convoy trail** stable in cluttered maps.
 - **§ R — Road routing** for tasks classified road-based (UGV primary at minimum).
+- **§ 3D — Vertical geofences & router** for tasks with altitude-band fences or airborne exclusions (UAV / mixed airspace).
 - Runtime setpoint follower proven at mission-run cadence with offboard-loss / reconnect policy operators trust.
 
 **Checklist:**
@@ -221,6 +297,10 @@ Do not block v2. **§ R** extends the § P router with a **road graph** and **ta
 - [ ] **Gradual rollout:** Per-run or per-task “MRE drives primary”; distinct log keys for MRE-leg vs AUTO leg.
 
 **Out of scope for v3 initial pass:** Removing mission upload entirely; Paladin-only autonomous mission authoring without operator template.
+
+### U — Mission Control operator UI (deferred)
+
+- [ ] **Mid-run squad formation:** Task triage **squad card** — operator changes squad formation shape while the run is live; Paladin or manual command; smooth retarget on OFFBOARD/GUIDED streams without dropping follow (offsets pathfound per § P / § F).
 
 ---
 

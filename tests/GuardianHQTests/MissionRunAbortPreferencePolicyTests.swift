@@ -140,6 +140,59 @@ final class MissionRunAbortPreferencePolicyTests: XCTestCase {
         XCTAssertEqual(tactic.kind, .returnToLaunch)
     }
 
+    func test_defaultMissionCompletePreferenceChain_extractionThenRTLThenPark() {
+        let chain = MissionRunCompleteTactic.defaultMissionCompletePreferenceChain
+        XCTAssertEqual(chain.count, 3)
+        XCTAssertEqual(chain[0].kind, .nearestOpenMapPoint)
+        XCTAssertEqual(chain[0].mapPointKind, .extraction)
+        XCTAssertEqual(chain[1].kind, .returnToLaunch)
+        XCTAssertEqual(chain[2].kind, .park)
+    }
+
+    func test_normalizedCompletePreferenceChain_emptyUsesDefaultExtractionRTLChain() {
+        let out = MissionRunCompleteTactic.normalizedPreferenceChain([])
+        XCTAssertEqual(out, MissionRunCompleteTactic.defaultMissionCompletePreferenceChain)
+    }
+
+    func test_upgradingStoredMissionWideChain_replaces_superseded_rtl_park_default() {
+        let legacy = MissionRunCompleteTactic.supersededMissionCompletePreferenceChain
+        XCTAssertTrue(MissionRunCompleteTactic.isSupersededMissionWideCompleteChain(legacy))
+        let upgraded = MissionRunCompleteTactic.upgradingStoredMissionWideChain(legacy)
+        XCTAssertEqual(upgraded.count, 3)
+        XCTAssertEqual(upgraded[0].kind, .nearestOpenMapPoint)
+        XCTAssertEqual(upgraded[0].mapPointKind, .extraction)
+        XCTAssertEqual(upgraded[1].kind, .returnToLaunch)
+        XCTAssertEqual(upgraded[2].kind, .park)
+    }
+
+    func test_upgradingStoredMissionWideChain_preserves_custom_chain() {
+        let custom = [
+            MissionRunCompleteTactic(kind: .loiter),
+            MissionRunCompleteTactic(kind: .park),
+        ]
+        let out = MissionRunCompleteTactic.upgradingStoredMissionWideChain(custom)
+        XCTAssertEqual(out.count, 2)
+        XCTAssertEqual(out[0].kind, .loiter)
+        XCTAssertEqual(out[1].kind, .park)
+    }
+
+    func test_routeRules_decode_upgrades_legacy_complete_default() throws {
+        let json = """
+        {
+          "defaultSpeed": 5,
+          "defaultHeadingHold": true,
+          "missionCompletePreferenceChain": [
+            {"id":"00000000-0000-0000-0000-000000000001","kind":"returnToLaunch"},
+            {"id":"00000000-0000-0000-0000-000000000002","kind":"park"}
+          ]
+        }
+        """
+        let rules = try JSONDecoder().decode(RouteRules.self, from: Data(json.utf8))
+        XCTAssertEqual(rules.missionCompletePreferenceChain.count, 3)
+        XCTAssertEqual(rules.missionCompletePreferenceChain[0].kind, .nearestOpenMapPoint)
+        XCTAssertEqual(rules.missionCompletePreferenceChain[0].mapPointKind, .extraction)
+    }
+
     func test_normalizedCompletePreferenceChain_singleNoneStaysAlone() {
         let input = [MissionRunCompleteTactic(kind: .none)]
         let out = MissionRunCompleteTactic.normalizedPreferenceChain(input)

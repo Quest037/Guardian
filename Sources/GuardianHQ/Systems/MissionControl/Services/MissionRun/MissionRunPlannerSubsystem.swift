@@ -208,7 +208,8 @@ final class MissionRunPlannerSubsystem {
 
             case .returnToLaunch:
                 let dispatch = environment.returnToLaunchFleetDispatch(
-                    assignmentID: assignment.id,
+                    assignment: assignment,
+                    mission: mission,
                     planningHub: hub
                 )
                 let issued = MissionRunIssuedCommand(

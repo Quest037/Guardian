@@ -892,7 +892,9 @@ struct RouteRules: Codable, Equatable {
         self.defaultSpeed = defaultSpeed
         self.defaultHeadingHold = defaultHeadingHold
         self.missionAbortPreferenceChain = MissionRunAbortTactic.normalizedPreferenceChain(missionAbortPreferenceChain)
-        self.missionCompletePreferenceChain = MissionRunCompleteTactic.normalizedPreferenceChain(missionCompletePreferenceChain)
+        self.missionCompletePreferenceChain = MissionRunCompleteTactic.upgradingStoredMissionWideChain(
+            missionCompletePreferenceChain
+        )
         self.missionReserveSwapPreferenceChain = MissionRunReserveSwapTactic.normalizedPreferenceChain(missionReserveSwapPreferenceChain)
     }
 
@@ -912,7 +914,7 @@ struct RouteRules: Codable, Equatable {
         }
         if let decoded = try c.decodeIfPresent([MissionRunCompleteTactic].self, forKey: .missionCompletePreferenceChain),
            !decoded.isEmpty {
-            missionCompletePreferenceChain = MissionRunCompleteTactic.normalizedPreferenceChain(decoded)
+            missionCompletePreferenceChain = MissionRunCompleteTactic.upgradingStoredMissionWideChain(decoded)
         } else {
             missionCompletePreferenceChain = MissionRunCompleteTactic.defaultMissionCompletePreferenceChain
         }

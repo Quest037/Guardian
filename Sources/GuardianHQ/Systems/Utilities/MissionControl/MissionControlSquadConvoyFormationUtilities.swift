@@ -27,14 +27,35 @@ enum MissionControlSquadConvoyFormationUtilities {
         let usesPathPolyline: Bool
     }
 
+    /// True when the primary is on the task polyline within lateral tolerance (mission follow — no “past WP1” gate).
+    static func shouldAnchorConvoyToTaskPathDuringMissionFollow(
+        task: MissionTask,
+        primaryLatitudeDeg: Double,
+        primaryLongitudeDeg: Double,
+        maxLateralM: Double = MissionSquadConvoyFollowControlPolicy.pathAnchorMaxLateralM
+    ) -> Bool {
+        guard task.waypoints.count >= 2 else { return false }
+        let polyline = pathPolyline(waypoints: task.waypoints)
+        guard polyline.count >= 2,
+              let projection = projectOntoPolyline(
+                  latitudeDeg: primaryLatitudeDeg,
+                  longitudeDeg: primaryLongitudeDeg,
+                  polyline: polyline
+              )
+        else { return false }
+        return projection.lateralM <= maxLateralM
+    }
+
     /// True when wingmen should use polyline slots (primary on path **and** at/ past the first route waypoint).
     static func shouldAnchorConvoyToTaskPath(
         task: MissionTask,
         primaryLatitudeDeg: Double,
         primaryLongitudeDeg: Double,
         primaryMissionProgressCurrent: Int32? = nil,
-        maxLateralM: Double = MissionSquadConvoyFollowControlPolicy.pathAnchorMaxLateralM
+        maxLateralM: Double = MissionSquadConvoyFollowControlPolicy.pathAnchorMaxLateralM,
+        allowPathPolylineAnchor: Bool = true
     ) -> Bool {
+        guard allowPathPolylineAnchor else { return false }
         guard task.waypoints.count >= 2 else { return false }
         let polyline = pathPolyline(waypoints: task.waypoints)
         guard polyline.count >= 2,
@@ -69,6 +90,47 @@ enum MissionControlSquadConvoyFormationUtilities {
         )
     }
 
+    /// Convoy slot on a **Guardian Router** launch→WP1 polyline: project primary along the route, wingmen astern on the spine.
+    static func desiredConvoySlotOnLaunchApproachRoute(
+        route: [RouteCoordinate],
+        primaryLatitudeDeg: Double,
+        primaryLongitudeDeg: Double,
+        primaryHeadingDeg: Double,
+        wingmanOrdinal: Int,
+        spacing: MissionSquadConvoySpacing,
+        maxLateralM: Double = MissionSquadConvoyFollowControlPolicy.launchApproachPathAnchorMaxLateralM
+    ) -> ConvoySlot? {
+        let polyline = pathPolyline(route: route)
+        guard polyline.count >= 2,
+              let projection = projectOntoPolyline(
+                  latitudeDeg: primaryLatitudeDeg,
+                  longitudeDeg: primaryLongitudeDeg,
+                  polyline: polyline
+              ),
+              projection.lateralM <= maxLateralM
+        else { return nil }
+
+        let behindM = Double(wingmanOrdinal + 1) * spacing.alongTrackMetersPerOrdinal
+        let targetAlong = max(0, projection.alongTrackM - behindM)
+        guard let target = coordinateAtAlongTrack(targetAlong, polyline: polyline) else { return nil }
+
+        let rightM = spacing.lateralLaneMeters * (wingmanOrdinal % 2 == 0 ? -0.5 : 0.5)
+        let coordinate = offsetCoordinate(
+            latitudeDeg: target.coord.lat,
+            longitudeDeg: target.coord.lon,
+            headingDeg: target.headingDeg,
+            forwardMeters: 0,
+            rightMeters: rightM
+        )
+        let pathHeading = coordinateAtAlongTrack(targetAlong, polyline: polyline)?.headingDeg
+            ?? projection.headingDeg
+        return ConvoySlot(
+            coordinate: coordinate,
+            convoyHeadingDeg: pathHeading,
+            usesPathPolyline: true
+        )
+    }
+
     /// Convoy slot: path polyline astern once the primary is on the first leg; heading-astern before that.
     static func desiredConvoySlot(
         task: MissionTask,
@@ -77,15 +139,45 @@ enum MissionControlSquadConvoyFormationUtilities {
         primaryHeadingDeg: Double,
         primaryMissionProgressCurrent: Int32?,
         wingmanOrdinal: Int,
-        spacing: MissionSquadConvoySpacing
+        spacing: MissionSquadConvoySpacing,
+        allowPathPolylineAnchor: Bool = true
     ) -> ConvoySlot {
         let polyline = pathPolyline(waypoints: task.waypoints)
         if shouldAnchorConvoyToTaskPath(
             task: task,
             primaryLatitudeDeg: primaryLatitudeDeg,
             primaryLongitudeDeg: primaryLongitudeDeg,
-            primaryMissionProgressCurrent: primaryMissionProgressCurrent
+            primaryMissionProgressCurrent: primaryMissionProgressCurrent,
+            allowPathPolylineAnchor: allowPathPolylineAnchor
         ),
+           let projection = projectOntoPolyline(
+               latitudeDeg: primaryLatitudeDeg,
+               longitudeDeg: primaryLongitudeDeg,
+               polyline: polyline
+           ),
+           let onPath = desiredCoordinateOnTaskPath(
+               waypoints: task.waypoints,
+               primaryLatitudeDeg: primaryLatitudeDeg,
+               primaryLongitudeDeg: primaryLongitudeDeg,
+               wingmanOrdinal: wingmanOrdinal,
+               spacing: spacing
+           ) {
+            let behindM = Double(wingmanOrdinal + 1) * spacing.alongTrackMetersPerOrdinal
+            let targetAlong = max(0, projection.alongTrackM - behindM)
+            let pathHeading = coordinateAtAlongTrack(targetAlong, polyline: polyline)?.headingDeg
+                ?? projection.headingDeg
+            return ConvoySlot(
+                coordinate: onPath,
+                convoyHeadingDeg: pathHeading,
+                usesPathPolyline: true
+            )
+        }
+        if allowPathPolylineAnchor,
+           shouldAnchorConvoyToTaskPathDuringMissionFollow(
+               task: task,
+               primaryLatitudeDeg: primaryLatitudeDeg,
+               primaryLongitudeDeg: primaryLongitudeDeg
+           ),
            let projection = projectOntoPolyline(
                latitudeDeg: primaryLatitudeDeg,
                longitudeDeg: primaryLongitudeDeg,
@@ -339,12 +431,16 @@ enum MissionControlSquadConvoyFormationUtilities {
     // MARK: - Path geometry
 
     static func pathPolyline(waypoints: [RouteWaypoint]) -> [PathVertex] {
-        guard let first = waypoints.first else { return [] }
-        var out: [PathVertex] = [PathVertex(coord: first.coord, alongTrackM: 0)]
+        pathPolyline(route: waypoints.map(\.coord))
+    }
+
+    static func pathPolyline(route: [RouteCoordinate]) -> [PathVertex] {
+        guard let first = route.first else { return [] }
+        var out: [PathVertex] = [PathVertex(coord: first, alongTrackM: 0)]
         var cumulative = 0.0
-        for index in 1..<waypoints.count {
-            let prev = waypoints[index - 1].coord
-            let next = waypoints[index].coord
+        for index in 1..<route.count {
+            let prev = route[index - 1]
+            let next = route[index]
             cumulative += MissionTelemetryGeo.horizontalDistanceM(
                 lat1: prev.lat,
                 lon1: prev.lon,

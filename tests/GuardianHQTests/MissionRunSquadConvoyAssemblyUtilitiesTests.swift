@@ -24,4 +24,13 @@ final class MissionRunSquadConvoyAssemblyUtilitiesTests: XCTestCase {
         )
         XCTAssertFalse(assembled)
     }
+
+    func test_isConvoyAssembled_trueWhenNoWingmen() {
+        XCTAssertTrue(
+            MissionRunSquadConvoyAssemblyUtilities.isConvoyAssembled(
+                targets: [],
+                wingmanPositionByAssignmentID: [:]
+            )
+        )
+    }
 }

@@ -66,7 +66,11 @@ final class MissionControlOperatorLaunchPosePolicyTests: XCTestCase {
             ]
         )
         run.unitTestingReplaceOperatorLaunchPoses([aid: sampleLaunch()])
-        let dispatch = run.returnToLaunchFleetDispatch(assignmentID: aid, planningHub: nil)
+        let dispatch = run.returnToLaunchFleetDispatch(
+            assignment: run.assignments[0],
+            mission: mission,
+            planningHub: nil
+        )
         guard case .recipe(let name, _) = dispatch else {
             XCTFail("expected recipe dispatch")
             return

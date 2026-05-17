@@ -34,6 +34,44 @@ final class MissionGeofenceMavsdkGeofenceUtilitiesTests: XCTestCase {
         XCTAssertEqual(Double(circles[0].radius), 150.0, accuracy: 0.01)
     }
 
+    func test_missionGeofences_roundTrip_fromGeofencePolygonsJSON() throws {
+        let fence = MissionGeofence(
+            name: "box",
+            boundary: .exclusion,
+            shape: .polygon,
+            polygonVertices: [
+                RouteCoordinate(lat: -33.0, lon: 151.0),
+                RouteCoordinate(lat: -33.01, lon: 151.0),
+                RouteCoordinate(lat: -33.01, lon: 151.02),
+            ]
+        )
+        let json = try MissionGeofenceMavsdkGeofenceUtilities.encodeGeofencePolygonsJSON(forGeofences: [fence])
+        let decoded = try MissionGeofenceMavsdkGeofenceUtilities.missionGeofences(fromGeofencePolygonsJSON: json)
+        XCTAssertEqual(decoded.count, 1)
+        XCTAssertEqual(decoded[0].boundary, .exclusion)
+        XCTAssertEqual(decoded[0].shape, .polygon)
+        XCTAssertEqual(decoded[0].polygonVertices.count, 3)
+    }
+
+    func test_missionGeofences_roundTrip_fromGeofencePolygonsJSON() throws {
+        let fence = MissionGeofence(
+            name: "box",
+            boundary: .exclusion,
+            shape: .polygon,
+            polygonVertices: [
+                RouteCoordinate(lat: -33.0, lon: 151.0),
+                RouteCoordinate(lat: -33.01, lon: 151.0),
+                RouteCoordinate(lat: -33.01, lon: 151.02),
+            ]
+        )
+        let json = try MissionGeofenceMavsdkGeofenceUtilities.encodeGeofencePolygonsJSON(forGeofences: [fence])
+        let decoded = try MissionGeofenceMavsdkGeofenceUtilities.missionGeofences(fromGeofencePolygonsJSON: json)
+        XCTAssertEqual(decoded.count, 1)
+        XCTAssertEqual(decoded[0].boundary, .exclusion)
+        XCTAssertEqual(decoded[0].shape, .polygon)
+        XCTAssertEqual(decoded[0].polygonVertices.count, 3)
+    }
+
     func test_encode_decode_roundTrip_geofence_wire_payload() throws {
         let fence = MissionGeofence.newCircle(name: "c", center: RouteCoordinate(lat: -34.0, lon: 150.0))
         let wire = MissionGeofenceMavsdkGeofenceUtilities.geofenceUploadPayload(forGeofences: [fence])

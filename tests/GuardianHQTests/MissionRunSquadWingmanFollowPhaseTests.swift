@@ -28,6 +28,13 @@ final class MissionRunSquadWingmanFollowPhaseTests: XCTestCase {
         )
     }
 
+    func test_operatorLabel_approachingRoute() {
+        XCTAssertEqual(
+            MissionRunSquadWingmanFollowPhase.approachingRoute.operatorStatusLabel,
+            "Approaching route"
+        )
+    }
+
     func test_operatorLabel_holdingBetweenCycles() {
         XCTAssertEqual(
             MissionRunSquadWingmanFollowPhase.holdingBetweenCycles.operatorStatusLabel,

@@ -9,8 +9,6 @@ enum MissionRunOperatorWindDown {
 
 /// Operator **Retry recovery / abort protocol** jolt outcome (assignment triage Continue).
 enum MissionRunOperatorPolicyWindDownJoltOutcome: Equatable, Sendable {
-    /// Resumed the in-flight recipe via pending wizard escalation ``FleetRecipeResumptionVerb/retry``.
-    case joltedEscalation
     /// Cleared a stuck fleet recipe slot and redispatched end-policy commands (awaited, single pass).
     case redispatched
     case failedNoCommands
@@ -707,7 +705,8 @@ final class MissionRunExecutionSubsystem {
 
             case .returnToLaunch:
                 let dispatch = environment.returnToLaunchFleetDispatch(
-                    assignmentID: assignment.id,
+                    assignment: assignment,
+                    mission: mission,
                     planningHub: hub
                 )
                 return MissionRunIssuedCommand(
@@ -830,7 +829,8 @@ final class MissionRunExecutionSubsystem {
 
             case .returnToLaunch:
                 let dispatch = environment.returnToLaunchFleetDispatch(
-                    assignmentID: assignment.id,
+                    assignment: assignment,
+                    mission: mission,
                     planningHub: hub
                 )
                 return MissionRunIssuedCommand(
@@ -1078,11 +1078,9 @@ final class MissionRunExecutionSubsystem {
               )
         else { return .failedNoVehicle }
 
-        if FleetRecipeRunner.shared.joltPendingWizardEscalationRetry(forVehicleID: vehicleID) {
-            return .joltedEscalation
-        }
-
         await context.fleetLink.awaitOperatorPolicyWindDownJoltPreparation(vehicleID: vehicleID)
+        // Always rebuild wind-down from current hub + geofence policy — do not jolt the in-flight
+        // recipe (frozen parameters would skip refreshed Guardian Router move legs).
         let parkStabilized = await context.fleetLink.awaitOperatorEngageStabilizePark(vehicleID: vehicleID)
         if !parkStabilized {
             environment.systems.logging.appendLogEvent(
@@ -1726,7 +1724,11 @@ final class MissionRunExecutionSubsystem {
             let primaryDispatch: MissionRunFleetDispatch
             switch task.betweenCycles {
             case .returnToLaunch:
-                primaryDispatch = environment.returnToLaunchFleetDispatch(assignmentID: aid, planningHub: hub)
+                primaryDispatch = environment.returnToLaunchFleetDispatch(
+                    assignment: primaryAssignment,
+                    mission: mission,
+                    planningHub: hub
+                )
             case .holdPosition:
                 guard let d = MissionRunFleetDispatch.betweenCyclesTaskDispatch(.holdPosition) else { continue }
                 primaryDispatch = d
@@ -1752,7 +1754,8 @@ final class MissionRunExecutionSubsystem {
                 switch task.betweenCycles {
                 case .returnToLaunch:
                     wingDispatch = environment.returnToLaunchFleetDispatch(
-                        assignmentID: wingman.assignment.id,
+                        assignment: wingman.assignment,
+                        mission: mission,
                         planningHub: environment.abortPlanningHubTelemetry(for: wingman.assignment)
                     )
                 case .holdPosition:
@@ -2022,44 +2025,20 @@ final class MissionRunExecutionSubsystem {
             let aggregated = environment.taskCyclesCompletedByTaskID[taskID] ?? 0
             if aggregated >= task.cycles { return false }
         }
-        let pass = buildPrimaryMissionPass(
+        guard let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }),
+              let squadPlan = environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: taskID)
+                .first(where: { $0.squad.primaryAssignment.id == primaryAssignmentID })
+        else { return false }
+        environment.systems.squadFollow.preparePrimaryCycleLaunch(
             mission: mission,
-            explicitTaskId: taskID,
-            nextCyclePrimaryAssignmentIDs: Set([primaryAssignmentID])
+            task: task,
+            plannedSquad: squadPlan,
+            fleetLink: context.fleetLink,
+            sitl: context.sitl,
+            launchContext: context,
+            launchPrimaryWhenReady: true
         )
-        let hasWingmen = environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: taskID)
-            .first(where: { $0.squad.primaryAssignment.id == primaryAssignmentID })
-            .map { !$0.squad.wingmanBindings.isEmpty } ?? false
-
-        if hasWingmen {
-            guard let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }),
-                  let squadPlan = environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: taskID)
-                    .first(where: { $0.squad.primaryAssignment.id == primaryAssignmentID })
-            else { return false }
-            environment.systems.squadFollow.preparePrimaryCycleLaunch(
-                mission: mission,
-                task: task,
-                plannedSquad: squadPlan,
-                fleetLink: context.fleetLink,
-                sitl: context.sitl,
-                launchContext: context,
-                launchPrimaryWhenReady: true
-            )
-            return true
-        }
-
-        let dispatched = !pass.immediateCommands.isEmpty || !pass.queuedBatches.isEmpty
-        if dispatched {
-            environment.markSquadActiveInCurrentCycle(primaryAssignmentID)
-        }
-        pass.events.forEach { environment.appendEvent($0) }
-        for issued in pass.immediateCommands {
-            environment.appendEvent(environment.systems.commands.dispatchCommand(issued, fleetLink: context.fleetLink, sitl: context.sitl))
-        }
-        for batch in pass.queuedBatches {
-            environment.systems.executor.enqueueCommandBatch(batch, context: context, replacingTags: [])
-        }
-        return dispatched
+        return true
     }
 
     /// Operator / automation: launch the next deferred first-wave primary for this task (waypoint / operator stagger gate).
@@ -2239,9 +2218,9 @@ final class MissionRunExecutionSubsystem {
         var queuedBatches: [MissionRunQueuedCommandBatch]
         /// Primary squads whose MAVLink mission launches in the first immediate batch (not stagger wall-clock).
         var immediateLaunchPrimaryAssignmentIDs: Set<UUID> = []
-        /// Squads with wingmen: assemble convoy before primary mission (immediate).
+        /// Squads: GR launch leg (assemble wingmen when present) before AUTO (immediate).
         var convoyAssemblyImmediatePrimaryIDs: Set<UUID> = []
-        /// Squads with wingmen: begin assembly at stagger time, then launch primary when ready.
+        /// Squads: begin launch leg at stagger time (wingman assembly when present).
         var convoyAssemblyDelayed: [(primaryAssignmentID: UUID, startAt: Date)] = []
     }
 
@@ -2292,44 +2271,102 @@ final class MissionRunExecutionSubsystem {
         }
     }
 
-    /// Primary MAVLink mission after wingmen reach heading-based convoy slots.
+    /// Encodes primary mission+geofence upload (catalogue only — no arm/start).
+    func encodeConvoyPrimaryMissionUploadCommand(
+        taskID: UUID,
+        primaryAssignmentID: UUID,
+        context: MissionRunExecutionContext
+    ) -> MissionRunIssuedCommand? {
+        guard let environment else { return nil }
+        guard let mission = context.missionProvider(),
+              let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }),
+              let squadPlan = environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: taskID)
+                .first(where: { $0.squad.primaryAssignment.id == primaryAssignmentID }),
+              squadPlan.squad.primaryAssignment.attachedFleetVehicleToken != nil
+        else { return nil }
+        let encoded = MissionRunConvoyPrimaryMissionDispatch.encodeMissionUploadCommand(
+            squad: squadPlan,
+            task: task,
+            mission: mission,
+            environment: environment,
+            issuerKey: MissionRunCommandIssuerKey.missionExecute
+        )
+        encoded.events.forEach { environment.appendEvent($0) }
+        return encoded.command
+    }
+
+    /// Compiling phase: await catalogue mission+geofence upload on the primary (once per launch pipeline).
+    func awaitConvoyPrimaryMissionUpload(
+        taskID: UUID,
+        primaryAssignmentID: UUID,
+        context: MissionRunExecutionContext
+    ) async -> Bool {
+        guard let environment else { return false }
+        guard let issued = encodeConvoyPrimaryMissionUploadCommand(
+            taskID: taskID,
+            primaryAssignmentID: primaryAssignmentID,
+            context: context
+        ) else { return false }
+        return await environment.systems.commands.awaitCatalogueDispatchAndAckLogs(
+            issued: issued,
+            fleetLink: context.fleetLink,
+            sitl: context.sitl
+        )
+    }
+
+    /// Primary exit OFFBOARD + AUTO start after launch→WP1 (onboard plan from compiling phase only).
+    @discardableResult
     func launchPrimaryMissionAfterConvoyAssembly(
         taskID: UUID,
         primaryAssignmentID: UUID,
         context: MissionRunExecutionContext
-    ) {
-        guard let environment else { return }
-        guard let mission = context.missionProvider() else { return }
+    ) async -> Bool {
+        guard let environment else { return false }
+        guard let mission = context.missionProvider(),
+              let assignment = environment.assignments.first(where: { $0.id == primaryAssignmentID }),
+              let tokenKey = assignment.attachedFleetVehicleToken,
+              !tokenKey.isEmpty
+        else { return false }
         environment.clearMissionSquadConvoyAssemblyHold(forAssignmentID: primaryAssignmentID)
-        let pass = buildPrimaryMissionPass(
-            mission: mission,
-            explicitTaskId: taskID,
-            nextCyclePrimaryAssignmentIDs: Set([primaryAssignmentID]),
-            skipConvoyAssemblyGate: true
+
+        let issued = MissionRunConvoyPrimaryMissionDispatch.startMissionAfterLaunchLegCommand(
+            primaryAssignmentID: primaryAssignmentID,
+            slotName: assignment.slotName,
+            vehicleTokenKey: tokenKey
         )
-        guard !pass.immediateCommands.isEmpty || !pass.queuedBatches.isEmpty else {
-            environment.systems.logging.appendLogEvent(
-                level: .warning,
-                taskID: taskID,
-                taskLabel: mission.routeMacro.tasks.first(where: { $0.id == taskID })?.name,
-                speaker: .missionControl,
-                templateKey: MissionRunLogTemplateKey.squadFollowConvoyPrimaryLaunchSkipped,
-                templateParams: [
-                    "slotID": primaryAssignmentID.uuidString,
-                    "reason": "no_mission_commands",
-                ]
+        if let task = mission.routeMacro.tasks.first(where: { $0.id == taskID }),
+           let squadPlan = environment.systems.planner.buildTaskSquadMissions(mission: mission, taskId: taskID)
+            .first(where: { $0.squad.primaryAssignment.id == primaryAssignmentID }) {
+            let squadLog = MissionControlSquadUtilities.squadLogContext(
+                taskID: task.id,
+                taskName: task.name,
+                squadIndex: squadPlan.squadIndex
             )
-            return
+            environment.appendEvent(
+                MissionRunEvent(
+                    level: .info,
+                    taskID: squadLog.id,
+                    taskLabel: squadLog.label,
+                    speaker: .missionControl,
+                    templateKey: MissionRunLogTemplateKey.missionExecuting,
+                    templateParams: [
+                        "slot": assignment.slotName,
+                        "itemCount": String(squadPlan.missionItems.count),
+                        "formation": "convoy",
+                        "timing": "arm and start after launch leg",
+                    ]
+                )
+            )
         }
-        environment.markSquadActiveInCurrentCycle(primaryAssignmentID)
-        environment.systems.squadFollow.onPrimaryMissionUnderway(primaryAssignmentID: primaryAssignmentID)
-        pass.events.forEach { environment.appendEvent($0) }
-        for issued in pass.immediateCommands {
-            environment.appendEvent(environment.systems.commands.dispatchCommand(issued, fleetLink: context.fleetLink, sitl: context.sitl))
+        let ok = await environment.systems.commands.awaitRecipeDispatchAppendingDispatchedThenAckLogs(
+            issued: issued,
+            fleetLink: context.fleetLink,
+            sitl: context.sitl
+        )
+        if ok {
+            environment.markSquadActiveInCurrentCycle(primaryAssignmentID)
         }
-        for batch in pass.queuedBatches {
-            environment.systems.executor.enqueueCommandBatch(batch, context: context, replacingTags: [])
-        }
+        return ok
     }
 
     private enum TaskFormationIntent {
@@ -2346,8 +2383,6 @@ final class MissionRunExecutionSubsystem {
         guard let environment else {
             return TaskMissionLaunchPass(events: [], immediateCommands: [], queuedBatches: [])
         }
-        let fleetLink = environment.fleetLink
-        let sitl = environment.sitl
         var events: [MissionRunEvent] = []
         var immediateCommands: [MissionRunIssuedCommand] = []
         var queuedBatches: [MissionRunQueuedCommandBatch] = []
@@ -2402,8 +2437,7 @@ final class MissionRunExecutionSubsystem {
                 continue
             }
             guard let tokenKey = squad.squad.primaryAssignment.attachedFleetVehicleToken else { continue }
-            let hasWingmen = !squad.squad.wingmanBindings.isEmpty
-            if hasWingmen, !skipConvoyAssemblyGate {
+            if !skipConvoyAssemblyGate {
                 let offset = isNextCyclePass ? 0 : Double(squad.squadIndex) * staggerStep
                 let dispatchAt = now.addingTimeInterval(offset)
                 if offset <= 0 {
@@ -2442,7 +2476,8 @@ final class MissionRunExecutionSubsystem {
             let geofencePolygonsJSON: String
             do {
                 let hubForPx4Filter: FleetHubVehicleTelemetry? = {
-                    guard let fleetLink, let sitl,
+                    guard let fleetLink = environment.fleetLink,
+                          let sitl = environment.sitl,
                           let token = FleetMissionVehicleToken(storageKey: tokenKey),
                           let vehicleID = resolvedFleetStreamVehicleID(token: token, fleetLink: fleetLink, sitl: sitl)
                     else { return nil }
@@ -2741,6 +2776,10 @@ extension MissionRunLogTemplateKey {
     static let squadFollowStreamExhausted = "missioncontrol.mre.squad_follow.stream_exhausted"
     static let squadFollowWingmanPromotedToPrimary = "missioncontrol.mre.squad_follow.wingman_promoted_to_primary"
     static let squadFollowOffboardStreamLost = "missioncontrol.mre.squad_follow.offboard_stream_lost"
+    static let squadFollowGuardianRouterApproachPlanned = "missioncontrol.mre.squad_follow.guardian_router_approach_planned"
+    static let squadFollowGuardianRouterApproachComplete = "missioncontrol.mre.squad_follow.guardian_router_approach_complete"
+    static let squadFollowPreMissionAssemblyStarted = "missioncontrol.mre.squad_follow.pre_mission_assembly_started"
+    static let squadFollowPreMissionAssemblyReady = "missioncontrol.mre.squad_follow.pre_mission_assembly_ready"
     static let startMissionTaskSkippedPhase = "missioncontrol.mre.mission.start_skipped_phase"
     static let startMissionTaskNoDispatchContext = "missioncontrol.mre.mission.start_no_dispatch_context"
     static let startMissionTaskNoExecutionContext = "missioncontrol.mre.mission.start_no_execution_context"

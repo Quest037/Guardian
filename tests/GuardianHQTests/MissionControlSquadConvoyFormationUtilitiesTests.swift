@@ -81,7 +81,7 @@ final class MissionControlSquadConvoyFormationUtilitiesTests: XCTestCase {
         let slot = MissionControlSquadConvoyFormationUtilities.desiredConvoySlot(
             task: task,
             primaryLatitudeDeg: 50.7532,
-            primaryLongitudeDeg: -1.6190,
+            primaryLongitudeDeg: -1.6100,
             primaryHeadingDeg: 90,
             primaryMissionProgressCurrent: 0,
             wingmanOrdinal: 0,
@@ -90,7 +90,7 @@ final class MissionControlSquadConvoyFormationUtilitiesTests: XCTestCase {
         XCTAssertFalse(slot.usesPathPolyline)
         let bodyOnly = MissionControlSquadConvoyFormationUtilities.desiredCoordinate(
             primaryLatitudeDeg: 50.7532,
-            primaryLongitudeDeg: -1.6190,
+            primaryLongitudeDeg: -1.6100,
             primaryHeadingDeg: 90,
             wingmanOrdinal: 0,
             spacing: spacing
@@ -129,11 +129,120 @@ final class MissionControlSquadConvoyFormationUtilitiesTests: XCTestCase {
         XCTAssertTrue(
             MissionControlSquadConvoyFormationUtilities.shouldAnchorConvoyToTaskPath(
                 task: task,
-                primaryLatitudeDeg: 50.7539,
+                primaryLatitudeDeg: 50.7540,
                 primaryLongitudeDeg: -1.6190,
                 primaryMissionProgressCurrent: nil
             )
         )
+    }
+
+    func test_shouldAnchorConvoyToTaskPath_falseWhenPathAnchorDisallowed() {
+        let task = MissionTask(
+            name: "T",
+            waypoints: [
+                RouteWaypoint(coord: RouteCoordinate(lat: 50.7530, lon: -1.6190)),
+                RouteWaypoint(coord: RouteCoordinate(lat: 50.7540, lon: -1.6190)),
+            ]
+        )
+        XCTAssertFalse(
+            MissionControlSquadConvoyFormationUtilities.shouldAnchorConvoyToTaskPath(
+                task: task,
+                primaryLatitudeDeg: 50.7539,
+                primaryLongitudeDeg: -1.6190,
+                primaryMissionProgressCurrent: 1,
+                allowPathPolylineAnchor: false
+            )
+        )
+    }
+
+    func test_desiredConvoySlot_headingAsternWhenPathAnchorDisallowedNearWP1() {
+        let task = MissionTask(
+            name: "T",
+            waypoints: [
+                RouteWaypoint(coord: RouteCoordinate(lat: 50.7530, lon: -1.6190)),
+                RouteWaypoint(coord: RouteCoordinate(lat: 50.7540, lon: -1.6190)),
+            ]
+        )
+        let spacing = MissionSquadConvoySpacing(alongTrackMetersPerOrdinal: 3, lateralLaneMeters: 0)
+        let slot = MissionControlSquadConvoyFormationUtilities.desiredConvoySlot(
+            task: task,
+            primaryLatitudeDeg: 50.7539,
+            primaryLongitudeDeg: -1.6190,
+            primaryHeadingDeg: 90,
+            primaryMissionProgressCurrent: 1,
+            wingmanOrdinal: 0,
+            spacing: spacing,
+            allowPathPolylineAnchor: false
+        )
+        XCTAssertFalse(slot.usesPathPolyline)
+        XCTAssertEqual(slot.convoyHeadingDeg, 90, accuracy: 0.001)
+    }
+
+    func test_shouldAnchorConvoyToTaskPathDuringMissionFollow_whenOnPolylineBeforeWP2() {
+        let task = MissionTask(
+            name: "T",
+            waypoints: [
+                RouteWaypoint(coord: RouteCoordinate(lat: 50.7530, lon: -1.6190)),
+                RouteWaypoint(coord: RouteCoordinate(lat: 50.7540, lon: -1.6190)),
+            ]
+        )
+        XCTAssertTrue(
+            MissionControlSquadConvoyFormationUtilities.shouldAnchorConvoyToTaskPathDuringMissionFollow(
+                task: task,
+                primaryLatitudeDeg: 50.7532,
+                primaryLongitudeDeg: -1.6190
+            )
+        )
+        XCTAssertFalse(
+            MissionControlSquadConvoyFormationUtilities.shouldAnchorConvoyToTaskPath(
+                task: task,
+                primaryLatitudeDeg: 50.7532,
+                primaryLongitudeDeg: -1.6190,
+                primaryMissionProgressCurrent: 0
+            )
+        )
+    }
+
+    func test_desiredConvoySlotOnLaunchApproachRoute_wingmanAsternOnGRSpine() {
+        let route = [
+            RouteCoordinate(lat: 50.7530, lon: -1.6190),
+            RouteCoordinate(lat: 50.7540, lon: -1.6190),
+        ]
+        let spacing = MissionSquadConvoySpacing(alongTrackMetersPerOrdinal: 3, lateralLaneMeters: 0)
+        let slot = MissionControlSquadConvoyFormationUtilities.desiredConvoySlotOnLaunchApproachRoute(
+            route: route,
+            primaryLatitudeDeg: 50.7535,
+            primaryLongitudeDeg: -1.6190,
+            primaryHeadingDeg: 45,
+            wingmanOrdinal: 0,
+            spacing: spacing
+        )
+        XCTAssertNotNil(slot)
+        XCTAssertTrue(slot!.usesPathPolyline)
+        XCTAssertLessThan(slot!.coordinate.lat, 50.7535)
+        XCTAssertEqual(slot!.coordinate.lon, -1.6190, accuracy: 0.00005)
+    }
+
+    func test_desiredConvoySlot_onPathDuringMissionFollow_beforePastFirstWaypoint() {
+        let task = MissionTask(
+            name: "T",
+            waypoints: [
+                RouteWaypoint(coord: RouteCoordinate(lat: 50.7530, lon: -1.6190)),
+                RouteWaypoint(coord: RouteCoordinate(lat: 50.7540, lon: -1.6190)),
+            ]
+        )
+        let spacing = MissionSquadConvoySpacing(alongTrackMetersPerOrdinal: 3, lateralLaneMeters: 0)
+        let slot = MissionControlSquadConvoyFormationUtilities.desiredConvoySlot(
+            task: task,
+            primaryLatitudeDeg: 50.7532,
+            primaryLongitudeDeg: -1.6190,
+            primaryHeadingDeg: 90,
+            primaryMissionProgressCurrent: 0,
+            wingmanOrdinal: 0,
+            spacing: spacing
+        )
+        XCTAssertTrue(slot.usesPathPolyline)
+        XCTAssertEqual(slot.coordinate.lon, -1.6190, accuracy: 0.00005)
     }
 
     func test_desiredConvoySlot_onPathAfterFirstWaypoint() {

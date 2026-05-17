@@ -78,7 +78,11 @@ extension MissionRunEnvironment {
             else { return nil }
             return fleetLink.hubTelemetry(forVehicleID: vehicleID)
         }()
-        let dispatch = returnToLaunchFleetDispatch(assignmentID: assignment.id, planningHub: planningHub)
+        let dispatch = returnToLaunchFleetDispatch(
+            assignment: assignment,
+            mission: template,
+            planningHub: planningHub
+        )
         let issued = MissionRunIssuedCommand(
             assignmentID: assignment.id,
             slotName: assignment.slotName,
@@ -221,19 +225,6 @@ extension MissionRunEnvironment {
                 context: ctx
             )
             switch outcome {
-            case .joltedEscalation:
-                self.systems.logging.appendLogEvent(
-                    level: .info,
-                    taskID: fields.0,
-                    taskLabel: fields.1,
-                    speaker: .missionControl,
-                    templateKey: MissionRunLogTemplateKey.operatorPolicyWindDownJoltEscalation,
-                    templateParams: [
-                        "slot": assignment.slotName,
-                        "slotID": assignment.id.uuidString,
-                        "intent": label,
-                    ]
-                )
             case .redispatched:
                 self.systems.logging.appendLogEvent(
                     level: .info,

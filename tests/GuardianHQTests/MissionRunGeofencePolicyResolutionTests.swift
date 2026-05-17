@@ -27,6 +27,36 @@ final class MissionRunGeofencePolicyResolutionTests: XCTestCase {
         XCTAssertEqual(merged.map(\.name), ["M", "T", "RunM", "RunT"])
     }
 
+    func test_assignmentGeofences_matchesPlanningPlusSlotAugmentation() {
+        let mFence = MissionGeofence.newCircle(name: "M", center: RouteCoordinate(lat: 0, lon: 0))
+        var task = MissionTask(name: "T1")
+        let tFence = MissionGeofence.newCircle(name: "T", center: RouteCoordinate(lat: 1, lon: 1))
+        task.geofences = [tFence]
+        let mission = Mission(
+            name: "M",
+            description: "",
+            type: .mobile,
+            routeMacro: RouteMacro(tasks: [task]),
+            missionGeofences: [mFence]
+        )
+        let asn = MissionRunAssignment(
+            id: UUID(),
+            taskId: task.id,
+            rosterDeviceId: UUID(),
+            slotName: "Wing",
+            policies: MissionRunAssignmentPolicies(
+                geofenceAugmentation: [MissionGeofence.newCircle(name: "S", center: RouteCoordinate(lat: 9, lon: 9))]
+            )
+        )
+        let merged = MissionRunGeofencePolicyResolution.assignmentGeofences(
+            assignment: asn,
+            mission: mission,
+            missionWideRunAugmentation: [],
+            perTaskRunAugmentationByTaskID: [:]
+        )
+        XCTAssertEqual(merged.map(\.name), ["M", "T", "S"])
+    }
+
     func test_squadGeofences_appendsSlotAugmentation() {
         let mFence = MissionGeofence.newCircle(name: "M", center: RouteCoordinate(lat: 0, lon: 0))
         var task = MissionTask(name: "T1")

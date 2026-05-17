@@ -57,6 +57,45 @@ enum MissionGeofenceMavsdkGeofenceUtilities: Sendable {
         try geofenceUploadPayload(forGeofences: fences).encodeToJSON()
     }
 
+    /// Decodes fleet ``geofencePolygonsJSON`` into ``MissionGeofence`` rows for Guardian Router (move+park, etc.).
+    static func missionGeofences(fromGeofencePolygonsJSON json: String) throws -> [MissionGeofence] {
+        let payload = try FleetVehicleCommandGeofenceUploadPayload.decode(fromJSON: json)
+        return missionGeofences(fromUploadPayload: payload)
+    }
+
+    /// Rebuilds ``MissionGeofence`` models from a fleet upload payload (new ids; horizontal geometry only).
+    static func missionGeofences(fromUploadPayload payload: FleetVehicleCommandGeofenceUploadPayload) -> [MissionGeofence] {
+        var out: [MissionGeofence] = []
+        out.reserveCapacity(payload.polygons.count + payload.circles.count)
+        for (index, poly) in payload.polygons.enumerated() {
+            let boundary: MissionGeofenceBoundaryKind =
+                poly.fenceType.lowercased().contains("exclusion") ? .exclusion : .inclusion
+            let verts = poly.points.map { RouteCoordinate(lat: $0.latitudeDeg, lon: $0.longitudeDeg) }
+            out.append(
+                MissionGeofence(
+                    name: "wire-polygon-\(index + 1)",
+                    boundary: boundary,
+                    shape: .polygon,
+                    polygonVertices: verts
+                )
+            )
+        }
+        for (index, circle) in payload.circles.enumerated() {
+            let boundary: MissionGeofenceBoundaryKind =
+                circle.fenceType.lowercased().contains("exclusion") ? .exclusion : .inclusion
+            out.append(
+                MissionGeofence(
+                    name: "wire-circle-\(index + 1)",
+                    boundary: boundary,
+                    shape: .circle,
+                    circleCenter: RouteCoordinate(lat: circle.latitudeDeg, lon: circle.longitudeDeg),
+                    circleRadiusMeters: max(1, circle.radiusMeters)
+                )
+            )
+        }
+        return out
+    }
+
     /// Chooses the lat/lon point used for ``fencesFilteredForPX4GeofenceUpload``.
     ///
     /// PX4 validates **inclusion** fences against the autopilot’s **current home** (e.g. SIH / spawn),

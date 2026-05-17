@@ -821,7 +821,9 @@ final class FleetRecipeRunner: ObservableObject {
             switch value {
             case .reference(let name):
                 guard let supplied = runParameters.value(named: name) else {
-                    return .unresolvable("Step parameter '\(key)' references missing recipe parameter '\(name)'.")
+                    // Optional recipe parameters (e.g. move+park `geofencePolygonsJSON`) may be
+                    // omitted by the caller — skip the step key so the command layer treats it as absent.
+                    continue
                 }
                 if case .reference = supplied {
                     return .unresolvable("Step parameter '\(key)' references unresolved recipe parameter '\(name)'.")

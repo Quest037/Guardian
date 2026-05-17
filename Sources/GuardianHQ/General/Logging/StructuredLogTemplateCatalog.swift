@@ -418,8 +418,8 @@ enum StructuredLogTemplateCatalog: Sendable {
         )
         put(
             MissionRunLogTemplateKey.squadFollowConvoyAssemblyStarted,
-            "Convoy assembly started for {{squad}} ({{wingmanCount}} wingman); primary held until formation is ready.",
-            mcr: "Convoy assembly · {{squad}} · {{wingmanCount}} wingman"
+            "Squad launch leg started for {{squad}} ({{wingmanCount}} wingman); GR approach to first waypoint after formation when wingmen are present.",
+            mcr: "Launch leg · {{squad}} · {{wingmanCount}} wingman"
         )
         put(
             MissionRunLogTemplateKey.squadFollowConvoyRebuildStarted,
@@ -460,6 +460,26 @@ enum StructuredLogTemplateCatalog: Sendable {
             MissionRunLogTemplateKey.squadFollowOffboardStreamLost,
             "Wingman {{slot}} (@{{slotID}}) OFFBOARD/GUIDED setpoint stream ended unexpectedly for {{squad}}; reconnecting.",
             mcr: "Convoy stream lost · {{squad}} · {{slot}}"
+        )
+        put(
+            MissionRunLogTemplateKey.squadFollowGuardianRouterApproachPlanned,
+            "Guardian Router planned launch→first waypoint for {{squad}} ({{waypointCount}} points, detour={{usedDetour}}); OFFBOARD until arrival, then AUTO.",
+            mcr: "GR launch leg · {{squad}} · {{waypointCount}} pts"
+        )
+        put(
+            MissionRunLogTemplateKey.squadFollowGuardianRouterApproachComplete,
+            "Guardian Router launch approach complete for {{squad}}; primary AUTO mission start.",
+            mcr: "GR approach done · {{squad}}"
+        )
+        put(
+            MissionRunLogTemplateKey.squadFollowPreMissionAssemblyStarted,
+            "Quick convoy re-form at first waypoint for {{squad}} (≤{{timeoutSeconds}}s) before primary AUTO.",
+            mcr: "Pre-mission form · {{squad}}"
+        )
+        put(
+            MissionRunLogTemplateKey.squadFollowPreMissionAssemblyReady,
+            "Convoy re-formed at first waypoint for {{squad}} (timedOut={{timedOut}}); starting primary AUTO.",
+            mcr: "Pre-mission ready · {{squad}}"
         )
 
         put(

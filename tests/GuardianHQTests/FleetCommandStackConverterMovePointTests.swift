@@ -8,7 +8,7 @@ final class FleetCommandStackConverterMovePointTests: XCTestCase {
     private func gotoYaw(from translation: FleetCommandStackTranslation) -> Double? {
         guard case let .vehicleCommands(cmds) = translation,
               let first = cmds.first,
-              case let .gotoCoordinate(_, _, yaw) = first
+              case let .gotoCoordinate(_, _, yaw, routeFences) = first
         else { return nil }
         return yaw
     }
@@ -111,5 +111,41 @@ final class FleetCommandStackConverterMovePointTests: XCTestCase {
             return
         }
         XCTAssertEqual(yaw, 88, accuracy: 0.001)
+    }
+
+    func test_explicit_movePoint_decodesGeofencePolygonsJSONForRouting() throws {
+        let exclusion = MissionGeofence(
+            name: "keep-out",
+            boundary: .exclusion,
+            shape: .polygon,
+            polygonVertices: [
+                RouteCoordinate(lat: 37.0, lon: -122.0),
+                RouteCoordinate(lat: 37.001, lon: -122.0),
+                RouteCoordinate(lat: 37.001, lon: -121.999),
+            ]
+        )
+        let json = try MissionGeofenceMavsdkGeofenceUtilities.encodeGeofencePolygonsJSON(forGeofences: [exclusion])
+        let ctx = FleetCommandStackConverterContext(
+            vehicleID: "v1",
+            vehicleType: .uavCopter,
+            hubTelemetry: nil
+        )
+        let params = FleetCommandParameters(values: [
+            "pointKind": .string("explicit"),
+            "latitudeDeg": .double(37.002),
+            "longitudeDeg": .double(-122.0),
+            "relativeAltitudeM": .double(2),
+            "geofencePolygonsJSON": .string(json),
+        ])
+        let t = FleetCommandStackConverterShared.translateMovePoint(parameters: params, context: ctx)
+        guard case let .vehicleCommands(cmds) = t,
+              let first = cmds.first,
+              case let .gotoCoordinate(_, _, _, routeFences) = first
+        else {
+            XCTFail("expected gotoCoordinate with route fences")
+            return
+        }
+        XCTAssertEqual(routeFences.count, 1)
+        XCTAssertEqual(routeFences[0].boundary, .exclusion)
     }
 }

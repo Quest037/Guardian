@@ -9,6 +9,8 @@ struct MissionRunStartPreflightOverlay: View {
     let controlStore: MissionControlStore
     let contentSpring: Animation
     let resolveTelemetryVehicleID: (MissionRunAssignment) -> String?
+    /// MCS staging-map drag poses (merged with any pending launch overrides before geofence gate + arm probes).
+    let launchCoordinateOverrides: [UUID: RouteCoordinate]
     let onSuccess: () -> Void
     let onAbandonWithoutStart: () -> Void
     let onDismiss: () -> Void
@@ -26,6 +28,8 @@ struct MissionRunStartPreflightOverlay: View {
     @State private var vehicleIDsArmedDuringProbe: [String] = []
     /// Short delay before roster probes start: show a blocking spinner so the overlay never feels idle.
     @State private var preflightGateDelayActive = true
+    /// When true, arm probes are skipped until every slot is outside exclusion geofences.
+    @State private var startRunGeofenceBlocked = false
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
@@ -69,6 +73,13 @@ struct MissionRunStartPreflightOverlay: View {
     }
 
     private var footerSummary: (icon: String, title: String, tint: Color)? {
+        if startRunGeofenceBlocked {
+            return (
+                "xmark.octagon.fill",
+                "Start run blocked — move vehicles out of exclusion geofences, then retry.",
+                GuardianSemanticColors.dangerStroke
+            )
+        }
         if initialSweepRunning || !activeRetryAssignmentIDs.isEmpty || !bulkRetryFailedCoveringAssignmentIDs.isEmpty {
             return ("ellipsis.circle", "Running arm checks on roster vehicles", GuardianSemanticColors.infoForeground)
         }
@@ -442,8 +453,52 @@ struct MissionRunStartPreflightOverlay: View {
         rowByAssignmentID = next
     }
 
+    /// Returns `true` when start run must not proceed (violations seeded on affected slots).
+    @MainActor
+    private func applyStartRunExclusionGeofenceGate() -> Bool {
+        guard let mission = effectiveMission else {
+            startRunGeofenceBlocked = false
+            return false
+        }
+        let violations = MissionControlStartRunGeofenceValidationUtilities.exclusionViolations(
+            run: run,
+            mission: mission,
+            fleetLink: fleetLink,
+            launchCoordinateOverrides: launchCoordinateOverrides,
+            resolveVehicleID: resolveTelemetryVehicleID
+        )
+        guard !violations.isEmpty else {
+            startRunGeofenceBlocked = false
+            return false
+        }
+        startRunGeofenceBlocked = true
+        let violationIDs = Set(violations.map(\.assignmentID))
+        var next = rowByAssignmentID
+        for violation in violations {
+            let identity = MissionRunPreflightSlotIdentity.rosterAssignment(violation.assignmentID)
+            next[violation.assignmentID] = MissionRunPreflightSlotRow(
+                identity: identity,
+                slotName: violation.slotDisplayName,
+                phase: .failed,
+                detail: MissionControlStartRunGeofenceValidationUtilities.failureDetail(for: violation),
+                remediationAdvice: MissionControlStartRunGeofenceValidationUtilities.startRunInsideExclusionRemediation
+            )
+        }
+        for target in flattenedTargets where !violationIDs.contains(target.assignment.id) {
+            next[target.assignment.id] = MissionRunPreflightSlotRow(
+                identity: target.identity,
+                slotName: target.displayTitle,
+                phase: .pending,
+                detail: "Waiting — resolve exclusion conflicts on other slots first."
+            )
+        }
+        rowByAssignmentID = next
+        return true
+    }
+
     @MainActor
     private func runInitialSweep() async {
+        if applyStartRunExclusionGeofenceGate() { return }
         initialSweepRunning = true
         defer { initialSweepRunning = false }
 
@@ -463,6 +518,7 @@ struct MissionRunStartPreflightOverlay: View {
     @MainActor
     private func probeSingleAssignment(assignmentId: UUID) async {
         guard let assignment = run.assignments.first(where: { $0.id == assignmentId }) else { return }
+        if applyStartRunExclusionGeofenceGate() { return }
         activeRetryAssignmentIDs.insert(assignmentId)
         defer { activeRetryAssignmentIDs.remove(assignmentId) }
         let identity = MissionRunPreflightSlotIdentity.rosterAssignment(assignmentId)
@@ -477,6 +533,7 @@ struct MissionRunStartPreflightOverlay: View {
 
     @MainActor
     private func retryAllFailedAssignments() async {
+        if applyStartRunExclusionGeofenceGate() { return }
         let failedIds = flattenedTargets.compactMap { target -> UUID? in
             guard rowByAssignmentID[target.assignment.id]?.phase == .failed else { return nil }
             return target.assignment.id

@@ -160,6 +160,8 @@ struct OSMMapView: NSViewRepresentable {
     var geofenceLeafletChrome: GuardianGeofenceLeafletChrome
     /// When true, geofence polygons/circles are interactive and post ``geofenceClick`` (mission Geofences tab).
     var geofenceMapLayerPointerSelectsFence: Bool = false
+    /// Dashed debug polylines (GR launch leg, etc.) when app debug mode is on.
+    var debugOverlayPolylines: [[RouteCoordinate]] = []
     var contextMenuPolicy: GuardianMapContextMenuPolicy
     var onMapClick: (Double, Double) -> Void
     var onVehicleMarkerMoved: (String, Double, Double) -> Void
@@ -312,7 +314,8 @@ struct OSMMapView: NSViewRepresentable {
             mcsReservePoolHomePlacementArmed: mcsReservePoolHomePlacementArmed,
             geofenceOverlays: geofenceOverlays,
             geofenceLeafletChrome: geofenceLeafletChrome,
-            geofenceMapLayerPointerSelectsFence: geofenceMapLayerPointerSelectsFence
+            geofenceMapLayerPointerSelectsFence: geofenceMapLayerPointerSelectsFence,
+            debugOverlayPolylines: debugOverlayPolylines
         )
         guard payload != c.lastBridgePayload else {
             GuardianLeafletMissionBridgeProfiler.recordPayloadUnchangedSkip()
@@ -1640,8 +1643,9 @@ private extension OSMMapView {
       map.panTo([lat, lon], { animate: true, duration: 0.25 });
     }
 
-    function setMissionData(home, allTasksCoords, taskPathIds, selectedWaypoints, selectedWaypointIndex, missionVehicleMarkers, mapStyle, recenterNonce, headingPreview, cameraPreview, followVehicleMarkerID, menuPolicy, preserveView, isEditingTask, missionPointPlacementArmed, mcsReservePoolHomePlacementArmed, missionPointMarkersArg, geofenceOverlaysArg, geofenceChrome, geofencePointerSelects) {
+    function setMissionData(home, allTasksCoords, taskPathIds, selectedWaypoints, selectedWaypointIndex, missionVehicleMarkers, mapStyle, recenterNonce, headingPreview, cameraPreview, followVehicleMarkerID, menuPolicy, preserveView, isEditingTask, missionPointPlacementArmed, mcsReservePoolHomePlacementArmed, missionPointMarkersArg, geofenceOverlaysArg, geofenceChrome, geofencePointerSelects, debugOverlayPolylinesArg) {
       const geometryTasks = (allTasksCoords || []).filter(path => path && path.length > 0);
+      const debugPaths = (debugOverlayPolylinesArg || []).filter(path => path && path.length >= 2);
       const fullMissionSig = JSON.stringify({
         home: home,
         geometryTasks: geometryTasks,
@@ -1662,7 +1666,8 @@ private extension OSMMapView {
         missionPoints: missionPointMarkersArg || [],
         geofences: geofenceOverlaysArg || [],
         geofenceChrome: geofenceChrome || null,
-        geofencePointerSelects: !!geofencePointerSelects
+        geofencePointerSelects: !!geofencePointerSelects,
+        debugPaths: debugPaths
       });
       if (fullMissionSig === state.lastFullMissionSig) {
         return;
@@ -1685,7 +1690,8 @@ private extension OSMMapView {
         mcsReservePoolHomePlacementArmed: !!mcsReservePoolHomePlacementArmed,
         geofences: JSON.stringify(geofenceOverlaysArg || []),
         geofenceChrome: JSON.stringify(geofenceChrome || {}),
-        geofencePointerSelects: !!geofencePointerSelects
+        geofencePointerSelects: !!geofencePointerSelects,
+        debugPaths: debugPaths
       });
       const canPatchMarkersOnly = state.lastStructureSig !== null && structureSig === state.lastStructureSig;
 
@@ -1839,6 +1845,21 @@ private extension OSMMapView {
               wireTaskPathPointer(line);
             }
           }
+        });
+      }
+
+      if (debugPaths.length > 0) {
+        debugPaths.forEach((pathCoords) => {
+          const latlngs = pathCoords.map(p => [p.lat, p.lon]);
+          const debugLine = L.polyline(latlngs, {
+            color: '#000000',
+            weight: 2,
+            opacity: 0.92,
+            dashArray: '6 8',
+            interactive: false
+          }).addTo(map);
+          pathLines.push(debugLine);
+          for (const p of latlngs) points.push(p);
         });
       }
 

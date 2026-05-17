@@ -53,3 +53,9 @@ Deferred product and engineering ideas for a future release. Entries are appende
 - **Idea:** Add a future **between-cycles** action choice **“Swap In Replacement”** (reserve / hull swap during the gap between task cycles), alongside the locked v1 set (**Return to Launch**, **Loiter**, **Park**) documented in **README_FULL.md** (Fleet Layer 1 — **MRE policy & between-cycles dispatch**).
 - **Context:** `MissionTaskBetweenCyclesAction`, `MissionRunFleetDispatch.betweenCyclesTaskDispatch`, `MissionRunExecutionSubsystem` between-cycle planning; floating reserve pool and roster swap flows (`MissionRunEnvironment`, reserve swap recipes).
 - **Notes:** Implement when product wants the extra action; v1 between-cycles UX, dispatch, failure fallbacks, and MissionStore persistence are shipped (see README bullets above).
+
+## 2026-05-17 — Squad wingman follow on long AUTO mission legs
+
+- **Idea:** Wingmen often stop tracking the primary convoy slot when the primary stays on **AUTO mission** with a steady heading for a long stretch; a turn wakes follow again, but wingmen may already be too far to catch up. **AUTO** does not let the primary slow for wingmen to close (acceptable for v1 — document operator expectation; optional future: convoy speed cap, follow re-engage pulse, or OFFBOARD catch-up leg before resuming mission).
+- **Context:** `MissionRunSquadFollowSubsystem`, convoy formation setpoints vs primary `AUTO_MISSION`, `SquadFollow&Formation.md`.
+- **Notes:** Distinct from GR wind-down / end-policy routing work.

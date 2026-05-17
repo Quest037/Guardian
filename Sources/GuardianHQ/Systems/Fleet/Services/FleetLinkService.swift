@@ -164,6 +164,14 @@ final class FleetLinkService: ObservableObject {
     @Published private(set) var logLines: [String] = []
     @Published private(set) var logLinesByVehicleID: [String: [String]] = [:]
 
+    /// MC-R operator debug overlays and verbose diagnostics (Settings bar toggle).
+    @Published private(set) var isDebugEnabled = false
+
+    func setDebugEnabled(_ enabled: Bool) {
+        guard isDebugEnabled != enabled else { return }
+        isDebugEnabled = enabled
+    }
+
     @Published private(set) var bridgePhase: TelemetryBridgePhase = .awaitingVehicle
     @Published private(set) var telemetry: FleetTelemetrySnapshot?
     @Published private(set) var hubTelemetry: FleetHubVehicleTelemetry?

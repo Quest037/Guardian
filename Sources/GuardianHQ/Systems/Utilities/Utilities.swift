@@ -4,6 +4,7 @@ import Mavsdk
 @MainActor
 final class GlobalUtilities {
     let mission = MissionUtilities()
+    let movements = MovementsUtilities()
     let fleet = FleetUtilities()
     let liveLeafletMap = LiveLeafletMapUtilitiesNamespace()
 }
@@ -13,6 +14,7 @@ enum Utilities {
     private static let global = GlobalUtilities()
 
     static var mission: MissionUtilities { global.mission }
+    static var movements: MovementsUtilities { global.movements }
     static var fleet: FleetUtilities { global.fleet }
     static var liveLeafletMap: LiveLeafletMapUtilitiesNamespace { global.liveLeafletMap }
 }
@@ -51,14 +53,113 @@ struct LiveLeafletMapUtilitiesNamespace {
 }
 
 @MainActor
+final class MovementsUtilities {
+    let sequenceStore = GuardianMovementSequenceStore()
+
+    func planSlotApproach(
+        _ context: GuardianMovementSlotApproachContext,
+        vehicleID: String? = nil
+    ) -> (plan: GuardianMovementPursuitPlan, declined: [GuardianMovementID]) {
+        GuardianMovementPlanner.planSlotApproach(
+            context,
+            vehicleID: vehicleID,
+            sequenceStore: sequenceStore
+        )
+    }
+
+    func formationSlotPursuit(
+        slot: RouteCoordinate,
+        targetHeadingDeg: Double,
+        vehicleType: FleetVehicleType,
+        hub: FleetHubVehicleTelemetry?,
+        primarySpeedMS: Double?,
+        wingmanVehicleID: String? = nil,
+        directSlotBeyondM: Double = MissionSquadConvoyFollowControlPolicy.directSlotBeyondM
+    ) -> GuardianFormationSlotPursuitPlanning.Result? {
+        GuardianFormationSlotPursuitPlanning.plan(
+            slot: slot,
+            targetHeadingDeg: targetHeadingDeg,
+            vehicleType: vehicleType,
+            hub: hub,
+            primarySpeedMS: primarySpeedMS,
+            wingmanVehicleID: wingmanVehicleID,
+            sequenceStore: sequenceStore,
+            directSlotBeyondM: directSlotBeyondM
+        )
+    }
+
+    func supportedMovements(for vehicleType: FleetVehicleType) -> [GuardianMovementID] {
+        GuardianMovementCapabilities.supportedMovements(vehicleType: vehicleType)
+    }
+}
+
+@MainActor
 final class MissionUtilities {
     let path = MissionPathUtilities()
+    let squadFormation = MissionSquadFormationUtilities()
     let templateGeofences = MissionTemplateGeofenceUtilities()
     let geofenceGeometry = MissionGeofenceGeometryUtilities()
 
     /// MAVSDK geofence wire JSON for fleet upload (``FleetVehicleCommandGeofenceUploadPayload``: polygons + circles).
     func geofencePolygonsJSON(forGeofences fences: [MissionGeofence]) throws -> String {
         try MissionGeofenceMavsdkGeofenceUtilities.encodeGeofencePolygonsJSON(forGeofences: fences)
+    }
+}
+
+@MainActor
+final class MissionSquadFormationUtilities {
+    func desiredPadSlot(
+        formation: MissionSquadFormationKind,
+        primaryLatitudeDeg: Double,
+        primaryLongitudeDeg: Double,
+        primaryHeadingDeg: Double,
+        wingmanOrdinal: Int,
+        spacing: MissionSquadConvoySpacing
+    ) -> RouteCoordinate {
+        MissionSquadFormationGeometry.desiredPadSlotCoordinate(
+            formation: formation,
+            primaryLatitudeDeg: primaryLatitudeDeg,
+            primaryLongitudeDeg: primaryLongitudeDeg,
+            primaryHeadingDeg: primaryHeadingDeg,
+            wingmanOrdinal: wingmanOrdinal,
+            spacing: spacing
+        )
+    }
+
+    func bodyOffset(
+        formation: MissionSquadFormationKind,
+        wingmanOrdinal: Int,
+        spacing: MissionSquadConvoySpacing
+    ) -> MissionSquadFormationGeometry.BodyOffsetMeters {
+        MissionSquadFormationGeometry.bodyOffsetMeters(
+            formation: formation,
+            wingmanOrdinal: wingmanOrdinal,
+            spacing: spacing
+        )
+    }
+
+    func pathBehindMeters(
+        formation: MissionSquadFormationKind,
+        wingmanOrdinal: Int,
+        spacing: MissionSquadConvoySpacing
+    ) -> Double {
+        MissionSquadFormationGeometry.pathBehindMeters(
+            formation: formation,
+            wingmanOrdinal: wingmanOrdinal,
+            spacing: spacing
+        )
+    }
+
+    func resolvedFormationHeadingDeg(
+        primaryHeadingDeg: Double,
+        source: MissionSquadFormationHeadingPolicy.Source = .matchPrimary,
+        fallbackHeadingDeg: Double? = nil
+    ) -> Double {
+        MissionSquadFormationHeadingPolicy.resolvedTargetHeadingDeg(
+            source: source,
+            primaryHeadingDeg: primaryHeadingDeg,
+            fallbackHeadingDeg: fallbackHeadingDeg
+        )
     }
 }
 

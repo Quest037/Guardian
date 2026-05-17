@@ -26,4 +26,14 @@ enum MapVehicleMarkerIdentity {
     }
 
     static let simSpawnDraft = "sim-spawn-default"
+
+    /// Formations playground — live / committed slot target (streams + telemetry).
+    static func formationPlaygroundSlotTarget(ordinal: Int) -> String {
+        "formations-slot-target-\(ordinal)"
+    }
+
+    /// Formations playground — preview clone while **Adjust slots on map** is on (map edit chrome only).
+    static func formationPlaygroundSlotClone(ordinal: Int) -> String {
+        "formations-slot-clone-\(ordinal)"
+    }
 }

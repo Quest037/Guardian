@@ -37,6 +37,50 @@ struct MissionRunTaskPolicyOverridesSidebarView: View {
                     .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
 
+                if taskHasSquadWingmen {
+                    Text("Squad formation")
+                        .font(GuardianTypography.font(.disclosureRowTitle))
+                        .foregroundStyle(theme.textPrimary)
+                    Text("Wingman assembly and follow offsets for every primary squad on this task.")
+                        .font(GuardianTypography.font(.denseFootnoteRegular))
+                        .foregroundStyle(theme.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Spacer(minLength: 0)
+                        Picker("Squad formation", selection: squadFormationBinding) {
+                            ForEach(MissionSquadFormationKind.allCases) { kind in
+                                Text(kind.displayTitle).tag(kind)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                        .accessibilityLabel("Squad formation")
+                    }
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+
+                    Text("Shape")
+                        .font(GuardianTypography.font(.disclosureRowTitle))
+                        .foregroundStyle(theme.textPrimary)
+                    Text("How tightly wingmen pack for the chosen formation.")
+                        .font(GuardianTypography.font(.denseFootnoteRegular))
+                        .foregroundStyle(theme.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Spacer(minLength: 0)
+                        Picker("Shape", selection: squadFormationShapeBinding) {
+                            ForEach(MissionSquadFormationShape.allCases) { shape in
+                                Text(shape.displayTitle).tag(shape)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                        .accessibilityLabel("Formation shape")
+                    }
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+
                 if showsBetweenCyclesControl {
                     Text("Between cycles")
                         .font(GuardianTypography.font(.disclosureRowTitle))
@@ -166,6 +210,31 @@ struct MissionRunTaskPolicyOverridesSidebarView: View {
             .first(where: { $0.id == run.missionId })?
             .routeMacro.tasks.first(where: { $0.id == taskId })
     }
+
+    private var taskHasSquadWingmen: Bool {
+        guard let mission = missionSnapshot, let task = resolvedTask() else { return false }
+        return MissionControlSquadFollowBindingUtilities.taskHasWingmen(mission: mission, task: task)
+    }
+
+    private var squadFormationBinding: Binding<MissionSquadFormationKind> {
+        Binding(
+            get: { resolvedTask()?.squadFormation ?? .convoy },
+            set: { newValue in
+                _ = run.updateTaskSquadFormation(taskID: taskId, newValue, credential: credential)
+                onChange()
+            }
+        )
+    }
+
+    private var squadFormationShapeBinding: Binding<MissionSquadFormationShape> {
+        Binding(
+            get: { resolvedTask()?.squadFormationShape ?? .normal },
+            set: { newValue in
+                _ = run.updateTaskSquadFormationShape(taskID: taskId, newValue, credential: credential)
+                onChange()
+            }
+        )
+    }
 }
 
 // MARK: - Slot settings sidebar (MC-S roster card cog)
@@ -198,6 +267,52 @@ struct MissionRunAssignmentPolicyOverridesSidebarView: View {
                     .font(GuardianTypography.font(.denseFootnoteRegular))
                     .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                if showsPrimarySquadFormationOverride {
+                    Text("Squad formation")
+                        .font(GuardianTypography.font(.disclosureRowTitle))
+                        .foregroundStyle(theme.textPrimary)
+                    Text("Primary slot only. Inherit uses the task formation (\(inheritedSquadFormationLabel)).")
+                        .font(GuardianTypography.font(.denseFootnoteRegular))
+                        .foregroundStyle(theme.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Spacer(minLength: 0)
+                        Picker("Squad formation", selection: primarySquadFormationPickerBinding) {
+                            Text("Inherit (\(inheritedSquadFormationLabel))").tag(PrimarySquadFormationPickerChoice.inherit)
+                            ForEach(MissionSquadFormationKind.allCases) { kind in
+                                Text(kind.displayTitle).tag(PrimarySquadFormationPickerChoice.explicit(kind))
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                        .accessibilityLabel("Squad formation override")
+                    }
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+
+                    Text("Shape")
+                        .font(GuardianTypography.font(.disclosureRowTitle))
+                        .foregroundStyle(theme.textPrimary)
+                    Text("Primary slot only. Inherit uses the task shape (\(inheritedSquadFormationShapeLabel)).")
+                        .font(GuardianTypography.font(.denseFootnoteRegular))
+                        .foregroundStyle(theme.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Spacer(minLength: 0)
+                        Picker("Shape", selection: primarySquadFormationShapePickerBinding) {
+                            Text("Inherit (\(inheritedSquadFormationShapeLabel))").tag(PrimarySquadFormationShapePickerChoice.inherit)
+                            ForEach(MissionSquadFormationShape.allCases) { shape in
+                                Text(shape.displayTitle).tag(PrimarySquadFormationShapePickerChoice.explicit(shape))
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                        .accessibilityLabel("Formation shape override")
+                    }
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                }
 
                 Text("Abort preference chain")
                     .font(GuardianTypography.font(.disclosureRowTitle))
@@ -290,6 +405,91 @@ struct MissionRunAssignmentPolicyOverridesSidebarView: View {
             },
             set: { newValue in
                 _ = run.updateAssignmentReserveSwapPreferenceChain(assignmentID: assignmentId, newValue, credential: credential)
+                onChange()
+            }
+        )
+    }
+
+    private var showsPrimarySquadFormationOverride: Bool {
+        guard let mission = missionSnapshot,
+              let assignment = run.assignments.first(where: { $0.id == assignmentId }),
+              let device = mission.rosterDevices.first(where: { $0.id == assignment.rosterDeviceId }),
+              device.slot == .primary,
+              let taskID = MissionRunPolicyResolution.resolvedTaskId(for: assignment, mission: mission),
+              let task = mission.routeMacro.tasks.first(where: { $0.id == taskID })
+        else { return false }
+        return MissionControlSquadFollowBindingUtilities.taskHasWingmen(mission: mission, task: task)
+    }
+
+    private var inheritedSquadFormationLabel: String {
+        guard let mission = missionSnapshot,
+              let assignment = run.assignments.first(where: { $0.id == assignmentId })
+        else { return MissionSquadFormationKind.convoy.displayTitle }
+        return MissionRunPolicyResolution.inheritedSquadFormationForPrimarySlot(assignment: assignment, mission: mission)
+            .displayTitle
+    }
+
+    private enum PrimarySquadFormationPickerChoice: Hashable {
+        case inherit
+        case explicit(MissionSquadFormationKind)
+    }
+
+    private var primarySquadFormationPickerBinding: Binding<PrimarySquadFormationPickerChoice> {
+        Binding(
+            get: {
+                if let override = run.assignments.first(where: { $0.id == assignmentId })?
+                    .policies.squadFormationOverride {
+                    return .explicit(override)
+                }
+                return .inherit
+            },
+            set: { choice in
+                let formation: MissionSquadFormationKind? = switch choice {
+                case .inherit: nil
+                case .explicit(let kind): kind
+                }
+                _ = run.updateAssignmentSquadFormationOverride(
+                    assignmentID: assignmentId,
+                    formation,
+                    credential: credential
+                )
+                onChange()
+            }
+        )
+    }
+
+    private var inheritedSquadFormationShapeLabel: String {
+        guard let mission = missionSnapshot,
+              let assignment = run.assignments.first(where: { $0.id == assignmentId })
+        else { return MissionSquadFormationShape.normal.displayTitle }
+        return MissionRunPolicyResolution.inheritedSquadFormationShapeForPrimarySlot(assignment: assignment, mission: mission)
+            .displayTitle
+    }
+
+    private enum PrimarySquadFormationShapePickerChoice: Hashable {
+        case inherit
+        case explicit(MissionSquadFormationShape)
+    }
+
+    private var primarySquadFormationShapePickerBinding: Binding<PrimarySquadFormationShapePickerChoice> {
+        Binding(
+            get: {
+                if let override = run.assignments.first(where: { $0.id == assignmentId })?
+                    .policies.squadFormationShapeOverride {
+                    return .explicit(override)
+                }
+                return .inherit
+            },
+            set: { choice in
+                let shape: MissionSquadFormationShape? = switch choice {
+                case .inherit: nil
+                case .explicit(let value): value
+                }
+                _ = run.updateAssignmentSquadFormationShapeOverride(
+                    assignmentID: assignmentId,
+                    shape,
+                    credential: credential
+                )
                 onChange()
             }
         )

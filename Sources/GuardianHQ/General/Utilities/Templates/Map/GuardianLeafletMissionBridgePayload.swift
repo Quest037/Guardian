@@ -26,6 +26,7 @@ struct GuardianLeafletMissionBridgePayload: Equatable {
     var geofenceOverlays: [GuardianGeofenceMapOverlay]
     var geofenceLeafletChrome: GuardianGeofenceLeafletChrome
     var geofenceMapLayerPointerSelectsFence: Bool
+    var formationSlotGroupMapEdit: GuardianFormationSlotGroupMapEdit? = nil
     var debugOverlayPolylines: [[RouteCoordinate]] = []
 }
 

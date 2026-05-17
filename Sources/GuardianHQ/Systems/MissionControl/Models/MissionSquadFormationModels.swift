@@ -1,8 +1,59 @@
 import Foundation
 
-/// v1 formation shape for squad wingmen (see `SquadFollow&Formation.md`). Additional shapes are v2.
-enum MissionSquadFormationKind: String, Codable, CaseIterable, Sendable, Equatable {
+/// v1 formation shape for squad wingmen (see `SquadFollow&Formation.md`). Geometry: ``MissionSquadFormationGeometry``.
+enum MissionSquadFormationKind: String, Codable, CaseIterable, Sendable, Equatable, Identifiable {
+    /// Single-file astern line (no alternating lateral lanes).
     case convoy
+    /// Alternating left/right lanes astern of the primary (zig-zag).
+    case staggeredConvoy
+    case chevron
+    case arrowhead
+
+    var id: String { rawValue }
+
+    var displayTitle: String {
+        switch self {
+        case .convoy: return "Convoy"
+        case .staggeredConvoy: return "Staggered convoy"
+        case .chevron: return "Chevron"
+        case .arrowhead: return "Arrowhead"
+        }
+    }
+}
+
+/// How tightly wingmen pack for any formation kind (convoy / chevron / arrowhead).
+enum MissionSquadFormationShape: String, Codable, CaseIterable, Sendable, Equatable, Identifiable {
+    case tight
+    case normal
+    case loose
+
+    var id: String { rawValue }
+
+    var displayTitle: String {
+        switch self {
+        case .tight: return "Tight"
+        case .normal: return "Normal"
+        case .loose: return "Loose"
+        }
+    }
+
+    /// Scales along-track row / ordinal spacing.
+    var alongTrackScale: Double {
+        switch self {
+        case .tight: return 0.72
+        case .normal: return 1.0
+        case .loose: return 1.38
+        }
+    }
+
+    /// Scales lateral lane / row width.
+    var lateralScale: Double {
+        switch self {
+        case .tight: return 0.68
+        case .normal: return 1.0
+        case .loose: return 1.42
+        }
+    }
 }
 
 /// Locked convoy spacing defaults until mission authoring exposes per-task fields.
@@ -20,7 +71,7 @@ struct MissionSquadConvoySpacing: Equatable, Sendable {
 }
 
 enum MissionSquadConvoySpacingPolicy {
-    /// Spacing for heading-based convoy slots — driven by **primary vehicle class** (not task pattern).
+    /// Vehicle-class baseline spacing before formation shape and kind adjustments.
     static func lockedSpacing(
         taskPattern: MissionTaskPattern,
         primaryGranularClass: FleetVehicleType?
@@ -36,15 +87,38 @@ enum MissionSquadConvoySpacingPolicy {
         return .genericDefault
     }
 
-    static func formationKind(taskPattern: MissionTaskPattern) -> MissionSquadFormationKind {
-        taskPattern == .convoy ? .convoy : .convoy
+    /// Effective spacing for wingman slots (class baseline × operator **Shape** × formation kind).
+    static func resolvedSpacing(
+        taskPattern: MissionTaskPattern,
+        primaryGranularClass: FleetVehicleType?,
+        shape: MissionSquadFormationShape,
+        formation: MissionSquadFormationKind
+    ) -> MissionSquadConvoySpacing {
+        let base = lockedSpacing(taskPattern: taskPattern, primaryGranularClass: primaryGranularClass)
+        let alongKindScale: Double = switch formation {
+        case .convoy, .staggeredConvoy: 1.0
+        case .chevron: 0.92
+        case .arrowhead: 0.78
+        }
+        let lateralKindScale: Double = switch formation {
+        case .convoy, .staggeredConvoy: 1.0
+        case .chevron: 0.92
+        case .arrowhead: 0.62
+        }
+        return MissionSquadConvoySpacing(
+            alongTrackMetersPerOrdinal: base.alongTrackMetersPerOrdinal * shape.alongTrackScale * alongKindScale,
+            lateralLaneMeters: base.lateralLaneMeters * shape.lateralScale * lateralKindScale
+        )
     }
+
 }
 
 /// Locked v1 wingman OFFBOARD pursuit / convoy assembly (see `SquadFollow&Formation.md` §C).
 enum MissionSquadConvoyFollowControlPolicy {
     /// Wingman within this distance of its heading-based slot counts as in formation (m).
     static let convoyAssemblyArrivalM: Double = 1.5
+    /// Wingman |yaw − target| must be within this to count as heading-aligned (degrees).
+    static let convoyAssemblyHeadingToleranceDeg: Double = 5.0
     /// Primary ground speed at or below this counts as stationary for wingman in-slot hold (m/s).
     static let primaryConvoyStationaryMaxGroundSpeedMS: Double = 0.2
     /// Abort assembly wait and release the primary anyway (s).
@@ -84,6 +158,10 @@ enum MissionSquadConvoyFollowControlPolicy {
     /// Yaw rate toward convoy heading when |lateral error| exceeds this (deg/s per m, capped).
     static let pursuitYawRateGainDegSPerM: Double = 12.0
     static let pursuitYawRateMaxDegS: Double = 35.0
+    /// Start applying yaw rate when |heading error| exceeds this (degrees).
+    static let pursuitHeadingAlignStartDeg: Double = 4.0
+    /// Yaw rate gain from heading error alone (deg/s per degree of error).
+    static let pursuitHeadingAlignGainDegSPerDeg: Double = 0.55
     /// Ahead of slot by more than this (m) — command reverse body speed (ArduPilot / PX4 copter).
     static let pursuitReverseAheadThresholdM: Double = 2.5
     static let pursuitMaxReverseMS: Double = 0.9

@@ -57,6 +57,8 @@ enum MissionRunPolicyEditScopeCategory: String, CaseIterable, Hashable {
     case taskBetweenCycles
     /// Run-only **additional** geofence regions (``MissionRunPolicies/missionGeofenceAugmentation``, per-task map on ``MissionRunEnvironment``, ``MissionRunAssignmentPolicies/geofenceAugmentation``).
     case geofencePolicy
+    /// ``MissionTask/squadFormation`` and primary-slot ``MissionRunAssignmentPolicies/squadFormationOverride``.
+    case squadFormation
 }
 
 /// What a single MRE policy / Rules-of-Engagement edit targets.
@@ -75,6 +77,10 @@ enum MissionRunPolicyEditScope: Equatable, Hashable {
     case missionGeofenceAugmentation
     case taskGeofenceAugmentation(taskID: UUID)
     case assignmentGeofenceAugmentation(assignmentID: UUID)
+    case taskSquadFormation(taskID: UUID)
+    case assignmentSquadFormationOverride(assignmentID: UUID)
+    case taskSquadFormationShape(taskID: UUID)
+    case assignmentSquadFormationShapeOverride(assignmentID: UUID)
 
     var category: MissionRunPolicyEditScopeCategory {
         switch self {
@@ -92,6 +98,9 @@ enum MissionRunPolicyEditScope: Equatable, Hashable {
             return .engagementRules
         case .missionGeofenceAugmentation, .taskGeofenceAugmentation, .assignmentGeofenceAugmentation:
             return .geofencePolicy
+        case .taskSquadFormation, .assignmentSquadFormationOverride,
+             .taskSquadFormationShape, .assignmentSquadFormationShapeOverride:
+            return .squadFormation
         }
     }
 }

@@ -28,6 +28,84 @@ final class MissionControlSquadFollowBindingUtilitiesTests: XCTestCase {
         XCTAssertTrue(MissionControlSquadFollowBindingUtilities.taskHasWingmen(mission: mission, task: task))
     }
 
+    func test_resolvedSquadFormationShape_primarySlotOverrideWins() {
+        let taskID = UUID()
+        let primaryDeviceID = UUID()
+        let wingmanDeviceID = UUID()
+        let primaryAssignmentID = UUID()
+        var task = MissionTask(id: taskID, name: "T", rosterDeviceIds: [primaryDeviceID, wingmanDeviceID])
+        task.squadFormationShape = .normal
+        let mission = Mission(
+            name: "M",
+            description: "",
+            type: .mobile,
+            rosterDevices: [
+                RosterDevice(id: primaryDeviceID, name: "P", role: .none, slot: .primary, vehicleClass: .uavCopter),
+                RosterDevice(
+                    id: wingmanDeviceID,
+                    name: "W",
+                    role: .none,
+                    slot: .wingman,
+                    vehicleClass: .uavCopter,
+                    leaderRosterDeviceId: primaryDeviceID
+                ),
+            ],
+            routeMacro: RouteMacro(tasks: [task])
+        )
+        let assignment = MissionRunAssignment(
+            id: primaryAssignmentID,
+            taskId: taskID,
+            rosterDeviceId: primaryDeviceID,
+            slotName: "P1",
+            policies: MissionRunAssignmentPolicies(squadFormationShapeOverride: .tight)
+        )
+        XCTAssertEqual(
+            MissionRunPolicyResolution.resolvedSquadFormationShape(assignment: assignment, mission: mission),
+            .tight
+        )
+    }
+
+    func test_resolvedSquadFormation_primarySlotOverrideWins() {
+        let taskID = UUID()
+        let primaryDeviceID = UUID()
+        let wingmanDeviceID = UUID()
+        let primaryAssignmentID = UUID()
+        var task = MissionTask(id: taskID, name: "T", rosterDeviceIds: [primaryDeviceID, wingmanDeviceID])
+        task.squadFormation = .chevron
+        let mission = Mission(
+            name: "M",
+            description: "",
+            type: .mobile,
+            rosterDevices: [
+                RosterDevice(id: primaryDeviceID, name: "P", role: .none, slot: .primary, vehicleClass: .uavCopter),
+                RosterDevice(
+                    id: wingmanDeviceID,
+                    name: "W",
+                    role: .none,
+                    slot: .wingman,
+                    vehicleClass: .uavCopter,
+                    leaderRosterDeviceId: primaryDeviceID
+                ),
+            ],
+            routeMacro: RouteMacro(tasks: [task])
+        )
+        let assignment = MissionRunAssignment(
+            id: primaryAssignmentID,
+            taskId: taskID,
+            rosterDeviceId: primaryDeviceID,
+            slotName: "P1",
+            policies: MissionRunAssignmentPolicies(squadFormationOverride: .arrowhead)
+        )
+        XCTAssertEqual(
+            MissionRunPolicyResolution.resolvedSquadFormation(assignment: assignment, mission: mission),
+            .arrowhead
+        )
+        XCTAssertEqual(
+            MissionRunPolicyResolution.inheritedSquadFormationForPrimarySlot(assignment: assignment, mission: mission),
+            .chevron
+        )
+    }
+
     func test_taskHasWingmen_falseWithoutWingmanRows() {
         let primaryID = UUID()
         let task = MissionTask(name: "Solo", enabled: true, rosterDeviceIds: [primaryID])

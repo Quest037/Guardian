@@ -847,21 +847,31 @@ struct MissionRunAssignmentPolicies: Codable, Equatable {
     var reserveSwapPreferenceChain: [MissionRunReserveSwapTactic]?
     /// **Additional** geofences for this slot merged **after** task-level planning fences (``MissionRunGeofencePolicyResolution``).
     var geofenceAugmentation: [MissionGeofence]
+    /// When set on a **primary** slot, overrides the parent task’s ``MissionTask/squadFormation``.
+    var squadFormationOverride: MissionSquadFormationKind?
+    /// When set on a **primary** slot, overrides the parent task’s ``MissionTask/squadFormationShape``.
+    var squadFormationShapeOverride: MissionSquadFormationShape?
 
     init(
         abortPreferenceChain: [MissionRunAbortTactic]? = nil,
         completePreferenceChain: [MissionRunCompleteTactic]? = nil,
         reserveSwapPreferenceChain: [MissionRunReserveSwapTactic]? = nil,
-        geofenceAugmentation: [MissionGeofence] = []
+        geofenceAugmentation: [MissionGeofence] = [],
+        squadFormationOverride: MissionSquadFormationKind? = nil,
+        squadFormationShapeOverride: MissionSquadFormationShape? = nil
     ) {
         self.abortPreferenceChain = abortPreferenceChain
         self.completePreferenceChain = completePreferenceChain
         self.reserveSwapPreferenceChain = reserveSwapPreferenceChain
         self.geofenceAugmentation = geofenceAugmentation
+        self.squadFormationOverride = squadFormationOverride
+        self.squadFormationShapeOverride = squadFormationShapeOverride
     }
 
     enum CodingKeys: String, CodingKey {
         case abortPreferenceChain, completePreferenceChain, reserveSwapPreferenceChain, geofenceAugmentation
+        case squadFormationOverride
+        case squadFormationShapeOverride
     }
 
     init(from decoder: Decoder) throws {
@@ -870,6 +880,8 @@ struct MissionRunAssignmentPolicies: Codable, Equatable {
         completePreferenceChain = try c.decodeIfPresent([MissionRunCompleteTactic].self, forKey: .completePreferenceChain)
         reserveSwapPreferenceChain = try c.decodeIfPresent([MissionRunReserveSwapTactic].self, forKey: .reserveSwapPreferenceChain)
         geofenceAugmentation = try c.decodeIfPresent([MissionGeofence].self, forKey: .geofenceAugmentation) ?? []
+        squadFormationOverride = try c.decodeIfPresent(MissionSquadFormationKind.self, forKey: .squadFormationOverride)
+        squadFormationShapeOverride = try c.decodeIfPresent(MissionSquadFormationShape.self, forKey: .squadFormationShapeOverride)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -880,6 +892,8 @@ struct MissionRunAssignmentPolicies: Codable, Equatable {
         if !geofenceAugmentation.isEmpty {
             try c.encode(geofenceAugmentation, forKey: .geofenceAugmentation)
         }
+        try c.encodeIfPresent(squadFormationOverride, forKey: .squadFormationOverride)
+        try c.encodeIfPresent(squadFormationShapeOverride, forKey: .squadFormationShapeOverride)
     }
 }
 
@@ -975,6 +989,49 @@ enum MissionRunPolicyResolution {
         var copy = assignment
         copy.policies.reserveSwapPreferenceChain = nil
         return resolvedReserveSwapPreferenceChain(assignment: copy, mission: mission)
+    }
+
+    /// Effective squad formation: **primary slot override → task** (defaults to convoy).
+    static func resolvedSquadFormation(assignment: MissionRunAssignment, mission: Mission?) -> MissionSquadFormationKind {
+        if let override = assignment.policies.squadFormationOverride {
+            return override
+        }
+        if let mission,
+           let tid = resolvedTaskId(for: assignment, mission: mission),
+           let task = mission.routeMacro.tasks.first(where: { $0.id == tid }) {
+            return task.squadFormation
+        }
+        return .convoy
+    }
+
+    /// Formation for a primary slot if its assignment override were cleared.
+    static func inheritedSquadFormationForPrimarySlot(assignment: MissionRunAssignment, mission: Mission?) -> MissionSquadFormationKind {
+        var copy = assignment
+        copy.policies.squadFormationOverride = nil
+        return resolvedSquadFormation(assignment: copy, mission: mission)
+    }
+
+    /// Effective formation packing tightness: **primary slot override → task** (defaults to normal).
+    static func resolvedSquadFormationShape(assignment: MissionRunAssignment, mission: Mission?) -> MissionSquadFormationShape {
+        if let override = assignment.policies.squadFormationShapeOverride {
+            return override
+        }
+        if let mission,
+           let tid = resolvedTaskId(for: assignment, mission: mission),
+           let task = mission.routeMacro.tasks.first(where: { $0.id == tid }) {
+            return task.squadFormationShape
+        }
+        return .normal
+    }
+
+    /// Formation shape for a primary slot if its assignment override were cleared.
+    static func inheritedSquadFormationShapeForPrimarySlot(
+        assignment: MissionRunAssignment,
+        mission: Mission?
+    ) -> MissionSquadFormationShape {
+        var copy = assignment
+        copy.policies.squadFormationShapeOverride = nil
+        return resolvedSquadFormationShape(assignment: copy, mission: mission)
     }
 }
 
@@ -1204,7 +1261,9 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         let hasComplete = policies.completePreferenceChain != nil && !(policies.completePreferenceChain?.isEmpty ?? true)
         let hasReserveSwap = policies.reserveSwapPreferenceChain != nil && !(policies.reserveSwapPreferenceChain?.isEmpty ?? true)
         let hasGeofenceAug = !policies.geofenceAugmentation.isEmpty
-        if hasAbort || hasComplete || hasReserveSwap || hasGeofenceAug {
+        let hasFormationOverride = policies.squadFormationOverride != nil
+        let hasFormationShapeOverride = policies.squadFormationShapeOverride != nil
+        if hasAbort || hasComplete || hasReserveSwap || hasGeofenceAug || hasFormationOverride || hasFormationShapeOverride {
             try c.encode(policies, forKey: .policies)
         }
         try c.encodeIfPresent(slotLifecycleLanes, forKey: .slotLifecycleLanes)

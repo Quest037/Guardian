@@ -84,6 +84,7 @@ struct VehiclesView: View {
                         controlStore: missionControlStore,
                         sitl: sitl,
                         vehicleID: ctx.vehicleID,
+                        simSpawnDefaults: generalSettings.simSpawnDefaults,
                         fallback: ctx.fallback,
                         onClose: { calibrationSheetContext = nil }
                     )
@@ -107,6 +108,29 @@ struct VehiclesView: View {
         missionControlStore.isVehicleStreamUsedInLiveMission(vehicleID: vehicleID, fleetLink: fleetLink, sitl: sitl)
             ? "Vehicle is assigned to a live Mission Control run."
             : nil
+    }
+
+    private func simReconnectLinkAction(vehicleID: String, lifecycleStage: VehicleLifecycleStage) -> (() -> Void)? {
+        guard GuardianSitlFleetLinkReconnectPolicy.mayOfferReconnectLinkOnDevicesGrid(
+            fleetLink: fleetLink,
+            sitl: sitl,
+            vehicleID: vehicleID,
+            lifecycleStage: lifecycleStage
+        ) else { return nil }
+        return {
+            Task { @MainActor in
+                let ok = await sitl.reconnectFleetLink(
+                    forGuardianVehicleID: vehicleID,
+                    spawnDefaults: generalSettings.simSpawnDefaults
+                )
+                if ok {
+                    toastCenter.show("Reconnecting telemetry link…", style: .info, duration: 2.5)
+                } else {
+                    let msg = sitl.lastError ?? fleetLink.lastError ?? "Reconnect failed."
+                    toastCenter.show(msg, style: .error, duration: 4.5)
+                }
+            }
+        }
     }
 
     private var noVehiclesEmptyState: some View {
@@ -212,7 +236,8 @@ struct VehiclesView: View {
                         onStopSim: nil,
                         stopSimDisabledReason: nil,
                         onDismissSim: nil,
-                        onCloneSim: nil
+                        onCloneSim: nil,
+                        onReconnectLink: nil
                     )
                 case .sim(let inst):
                     let systemID = inst.stackInstanceIndex + 1
@@ -265,7 +290,11 @@ struct VehiclesView: View {
                                 defaults: generalSettings.simSpawnDefaults
                             )
                             toastCenter.show("Cloning simulator…", style: .info, duration: 2)
-                        }
+                        },
+                        onReconnectLink: simReconnectLinkAction(
+                            vehicleID: resolvedVehicleID,
+                            lifecycleStage: status.stage
+                        )
                     )
                 }
             }

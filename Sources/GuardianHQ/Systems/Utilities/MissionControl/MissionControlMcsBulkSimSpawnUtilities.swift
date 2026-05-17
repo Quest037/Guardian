@@ -1,6 +1,7 @@
 import Foundation
 
 /// MCS roster / floating-reserve **bulk SIM spawn** counting and preset selection (``MissionRunDetailView``).
+@MainActor
 enum MissionControlMcsBulkSimSpawnUtilities {
     static func emptyReservePoolSlotCount(run: MissionRunEnvironment, taskID: UUID) -> Int {
         run.reservePool(forTaskID: taskID).entries.filter { !$0.hasFleetOrLegacyBinding }.count

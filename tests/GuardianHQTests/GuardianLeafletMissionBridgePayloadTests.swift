@@ -71,7 +71,8 @@ final class GuardianLeafletMissionBridgePayloadTests: XCTestCase {
     }
 
     private func samplePayload(
-        vehicleMarkers: [MapVehicleMarker] = []
+        vehicleMarkers: [MapVehicleMarker] = [],
+        formationSlotGroupMapEdit: GuardianFormationSlotGroupMapEdit? = nil
     ) -> GuardianLeafletMissionBridgePayload {
         GuardianLeafletMissionBridgePayload(
             home: nil,
@@ -93,7 +94,22 @@ final class GuardianLeafletMissionBridgePayloadTests: XCTestCase {
             mcsReservePoolHomePlacementArmed: false,
             geofenceOverlays: [],
             geofenceLeafletChrome: GuardianGeofenceLeafletChrome(colorScheme: .dark),
-            geofenceMapLayerPointerSelectsFence: false
+            geofenceMapLayerPointerSelectsFence: false,
+            formationSlotGroupMapEdit: formationSlotGroupMapEdit
         )
+    }
+
+    func test_javascript_includes_formation_slot_group_edit_when_set() {
+        let payload = samplePayload(
+            formationSlotGroupMapEdit: GuardianFormationSlotGroupMapEdit(
+                centerLat: 50.1,
+                centerLon: -1.2,
+                headingDeg: 45,
+                circleRadiusM: 8
+            )
+        )
+        let js = OSMMapView.javascriptExpression(for: payload)
+        XCTAssertTrue(js.contains("\"centerLat\":50.1"))
+        XCTAssertTrue(js.contains("\"circleRadiusM\":8"))
     }
 }

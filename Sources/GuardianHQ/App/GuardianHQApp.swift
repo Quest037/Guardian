@@ -11,6 +11,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     case theme = "Theme"
     case settings = "Settings"
     case plugins = "Plugins"
+    case formations = "Formations"
 
     var id: String { rawValue }
 
@@ -28,6 +29,8 @@ enum AppSection: String, CaseIterable, Identifiable {
             return "list.bullet.rectangle.portrait"
         case .missionControl:
             return "slider.horizontal.3"
+        case .formations:
+            return "arrow.trianglehead.branch"
         case .theme:
             return "paintpalette.fill"
         case .settings:
@@ -51,6 +54,8 @@ enum AppSection: String, CaseIterable, Identifiable {
             return "Server and vehicle log streams."
         case .missionControl:
             return "Operate active missions in real time."
+        case .formations:
+            return "Formation spacing sandbox with simulators."
         case .theme:
             return "UI chrome catalog and layout defaults."
         case .settings:
@@ -65,6 +70,15 @@ extension AppSection {
     /// Upper sidebar scroll area (core destinations + ``GuardianPluginSidebarPlacement/primary`` contributions).
     static var primarySidebarRail: [AppSection] {
         [.dashboard, .missions, .missionControl, .devices, .liveDrive, .logs]
+    }
+
+    /// Primary rail entries visible for the current session (simulate-only surfaces appended when enabled).
+    static func primarySidebarRail(simulateEnabled: Bool) -> [AppSection] {
+        var rail = primarySidebarRail
+        if simulateEnabled {
+            rail.append(.formations)
+        }
+        return rail
     }
 
     /// Built-in entries for the lower ``GuardianPluginSidebarPlacement/secondary`` rail (Settings, Plugins), above version.

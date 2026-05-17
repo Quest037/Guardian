@@ -7,9 +7,7 @@ enum MissionControlLiveMapFitCoordinates {
     /// Drops unset `(0,0)` defaults, non-finite values, and coordinates outside WGS84 so ``fitBounds`` is not
     /// stretched across the globe (which forces a very wide zoom).
     static func isUsableWgs84ForMapFit(lat: Double, lon: Double) -> Bool {
-        guard lat.isFinite, lon.isFinite else { return false }
-        if lat == 0, lon == 0 { return false }
-        return (-85 ... 85).contains(lat) && (-180 ... 180).contains(lon)
+        GuardianMapFitCoordinates.isUsableWgs84ForMapFit(lat: lat, lon: lon)
     }
 
     /// Task triage “show on map”: task route waypoints, **task-owned** runtime map points (`taskID == taskID`),

@@ -108,6 +108,81 @@ final class SitlService: ObservableObject {
         reconcileFleetLinkVehicleCacheAfterSitlChange()
     }
 
+    /// Running built-in SITL session id for a Guardian sim stream key (`sysid:n`), when the process is alive.
+    func sitlSessionID(forGuardianVehicleID vehicleID: String) -> UUID? {
+        let prefix = "sysid:"
+        guard vehicleID.hasPrefix(prefix) else { return nil }
+        let rest = String(vehicleID.dropFirst(prefix.count))
+        guard let systemID = Int(rest), systemID >= 1 else { return nil }
+        let stackIndex = systemID - 1
+        return instances.first(where: { $0.isAlive && $0.stackInstanceIndex == stackIndex })?.id
+    }
+
+    /// Restarts Guardian's MAVSDK session to a running built-in SITL without stopping the sim process.
+    @discardableResult
+    func reconnectFleetLink(
+        sitlSessionID: UUID,
+        spawnDefaults: SimSpawnDefaults? = nil
+    ) async -> Bool {
+        lastError = nil
+        guard let link = fleetLink else {
+            lastError = "Fleet link is not attached."
+            return false
+        }
+        guard let inst = instances.first(where: { $0.id == sitlSessionID && $0.isAlive }) else {
+            lastError = "Simulator is not running."
+            return false
+        }
+        return await reconnectFleetLink(instance: inst, link: link, spawnDefaults: spawnDefaults)
+    }
+
+    /// Restarts the MAVSDK session for a Guardian-managed sim stream (`sysid:n`).
+    @discardableResult
+    func reconnectFleetLink(
+        forGuardianVehicleID vehicleID: String,
+        spawnDefaults: SimSpawnDefaults? = nil
+    ) async -> Bool {
+        lastError = nil
+        guard let sessionID = sitlSessionID(forGuardianVehicleID: vehicleID) else {
+            lastError = "No running simulator matches this vehicle."
+            return false
+        }
+        return await reconnectFleetLink(sitlSessionID: sessionID, spawnDefaults: spawnDefaults)
+    }
+
+    private func reconnectFleetLink(
+        instance inst: SitlRunningInstance,
+        link: FleetLinkService,
+        spawnDefaults: SimSpawnDefaults?
+    ) async -> Bool {
+        let stackIndex = inst.stackInstanceIndex
+        let systemID = stackIndex + 1
+        let mavlinkURL: String
+        let stack: FleetAutopilotStack
+        switch inst.platform {
+        case .ardupilot:
+            mavlinkURL = "udpin://0.0.0.0:\(SitlLaunchRecipe.ardupilotMavproxyOutPort(instance: stackIndex))"
+            stack = .ardupilot
+        case .px4:
+            mavlinkURL = "udpin://0.0.0.0:\(SitlLaunchRecipe.px4OffboardRemotePort(instance: stackIndex))"
+            stack = .px4
+        }
+        link.appendSimulationLog(
+            "Reconnecting MAVSDK link [vehicle=\(inst.preset.displayName) instance=\(stackIndex) mavlink_sysid=\(systemID) session=\(inst.id.uuidString)] \(mavlinkURL)"
+        )
+        let ok = await link.reconnectSimulatedVehicleSession(
+            systemID: systemID,
+            mavlinkConnectionURL: mavlinkURL,
+            autopilotStack: stack,
+            vehicleType: inst.preset.fleetVehicleType,
+            spawnDefaults: spawnDefaults
+        )
+        if !ok, lastError == nil {
+            lastError = link.lastError ?? "Reconnect failed."
+        }
+        return ok
+    }
+
     /// Spawns SITL when **Simulate** is on.
     func spawn(preset: SimulationVehiclePreset, platform: SimulationPlatform, defaults: SimSpawnDefaults) {
         lastError = nil

@@ -1060,6 +1060,53 @@ final class FleetLinkService: ObservableObject {
         start(session: session)
     }
 
+    /// Tear down and recreate the MAVSDK session for a built-in SITL (same URL), waiting briefly for the UDP listen port to free.
+    @discardableResult
+    func reconnectSimulatedVehicleSession(
+        systemID: Int,
+        mavlinkConnectionURL: String,
+        autopilotStack: FleetAutopilotStack,
+        vehicleType: FleetVehicleType,
+        spawnDefaults: SimSpawnDefaults? = nil
+    ) async -> Bool {
+        lastError = nil
+        let vehicleID = "sysid:\(systemID)"
+        if sessionsByVehicleID[vehicleID] != nil {
+            appendVehicleLog("Replacing stale MAVSDK session before reconnecting sim.", vehicleID: vehicleID)
+            stopSession(vehicleID: vehicleID)
+        } else {
+            appendVehicleLog("Starting MAVSDK session for reconnect.", vehicleID: vehicleID)
+        }
+
+        if let port = GuardianUdpPortUtilities.udpInboundListenPort(from: mavlinkConnectionURL) {
+            let freed = await GuardianUdpPortUtilities.waitForUdpInboundPortBindable(port: port, timeout: 2.5)
+            if !freed {
+                appendVehicleLog(
+                    "Reconnect: UDP port \(port) still busy after wait; starting MAVSDK anyway.",
+                    vehicleID: vehicleID
+                )
+            }
+        } else {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+
+        registerSimulatedVehicle(
+            systemID: systemID,
+            mavlinkConnectionURL: mavlinkConnectionURL,
+            autopilotStack: autopilotStack,
+            vehicleType: vehicleType,
+            spawnDefaults: spawnDefaults
+        )
+        guard sessionsByVehicleID[vehicleID] != nil else {
+            if lastError == nil {
+                lastError = "MAVSDK session did not start."
+            }
+            return false
+        }
+        appendVehicleLog("Reconnect scheduled MAVSDK session (\(mavlinkConnectionURL)).", vehicleID: vehicleID)
+        return true
+    }
+
     func unregisterSimulatedVehicle(systemID: Int) {
         let vehicleID = "sysid:\(systemID)"
         stopSession(vehicleID: vehicleID)

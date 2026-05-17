@@ -104,7 +104,12 @@ struct RootView: View {
             }
         }
         .onChange(of: fleetLinkService.isSimulateEnabled) { sim in
-            if !sim { sitlService.stopAll() }
+            if !sim {
+                sitlService.stopAll()
+                if selection == .formations {
+                    selection = .dashboard
+                }
+            }
         }
         .onChange(of: generalSettingsStore.logRetentionProfile) { profile in
             fleetLinkService.applyLogRetentionProfile(profile)
@@ -172,7 +177,7 @@ struct RootView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
-                    ForEach(AppSection.primarySidebarRail, id: \.self) { section in
+                    ForEach(AppSection.primarySidebarRail(simulateEnabled: fleetLinkService.isSimulateEnabled), id: \.self) { section in
                         sidebarSectionRow(section: section)
                     }
                     ForEach(pluginRegistry.sidebarItems(for: .primary)) { item in
@@ -450,6 +455,13 @@ struct RootView: View {
                 PluginsView()
             case .logs:
                 LogsView(fleetLink: fleetLinkService)
+            case .formations:
+                FormationsPlaygroundView(
+                    fleetLink: fleetLinkService,
+                    sitl: sitlService,
+                    missionControl: missionControlStore,
+                    generalSettings: generalSettingsStore
+                )
             }
         }
     }

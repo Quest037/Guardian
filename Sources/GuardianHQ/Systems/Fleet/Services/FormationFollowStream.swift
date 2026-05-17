@@ -14,6 +14,8 @@ final class FormationFollowStream {
         /// When set, streams ``Offboard/setVelocityBody`` (ArduPilot GUIDED + PX4 OFFBOARD) for gap closure.
         var pursuitForwardMS: Float?
         var pursuitYawspeedDegS: Float?
+        /// PX4 UGV: body velocity for reverse / 3-point catalogue moves (position-only cannot steer heading in place).
+        var useVelocityBodyPursuit: Bool = false
     }
 
     private let drone: Drone
@@ -127,6 +129,9 @@ final class FormationFollowStream {
     private var usesVelocityBodyPursuit: Bool {
         guard target.pursuitForwardMS != nil else { return false }
         if stack == .ardupilot { return true }
+        if stack == .px4, universalClass == .ugv {
+            return target.useVelocityBodyPursuit
+        }
         return stack == .px4 && universalClass != .ugv
     }
 

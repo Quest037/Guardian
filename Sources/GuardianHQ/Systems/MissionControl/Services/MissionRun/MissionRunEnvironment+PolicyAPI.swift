@@ -370,6 +370,66 @@ extension MissionRunEnvironment {
         return .allowed
     }
 
+    @discardableResult
+    func updateTaskSquadFormation(
+        taskID: UUID,
+        _ formation: MissionSquadFormationKind,
+        credential: MissionRunPolicyEditCredential
+    ) -> MissionRunPolicyEditDecision {
+        let scope = MissionRunPolicyEditScope.taskSquadFormation(taskID: taskID)
+        let decision = systems.policyAuthority.evaluate(scope, credential: credential)
+        guard decision.isAllowed else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: denialReason(decision) ?? .permissionDenied)
+            return decision
+        }
+        guard var mission = template else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: .missionUnavailable)
+            return .denied(.missionUnavailable)
+        }
+        guard let idx = mission.routeMacro.tasks.firstIndex(where: { $0.id == taskID }) else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: .taskNotFound)
+            return .denied(.taskNotFound)
+        }
+        mission.routeMacro.tasks[idx].squadFormation = formation
+        applyMissionTemplateMutation(mission)
+        logPolicyEditApplied(
+            scope: scope,
+            credential: credential,
+            value: formation.displayTitle
+        )
+        return .allowed
+    }
+
+    @discardableResult
+    func updateTaskSquadFormationShape(
+        taskID: UUID,
+        _ shape: MissionSquadFormationShape,
+        credential: MissionRunPolicyEditCredential
+    ) -> MissionRunPolicyEditDecision {
+        let scope = MissionRunPolicyEditScope.taskSquadFormationShape(taskID: taskID)
+        let decision = systems.policyAuthority.evaluate(scope, credential: credential)
+        guard decision.isAllowed else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: denialReason(decision) ?? .permissionDenied)
+            return decision
+        }
+        guard var mission = template else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: .missionUnavailable)
+            return .denied(.missionUnavailable)
+        }
+        guard let idx = mission.routeMacro.tasks.firstIndex(where: { $0.id == taskID }) else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: .taskNotFound)
+            return .denied(.taskNotFound)
+        }
+        mission.routeMacro.tasks[idx].squadFormationShape = shape
+        applyMissionTemplateMutation(mission)
+        logPolicyEditApplied(
+            scope: scope,
+            credential: credential,
+            value: shape.displayTitle
+        )
+        return .allowed
+    }
+
     // MARK: - Assignment-level
 
     @discardableResult
@@ -471,6 +531,58 @@ extension MissionRunEnvironment {
         return .allowed
     }
 
+    @discardableResult
+    func updateAssignmentSquadFormationOverride(
+        assignmentID: UUID,
+        _ formation: MissionSquadFormationKind?,
+        credential: MissionRunPolicyEditCredential
+    ) -> MissionRunPolicyEditDecision {
+        let scope = MissionRunPolicyEditScope.assignmentSquadFormationOverride(assignmentID: assignmentID)
+        let decision = systems.policyAuthority.evaluate(scope, credential: credential)
+        guard decision.isAllowed else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: denialReason(decision) ?? .permissionDenied)
+            return decision
+        }
+        guard let idx = assignments.firstIndex(where: { $0.id == assignmentID }) else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: .assignmentNotFound)
+            return .denied(.assignmentNotFound)
+        }
+        assignments[idx].policies.squadFormationOverride = formation
+        let logValue = formation?.displayTitle ?? "Inherit"
+        logPolicyEditApplied(
+            scope: scope,
+            credential: credential,
+            value: logValue
+        )
+        return .allowed
+    }
+
+    @discardableResult
+    func updateAssignmentSquadFormationShapeOverride(
+        assignmentID: UUID,
+        _ shape: MissionSquadFormationShape?,
+        credential: MissionRunPolicyEditCredential
+    ) -> MissionRunPolicyEditDecision {
+        let scope = MissionRunPolicyEditScope.assignmentSquadFormationShapeOverride(assignmentID: assignmentID)
+        let decision = systems.policyAuthority.evaluate(scope, credential: credential)
+        guard decision.isAllowed else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: denialReason(decision) ?? .permissionDenied)
+            return decision
+        }
+        guard let idx = assignments.firstIndex(where: { $0.id == assignmentID }) else {
+            logPolicyEditDenied(scope: scope, credential: credential, reason: .assignmentNotFound)
+            return .denied(.assignmentNotFound)
+        }
+        assignments[idx].policies.squadFormationShapeOverride = shape
+        let logValue = shape?.displayTitle ?? "Inherit"
+        logPolicyEditApplied(
+            scope: scope,
+            credential: credential,
+            value: logValue
+        )
+        return .allowed
+    }
+
     // MARK: - Helpers
 
     private func applyMissionTemplateMutation(_ mission: Mission) {
@@ -536,10 +648,10 @@ extension MissionRunEnvironment {
         switch scope {
         case .missionAbortPolicy, .missionCompletePolicy, .missionEngagementRules, .missionReserveSwapPolicy, .missionGeofenceAugmentation:
             return .missionControl
-        case .taskAbortPolicyOverride(let id), .taskCompletePolicyOverride(let id), .taskReserveSwapPolicyOverride(let id), .taskBetweenCyclesAction(let id), .taskGeofenceAugmentation(let id):
+        case .taskAbortPolicyOverride(let id), .taskCompletePolicyOverride(let id), .taskReserveSwapPolicyOverride(let id), .taskBetweenCyclesAction(let id), .taskGeofenceAugmentation(let id), .taskSquadFormation(let id), .taskSquadFormationShape(let id):
             let name = template?.routeMacro.tasks.first(where: { $0.id == id })?.name ?? "Task"
             return .task(id: id, name: name)
-        case .assignmentAbortPolicy(let id), .assignmentCompletePolicy(let id), .assignmentReserveSwapPolicy(let id), .assignmentGeofenceAugmentation(let id):
+        case .assignmentAbortPolicy(let id), .assignmentCompletePolicy(let id), .assignmentReserveSwapPolicy(let id), .assignmentGeofenceAugmentation(let id), .assignmentSquadFormationOverride(let id), .assignmentSquadFormationShapeOverride(let id):
             return .slot(id: id)
         }
     }
@@ -560,9 +672,9 @@ extension MissionRunEnvironment {
     /// `[<TaskName>]` wrapper for slot edits the same way they do for task edits.
     private func scopeTaskID(_ scope: MissionRunPolicyEditScope) -> UUID? {
         switch scope {
-        case .taskAbortPolicyOverride(let id), .taskCompletePolicyOverride(let id), .taskReserveSwapPolicyOverride(let id), .taskBetweenCyclesAction(let id), .taskGeofenceAugmentation(let id):
+        case .taskAbortPolicyOverride(let id), .taskCompletePolicyOverride(let id), .taskReserveSwapPolicyOverride(let id), .taskBetweenCyclesAction(let id), .taskGeofenceAugmentation(let id), .taskSquadFormation(let id), .taskSquadFormationShape(let id):
             return id
-        case .assignmentAbortPolicy(let id), .assignmentCompletePolicy(let id), .assignmentReserveSwapPolicy(let id), .assignmentGeofenceAugmentation(let id):
+        case .assignmentAbortPolicy(let id), .assignmentCompletePolicy(let id), .assignmentReserveSwapPolicy(let id), .assignmentGeofenceAugmentation(let id), .assignmentSquadFormationOverride(let id), .assignmentSquadFormationShapeOverride(let id):
             guard let assignment = assignments.first(where: { $0.id == id }) else { return nil }
             return MissionRunPolicyResolution.resolvedTaskId(for: assignment, mission: template)
         default:
@@ -593,6 +705,10 @@ extension MissionRunEnvironment {
         case .missionGeofenceAugmentation: return "Mission run geofence augmentation"
         case .taskGeofenceAugmentation: return "Task run geofence augmentation"
         case .assignmentGeofenceAugmentation: return "Slot run geofence augmentation"
+        case .taskSquadFormation: return "Task squad formation"
+        case .assignmentSquadFormationOverride: return "Primary slot squad formation override"
+        case .taskSquadFormationShape: return "Task squad formation shape"
+        case .assignmentSquadFormationShapeOverride: return "Primary slot squad formation shape override"
         }
     }
 }

@@ -92,6 +92,7 @@ enum MissionControlSquadConvoyFormationUtilities {
 
     /// Convoy slot on a **Guardian Router** launch→WP1 polyline: project primary along the route, wingmen astern on the spine.
     static func desiredConvoySlotOnLaunchApproachRoute(
+        formation: MissionSquadFormationKind = .staggeredConvoy,
         route: [RouteCoordinate],
         primaryLatitudeDeg: Double,
         primaryLongitudeDeg: Double,
@@ -114,7 +115,11 @@ enum MissionControlSquadConvoyFormationUtilities {
         let targetAlong = max(0, projection.alongTrackM - behindM)
         guard let target = coordinateAtAlongTrack(targetAlong, polyline: polyline) else { return nil }
 
-        let rightM = spacing.lateralLaneMeters * (wingmanOrdinal % 2 == 0 ? -0.5 : 0.5)
+        let rightM = MissionSquadFormationGeometry.lateralBodyMeters(
+            formation: formation,
+            wingmanOrdinal: wingmanOrdinal,
+            spacing: spacing
+        )
         let coordinate = offsetCoordinate(
             latitudeDeg: target.coord.lat,
             longitudeDeg: target.coord.lon,
@@ -131,8 +136,34 @@ enum MissionControlSquadConvoyFormationUtilities {
         )
     }
 
+    /// Wingman slot for the selected formation (convoy / chevron / arrowhead).
+    static func desiredFormationSlot(
+        formation: MissionSquadFormationKind,
+        task: MissionTask,
+        primaryLatitudeDeg: Double,
+        primaryLongitudeDeg: Double,
+        primaryHeadingDeg: Double,
+        primaryMissionProgressCurrent: Int32?,
+        wingmanOrdinal: Int,
+        spacing: MissionSquadConvoySpacing,
+        allowPathPolylineAnchor: Bool = true
+    ) -> ConvoySlot {
+        desiredConvoySlot(
+            formation: formation,
+            task: task,
+            primaryLatitudeDeg: primaryLatitudeDeg,
+            primaryLongitudeDeg: primaryLongitudeDeg,
+            primaryHeadingDeg: primaryHeadingDeg,
+            primaryMissionProgressCurrent: primaryMissionProgressCurrent,
+            wingmanOrdinal: wingmanOrdinal,
+            spacing: spacing,
+            allowPathPolylineAnchor: allowPathPolylineAnchor
+        )
+    }
+
     /// Convoy slot: path polyline astern once the primary is on the first leg; heading-astern before that.
     static func desiredConvoySlot(
+        formation: MissionSquadFormationKind = .convoy,
         task: MissionTask,
         primaryLatitudeDeg: Double,
         primaryLongitudeDeg: Double,
@@ -156,13 +187,14 @@ enum MissionControlSquadConvoyFormationUtilities {
                polyline: polyline
            ),
            let onPath = desiredCoordinateOnTaskPath(
+               formation: formation,
                waypoints: task.waypoints,
                primaryLatitudeDeg: primaryLatitudeDeg,
                primaryLongitudeDeg: primaryLongitudeDeg,
                wingmanOrdinal: wingmanOrdinal,
                spacing: spacing
            ) {
-            let behindM = Double(wingmanOrdinal + 1) * spacing.alongTrackMetersPerOrdinal
+            let behindM = pathBehindMeters(formation: formation, wingmanOrdinal: wingmanOrdinal, spacing: spacing)
             let targetAlong = max(0, projection.alongTrackM - behindM)
             let pathHeading = coordinateAtAlongTrack(targetAlong, polyline: polyline)?.headingDeg
                 ?? projection.headingDeg
@@ -184,13 +216,14 @@ enum MissionControlSquadConvoyFormationUtilities {
                polyline: polyline
            ),
            let onPath = desiredCoordinateOnTaskPath(
+               formation: formation,
                waypoints: task.waypoints,
                primaryLatitudeDeg: primaryLatitudeDeg,
                primaryLongitudeDeg: primaryLongitudeDeg,
                wingmanOrdinal: wingmanOrdinal,
                spacing: spacing
            ) {
-            let behindM = Double(wingmanOrdinal + 1) * spacing.alongTrackMetersPerOrdinal
+            let behindM = pathBehindMeters(formation: formation, wingmanOrdinal: wingmanOrdinal, spacing: spacing)
             let targetAlong = max(0, projection.alongTrackM - behindM)
             let pathHeading = coordinateAtAlongTrack(targetAlong, polyline: polyline)?.headingDeg
                 ?? projection.headingDeg
@@ -200,7 +233,8 @@ enum MissionControlSquadConvoyFormationUtilities {
                 usesPathPolyline: true
             )
         }
-        let body = desiredCoordinate(
+        let body = desiredFormationCoordinate(
+            formation: formation,
             primaryLatitudeDeg: primaryLatitudeDeg,
             primaryLongitudeDeg: primaryLongitudeDeg,
             primaryHeadingDeg: primaryHeadingDeg,
@@ -259,6 +293,23 @@ enum MissionControlSquadConvoyFormationUtilities {
         slotCoordinate: RouteCoordinate,
         convoyHeadingDeg: Double
     ) -> Double {
+        abs(
+            convoySignedLateralErrorM(
+                wingmanLatitudeDeg: wingmanLatitudeDeg,
+                wingmanLongitudeDeg: wingmanLongitudeDeg,
+                slotCoordinate: slotCoordinate,
+                convoyHeadingDeg: convoyHeadingDeg
+            )
+        )
+    }
+
+    /// Signed lateral offset (m): positive = starboard of convoy axis.
+    static func convoySignedLateralErrorM(
+        wingmanLatitudeDeg: Double,
+        wingmanLongitudeDeg: Double,
+        slotCoordinate: RouteCoordinate,
+        convoyHeadingDeg: Double
+    ) -> Double {
         let h = convoyHeadingDeg * .pi / 180
         let sinH = sin(h)
         let cosH = cos(h)
@@ -266,7 +317,7 @@ enum MissionControlSquadConvoyFormationUtilities {
         let mPerLon = metresPerDegreeLatitude * max(0.01, cos(latRad))
         let northM = (wingmanLatitudeDeg - slotCoordinate.lat) * metresPerDegreeLatitude
         let eastM = (wingmanLongitudeDeg - slotCoordinate.lon) * mPerLon
-        return abs(-northM * sinH + eastM * cosH)
+        return -northM * sinH + eastM * cosH
     }
 
     /// Body-forward pursuit speed (m/s, signed) from primary cruise and convoy gap.
@@ -296,24 +347,66 @@ enum MissionControlSquadConvoyFormationUtilities {
         return min(max(speed, minForward), maxForward)
     }
 
-    /// Yaw rate (deg/s) to align with convoy heading while closing lateral error.
+    /// Signed heading error (deg): positive = wingman should turn clockwise to match target.
+    static func headingErrorDeg(
+        wingmanHeadingDeg: Double?,
+        targetHeadingDeg: Double
+    ) -> Double? {
+        MissionSquadFormationHeadingPolicy.headingErrorDeg(
+            wingmanHeadingDeg: wingmanHeadingDeg,
+            targetHeadingDeg: targetHeadingDeg
+        )
+    }
+
+    /// Yaw rate (deg/s) to match formation target heading (primary by default) while closing lateral error.
     static func pursuitYawRateDegS(
         wingmanHeadingDeg: Double?,
         convoyHeadingDeg: Double,
         lateralErrorM: Double
     ) -> Double {
-        guard lateralErrorM > 0.35 else { return 0 }
-        let delta: Double
-        if let wingmanHeadingDeg {
-            delta = MissionTelemetryGeo.angleDifferenceDeg(convoyHeadingDeg, wingmanHeadingDeg)
-        } else {
-            delta = 0
+        let delta = headingErrorDeg(wingmanHeadingDeg: wingmanHeadingDeg, targetHeadingDeg: convoyHeadingDeg) ?? 0
+        var rate = headingAlignYawRateDegS(headingErrorDeg: delta)
+        // Small lateral offset: nudge yaw with heading correction. Large offset: steer toward slot bearing
+        // so GPS course heading does not fight a large heading-error turn during forward pursuit.
+        if lateralErrorM > 0.35, abs(delta) < 45 {
+            let fromLateral = lateralErrorM * MissionSquadConvoyFollowControlPolicy.pursuitYawRateGainDegSPerM
+            rate += (delta >= 0 ? fromLateral : -fromLateral) * 0.65
         }
-        let fromLateral = lateralErrorM * MissionSquadConvoyFollowControlPolicy.pursuitYawRateGainDegSPerM
-        let combined = delta * 0.35 + (delta >= 0 ? fromLateral : -fromLateral)
-        return min(
+        return clampYawRateDegS(rate)
+    }
+
+    /// Yaw rate from heading error alone (in-place / slot hold).
+    static func headingAlignYawRateDegS(headingErrorDeg: Double) -> Double {
+        guard abs(headingErrorDeg) > MissionSquadConvoyFollowControlPolicy.pursuitHeadingAlignStartDeg else {
+            return 0
+        }
+        let rate = headingErrorDeg * MissionSquadConvoyFollowControlPolicy.pursuitHeadingAlignGainDegSPerDeg
+        return clampYawRateDegS(rate)
+    }
+
+    private static func clampYawRateDegS(_ rate: Double) -> Double {
+        min(
             MissionSquadConvoyFollowControlPolicy.pursuitYawRateMaxDegS,
-            max(-MissionSquadConvoyFollowControlPolicy.pursuitYawRateMaxDegS, combined)
+            max(-MissionSquadConvoyFollowControlPolicy.pursuitYawRateMaxDegS, rate)
+        )
+    }
+
+    /// Forward speed (m/s) for slot approach; zero when in the slot band so heading can align without creep.
+    static func pursuitForwardSpeedMS(
+        alongErrorM: Double,
+        distToSlotM: Double,
+        primarySpeedMS: Double?,
+        headingErrorDeg: Double? = nil
+    ) -> Double {
+        if distToSlotM <= MissionSquadConvoyFollowControlPolicy.convoyAssemblyArrivalM,
+           let headingErrorDeg,
+           abs(headingErrorDeg) > MissionSquadConvoyFollowControlPolicy.convoyAssemblyHeadingToleranceDeg {
+            return 0
+        }
+        return pursuitForwardSpeedMS(
+            alongErrorM: alongErrorM,
+            distToSlotM: distToSlotM,
+            primarySpeedMS: primarySpeedMS
         )
     }
 
@@ -380,6 +473,7 @@ enum MissionControlSquadConvoyFormationUtilities {
 
     /// Wingman position on the mission path at `primaryAlongTrack - spacing`, with optional lane offset.
     static func desiredCoordinateOnTaskPath(
+        formation: MissionSquadFormationKind = .convoy,
         waypoints: [RouteWaypoint],
         primaryLatitudeDeg: Double,
         primaryLongitudeDeg: Double,
@@ -395,11 +489,15 @@ enum MissionControlSquadConvoyFormationUtilities {
               )
         else { return nil }
 
-        let behindM = Double(wingmanOrdinal + 1) * spacing.alongTrackMetersPerOrdinal
+        let behindM = pathBehindMeters(formation: formation, wingmanOrdinal: wingmanOrdinal, spacing: spacing)
         let targetAlong = max(0, projection.alongTrackM - behindM)
         guard let target = coordinateAtAlongTrack(targetAlong, polyline: polyline) else { return nil }
 
-        let rightM = spacing.lateralLaneMeters * (wingmanOrdinal % 2 == 0 ? -0.5 : 0.5)
+        let rightM = MissionSquadFormationGeometry.lateralBodyMeters(
+            formation: formation,
+            wingmanOrdinal: wingmanOrdinal,
+            spacing: spacing
+        )
         return offsetCoordinate(
             latitudeDeg: target.coord.lat,
             longitudeDeg: target.coord.lon,
@@ -409,7 +507,26 @@ enum MissionControlSquadConvoyFormationUtilities {
         )
     }
 
-    /// Body-frame astern offset from the primary (fallback when the path is unavailable).
+    /// Body-frame offset from the primary (pad assembly / off-route follow).
+    static func desiredFormationCoordinate(
+        formation: MissionSquadFormationKind,
+        primaryLatitudeDeg: Double,
+        primaryLongitudeDeg: Double,
+        primaryHeadingDeg: Double,
+        wingmanOrdinal: Int,
+        spacing: MissionSquadConvoySpacing
+    ) -> RouteCoordinate {
+        MissionSquadFormationGeometry.desiredPadSlotCoordinate(
+            formation: formation,
+            primaryLatitudeDeg: primaryLatitudeDeg,
+            primaryLongitudeDeg: primaryLongitudeDeg,
+            primaryHeadingDeg: primaryHeadingDeg,
+            wingmanOrdinal: wingmanOrdinal,
+            spacing: spacing
+        )
+    }
+
+    /// Body-frame astern offset from the primary (convoy — legacy name).
     static func desiredCoordinate(
         primaryLatitudeDeg: Double,
         primaryLongitudeDeg: Double,
@@ -417,14 +534,25 @@ enum MissionControlSquadConvoyFormationUtilities {
         wingmanOrdinal: Int,
         spacing: MissionSquadConvoySpacing
     ) -> RouteCoordinate {
-        let alongM = -Double(wingmanOrdinal + 1) * spacing.alongTrackMetersPerOrdinal
-        let rightM = spacing.lateralLaneMeters * (wingmanOrdinal % 2 == 0 ? -0.5 : 0.5)
-        return offsetCoordinate(
-            latitudeDeg: primaryLatitudeDeg,
-            longitudeDeg: primaryLongitudeDeg,
-            headingDeg: primaryHeadingDeg,
-            forwardMeters: alongM,
-            rightMeters: rightM
+        desiredFormationCoordinate(
+            formation: .convoy,
+            primaryLatitudeDeg: primaryLatitudeDeg,
+            primaryLongitudeDeg: primaryLongitudeDeg,
+            primaryHeadingDeg: primaryHeadingDeg,
+            wingmanOrdinal: wingmanOrdinal,
+            spacing: spacing
+        )
+    }
+
+    private static func pathBehindMeters(
+        formation: MissionSquadFormationKind,
+        wingmanOrdinal: Int,
+        spacing: MissionSquadConvoySpacing
+    ) -> Double {
+        MissionSquadFormationGeometry.pathBehindMeters(
+            formation: formation,
+            wingmanOrdinal: wingmanOrdinal,
+            spacing: spacing
         )
     }
 
@@ -550,15 +678,12 @@ enum MissionControlSquadConvoyFormationUtilities {
         forwardMeters: Double,
         rightMeters: Double
     ) -> RouteCoordinate {
-        let h = headingDeg * .pi / 180
-        let sinH = sin(h)
-        let cosH = cos(h)
-        let eastM = forwardMeters * sinH + rightMeters * cosH
-        let northM = forwardMeters * cosH - rightMeters * sinH
-        let latRad = latitudeDeg * .pi / 180
-        let metresPerDegreeLon = metresPerDegreeLatitude * max(0.01, cos(latRad))
-        let lat = latitudeDeg + northM / metresPerDegreeLatitude
-        let lon = longitudeDeg + eastM / metresPerDegreeLon
-        return RouteCoordinate(lat: lat, lon: lon)
+        MissionSquadFormationGeometry.offsetCoordinate(
+            latitudeDeg: latitudeDeg,
+            longitudeDeg: longitudeDeg,
+            headingDeg: headingDeg,
+            forwardMeters: forwardMeters,
+            rightMeters: rightMeters
+        )
     }
 }

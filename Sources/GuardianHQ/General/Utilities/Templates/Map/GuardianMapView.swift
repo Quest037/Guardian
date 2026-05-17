@@ -166,6 +166,8 @@ struct GuardianRouteMapGeometry: Equatable {
     var geofenceOverlays: [GuardianGeofenceMapOverlay]
     /// Mission workspace **Geofences** tab: fence layers accept primary clicks and post ``geofenceClick`` to Swift.
     var geofenceMapLayerPointerSelectsFence: Bool
+    /// Formations playground: gold centroid + circle rim handles for dragging / rotating the slot group.
+    var formationSlotGroupMapEdit: GuardianFormationSlotGroupMapEdit? = nil
     /// Debug overlays (e.g. GR launch→WP1) — dashed polylines, non-interactive.
     var debugOverlayPolylines: [[RouteCoordinate]] = []
 
@@ -183,7 +185,8 @@ struct GuardianRouteMapGeometry: Equatable {
         missionPointPlacementArmed: false,
         mcsReservePoolHomePlacementArmed: false,
         geofenceOverlays: [],
-        geofenceMapLayerPointerSelectsFence: false
+        geofenceMapLayerPointerSelectsFence: false,
+        formationSlotGroupMapEdit: nil
     )
 }
 
@@ -194,8 +197,8 @@ struct GuardianMapViewportNudge: Equatable {
         case panRetainZoom(lat: Double, lon: Double)
         /// Leaflet ``setView`` — pans to ``lat``/``lon`` and sets integer zoom (clamped to the map’s min/max zoom).
         case panToZoom(lat: Double, lon: Double, zoom: Double)
-        /// Fit the map to the given WGS84 points (Leaflet ``fitBounds`` via ``guardianFitBoundsForPoints``).
-        case fitBounds(points: [(Double, Double)])
+        /// Fit the map to the given WGS84 points (Leaflet ``guardianFitBoundsForPoints`` or formation variant).
+        case fitBounds(points: [(Double, Double)], style: GuardianMapFitBoundsStyle = .missionControl)
 
         static func == (lhs: Kind, rhs: Kind) -> Bool {
             switch (lhs, rhs) {
@@ -203,8 +206,8 @@ struct GuardianMapViewportNudge: Equatable {
                 return la == ra && lo == ro
             case let (.panToZoom(la, lo, lz), .panToZoom(ra, ro, rz)):
                 return la == ra && lo == ro && lz == rz
-            case (.fitBounds(let lp), .fitBounds(let rp)):
-                guard lp.count == rp.count else { return false }
+            case let (.fitBounds(lp, ls), .fitBounds(rp, rs)):
+                guard ls == rs, lp.count == rp.count else { return false }
                 return zip(lp, rp).allSatisfy { $0.0 == $1.0 && $0.1 == $1.1 }
             default:
                 return false
@@ -315,6 +318,42 @@ final class GuardianMapModel: ObservableObject {
     /// reset button and by callers that change selection, etc.).
     func recenter() { recenterNonce &+= 1 }
 
+    /// Fit the viewport to WGS84 points (MC-R / formations playground / any caller).
+    func fitToVisible(
+        points: [(Double, Double)],
+        style: GuardianMapFitBoundsStyle = .missionControl
+    ) {
+        let usable = GuardianMapFitCoordinates.filterUsable(points)
+        guard !usable.isEmpty else {
+            recenter()
+            return
+        }
+        focusMapFitBounds(points: usable, style: style)
+    }
+
+    /// Fit the viewport to home, paths, waypoints, map points, and vehicle markers on the model (Leaflet ``guardianFitBoundsForPoints``).
+    func fitToVisibleContent() {
+        var points: [(Double, Double)] = []
+        if let home = mapContent.routeGeometry.home {
+            points.append((home.coord.lat, home.coord.lon))
+        }
+        for path in mapContent.routeGeometry.allTasksCoords {
+            for coord in path {
+                points.append((coord.lat, coord.lon))
+            }
+        }
+        for waypoint in mapContent.routeGeometry.selectedTaskWaypoints {
+            points.append((waypoint.coord.lat, waypoint.coord.lon))
+        }
+        for marker in mapContent.routeGeometry.missionPointMarkers {
+            points.append((marker.lat, marker.lon))
+        }
+        for marker in mapContent.vehicleMarkers {
+            points.append((marker.lat, marker.lon))
+        }
+        fitToVisible(points: points)
+    }
+
     /// Pan the map centre to ``lat``/``lon`` without changing zoom (MC-R triage shortcuts). Does not bump ``recenterNonce``.
     func focusMapPanRetainZoom(lat: Double, lon: Double) {
         viewportNudgeSequence &+= 1
@@ -322,10 +361,16 @@ final class GuardianMapModel: ObservableObject {
     }
 
     /// Fit the map viewport to the bounding box of ``points`` (empty → no-op).
-    func focusMapFitBounds(points: [(Double, Double)]) {
+    func focusMapFitBounds(
+        points: [(Double, Double)],
+        style: GuardianMapFitBoundsStyle = .missionControl
+    ) {
         guard !points.isEmpty else { return }
         viewportNudgeSequence &+= 1
-        viewportNudge = GuardianMapViewportNudge(sequence: viewportNudgeSequence, kind: .fitBounds(points: points))
+        viewportNudge = GuardianMapViewportNudge(
+            sequence: viewportNudgeSequence,
+            kind: .fitBounds(points: points, style: style)
+        )
     }
 
     /// Pan to ``lat``/``lon`` and set zoom (Live Drive live-mission framing).
@@ -436,6 +481,8 @@ struct GuardianMapView: View {
     var onGeofencePolygonTranslated: (UUID, Double, Double) -> Void
     var onGeofencePolygonEdgeInsert: (UUID, Int, Double, Double) -> Void
     var onGeofencePolygonVertexDelete: (UUID, Int) -> Void
+    var onFormationSlotGroupCenterMoved: (Double, Double) -> Void
+    var onFormationSlotGroupHeadingMoved: (Double) -> Void
 
     init(
         model: GuardianMapModel,
@@ -464,7 +511,9 @@ struct GuardianMapView: View {
         onGeofencePolygonVertexMoved: @escaping (UUID, Int, Double, Double) -> Void = { _, _, _, _ in },
         onGeofencePolygonTranslated: @escaping (UUID, Double, Double) -> Void = { _, _, _ in },
         onGeofencePolygonEdgeInsert: @escaping (UUID, Int, Double, Double) -> Void = { _, _, _, _ in },
-        onGeofencePolygonVertexDelete: @escaping (UUID, Int) -> Void = { _, _ in }
+        onGeofencePolygonVertexDelete: @escaping (UUID, Int) -> Void = { _, _ in },
+        onFormationSlotGroupCenterMoved: @escaping (Double, Double) -> Void = { _, _ in },
+        onFormationSlotGroupHeadingMoved: @escaping (Double) -> Void = { _ in }
     ) {
         self.model = model
         self.toolbar = toolbar
@@ -493,6 +542,8 @@ struct GuardianMapView: View {
         self.onGeofencePolygonTranslated = onGeofencePolygonTranslated
         self.onGeofencePolygonEdgeInsert = onGeofencePolygonEdgeInsert
         self.onGeofencePolygonVertexDelete = onGeofencePolygonVertexDelete
+        self.onFormationSlotGroupCenterMoved = onFormationSlotGroupCenterMoved
+        self.onFormationSlotGroupHeadingMoved = onFormationSlotGroupHeadingMoved
     }
 
     var body: some View {
@@ -518,6 +569,7 @@ struct GuardianMapView: View {
                 geofenceOverlays: model.routeGeometry.geofenceOverlays,
                 geofenceLeafletChrome: GuardianGeofenceLeafletChrome(colorScheme: colorScheme),
                 geofenceMapLayerPointerSelectsFence: model.routeGeometry.geofenceMapLayerPointerSelectsFence,
+                formationSlotGroupMapEdit: model.routeGeometry.formationSlotGroupMapEdit,
                 debugOverlayPolylines: model.routeGeometry.debugOverlayPolylines,
                 contextMenuPolicy: contextMenuPolicy,
                 onMapClick: onMapClick,
@@ -544,7 +596,9 @@ struct GuardianMapView: View {
                 onGeofencePolygonTranslated: onGeofencePolygonTranslated,
                 onGeofencePolygonEdgeInsert: onGeofencePolygonEdgeInsert,
                 onGeofencePolygonVertexDelete: onGeofencePolygonVertexDelete,
-                onViewportNudgeConsumed: { model.consumeViewportNudge() }
+                onViewportNudgeConsumed: { model.consumeViewportNudge() },
+                onFormationSlotGroupCenterMoved: onFormationSlotGroupCenterMoved,
+                onFormationSlotGroupHeadingMoved: onFormationSlotGroupHeadingMoved
             )
 
             if toolbar.hasAnyVisibleButton {
@@ -627,14 +681,12 @@ private struct GuardianMapToolbarOverlay: View {
                 GuardianMapToolbarButton(
                     id: "reset",
                     systemImage: "scope",
-                    help: toolbar.mapResetAction != nil
-                        ? "Fit map to routes, map points, and live vehicles"
-                        : "Recenter map",
-                    action: { [model] in
+                    help: "Fit map to visible content",
+                    action: { [model, toolbar] in
                         if let custom = toolbar.mapResetAction {
                             custom(model)
                         } else {
-                            model.recenter()
+                            model.fitToVisibleContent()
                         }
                     }
                 )

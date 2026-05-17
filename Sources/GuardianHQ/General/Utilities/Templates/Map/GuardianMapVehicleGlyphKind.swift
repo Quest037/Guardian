@@ -6,8 +6,12 @@ enum GuardianMapVehicleGlyphKind: String, Equatable, Codable, Sendable {
     case uavArrow = "uav"
     /// Wheeled / tracked / legged / unknown template class — square outline.
     case ugvSquare = "ugv"
-    /// Surface / underwater — plus / cross.
+    /// Surface / underwater — plus / cross with a small north-pointing triangle at the centre (heading).
     case usvUuvCross = "usv"
+    /// Hollow red-outline slot (Formations playground target positions).
+    case formationSlotTarget = "formationTarget"
+    /// Gold-outline preview clone (Formations playground map edit — not streamed until edit ends).
+    case formationSlotClone = "formationSlotClone"
 
     static func forFleetVehicleType(_ type: FleetVehicleType) -> GuardianMapVehicleGlyphKind {
         switch type {

@@ -1838,6 +1838,7 @@ struct VehicleCalibrationModal: View {
     @ObservedObject var fleetLink: FleetLinkService
     @ObservedObject var controlStore: MissionControlStore
     @ObservedObject var sitl: SitlService
+    var simSpawnDefaults: SimSpawnDefaults
     let vehicleID: String
     let fallback: FleetVehicleModel?
     /// When non-`nil` (in-window ``VehicleInspectorHostOverlay``), **Close** calls this instead of ``EnvironmentValues/dismiss``.
@@ -1847,6 +1848,7 @@ struct VehicleCalibrationModal: View {
     @EnvironmentObject private var toastCenter: ToastCenter
     @StateObject private var vehicleInspectorGuidedWizard = VehicleInspectorGuidedWizardController()
     @State private var isRunningPreflight = false
+    @State private var isReconnectingSimLink = false
     @State private var activeTab: InspectorTab = .calibration
 
     private enum InspectorTab: String, CaseIterable, Identifiable {
@@ -1860,12 +1862,14 @@ struct VehicleCalibrationModal: View {
         controlStore: MissionControlStore,
         sitl: SitlService,
         vehicleID: String,
+        simSpawnDefaults: SimSpawnDefaults = .default,
         fallback: FleetVehicleModel? = nil,
         onClose: (() -> Void)? = nil
     ) {
         self.fleetLink = fleetLink
         self.controlStore = controlStore
         self.sitl = sitl
+        self.simSpawnDefaults = simSpawnDefaults
         self.vehicleID = vehicleID
         self.fallback = fallback
         self.onClose = onClose
@@ -1901,6 +1905,15 @@ struct VehicleCalibrationModal: View {
         )
     }
 
+    private var mayOfferSimReconnectLink: Bool {
+        GuardianSitlFleetLinkReconnectPolicy.mayOfferReconnectLink(
+            fleetLink: fleetLink,
+            sitl: sitl,
+            vehicleID: vehicleID,
+            lifecycleStage: resolvedVehicle.collections.lifecycleStatus.stage
+        )
+    }
+
     var body: some View {
         Modal(
             title: "Vehicle Inspector",
@@ -1924,6 +1937,28 @@ struct VehicleCalibrationModal: View {
                         isLiveMissionRecipeLocked: isVehicleInLiveMission
                     )
                     preflightHeaderButton
+                }
+
+                if mayOfferSimReconnectLink {
+                    GuardianThemedButton(
+                        accent: .primary,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        isEnabled: !isReconnectingSimLink,
+                        action: { reconnectSimFleetLink() },
+                        label: {
+                            HStack(spacing: GuardianSpacing.xsTight) {
+                                if isReconnectingSimLink {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Image(systemName: "arrow.triangle.2.circlepath")
+                                }
+                                Text(isReconnectingSimLink ? "Reconnecting…" : "Reconnect link")
+                            }
+                        }
+                    )
+                    .help("Restart Guardian's telemetry link to this simulator without stopping the sim process.")
                 }
 
                 GuardianThemedButton(
@@ -2035,6 +2070,24 @@ struct VehicleCalibrationModal: View {
                 }
             )
             .help("Run a one-shot arm preflight probe and overlay the result on the calibration canvas.")
+        }
+    }
+
+    private func reconnectSimFleetLink() {
+        guard !isReconnectingSimLink else { return }
+        isReconnectingSimLink = true
+        Task { @MainActor in
+            let ok = await sitl.reconnectFleetLink(
+                forGuardianVehicleID: vehicleID,
+                spawnDefaults: simSpawnDefaults
+            )
+            isReconnectingSimLink = false
+            if ok {
+                toastCenter.show("Reconnecting telemetry link…", style: .info, duration: 2.5)
+            } else {
+                let msg = sitl.lastError ?? fleetLink.lastError ?? "Reconnect failed."
+                toastCenter.show(msg, style: .error, duration: 4.5)
+            }
         }
     }
 

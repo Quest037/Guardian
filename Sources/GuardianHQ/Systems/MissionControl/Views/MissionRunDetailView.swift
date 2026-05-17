@@ -2866,6 +2866,7 @@ struct MissionRunDetailView: View {
                         controlStore: controlStore,
                         sitl: sitl,
                         vehicleID: vid,
+                        simSpawnDefaults: generalSettings.simSpawnDefaults,
                         fallback: rosterCalibrationFallbackModel,
                         onClose: {
                             rosterCalibrationVehicleID = nil
@@ -5409,8 +5410,7 @@ struct MissionRunDetailView: View {
             focusedTaskID: liveOverviewMapFocusedTaskID,
             vehicleMarkerLatLon: vehicleLL
         )
-        guard !pts.isEmpty else { return }
-        mapModel.focusMapFitBounds(points: pts)
+        mapModel.fitToVisible(points: pts)
     }
 
     /// Fits the MCS roster staging map to home, all task paths, template/runtime map points, and **current** roster vehicle markers (same bbox inputs as ``fitLiveOverviewMapToVisibleMissionContent()`` — not ``recenterNonce`` / default world zoom).
@@ -5425,8 +5425,7 @@ struct MissionRunDetailView: View {
             focusedTaskID: nil,
             vehicleMarkerLatLon: vehicleLL
         )
-        guard !pts.isEmpty else { return }
-        mapModel.focusMapFitBounds(points: pts)
+        mapModel.fitToVisible(points: pts)
     }
 
     /// Full route + marker rebuild when mission topology, roster bindings, or map-point selection metadata changes.

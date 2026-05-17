@@ -188,12 +188,23 @@ final class MissionRunSquadFollowSubsystem {
         let heading = primaryHub.headingDeg ?? primaryHub.yawDeg ?? 0
         let bindings = squad.wingmanBindings
         guard !bindings.isEmpty else { return [] }
-        let spacing = MissionSquadConvoySpacingPolicy.lockedSpacing(
+        let formation = resolvedSquadFormation(
+            primaryAssignmentID: squad.primaryAssignment.id,
+            mission: environment?.template
+        )
+        let shape = resolvedSquadFormationShape(
+            primaryAssignmentID: squad.primaryAssignment.id,
+            mission: environment?.template
+        )
+        let spacing = MissionSquadConvoySpacingPolicy.resolvedSpacing(
             taskPattern: task.pattern,
-            primaryGranularClass: squad.primaryRosterDevice.vehicleClass
+            primaryGranularClass: squad.primaryRosterDevice.vehicleClass,
+            shape: shape,
+            formation: formation
         )
         return bindings.enumerated().map { ordinal, binding in
-            let slot = MissionControlSquadConvoyFormationUtilities.desiredConvoySlot(
+            let slot = MissionControlSquadConvoyFormationUtilities.desiredFormationSlot(
+                formation: formation,
                 task: task,
                 primaryLatitudeDeg: lat,
                 primaryLongitudeDeg: lon,
@@ -418,6 +429,7 @@ final class MissionRunSquadFollowSubsystem {
                 task: task,
                 primaryHub: primaryHub,
                 primaryRosterDevice: assignment.rosterDeviceId,
+                primaryAssignmentID: active.primaryAssignmentID,
                 mission: mission,
                 environment: environment,
                 allowPathPolylineAnchor: active.squadMode == .following
@@ -654,7 +666,7 @@ final class MissionRunSquadFollowSubsystem {
                let lat = hub.latitudeDeg, let lon = hub.longitudeDeg {
                 let coord = lastDesiredTargetByAssignmentID[wingmanID]
                     ?? RouteCoordinate(lat: lat, lon: lon)
-                let yaw = hub.headingDeg ?? hub.yawDeg ?? 0
+                let yaw = MissionSquadFormationHeadingPolicy.wingmanHeadingDeg(hub: hub) ?? 0
                 let absAlt = hub.absoluteAltM ?? hub.altitudeAmslM ?? 0
                 frozenStreamTargetByAssignmentID[wingmanID] = FormationFollowStream.Target(
                     coord: coord,
@@ -715,6 +727,7 @@ final class MissionRunSquadFollowSubsystem {
                 task: task,
                 primaryHub: primaryHub,
                 primaryRosterDevice: assignment.rosterDeviceId,
+                primaryAssignmentID: active.primaryAssignmentID,
                 mission: mission,
                 environment: environment,
                 allowPathPolylineAnchor: active.squadMode == .following
@@ -983,6 +996,7 @@ final class MissionRunSquadFollowSubsystem {
                 task: task,
                 primaryHub: primaryHub,
                 primaryRosterDevice: primaryAssignment.rosterDeviceId,
+                primaryAssignmentID: active.primaryAssignmentID,
                 mission: mission,
                 environment: environment,
                 allowPathPolylineAnchor: active.squadMode == .following
@@ -1095,6 +1109,7 @@ final class MissionRunSquadFollowSubsystem {
                     task: task,
                     primaryHub: primaryHub,
                     primaryRosterDevice: assignment.rosterDeviceId,
+                    primaryAssignmentID: active.primaryAssignmentID,
                     mission: mission,
                     environment: environment,
                     allowPathPolylineAnchor: active.squadMode == .following,
@@ -1117,6 +1132,7 @@ final class MissionRunSquadFollowSubsystem {
                 task: task,
                 primaryHub: primaryHub,
                 primaryRosterDevice: assignment.rosterDeviceId,
+                primaryAssignmentID: activeForTick.primaryAssignmentID,
                 mission: mission,
                 environment: environment,
                 allowPathPolylineAnchor: activeForTick.squadMode == .following,
@@ -1267,6 +1283,7 @@ final class MissionRunSquadFollowSubsystem {
                 task: task,
                 primaryHub: primaryHub,
                 primaryRosterDevice: assignment.rosterDeviceId,
+                primaryAssignmentID: active.primaryAssignmentID,
                 mission: mission,
                 environment: environment,
                 allowPathPolylineAnchor: false,
@@ -1565,15 +1582,14 @@ final class MissionRunSquadFollowSubsystem {
             })
         else { return nil }
         let holdHeading = active.convoyHoldHeadingDeg
-            ?? primaryHub.headingDeg
-            ?? primaryHub.yawDeg
+            ?? MissionSquadFormationHeadingPolicy.wingmanHeadingDeg(hub: primaryHub)
             ?? 0
         let absAlt = primaryHub.absoluteAltM ?? primaryHub.altitudeAmslM ?? 0
         return FormationFollowStream.Target(
             coord: holdCoord,
             absoluteAltitudeM: absAlt,
             yawDeg: holdHeading,
-            pursuitForwardMS: 0,
+            pursuitForwardMS: nil,
             pursuitYawspeedDegS: nil
         )
     }
@@ -1666,30 +1682,15 @@ final class MissionRunSquadFollowSubsystem {
         inSlotFreezeM: Double = MissionSquadConvoyFollowControlPolicy.convoyAssemblyArrivalM
     ) -> FormationFollowStream.Target {
         let hub = fleetLink.hubTelemetry(forVehicleID: wingmanVehicleID)
+        let vehicleType = fleetLink.vehicleModel(forVehicleID: wingmanVehicleID)?.data.vehicleType ?? .unknown
         let wLat = hub?.latitudeDeg
         let wLon = hub?.longitudeDeg
-        let alongErrorM: Double?
-        let lateralM: Double
         let distToSlot: Double
         if let wLat, let wLon {
-            alongErrorM = MissionControlSquadConvoyFormationUtilities.convoyAlongTrackErrorM(
-                wingmanLatitudeDeg: wLat,
-                wingmanLongitudeDeg: wLon,
-                slotCoordinate: slot,
-                convoyHeadingDeg: convoyHeadingDeg
-            )
-            lateralM = MissionControlSquadConvoyFormationUtilities.convoyLateralErrorM(
-                wingmanLatitudeDeg: wLat,
-                wingmanLongitudeDeg: wLon,
-                slotCoordinate: slot,
-                convoyHeadingDeg: convoyHeadingDeg
-            )
             distToSlot = MissionTelemetryGeo.horizontalDistanceM(
                 lat1: wLat, lon1: wLon, lat2: slot.lat, lon2: slot.lon
             )
         } else {
-            alongErrorM = nil
-            lateralM = 0
             distToSlot = 0
         }
 
@@ -1701,12 +1702,16 @@ final class MissionRunSquadFollowSubsystem {
             } else {
                 nil
             }
-            if let freezeBandM, distToSlot <= freezeBandM {
+            if let freezeBandM, distToSlot <= freezeBandM,
+               MissionSquadFormationHeadingPolicy.isHeadingAligned(
+                   hub: hub,
+                   targetHeadingDeg: convoyHeadingDeg
+               ) {
                 return FormationFollowStream.Target(
                     coord: RouteCoordinate(lat: wLat, lon: wLon),
                     absoluteAltitudeM: wingmanAbsAlt,
                     yawDeg: yawDeg,
-                    pursuitForwardMS: 0,
+                    pursuitForwardMS: nil,
                     pursuitYawspeedDegS: nil
                 )
             }
@@ -1715,48 +1720,52 @@ final class MissionRunSquadFollowSubsystem {
         let directBeyondM = usesPathPolyline
             ? MissionSquadConvoyFollowControlPolicy.pathAnchoredDirectSlotBeyondM
             : MissionSquadConvoyFollowControlPolicy.directSlotBeyondM
-        let coord: RouteCoordinate
-        if let wLat, let wLon {
-            coord = MissionControlSquadConvoyFormationUtilities.streamedConvoySetpointCoordinate(
-                wingmanLatitudeDeg: wLat,
-                wingmanLongitudeDeg: wLon,
-                slotCoordinate: slot,
-                convoyHeadingDeg: convoyHeadingDeg,
-                alongErrorM: alongErrorM,
-                directSlotBeyondM: directBeyondM
+        if let pursuit = Utilities.movements.formationSlotPursuit(
+            slot: slot,
+            targetHeadingDeg: convoyHeadingDeg,
+            vehicleType: vehicleType,
+            hub: hub,
+            primarySpeedMS: primarySpeedMS,
+            wingmanVehicleID: wingmanVehicleID,
+            directSlotBeyondM: directBeyondM
+        ) {
+            return GuardianFormationSlotPursuitPlanning.applyPlan(
+                coord: pursuit.coord,
+                targetHeadingDeg: yawDeg,
+                wingmanAbsoluteAltitudeM: wingmanAbsAlt,
+                plan: pursuit.plan
             )
-        } else {
-            coord = slot
-        }
-
-        let pursuitForward: Float?
-        let pursuitYaw: Float?
-        if let alongErrorM {
-            let speed = MissionControlSquadConvoyFormationUtilities.pursuitForwardSpeedMS(
-                alongErrorM: alongErrorM,
-                distToSlotM: distToSlot,
-                primarySpeedMS: primarySpeedMS
-            )
-            pursuitForward = Float(speed)
-            pursuitYaw = Float(
-                MissionControlSquadConvoyFormationUtilities.pursuitYawRateDegS(
-                    wingmanHeadingDeg: hub?.headingDeg ?? hub?.yawDeg,
-                    convoyHeadingDeg: convoyHeadingDeg,
-                    lateralErrorM: lateralM
-                )
-            )
-        } else {
-            pursuitForward = nil
-            pursuitYaw = nil
         }
 
         return FormationFollowStream.Target(
-            coord: coord,
+            coord: slot,
             absoluteAltitudeM: wingmanAbsAlt,
             yawDeg: yawDeg,
-            pursuitForwardMS: pursuitForward,
-            pursuitYawspeedDegS: pursuitYaw
+            pursuitForwardMS: nil,
+            pursuitYawspeedDegS: nil
         )
+    }
+
+    private func resolvedSquadFormation(
+        primaryAssignmentID: UUID,
+        mission: Mission?
+    ) -> MissionSquadFormationKind {
+        guard let environment,
+              let mission,
+              let assignment = environment.assignments.first(where: { $0.id == primaryAssignmentID })
+        else { return .convoy }
+        return MissionRunPolicyResolution.resolvedSquadFormation(assignment: assignment, mission: mission)
+    }
+
+    private func resolvedSquadFormationShape(
+        primaryAssignmentID: UUID,
+        mission: Mission?
+    ) -> MissionSquadFormationShape {
+        guard let environment,
+              let mission,
+              let assignment = environment.assignments.first(where: { $0.id == primaryAssignmentID })
+        else { return .normal }
+        return MissionRunPolicyResolution.resolvedSquadFormationShape(assignment: assignment, mission: mission)
     }
 
     private func computeConvoyTargetsFromBindings(
@@ -1764,6 +1773,7 @@ final class MissionRunSquadFollowSubsystem {
         task: MissionTask,
         primaryHub: FleetHubVehicleTelemetry,
         primaryRosterDevice: UUID,
+        primaryAssignmentID: UUID,
         mission: Mission,
         environment: MissionRunEnvironment,
         allowPathPolylineAnchor: Bool = true,
@@ -1785,16 +1795,21 @@ final class MissionRunSquadFollowSubsystem {
             }
             return nil
         }()
-        let spacing = MissionSquadConvoySpacingPolicy.lockedSpacing(
+        let formation = resolvedSquadFormation(primaryAssignmentID: primaryAssignmentID, mission: mission)
+        let shape = resolvedSquadFormationShape(primaryAssignmentID: primaryAssignmentID, mission: mission)
+        let spacing = MissionSquadConvoySpacingPolicy.resolvedSpacing(
             taskPattern: task.pattern,
-            primaryGranularClass: primaryDevice?.vehicleClass ?? wingmanClass
+            primaryGranularClass: primaryDevice?.vehicleClass ?? wingmanClass,
+            shape: shape,
+            formation: formation
         )
         var ordinal = 0
         var out: [WingmanFollowTarget] = []
         out.reserveCapacity(wingmanAssignmentIDs.count)
         for assignmentID in wingmanAssignmentIDs {
             guard let row = environment.assignments.first(where: { $0.id == assignmentID }) else { continue }
-            let slot = MissionControlSquadConvoyFormationUtilities.desiredConvoySlot(
+            let slot = MissionControlSquadConvoyFormationUtilities.desiredFormationSlot(
+                formation: formation,
                 task: task,
                 primaryLatitudeDeg: lat,
                 primaryLongitudeDeg: lon,

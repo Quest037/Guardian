@@ -626,6 +626,10 @@ struct MissionTask: Identifiable, Codable, Equatable {
     var betweenCycles: MissionTaskBetweenCyclesAction
     /// Formation / pattern intent (e.g. patrol vs convoy column).
     var pattern: MissionTaskPattern
+    /// Wingman slot geometry when this task has a squad (convoy / chevron / arrowhead).
+    var squadFormation: MissionSquadFormationKind
+    /// How tightly wingmen pack for the chosen formation (tight / normal / loose).
+    var squadFormationShape: MissionSquadFormationShape
     /// First-wave spacing between primary squads (see ``MissionTaskStaggerTrigger``).
     var staggerTrigger: MissionTaskStaggerTrigger
     /// Fixed interval between primaries when ``staggerTrigger`` is ``fixedInterval``.
@@ -659,6 +663,8 @@ struct MissionTask: Identifiable, Codable, Equatable {
         case legacyScheduleRefs = "scheduleRefs"
         case abortPreferenceChainOverride, completePreferenceChainOverride, reserveSwapPreferenceChainOverride
         case geofences
+        case squadFormation
+        case squadFormationShape
     }
 
     /// Effective start deferral duration for execution (seconds).
@@ -697,6 +703,8 @@ struct MissionTask: Identifiable, Codable, Equatable {
         regularity: MissionTaskRegularity = .onceAtStart,
         betweenCycles: MissionTaskBetweenCyclesAction = .returnToLaunch,
         pattern: MissionTaskPattern = .patrol,
+        squadFormation: MissionSquadFormationKind = .convoy,
+        squadFormationShape: MissionSquadFormationShape = .normal,
         staggerTrigger: MissionTaskStaggerTrigger = .pathEstimate,
         staggerIntervalValue: Double = 20,
         staggerIntervalUnit: DelayUnit = .secs,
@@ -720,6 +728,8 @@ struct MissionTask: Identifiable, Codable, Equatable {
         self.regularity = regularity
         self.betweenCycles = betweenCycles
         self.pattern = pattern
+        self.squadFormation = squadFormation
+        self.squadFormationShape = squadFormationShape
         self.staggerTrigger = staggerTrigger
         self.staggerIntervalValue = staggerIntervalValue
         self.staggerIntervalUnit = staggerIntervalUnit
@@ -776,6 +786,8 @@ struct MissionTask: Identifiable, Codable, Equatable {
         }
 
         pattern = try c.decodeIfPresent(MissionTaskPattern.self, forKey: .pattern) ?? .patrol
+        squadFormation = try c.decodeIfPresent(MissionSquadFormationKind.self, forKey: .squadFormation) ?? .convoy
+        squadFormationShape = try c.decodeIfPresent(MissionSquadFormationShape.self, forKey: .squadFormationShape) ?? .normal
 
         staggerTrigger = try c.decodeIfPresent(MissionTaskStaggerTrigger.self, forKey: .staggerTrigger) ?? .pathEstimate
         if let iv = try c.decodeIfPresent(Double.self, forKey: .staggerIntervalValue),
@@ -855,6 +867,12 @@ struct MissionTask: Identifiable, Codable, Equatable {
         try c.encode(regularity, forKey: .regularity)
         try c.encode(betweenCycles, forKey: .betweenCycles)
         try c.encode(pattern, forKey: .pattern)
+        if squadFormation != .convoy {
+            try c.encode(squadFormation, forKey: .squadFormation)
+        }
+        if squadFormationShape != .normal {
+            try c.encode(squadFormationShape, forKey: .squadFormationShape)
+        }
         try c.encode(staggerTrigger, forKey: .staggerTrigger)
         try c.encode(staggerIntervalValue, forKey: .staggerIntervalValue)
         try c.encode(staggerIntervalUnit, forKey: .staggerIntervalUnit)

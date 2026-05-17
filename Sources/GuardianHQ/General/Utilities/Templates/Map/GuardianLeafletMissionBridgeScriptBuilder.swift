@@ -80,6 +80,13 @@ extension OSMMapView {
         let debugPathsJSON = payload.debugOverlayPolylines.map { path in
             "[\(path.map { "{\"lat\":\($0.lat),\"lon\":\($0.lon)}" }.joined(separator: ","))]"
         }.joined(separator: ",")
-        return "setMissionData(\(homeJSON), [\(allPathsJSON)], \(taskPathIDsJSON), [\(waypointsJSON)], \(selectedWaypointIndexJS), [\(vehicleMarkersJSON)], \"\(payload.mapStyle.rawValue)\", \(payload.recenterNonce), \(headingPreviewJSON), \(cameraPreviewJSON), \(followedVehicleMarkerIDJSON), \(contextMenuPolicyJSON), \(payload.preserveView ? "true" : "false"), \(payload.isEditingTask ? "true" : "false"), \(payload.missionPointPlacementArmed ? "true" : "false"), \(mcsPoolHomeArmedJS), [\(missionPointsJSON)], [\(geofencesJSON)], \(geofenceChromeJSON), \(geofencePtrSelJS), [\(debugPathsJSON)]);"
+        let formationSlotGroupJSON: String
+        if let edit = payload.formationSlotGroupMapEdit {
+            formationSlotGroupJSON =
+                "{\"centerLat\":\(edit.centerLat),\"centerLon\":\(edit.centerLon),\"headingDeg\":\(edit.headingDeg),\"circleRadiusM\":\(edit.circleRadiusM)}"
+        } else {
+            formationSlotGroupJSON = "null"
+        }
+        return "setMissionData(\(homeJSON), [\(allPathsJSON)], \(taskPathIDsJSON), [\(waypointsJSON)], \(selectedWaypointIndexJS), [\(vehicleMarkersJSON)], \"\(payload.mapStyle.rawValue)\", \(payload.recenterNonce), \(headingPreviewJSON), \(cameraPreviewJSON), \(followedVehicleMarkerIDJSON), \(contextMenuPolicyJSON), \(payload.preserveView ? "true" : "false"), \(payload.isEditingTask ? "true" : "false"), \(payload.missionPointPlacementArmed ? "true" : "false"), \(mcsPoolHomeArmedJS), [\(missionPointsJSON)], [\(geofencesJSON)], \(geofenceChromeJSON), \(geofencePtrSelJS), [\(debugPathsJSON)], \(formationSlotGroupJSON));"
     }
 }

@@ -16,6 +16,8 @@ struct FleetVehicleGridCard: View {
     let onDismissSim: (() -> Void)?
     /// Spawn another SIM with the same preset/platform (SIM rows only).
     let onCloneSim: (() -> Void)?
+    /// Restart Guardian's MAVSDK session while the sim process keeps running (SIM rows only).
+    let onReconnectLink: (() -> Void)?
     @Environment(\.colorScheme) private var colorScheme
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
@@ -161,6 +163,21 @@ struct FleetVehicleGridCard: View {
                         }
                     )
                     .help("Spawn another simulator with this vehicle preset")
+                }
+                if let reconnect = onReconnectLink {
+                    GuardianThemedButton(
+                        accent: .primary,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        contentSizing: .squareToolbarCell,
+                        action: reconnect,
+                        label: {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
+                        }
+                    )
+                    .help("Restart Guardian's telemetry link to this simulator without stopping the sim process.")
                 }
                 if sitlAlive == true, let stop = onStopSim {
                     GuardianThemedButton(

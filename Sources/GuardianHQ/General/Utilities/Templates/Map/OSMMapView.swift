@@ -160,6 +160,8 @@ struct OSMMapView: NSViewRepresentable {
     var geofenceLeafletChrome: GuardianGeofenceLeafletChrome
     /// When true, geofence polygons/circles are interactive and post ``geofenceClick`` (mission Geofences tab).
     var geofenceMapLayerPointerSelectsFence: Bool = false
+    /// Formations playground slot-group translate / rotate handles (geofence-style Leaflet chrome).
+    var formationSlotGroupMapEdit: GuardianFormationSlotGroupMapEdit?
     /// Dashed debug polylines (GR launch leg, etc.) when app debug mode is on.
     var debugOverlayPolylines: [[RouteCoordinate]] = []
     var contextMenuPolicy: GuardianMapContextMenuPolicy
@@ -193,6 +195,8 @@ struct OSMMapView: NSViewRepresentable {
     var onGeofencePolygonVertexDelete: (UUID, Int) -> Void = { _, _ in }
     /// Called after a ``GuardianMapViewportNudge`` is applied in JS (typically ``GuardianMapModel/consumeViewportNudge()``).
     var onViewportNudgeConsumed: () -> Void = {}
+    var onFormationSlotGroupCenterMoved: (Double, Double) -> Void = { _, _ in }
+    var onFormationSlotGroupHeadingMoved: (Double) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -219,7 +223,9 @@ struct OSMMapView: NSViewRepresentable {
             onGeofencePolygonVertexMoved: onGeofencePolygonVertexMoved,
             onGeofencePolygonTranslated: onGeofencePolygonTranslated,
             onGeofencePolygonEdgeInsert: onGeofencePolygonEdgeInsert,
-            onGeofencePolygonVertexDelete: onGeofencePolygonVertexDelete
+            onGeofencePolygonVertexDelete: onGeofencePolygonVertexDelete,
+            onFormationSlotGroupCenterMoved: onFormationSlotGroupCenterMoved,
+            onFormationSlotGroupHeadingMoved: onFormationSlotGroupHeadingMoved
         )
     }
 
@@ -249,6 +255,8 @@ struct OSMMapView: NSViewRepresentable {
         controller.add(context.coordinator, name: "geofencePolygonTranslate")
         controller.add(context.coordinator, name: "geofencePolygonEdgeInsert")
         controller.add(context.coordinator, name: "geofencePolygonVertexDelete")
+        controller.add(context.coordinator, name: "formationSlotGroupCenterMove")
+        controller.add(context.coordinator, name: "formationSlotGroupHeadingMove")
 
         let config = WKWebViewConfiguration()
         config.userContentController = controller
@@ -292,6 +300,8 @@ struct OSMMapView: NSViewRepresentable {
         c.onGeofencePolygonTranslated = onGeofencePolygonTranslated
         c.onGeofencePolygonEdgeInsert = onGeofencePolygonEdgeInsert
         c.onGeofencePolygonVertexDelete = onGeofencePolygonVertexDelete
+        c.onFormationSlotGroupCenterMoved = onFormationSlotGroupCenterMoved
+        c.onFormationSlotGroupHeadingMoved = onFormationSlotGroupHeadingMoved
         c.onViewportNudgeConsumed = onViewportNudgeConsumed
         GuardianLeafletMissionBridgeProfiler.recordUpdateNSView(vehicleMarkerCount: vehicleMarkers.count)
         let payload = GuardianLeafletMissionBridgePayload(
@@ -315,6 +325,7 @@ struct OSMMapView: NSViewRepresentable {
             geofenceOverlays: geofenceOverlays,
             geofenceLeafletChrome: geofenceLeafletChrome,
             geofenceMapLayerPointerSelectsFence: geofenceMapLayerPointerSelectsFence,
+            formationSlotGroupMapEdit: formationSlotGroupMapEdit,
             debugOverlayPolylines: debugOverlayPolylines
         )
         guard payload != c.lastBridgePayload else {
@@ -339,9 +350,14 @@ struct OSMMapView: NSViewRepresentable {
             return "guardianPanToRetainZoom(\(lat),\(lon));"
         case let .panToZoom(lat, lon, zoom):
             return "guardianPanToZoom(\(lat),\(lon),\(zoom));"
-        case let .fitBounds(points):
+        case let .fitBounds(points, style):
             let inner = points.map { "[\($0.0),\($0.1)]" }.joined(separator: ",")
-            return "guardianFitBoundsForPoints([\(inner)]);"
+            switch style {
+            case .missionControl:
+                return "guardianFitBoundsForPoints([\(inner)]);"
+            case .formationContent:
+                return "guardianFitBoundsForFormationContent([\(inner)]);"
+            }
         }
     }
 }
@@ -437,6 +453,8 @@ extension OSMMapView {
         var onGeofencePolygonTranslated: (UUID, Double, Double) -> Void
         var onGeofencePolygonEdgeInsert: (UUID, Int, Double, Double) -> Void
         var onGeofencePolygonVertexDelete: (UUID, Int) -> Void
+        var onFormationSlotGroupCenterMoved: (Double, Double) -> Void
+        var onFormationSlotGroupHeadingMoved: (Double) -> Void
         var onViewportNudgeConsumed: () -> Void = {}
 
         init(
@@ -463,7 +481,9 @@ extension OSMMapView {
             onGeofencePolygonVertexMoved: @escaping (UUID, Int, Double, Double) -> Void,
             onGeofencePolygonTranslated: @escaping (UUID, Double, Double) -> Void,
             onGeofencePolygonEdgeInsert: @escaping (UUID, Int, Double, Double) -> Void,
-            onGeofencePolygonVertexDelete: @escaping (UUID, Int) -> Void
+            onGeofencePolygonVertexDelete: @escaping (UUID, Int) -> Void,
+            onFormationSlotGroupCenterMoved: @escaping (Double, Double) -> Void,
+            onFormationSlotGroupHeadingMoved: @escaping (Double) -> Void
         ) {
             self.onMapClick = onMapClick
             self.onVehicleMarkerMoved = onVehicleMarkerMoved
@@ -489,6 +509,8 @@ extension OSMMapView {
             self.onGeofencePolygonTranslated = onGeofencePolygonTranslated
             self.onGeofencePolygonEdgeInsert = onGeofencePolygonEdgeInsert
             self.onGeofencePolygonVertexDelete = onGeofencePolygonVertexDelete
+            self.onFormationSlotGroupCenterMoved = onFormationSlotGroupCenterMoved
+            self.onFormationSlotGroupHeadingMoved = onFormationSlotGroupHeadingMoved
         }
 
         private func noteLayerPointerDeliveredToSwift() {
@@ -832,6 +854,23 @@ extension OSMMapView {
                 onGeofencePolygonVertexDelete(uuid, idx)
                 return
             }
+
+            if message.name == "formationSlotGroupCenterMove",
+               let payload = message.body as? [String: Any],
+               let lat = OSMMapView.WKScriptPayloadBridge.double(payload["lat"]),
+               let lon = OSMMapView.WKScriptPayloadBridge.double(payload["lon"]) {
+                noteLayerPointerDeliveredToSwift()
+                onFormationSlotGroupCenterMoved(lat, lon)
+                return
+            }
+
+            if message.name == "formationSlotGroupHeadingMove",
+               let payload = message.body as? [String: Any],
+               let headingDeg = OSMMapView.WKScriptPayloadBridge.double(payload["headingDeg"]) {
+                noteLayerPointerDeliveredToSwift()
+                onFormationSlotGroupHeadingMoved(headingDeg)
+                return
+            }
         }
     }
 }
@@ -925,6 +964,8 @@ private extension OSMMapView {
     const pathLines = [];
     const geofenceLayers = [];
     const geofenceHandleLayers = [];
+    const formationSlotGroupLayers = [];
+    const formationSlotGroupHandleLayers = [];
     function clearGeofenceLayers() {
       while (geofenceHandleLayers.length > 0) {
         const h = geofenceHandleLayers.pop();
@@ -932,6 +973,16 @@ private extension OSMMapView {
       }
       while (geofenceLayers.length > 0) {
         const lyr = geofenceLayers.pop();
+        try { map.removeLayer(lyr); } catch (e) {}
+      }
+    }
+    function clearFormationSlotGroupLayers() {
+      while (formationSlotGroupHandleLayers.length > 0) {
+        const h = formationSlotGroupHandleLayers.pop();
+        try { map.removeLayer(h); } catch (e) {}
+      }
+      while (formationSlotGroupLayers.length > 0) {
+        const lyr = formationSlotGroupLayers.pop();
         try { map.removeLayer(lyr); } catch (e) {}
       }
     }
@@ -1271,6 +1322,56 @@ private extension OSMMapView {
       }
     }
 
+    /** Formation lab: bbox of live vehicles + red slot targets only — no ``maxZoom`` cap; pad small clusters. */
+    function guardianFitBoundsForFormationContent(pairs) {
+      if (!pairs || pairs.length === 0) return;
+      const pts = [];
+      for (const pr of pairs) {
+        if (!Array.isArray(pr) || pr.length !== 2) continue;
+        const la = pr[0], lo = pr[1];
+        if (!Number.isFinite(la) || !Number.isFinite(lo)) continue;
+        if (la === 0 && lo === 0) continue;
+        if (la < -85 || la > 85 || lo < -180 || lo > 180) continue;
+        pts.push([la, lo]);
+      }
+      if (pts.length === 0) return;
+      const padding = [40, 40];
+      const minSpanM = 28;
+      const minLatDeg = minSpanM / 111320;
+      if (pts.length === 1) {
+        const c = pts[0];
+        const cosLat = Math.cos(c[0] * Math.PI / 180);
+        const minLonDeg = minLatDeg / Math.max(0.01, cosLat);
+        const b = L.latLngBounds(
+          [c[0] - minLatDeg * 0.5, c[1] - minLonDeg * 0.5],
+          [c[0] + minLatDeg * 0.5, c[1] + minLonDeg * 0.5]
+        );
+        map.fitBounds(b, { padding: padding, animate: true, duration: 0.28 });
+        return;
+      }
+      let b = L.latLngBounds(pts);
+      const center = b.getCenter();
+      let ne = b.getNorthEast();
+      let sw = b.getSouthWest();
+      let h = Math.abs(ne.lat - sw.lat);
+      let w = Math.abs(ne.lng - sw.lng);
+      const cosLat = Math.cos(center.lat * Math.PI / 180);
+      const minLonDeg = minLatDeg / Math.max(0.01, cosLat);
+      if (h < minLatDeg) {
+        const midLat = (ne.lat + sw.lat) * 0.5;
+        sw = L.latLng(midLat - minLatDeg * 0.5, sw.lng);
+        ne = L.latLng(midLat + minLatDeg * 0.5, ne.lng);
+        h = minLatDeg;
+      }
+      if (w < minLonDeg) {
+        const midLon = (ne.lng + sw.lng) * 0.5;
+        sw = L.latLng(sw.lat, midLon - minLonDeg * 0.5);
+        ne = L.latLng(ne.lat, midLon + minLonDeg * 0.5);
+      }
+      b = L.latLngBounds(sw, ne);
+      map.fitBounds(b, { padding: padding, animate: true, duration: 0.28 });
+    }
+
     /** Excludes **heading** (yaw updates every hub sample) — including it forced ``setIcon`` every tick and
      *  rebuilt the DivIcon subtree under the cursor. Heading is patched separately on ``.guardian-vehicle-glyph-rotate``. */
     function guardianVehicleChromeSigNoPos(vm) {
@@ -1292,6 +1393,16 @@ private extension OSMMapView {
     function guardianVehicleGlyphSvgMarkup(glyph, sizePx, fillColor, selected) {
       const g = String(glyph || 'ugv');
       const s = Math.max(8, sizePx | 0);
+      if (g === 'formationTarget' || g === 'formationSlotClone') {
+        const sw = 3;
+        const inset = sw / 2;
+        const inner = Math.max(4, s - sw);
+        const stroke = g === 'formationSlotClone' ? '#fbbf24' : '#ef4444';
+        const dash = g === 'formationSlotClone' ? ' stroke-dasharray="4 2"' : '';
+        return '<svg width="' + s + '" height="' + s + '" viewBox="0 0 ' + s + ' ' + s + '" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="display:block;">'
+          + '<rect x="' + inset + '" y="' + inset + '" width="' + inner + '" height="' + inner + '" fill="none" stroke="' + stroke + '" stroke-width="' + sw + '" rx="1.2"' + dash + '/>'
+          + '</svg>';
+      }
       const fill = String(fillColor || '#94a3b8').replace(/</g, '');
       const stroke = '#0b1220';
       const sw = selected ? 2.1 : 1.45;
@@ -1301,13 +1412,25 @@ private extension OSMMapView {
           + '</svg>';
       }
       if (g === 'usv') {
+        // Plus/cross; small black triangle at centre points north (forward) before heading rotation.
         return '<svg width="' + s + '" height="' + s + '" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="display:block;">'
           + '<rect x="9.25" y="4" width="5.5" height="16" rx="1.25" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + sw + '"/>'
           + '<rect x="4" y="9.25" width="16" height="5.5" rx="1.25" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + sw + '"/>'
+          + '<polygon points="12,7.35 10.05,11.05 13.95,11.05" fill="#000000"/>'
           + '</svg>';
       }
+      // UGV square — marker SVG points north; `.guardian-vehicle-glyph-rotate` applies hub heading.
+      // Top edge is vehicle front (black); other edges use fill colour so the front reads clearly.
+      const ugvX = 3.6, ugvY = 3.6, ugvW = 16.8, ugvH = 16.8;
+      const ugvX2 = ugvX + ugvW, ugvY2 = ugvY + ugvH;
+      const sideStroke = fill;
+      const frontStroke = '#000000';
       return '<svg width="' + s + '" height="' + s + '" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="display:block;">'
-        + '<rect x="3.6" y="3.6" width="16.8" height="16.8" rx="1.6" fill="' + fill + '" stroke="' + stroke + '" stroke-width="' + sw + '"/>'
+        + '<rect x="' + ugvX + '" y="' + ugvY + '" width="' + ugvW + '" height="' + ugvH + '" rx="1.6" fill="' + fill + '"/>'
+        + '<line x1="' + ugvX + '" y1="' + ugvY2 + '" x2="' + ugvX2 + '" y2="' + ugvY2 + '" stroke="' + sideStroke + '" stroke-width="' + sw + '"/>'
+        + '<line x1="' + ugvX2 + '" y1="' + ugvY + '" x2="' + ugvX2 + '" y2="' + ugvY2 + '" stroke="' + sideStroke + '" stroke-width="' + sw + '"/>'
+        + '<line x1="' + ugvX + '" y1="' + ugvY + '" x2="' + ugvX + '" y2="' + ugvY2 + '" stroke="' + sideStroke + '" stroke-width="' + sw + '"/>'
+        + '<line x1="' + ugvX + '" y1="' + ugvY + '" x2="' + ugvX2 + '" y2="' + ugvY + '" stroke="' + frontStroke + '" stroke-width="' + sw + '"/>'
         + '</svg>';
     }
 
@@ -1390,10 +1513,12 @@ private extension OSMMapView {
           if (!vm.id || !Number.isFinite(vm.lat) || !Number.isFinite(vm.lon)) return;
           const idStr = String(vm.id);
           nextVehicleIds.add(idStr);
-          const size = vm.selected ? 18 : 16;
+          const glyph = String(vm.glyph || 'ugv');
+          const isFormationTarget = glyph === 'formationTarget' || glyph === 'formationSlotClone';
+          const isFormationClone = glyph === 'formationSlotClone';
+          const size = isFormationTarget ? 22 : (vm.selected ? 18 : 16);
           const ringColor = vm.color || '#94a3b8';
           const titleText = guardianVehicleMarkerTitleText(vm);
-          const glyph = String(vm.glyph || 'ugv');
           const svgMarkup = guardianVehicleGlyphSvgMarkup(glyph, size, ringColor, !!vm.selected);
           const pendingSimSync = !!vm.pendingSimSync;
           const selectionAttentionPulse = !!vm.selectionAttentionPulse;
@@ -1404,10 +1529,11 @@ private extension OSMMapView {
                  <span style="display:block;width:${spinRing}px;height:${spinRing}px;border-radius:50%;border:2px solid rgba(255,255,255,0.2);border-top-color:#fff;animation:guardianSimSyncSpin 0.72s linear infinite;"></span>
                </div>`
             : '';
-          const vehicleZ = vm.draggable ? 2500 : (vm.selected ? 1200 : 600);
+          const vehicleZ = isFormationClone ? 480 : (isFormationTarget ? 350 : (vm.draggable ? 2500 : (vm.selected ? 1200 : 600)));
           const shapePulseClass = selectionAttentionPulse ? ' guardian-vehicle-shape--reservePickerPulse' : '';
+          const dropShadow = isFormationTarget ? '' : 'filter:drop-shadow(0 1px 2px rgba(0,0,0,0.55));';
           const icon = L.divIcon({
-            className: 'mission-vehicle-dot',
+            className: isFormationTarget ? 'mission-formation-target' : 'mission-vehicle-dot',
             html: `<div style="position:relative;width:${size}px;height:${size}px;touch-action:none;-webkit-user-drag:none;"><div class="guardian-vehicle-glyph-rotate" style="position:absolute;left:0;top:0;width:${size}px;height:${size}px;"><div class="guardian-vehicle-shape${shapePulseClass}" style="width:${size}px;height:${size}px;display:flex;align-items:center;justify-content:center;box-sizing:border-box;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.55));overflow:visible;touch-action:none;">${svgMarkup}</div></div>${syncSpinner}</div>`,
             iconSize: [size, size],
             iconAnchor: [size / 2, size / 2]
@@ -1550,6 +1676,22 @@ private extension OSMMapView {
         iconAnchor: [8, 8]
       });
     }
+    function guardianFormationSlotGroupCentroidIcon() {
+      return L.divIcon({
+        className: 'formation-slot-group-ctr',
+        html: '<div style="width:16px;height:16px;background:#fbbf24;border:2px solid #92400e;transform:rotate(45deg);box-shadow:0 1px 4px rgba(0,0,0,0.45);"></div>',
+        iconSize: [20, 20],
+        iconAnchor: [10, 10]
+      });
+    }
+    function guardianFormationSlotGroupRimIcon() {
+      return L.divIcon({
+        className: 'formation-slot-group-rim',
+        html: '<div style="width:12px;height:12px;border-radius:999px;background:#fff;border:2px solid #ca8a04;box-shadow:0 1px 3px rgba(0,0,0,0.4);"></div>',
+        iconSize: [14, 14],
+        iconAnchor: [7, 7]
+      });
+    }
     function guardianHaversineMeters(lat1, lon1, lat2, lon2) {
       const R = 6371000;
       const toR = Math.PI / 180;
@@ -1643,7 +1785,7 @@ private extension OSMMapView {
       map.panTo([lat, lon], { animate: true, duration: 0.25 });
     }
 
-    function setMissionData(home, allTasksCoords, taskPathIds, selectedWaypoints, selectedWaypointIndex, missionVehicleMarkers, mapStyle, recenterNonce, headingPreview, cameraPreview, followVehicleMarkerID, menuPolicy, preserveView, isEditingTask, missionPointPlacementArmed, mcsReservePoolHomePlacementArmed, missionPointMarkersArg, geofenceOverlaysArg, geofenceChrome, geofencePointerSelects, debugOverlayPolylinesArg) {
+    function setMissionData(home, allTasksCoords, taskPathIds, selectedWaypoints, selectedWaypointIndex, missionVehicleMarkers, mapStyle, recenterNonce, headingPreview, cameraPreview, followVehicleMarkerID, menuPolicy, preserveView, isEditingTask, missionPointPlacementArmed, mcsReservePoolHomePlacementArmed, missionPointMarkersArg, geofenceOverlaysArg, geofenceChrome, geofencePointerSelects, debugOverlayPolylinesArg, formationSlotGroupMapEditArg) {
       const geometryTasks = (allTasksCoords || []).filter(path => path && path.length > 0);
       const debugPaths = (debugOverlayPolylinesArg || []).filter(path => path && path.length >= 2);
       const fullMissionSig = JSON.stringify({
@@ -1667,7 +1809,8 @@ private extension OSMMapView {
         geofences: geofenceOverlaysArg || [],
         geofenceChrome: geofenceChrome || null,
         geofencePointerSelects: !!geofencePointerSelects,
-        debugPaths: debugPaths
+        debugPaths: debugPaths,
+        formationSlotGroup: formationSlotGroupMapEditArg || null
       });
       if (fullMissionSig === state.lastFullMissionSig) {
         return;
@@ -1691,7 +1834,8 @@ private extension OSMMapView {
         geofences: JSON.stringify(geofenceOverlaysArg || []),
         geofenceChrome: JSON.stringify(geofenceChrome || {}),
         geofencePointerSelects: !!geofencePointerSelects,
-        debugPaths: debugPaths
+        debugPaths: debugPaths,
+        formationSlotGroup: JSON.stringify(formationSlotGroupMapEditArg || null)
       });
       const canPatchMarkersOnly = state.lastStructureSig !== null && structureSig === state.lastStructureSig;
 
@@ -1768,6 +1912,7 @@ private extension OSMMapView {
         map.removeLayer(line);
       }
       clearGeofenceLayers();
+      clearFormationSlotGroupLayers();
       while (waypointMarkers.length > 0) {
         const m = waypointMarkers.pop();
         map.removeLayer(m);
@@ -2140,6 +2285,78 @@ private extension OSMMapView {
             }
           }
         });
+      }
+
+      if (formationSlotGroupMapEditArg &&
+          Number.isFinite(formationSlotGroupMapEditArg.centerLat) &&
+          Number.isFinite(formationSlotGroupMapEditArg.centerLon) &&
+          Number.isFinite(formationSlotGroupMapEditArg.circleRadiusM)) {
+        const fg = formationSlotGroupMapEditArg;
+        const ctrLL = L.latLng(fg.centerLat, fg.centerLon);
+        const rM = Math.max(3, fg.circleRadiusM);
+        const hdg = Number.isFinite(fg.headingDeg) ? fg.headingDeg : 0;
+        const c = L.circle([fg.centerLat, fg.centerLon], {
+          radius: rM,
+          color: '#ca8a04',
+          weight: 2,
+          fillColor: 'rgba(251, 191, 36, 0.12)',
+          fillOpacity: 1,
+          interactive: false
+        }).addTo(map);
+        formationSlotGroupLayers.push(c);
+        const rimDest = guardianDestinationLatLng(fg.centerLat, fg.centerLon, hdg, rM);
+        const formationHandleZ = 6200;
+        const mCtr = L.marker(ctrLL, { draggable: true, zIndexOffset: formationHandleZ, icon: guardianFormationSlotGroupCentroidIcon() }).addTo(map);
+        const mRim = L.marker([rimDest.lat, rimDest.lng], { draggable: true, zIndexOffset: formationHandleZ, icon: guardianFormationSlotGroupRimIcon() }).addTo(map);
+        mCtr.on('dragstart', function() {
+          const cc = mCtr.getLatLng();
+          const rr = mRim.getLatLng();
+          mCtr._fgRimBrg = guardianBearingDeg(cc.lat, cc.lng, rr.lat, rr.lng);
+          mCtr._fgRadiusM = Math.max(3, c.getRadius());
+        });
+        function guardianPostFormationSlotGroupCenter(lat, lon) {
+          if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.formationSlotGroupCenterMove) {
+            window.webkit.messageHandlers.formationSlotGroupCenterMove.postMessage({ lat: lat, lon: lon });
+          }
+        }
+        function guardianPostFormationSlotGroupHeading(headingDeg) {
+          if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.formationSlotGroupHeadingMove) {
+            window.webkit.messageHandlers.formationSlotGroupHeadingMove.postMessage({ headingDeg: headingDeg });
+          }
+        }
+        mCtr.on('drag', function() {
+          const pos = mCtr.getLatLng();
+          const brg = mCtr._fgRimBrg;
+          const radiusM = mCtr._fgRadiusM;
+          if (brg == null || radiusM == null) {
+            return;
+          }
+          c.setLatLng(pos);
+          const dest = guardianDestinationLatLng(pos.lat, pos.lng, brg, radiusM);
+          mRim.setLatLng(L.latLng(dest.lat, dest.lng));
+        });
+        mCtr.on('dragend', function(e) {
+          mCtr._fgRimBrg = null;
+          mCtr._fgRadiusM = null;
+          const pos = e.target.getLatLng();
+          guardianPostFormationSlotGroupCenter(pos.lat, pos.lng);
+        });
+        formationSlotGroupHandleLayers.push(mCtr);
+        mRim.on('drag', function() {
+          const pos = mRim.getLatLng();
+          const cc = mCtr.getLatLng();
+          const radiusM = Math.max(3, c.getRadius());
+          const brg = guardianBearingDeg(cc.lat, cc.lng, pos.lat, pos.lng);
+          const dest = guardianDestinationLatLng(cc.lat, cc.lng, brg, radiusM);
+          mRim.setLatLng(L.latLng(dest.lat, dest.lng));
+        });
+        mRim.on('dragend', function(e) {
+          const pos = e.target.getLatLng();
+          const cc = mCtr.getLatLng();
+          const headingDeg = guardianBearingDeg(cc.lat, cc.lng, pos.lat, pos.lng);
+          guardianPostFormationSlotGroupHeading(headingDeg);
+        });
+        formationSlotGroupHandleLayers.push(mRim);
       }
 
       rebuildVehicleAndMissionPointMarkers(missionVehicleMarkers, missionPointMarkersArg, points);

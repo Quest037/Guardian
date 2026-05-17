@@ -22,7 +22,7 @@ Related: **`TODO.md`** → **Pathfinding & geofence avoidance** (shared router; 
 - OFFBOARD/GUIDED setpoints are a **heartbeat**: stream at a stable rate (target ~20 Hz); loss triggers autopilot offboard-loss / guided failsafe (HOLD, RTL, LOITER, etc. per vehicle params).
 - Prefer **OFFBOARD/GUIDED + streamed targets** over **AUTO_LOITER** for wingmen holding formation — loiter keeps internal nav active and fights formation control on rovers and tight offsets.
 - **FOLLOW_TARGET / Follow Me** alone is **not** v1 formation control (pursuit only, no tactical offsets). v1 uses explicit offset positions from primary state.
-- **v1 formation shape:** **convoy** (line behind / along primary heading) only. Chevron, arrowhead, and on-the-fly formation changes are **v2**.
+- **v1 formation shapes:** **convoy**, **chevron**, **arrowhead** — authored in MCS task / primary-slot settings (`MissionTask/squadFormation`, primary override). **Live** formation change during a run is **v2**; mid-run retarget without pause is **v3**.
 
 **MRE ownership:** While a wingman is bound and following, **MRE controls that vehicle at all times** — mode entry, setpoint stream, pause/hold between cycles, promotion handoff, release, reserve swap reposition, abort/complete wind-down, and teardown. No “wingman runs its own AUTO mission” during active follow.
 
@@ -54,7 +54,7 @@ Related: **`TODO.md`** → **Pathfinding & geofence avoidance** (shared router; 
 
 - [x] **Squad follow binding:** Wingman roster rows (`.wingman`, `leaderRosterDeviceId`) resolve to the same squad as primary; `buildTaskSquadMissions` / planner include wingman assignment IDs in squad scope (telemetry, logs, prompts use **TaskName:N** via `MissionControlSquadUtilities`). (`MissionControlSquadFollowBindingUtilities`, `MissionTaskSquad/wingmanBindings`.)
 - [x] **Mission upload on wingmen:** Upload same task mission to wingmen for **promotion / failover** readiness; while following, wingman does **not** start AUTO mission execution. (Upload on squad dispatch; no `missionStart` on wingmen.)
-- [x] **Formation field (convoy only):** Task or squad policy defaults to **convoy**; document in mission workspace (no chevron/arrowhead picker in v1). Align with `TODO.md` “Formations” bullet as **convoy-only** until v2. (`MissionSquadFormationKind`, `MissionTaskPattern/convoy` + locked spacing policy.)
+- [x] **Formation field:** `MissionSquadFormationKind` on task (default **convoy**); primary slot may override via `MissionRunAssignmentPolicies/squadFormationOverride`. MCS task + primary-slot policy drawers expose picker when the task has wingmen. Mission workspace still locks **pattern** to convoy when wingmen are present (shape is MCS/run policy, not mission editor pattern row).
 - [x] **Spacing parameters:** Convoy offset(s) — e.g. along-track distance per wingman index, optional lateral lane — authored or locked defaults; validate against vehicle class (UAV vs UGV). (`MissionSquadConvoySpacingPolicy`, `MissionControlSquadConvoyFormationUtilities`.)
 
 ### B — Fleet catalogue & recipes (Layer 0 / 1)
@@ -91,7 +91,7 @@ Related: **`TODO.md`** → **Pathfinding & geofence avoidance** (shared router; 
 
 - [x] **MC-R map:** Wingmen use the same hub telemetry markers as other roster assignments (per-vehicle live channels).
 - [x] **Status:** Wingman roster row shows follow phase labels via `wingmanFollowPhase` + `squadFollowStatusRevision` refresh; released wingmen show “Released from squad”.
-- [x] **No v1 formation picker:** Mission task settings lock **Convoy** when the task has wingmen; patrol remains available for solo tasks.
+- [x] **MCS formation picker (v1):** Task policy sidebar + primary-slot policy sidebar (inherit / convoy / chevron / arrowhead) when the task has wingmen. Live mid-run formation change deferred to v2 § F.
 
 ### G — Tests & docs
 

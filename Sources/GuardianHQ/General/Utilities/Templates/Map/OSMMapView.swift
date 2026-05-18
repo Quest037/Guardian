@@ -1393,10 +1393,21 @@ private extension OSMMapView {
     function guardianVehicleGlyphSvgMarkup(glyph, sizePx, fillColor, selected) {
       const g = String(glyph || 'ugv');
       const s = Math.max(8, sizePx | 0);
-      if (g === 'formationTarget' || g === 'formationSlotClone') {
+      if (g === 'formationTarget' || g === 'formationSlotClone' || g === 'trainingSlotGoal') {
         const sw = 3;
         const inset = sw / 2;
         const inner = Math.max(4, s - sw);
+        if (g === 'trainingSlotGoal') {
+          const sideStroke = '#22c55e';
+          const frontStroke = '#facc15';
+          const x = inset, y = inset, x2 = s - inset, y2 = s - inset;
+          return '<svg width="' + s + '" height="' + s + '" viewBox="0 0 ' + s + ' ' + s + '" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="display:block;">'
+            + '<line x1="' + x + '" y1="' + y2 + '" x2="' + x2 + '" y2="' + y2 + '" stroke="' + sideStroke + '" stroke-width="' + sw + '"/>'
+            + '<line x1="' + x2 + '" y1="' + y + '" x2="' + x2 + '" y2="' + y2 + '" stroke="' + sideStroke + '" stroke-width="' + sw + '"/>'
+            + '<line x1="' + x + '" y1="' + y + '" x2="' + x + '" y2="' + y2 + '" stroke="' + sideStroke + '" stroke-width="' + sw + '"/>'
+            + '<line x1="' + x + '" y1="' + y + '" x2="' + x2 + '" y2="' + y + '" stroke="' + frontStroke + '" stroke-width="' + sw + '"/>'
+            + '</svg>';
+        }
         const stroke = g === 'formationSlotClone' ? '#fbbf24' : '#ef4444';
         const dash = g === 'formationSlotClone' ? ' stroke-dasharray="4 2"' : '';
         return '<svg width="' + s + '" height="' + s + '" viewBox="0 0 ' + s + ' ' + s + '" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="display:block;">'
@@ -1516,7 +1527,11 @@ private extension OSMMapView {
           const glyph = String(vm.glyph || 'ugv');
           const isFormationTarget = glyph === 'formationTarget' || glyph === 'formationSlotClone';
           const isFormationClone = glyph === 'formationSlotClone';
-          const size = isFormationTarget ? 22 : (vm.selected ? 18 : 16);
+          const isTrainingSlotGoal = glyph === 'trainingSlotGoal';
+          const formationSlotMarkerSizePx = 22;
+          const size = isTrainingSlotGoal
+            ? Math.round(formationSlotMarkerSizePx * 1.25)
+            : (isFormationTarget ? formationSlotMarkerSizePx : (vm.selected ? 18 : 16));
           const ringColor = vm.color || '#94a3b8';
           const titleText = guardianVehicleMarkerTitleText(vm);
           const svgMarkup = guardianVehicleGlyphSvgMarkup(glyph, size, ringColor, !!vm.selected);
@@ -1529,11 +1544,11 @@ private extension OSMMapView {
                  <span style="display:block;width:${spinRing}px;height:${spinRing}px;border-radius:50%;border:2px solid rgba(255,255,255,0.2);border-top-color:#fff;animation:guardianSimSyncSpin 0.72s linear infinite;"></span>
                </div>`
             : '';
-          const vehicleZ = isFormationClone ? 480 : (isFormationTarget ? 350 : (vm.draggable ? 2500 : (vm.selected ? 1200 : 600)));
+          const vehicleZ = isFormationClone ? 480 : ((isFormationTarget || isTrainingSlotGoal) ? 350 : (vm.draggable ? 2500 : (vm.selected ? 1200 : 600)));
           const shapePulseClass = selectionAttentionPulse ? ' guardian-vehicle-shape--reservePickerPulse' : '';
-          const dropShadow = isFormationTarget ? '' : 'filter:drop-shadow(0 1px 2px rgba(0,0,0,0.55));';
+          const dropShadow = (isFormationTarget || isTrainingSlotGoal) ? '' : 'filter:drop-shadow(0 1px 2px rgba(0,0,0,0.55));';
           const icon = L.divIcon({
-            className: isFormationTarget ? 'mission-formation-target' : 'mission-vehicle-dot',
+            className: (isFormationTarget || isTrainingSlotGoal) ? 'mission-formation-target' : 'mission-vehicle-dot',
             html: `<div style="position:relative;width:${size}px;height:${size}px;touch-action:none;-webkit-user-drag:none;"><div class="guardian-vehicle-glyph-rotate" style="position:absolute;left:0;top:0;width:${size}px;height:${size}px;"><div class="guardian-vehicle-shape${shapePulseClass}" style="width:${size}px;height:${size}px;display:flex;align-items:center;justify-content:center;box-sizing:border-box;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.55));overflow:visible;touch-action:none;">${svgMarkup}</div></div>${syncSpinner}</div>`,
             iconSize: [size, size],
             iconAnchor: [size / 2, size / 2]

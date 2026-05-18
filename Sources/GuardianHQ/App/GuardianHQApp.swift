@@ -11,7 +11,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     case theme = "Theme"
     case settings = "Settings"
     case plugins = "Plugins"
-    case formations = "Formations"
+    case training = "Training"
 
     var id: String { rawValue }
 
@@ -29,8 +29,8 @@ enum AppSection: String, CaseIterable, Identifiable {
             return "list.bullet.rectangle.portrait"
         case .missionControl:
             return "slider.horizontal.3"
-        case .formations:
-            return "arrow.trianglehead.branch"
+        case .training:
+            return "graduationcap"
         case .theme:
             return "paintpalette.fill"
         case .settings:
@@ -54,8 +54,8 @@ enum AppSection: String, CaseIterable, Identifiable {
             return "Server and vehicle log streams."
         case .missionControl:
             return "Operate active missions in real time."
-        case .formations:
-            return "Formation spacing sandbox with simulators."
+        case .training:
+            return "Train movement skills and preview formation spacing on simulators."
         case .theme:
             return "UI chrome catalog and layout defaults."
         case .settings:
@@ -76,7 +76,7 @@ extension AppSection {
     static func primarySidebarRail(simulateEnabled: Bool) -> [AppSection] {
         var rail = primarySidebarRail
         if simulateEnabled {
-            rail.append(.formations)
+            rail.append(.training)
         }
         return rail
     }

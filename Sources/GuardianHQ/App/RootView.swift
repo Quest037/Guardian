@@ -106,7 +106,7 @@ struct RootView: View {
         .onChange(of: fleetLinkService.isSimulateEnabled) { sim in
             if !sim {
                 sitlService.stopAll()
-                if selection == .formations {
+                if selection == .training {
                     selection = .dashboard
                 }
             }
@@ -455,8 +455,8 @@ struct RootView: View {
                 PluginsView()
             case .logs:
                 LogsView(fleetLink: fleetLinkService)
-            case .formations:
-                FormationsPlaygroundView(
+            case .training:
+                TrainingPanelView(
                     fleetLink: fleetLinkService,
                     sitl: sitlService,
                     missionControl: missionControlStore,

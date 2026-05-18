@@ -12,9 +12,40 @@ import Foundation
 enum GuardianSitlOrphanBlitz {
     private static let skipEnvKey = "GUARDIAN_SKIP_SITL_ORPHAN_BLITZ"
     private static let sigtermWaitUsec: useconds_t = 280_000
+    /// Spawns registered at or after this time are never killed by pgrep during a blitz (avoids first-spawn races).
+    private static let appLaunchedAt = Date().timeIntervalSince1970
+
+    private static let coldLaunchLock = NSLock()
+    /// `nonisolated(unsafe)` — all reads/writes are behind ``coldLaunchLock``.
+    nonisolated(unsafe) private static var coldLaunchBlitzFinished = false
+    nonisolated(unsafe) private static var coldLaunchSemaphores: [DispatchSemaphore] = []
 
     static func kickoffFromColdLaunch() {
-        kickoffInBackground()
+        kickoffInBackground(markColdLaunch: true)
+    }
+
+    /// Blocks the caller until the cold-launch blitz completes (used from `SitlService.spawn` on the main actor).
+    static func blockUntilColdLaunchBlitzFinishedIfNeeded() {
+        coldLaunchLock.lock()
+        if coldLaunchBlitzFinished {
+            coldLaunchLock.unlock()
+            return
+        }
+        let sem = DispatchSemaphore(value: 0)
+        coldLaunchSemaphores.append(sem)
+        coldLaunchLock.unlock()
+        sem.wait()
+    }
+
+    private static func finishColdLaunchBlitz() {
+        coldLaunchLock.lock()
+        coldLaunchBlitzFinished = true
+        let semaphores = coldLaunchSemaphores
+        coldLaunchSemaphores.removeAll(keepingCapacity: true)
+        coldLaunchLock.unlock()
+        for sem in semaphores {
+            sem.signal()
+        }
     }
 
     /// When every built-in SITL row is stopped (e.g. after **Stop all** or mission SIM cleanup).
@@ -22,10 +53,14 @@ enum GuardianSitlOrphanBlitz {
         kickoffInBackground()
     }
 
-    private static func kickoffInBackground() {
-        guard ProcessInfo.processInfo.environment[skipEnvKey] == nil else { return }
+    private static func kickoffInBackground(markColdLaunch: Bool = false) {
+        guard ProcessInfo.processInfo.environment[skipEnvKey] == nil else {
+            if markColdLaunch { finishColdLaunchBlitz() }
+            return
+        }
         DispatchQueue.global(qos: .utility).async {
             runBlocking()
+            if markColdLaunch { finishColdLaunchBlitz() }
         }
     }
 
@@ -35,9 +70,12 @@ enum GuardianSitlOrphanBlitz {
         let ownPid32 = Int32(ownPid)
 
         var roots: Set<pid_t> = []
+        var protected = GuardianSitlSpawnRegistry.protectedPIDSet(registeredSince: appLaunchedAt)
+        addDescendants(of: protected, into: &protected)
 
         for rec in GuardianSitlSpawnRegistry.allRecords() {
             guard rec.pid > 1, rec.pid != ownPid32 else { continue }
+            guard rec.registeredAt < appLaunchedAt else { continue }
             if registryEntryStillMatches(rec) {
                 roots.insert(rec.pid)
             }
@@ -45,6 +83,7 @@ enum GuardianSitlOrphanBlitz {
 
         for pattern in allPgrepPatterns() {
             for pid in matchingPids(pattern: pattern) where pid > 1 && pid != ownPid32 {
+                guard !protected.contains(pid) else { continue }
                 roots.insert(pid)
             }
         }
@@ -53,8 +92,7 @@ enum GuardianSitlOrphanBlitz {
         addDescendants(of: roots, into: &all)
 
         guard !all.isEmpty else {
-            // Drop stale registry rows (dead PIDs / PID reuse) so the next launch does not carry junk.
-            GuardianSitlSpawnRegistry.clearAll()
+            GuardianSitlSpawnRegistry.removeRecordsRegisteredBefore(appLaunchedAt)
             return
         }
 
@@ -69,8 +107,7 @@ enum GuardianSitlOrphanBlitz {
             }
         }
 
-        // Stale JSON after force-quit is misleading; new session re-registers on spawn.
-        GuardianSitlSpawnRegistry.clearAll()
+        GuardianSitlSpawnRegistry.removeRecordsRegisteredBefore(appLaunchedAt)
     }
 
     // MARK: - Registry fingerprint

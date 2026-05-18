@@ -11,25 +11,34 @@ final class FormationFollowStream {
         /// Target AMSL altitude for ``Offboard/setPositionGlobal`` / ``Action/gotoLocation``.
         var absoluteAltitudeM: Double
         var yawDeg: Double
-        /// When set, streams ``Offboard/setVelocityBody`` (ArduPilot GUIDED + PX4 OFFBOARD) for gap closure.
+        /// When set, streams body-rate pursuit (ArduPilot GUIDED OFFBOARD, or PX4 rover throttle+steering).
         var pursuitForwardMS: Float?
         var pursuitYawspeedDegS: Float?
-        /// PX4 UGV: body velocity for reverse / 3-point catalogue moves (position-only cannot steer heading in place).
+        /// Catalogue flag: reverse / 3-point moves need body-rate pursuit (not position-global only).
         var useVelocityBodyPursuit: Bool = false
+    }
+
+    private enum PursuitPrimeKind: Equatable {
+        case positionGlobal
+        case offboardBodyVelocity
+        case px4GroundThrottleSteering
     }
 
     private let drone: Drone
     private let stack: FleetAutopilotStack
-    /// When `.ugv` on PX4, body velocity is ignored — position-global pursuit only.
     private let universalClass: UniversalVehicleClass
+    private let profile: ManualControlStepProfile
+    private let requestPx4ManualMode: (@MainActor () async -> Void)?
     private let awaitCompletable: @MainActor (Completable) async throws -> Void
     private let log: (String) -> Void
 
     private var target: Target
     private var streamTask: Task<Void, Never>?
     private(set) var isRunning = false
-    private var velocityBodyPrimed = false
-    /// Transient PX4 rejections (e.g. mode lag when the primary starts AUTO) before tearing down the stream.
+    private var offboardVelocityPrimed = false
+    private var px4RoverActuator: Px4GroundRoverMotionActuator?
+    private var px4ManualPrimed = false
+    private var primedPursuitKind: PursuitPrimeKind?
     private var consecutiveSetpointFailures = 0
     private let maxConsecutiveSetpointFailures = 12
 
@@ -37,16 +46,29 @@ final class FormationFollowStream {
         drone: Drone,
         stack: FleetAutopilotStack,
         universalClass: UniversalVehicleClass,
+        profile: ManualControlStepProfile,
         initialTarget: Target,
+        requestPx4ManualMode: (@MainActor () async -> Void)? = nil,
         awaitCompletable: @escaping @MainActor (Completable) async throws -> Void,
         log: @escaping (String) -> Void
     ) {
         self.drone = drone
         self.stack = stack
         self.universalClass = universalClass
+        self.profile = profile
         self.target = initialTarget
+        self.requestPx4ManualMode = requestPx4ManualMode
         self.awaitCompletable = awaitCompletable
         self.log = log
+        if GuardianVehicleMotionActuatorRouting.kind(stack: stack, universalClass: universalClass)
+            == .px4GroundThrottleSteering {
+            px4RoverActuator = Px4GroundRoverMotionActuator(
+                drone: drone,
+                profile: profile,
+                awaitCompletable: awaitCompletable,
+                log: log
+            )
+        }
     }
 
     func updateTarget(_ next: Target) {
@@ -59,7 +81,7 @@ final class FormationFollowStream {
             guard let self else { return }
             await self.run()
         }
-        for _ in 0..<150 {
+        for _ in 0..<250 {
             if isRunning { return true }
             try? await Task.sleep(nanoseconds: 20_000_000)
             if Task.isCancelled { return false }
@@ -71,7 +93,9 @@ final class FormationFollowStream {
         streamTask?.cancel()
         streamTask = nil
         isRunning = false
-        velocityBodyPrimed = false
+        offboardVelocityPrimed = false
+        px4ManualPrimed = false
+        primedPursuitKind = nil
         if stack == .px4 {
             do {
                 try await awaitCompletable(OffboardCoordinator.offboardStopCompletable(drone: drone))
@@ -80,6 +104,7 @@ final class FormationFollowStream {
                 log("Formation follow: offboard stop skipped (\(error.localizedDescription)).")
             }
         }
+        try? await px4RoverActuator?.pushNeutral()
         do {
             try await awaitCompletable(drone.action.hold())
             log("Formation follow: hold after stream stop.")
@@ -92,11 +117,13 @@ final class FormationFollowStream {
         defer {
             streamTask = nil
             isRunning = false
-            velocityBodyPrimed = false
+            offboardVelocityPrimed = false
+            px4ManualPrimed = false
+            primedPursuitKind = nil
             consecutiveSetpointFailures = 0
         }
         do {
-            try await primeOffboardIfNeeded()
+            try await ensurePrimedForCurrentTarget()
             isRunning = true
             log("Formation follow: setpoint stream active (~10 Hz).")
             while !Task.isCancelled {
@@ -106,8 +133,8 @@ final class FormationFollowStream {
                 } catch {
                     consecutiveSetpointFailures += 1
                     if consecutiveSetpointFailures == 1 {
-                        log("Formation follow: setpoint rejected; re-priming OFFBOARD (\(error.localizedDescription)).")
-                        try await rePrimeOffboard()
+                        log("Formation follow: setpoint rejected; re-priming (\(error.localizedDescription)).")
+                        try await rePrime()
                     } else if consecutiveSetpointFailures >= maxConsecutiveSetpointFailures {
                         throw error
                     }
@@ -121,51 +148,81 @@ final class FormationFollowStream {
         }
     }
 
-    private func rePrimeOffboard() async throws {
-        velocityBodyPrimed = false
-        try await primeOffboardIfNeeded()
+    private func rePrime() async throws {
+        offboardVelocityPrimed = false
+        px4ManualPrimed = false
+        primedPursuitKind = nil
+        try await ensurePrimedForCurrentTarget()
     }
 
-    private var usesVelocityBodyPursuit: Bool {
-        guard target.pursuitForwardMS != nil else { return false }
-        if stack == .ardupilot { return true }
-        if stack == .px4, universalClass == .ugv {
-            return target.useVelocityBodyPursuit
+    private func ensurePrimedForCurrentTarget() async throws {
+        let kind = currentPursuitPrimeKind
+        if primedPursuitKind == kind {
+            switch kind {
+            case .offboardBodyVelocity: if offboardVelocityPrimed { return }
+            case .px4GroundThrottleSteering: if px4ManualPrimed { return }
+            case .positionGlobal: return
+            }
         }
+        offboardVelocityPrimed = false
+        px4ManualPrimed = false
+        try await primeForKind(kind)
+        primedPursuitKind = kind
+    }
+
+    private var currentPursuitPrimeKind: PursuitPrimeKind {
+        if usesPx4GroundManualPursuit { return .px4GroundThrottleSteering }
+        if usesOffboardBodyVelocityPursuit { return .offboardBodyVelocity }
+        if stack == .px4 { return .positionGlobal }
+        return .positionGlobal
+    }
+
+    private var usesPx4GroundManualPursuit: Bool {
+        guard target.pursuitForwardMS != nil, target.useVelocityBodyPursuit else { return false }
+        return GuardianVehicleMotionActuatorRouting.kind(stack: stack, universalClass: universalClass)
+            == .px4GroundThrottleSteering
+    }
+
+    private var usesOffboardBodyVelocityPursuit: Bool {
+        guard target.pursuitForwardMS != nil else { return false }
+        if usesPx4GroundManualPursuit { return false }
+        if stack == .ardupilot { return true }
+        if stack == .px4, universalClass == .ugv { return false }
         return stack == .px4 && universalClass != .ugv
     }
 
-    private func primeOffboardIfNeeded() async throws {
-        if usesVelocityBodyPursuit {
+    private func primeForKind(_ kind: PursuitPrimeKind) async throws {
+        switch kind {
+        case .px4GroundThrottleSteering:
+            if stack == .px4 {
+                try? await awaitCompletable(OffboardCoordinator.offboardStopCompletable(drone: drone))
+            }
+            await requestPx4ManualMode?()
+            try await px4RoverActuator?.prime()
+            px4ManualPrimed = true
+            log("Formation follow: PX4 throttle+steering pursuit engaged.")
+        case .offboardBodyVelocity:
             try await primeVelocityBodyOffboardIfNeeded()
-            return
+        case .positionGlobal:
+            guard stack == .px4 else { return }
+            try await primePx4PositionOffboardIfNeeded()
         }
-        guard stack == .px4 else { return }
-        try await primePx4PositionOffboardIfNeeded()
     }
 
     private func primeVelocityBodyOffboardIfNeeded() async throws {
-        guard !velocityBodyPrimed else { return }
+        guard !offboardVelocityPrimed else { return }
         if stack == .px4 {
-            do {
-                try await awaitCompletable(OffboardCoordinator.offboardStopCompletable(drone: drone))
-            } catch {
-                log("Formation follow: pre-stream offboard stop skipped.")
-            }
+            try? await awaitCompletable(OffboardCoordinator.offboardStopCompletable(drone: drone))
         }
         let zero = Offboard.VelocityBodyYawspeed(forwardMS: 0, rightMS: 0, downMS: 0, yawspeedDegS: 0)
         try await awaitCompletable(drone.offboard.setVelocityBody(velocityBodyYawspeed: zero))
         try await awaitCompletable(drone.offboard.start())
-        velocityBodyPrimed = true
-        log("Formation follow: OFFBOARD velocity pursuit engaged.")
+        offboardVelocityPrimed = true
+        log("Formation follow: OFFBOARD body-velocity pursuit engaged.")
     }
 
     private func primePx4PositionOffboardIfNeeded() async throws {
-        do {
-            try await awaitCompletable(OffboardCoordinator.offboardStopCompletable(drone: drone))
-        } catch {
-            log("Formation follow: pre-stream offboard stop skipped.")
-        }
+        try? await awaitCompletable(OffboardCoordinator.offboardStopCompletable(drone: drone))
         let t = target
         let position = Offboard.PositionGlobalYaw(
             latDeg: t.coord.lat,
@@ -176,12 +233,21 @@ final class FormationFollowStream {
         )
         try await awaitCompletable(drone.offboard.setPositionGlobal(positionGlobalYaw: position))
         try await awaitCompletable(drone.offboard.start())
+        offboardVelocityPrimed = false
         log("Formation follow: OFFBOARD position engaged.")
     }
 
     private func pushCurrentSetpoint() async throws {
+        try await ensurePrimedForCurrentTarget()
         let t = target
-        if usesVelocityBodyPursuit, let forward = t.pursuitForwardMS {
+        if usesPx4GroundManualPursuit, let forward = t.pursuitForwardMS {
+            try await px4RoverActuator?.push(
+                bodyForwardMS: forward,
+                yawspeedDegS: t.pursuitYawspeedDegS ?? 0
+            )
+            return
+        }
+        if usesOffboardBodyVelocityPursuit, let forward = t.pursuitForwardMS {
             let velocity = Offboard.VelocityBodyYawspeed(
                 forwardMS: forward,
                 rightMS: 0,

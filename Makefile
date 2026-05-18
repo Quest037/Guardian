@@ -1,5 +1,5 @@
 # Default: ensure bundled mavsdk_server exists, then build.
-.PHONY: build bridge-deps sitl-runtime sitl-deps sitl-patch-waf sitl-prewarm sync-simulation-devices px4_sitl_default px4-sitl-runtime
+.PHONY: build bridge-deps sitl-runtime sitl-deps sitl-patch-waf sitl-prewarm sync-simulation-devices px4_sitl_default px4-sitl-runtime stack-wiki-fetch stack-wiki-refresh stack-wiki-deps
 
 # PX4 is not built from this repo; this target exists so `make px4_sitl_default` here explains what to run instead of "No rule".
 px4_sitl_default:
@@ -54,3 +54,13 @@ Sources/GuardianHQ/Resources/ArduPilotSitl/Tools/autotest/sim_vehicle.py:
 # One-time (or after Python upgrades): MAVSDK-Python for the telemetry sidecar.
 bridge-deps:
 	pip3 install -r Sources/GuardianHQ/Resources/MavsdkBridge/requirements.txt
+
+# Dev-only: local PX4 + ArduPilot doc chunks for Cursor agents (Resources/StackWiki/, not app bundle).
+stack-wiki-deps:
+	pip3 install -r scripts/stack_wiki/requirements.txt
+
+stack-wiki-fetch:
+	./scripts/stack_wiki/fetch_upstream.sh
+
+stack-wiki-refresh:
+	./scripts/stack_wiki/refresh_stack_wiki.sh

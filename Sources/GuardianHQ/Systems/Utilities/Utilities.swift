@@ -5,6 +5,7 @@ import Mavsdk
 final class GlobalUtilities {
     let mission = MissionUtilities()
     let movements = MovementsUtilities()
+    let training = TrainingUtilities()
     let fleet = FleetUtilities()
     let liveLeafletMap = LiveLeafletMapUtilitiesNamespace()
 }
@@ -15,6 +16,7 @@ enum Utilities {
 
     static var mission: MissionUtilities { global.mission }
     static var movements: MovementsUtilities { global.movements }
+    static var training: TrainingUtilities { global.training }
     static var fleet: FleetUtilities { global.fleet }
     static var liveLeafletMap: LiveLeafletMapUtilitiesNamespace { global.liveLeafletMap }
 }

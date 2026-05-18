@@ -1,0 +1,2 @@
+# RST → plain text for ArduPilot wiki sources (chunk pipeline only; not app runtime).
+docutils>=0.21,<0.23

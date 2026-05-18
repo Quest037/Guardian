@@ -17,6 +17,8 @@ struct SitlRunningInstance: Identifiable, Equatable {
     let px4GcsUdpPort: Int?
     var isAlive: Bool
     var lastExitCode: Int32?
+    /// Surface that spawned this process (Training vehicle vs Formation squad vs Vehicles / MC-R).
+    var spawnOwner: SitlSpawnOwner
 }
 
 extension SitlRunningInstance {
@@ -37,6 +39,8 @@ final class SitlService: ObservableObject {
     private var nextSimulationInstance: Int = 0
     private var recentlyReleasedUdpPorts: Set<Int> = []
     private var portReleaseSettleTask: Task<Void, Never>?
+    /// While set, ``reconcileFleetLinkVehicleCacheAfterSitlChange()`` does not run orphan blitz (avoids killing a brand-new sim).
+    private var suppressOrphanBlitzUntil: Date?
 
     init() {
         GuardianAppQuitCoordinator.shared.noteSitlServiceCreated(self)
@@ -56,9 +60,15 @@ final class SitlService: ObservableObject {
         let anyAlive = !aliveSystemIDs.isEmpty
         if !anyAlive {
             link.clearStaleVehicleStateWhenNoSitlAlive()
-            GuardianSitlOrphanBlitz.kickoffWhenAllInstancesStopped()
+            if suppressOrphanBlitzUntil.map({ $0 > Date() }) != true {
+                GuardianSitlOrphanBlitz.kickoffWhenAllInstancesStopped()
+            }
             schedulePortReleaseSettle()
         }
+    }
+
+    private func noteSpawnStarted() {
+        suppressOrphanBlitzUntil = Date().addingTimeInterval(20)
     }
 
     private func recordReleasedUdpPorts(from instance: SitlRunningInstance) {
@@ -293,29 +303,65 @@ final class SitlService: ObservableObject {
             vehicleType: inst.preset.fleetVehicleType,
             spawnDefaults: spawnDefaults
         )
-        if !ok, lastError == nil {
-            lastError = link.lastError ?? "Reconnect failed."
+        if !ok {
+            let detail = lastError ?? link.lastError ?? "Reconnect failed."
+            lastError = detail
+            link.appendSimulationLog(
+                "MAVSDK reconnect failed [mavlink_sysid=\(systemID) session=\(inst.id.uuidString)]: \(detail)"
+            )
         }
         return ok
     }
 
+    /// Opens the MAVSDK session as soon as the SITL process is running (retries until position telemetry is up).
+    private func registerFleetLinkForInstance(
+        _ inst: SitlRunningInstance,
+        link: FleetLinkService,
+        defaults: SimSpawnDefaults
+    ) {
+        let mavlinkURL = "udpin://0.0.0.0:\(inst.mavlinkIngressPort)"
+        let stack: FleetAutopilotStack = inst.platform == .ardupilot ? .ardupilot : .px4
+        link.appendSimulationLog(
+            "Registering MAVSDK for new SITL [vehicle=\(inst.preset.displayName) mavlink_sysid=\(inst.mavlinkSystemID) session=\(inst.id.uuidString)] \(mavlinkURL)"
+        )
+        link.registerSimulatedVehicle(
+            systemID: inst.mavlinkSystemID,
+            mavlinkConnectionURL: mavlinkURL,
+            autopilotStack: stack,
+            vehicleType: inst.preset.fleetVehicleType,
+            spawnDefaults: defaults
+        )
+    }
+
     /// Spawns SITL when **Simulate** is on.
-    func spawn(preset: SimulationVehiclePreset, platform: SimulationPlatform, defaults: SimSpawnDefaults) {
+    func spawn(
+        preset: SimulationVehiclePreset,
+        platform: SimulationPlatform,
+        defaults: SimSpawnDefaults,
+        owner: SitlSpawnOwner = .vehicles
+    ) {
         lastError = nil
         guard let link = fleetLink, link.isSimulateEnabled else {
             lastError = "Turn on Simulate before spawning SITL."
             return
         }
+        GuardianSitlOrphanBlitz.blockUntilColdLaunchBlitzFinishedIfNeeded()
+        noteSpawnStarted()
 
         switch platform {
         case .ardupilot:
-            spawnArduPilot(preset: preset, link: link, defaults: defaults)
+            spawnArduPilot(preset: preset, link: link, defaults: defaults, owner: owner)
         case .px4:
-            spawnPX4(preset: preset, link: link, defaults: defaults)
+            spawnPX4(preset: preset, link: link, defaults: defaults, owner: owner)
         }
     }
 
-    private func spawnArduPilot(preset: SimulationVehiclePreset, link: FleetLinkService, defaults: SimSpawnDefaults) {
+    private func spawnArduPilot(
+        preset: SimulationVehiclePreset,
+        link: FleetLinkService,
+        defaults: SimSpawnDefaults,
+        owner: SitlSpawnOwner
+    ) {
         guard let root = SitlLaunchRecipe.ardupilotRootPath() else {
             lastError = SitlError.missingArduPilotRuntime.errorDescription
             return
@@ -409,19 +455,16 @@ final class SitlService: ObservableObject {
                     mavlinkSystemID: mavlinkSystemID,
                     px4GcsUdpPort: nil,
                     isAlive: true,
-                    lastExitCode: nil
+                    lastExitCode: nil,
+                    spawnOwner: owner
                 )
-            )
-            link.registerSimulatedVehicle(
-                systemID: mavlinkSystemID,
-                mavlinkConnectionURL: "udpin://0.0.0.0:\(mavsdkIngressPort)",
-                autopilotStack: .ardupilot,
-                vehicleType: preset.fleetVehicleType,
-                spawnDefaults: defaults
             )
             link.appendSimulationLog(
                 "Started ArduPilot SITL [vehicle=\(preset.displayName) instance=\(instance) mavlink_port=\(mavsdkIngressPort) mavlink_sysid=\(mavlinkSystemID) session=\(id.uuidString)] primary_link=\(mavsdkIngressPort)"
             )
+            let row = instances.first(where: { $0.id == id })!
+            registerFleetLinkForInstance(row, link: link, defaults: defaults)
+            scheduleInitialFleetLinkRegistration(sessionID: id, link: link, defaults: defaults)
         } catch {
             lastError = error.localizedDescription
             runner.onLogLine = nil
@@ -429,7 +472,12 @@ final class SitlService: ObservableObject {
         }
     }
 
-    private func spawnPX4(preset: SimulationVehiclePreset, link: FleetLinkService, defaults: SimSpawnDefaults) {
+    private func spawnPX4(
+        preset: SimulationVehiclePreset,
+        link: FleetLinkService,
+        defaults: SimSpawnDefaults,
+        owner: SitlSpawnOwner
+    ) {
         guard let root = SitlLaunchRecipe.px4SitlRootPath() else {
             lastError = SitlError.missingPx4AutopilotRoot.errorDescription
             return
@@ -502,24 +550,84 @@ final class SitlService: ObservableObject {
                     mavlinkSystemID: mavlinkSystemID,
                     px4GcsUdpPort: gcsUdpPort,
                     isAlive: true,
-                    lastExitCode: nil
+                    lastExitCode: nil,
+                    spawnOwner: owner
                 )
-            )
-            link.registerSimulatedVehicle(
-                systemID: mavlinkSystemID,
-                mavlinkConnectionURL: "udpin://0.0.0.0:\(mavsdkIngressPort)",
-                autopilotStack: .px4,
-                vehicleType: preset.fleetVehicleType,
-                spawnDefaults: defaults
             )
             link.appendSimulationLog(
                 "Started PX4 SITL [sim=SIH vehicle=\(preset.displayName) model=\(preset.px4SitlSimModel()) instance=\(instance) mavlink_port=\(mavsdkIngressPort) mavlink_sysid=\(mavlinkSystemID) session=\(id.uuidString)] gcs_udp=\(gcsUdpPort) mavsdk_udpin=\(mavsdkIngressPort)"
             )
+            let row = instances.first(where: { $0.id == id })!
+            registerFleetLinkForInstance(row, link: link, defaults: defaults)
+            scheduleInitialFleetLinkRegistration(sessionID: id, link: link, defaults: defaults)
         } catch {
             lastError = error.localizedDescription
             runner.onLogLine = nil
             runner.onTerminated = nil
         }
+    }
+
+    /// After immediate ``registerFleetLinkForInstance``, retries **Reconnect link** until live position telemetry is up.
+    private func scheduleInitialFleetLinkRegistration(
+        sessionID: UUID,
+        link: FleetLinkService,
+        defaults: SimSpawnDefaults
+    ) {
+        Task { @MainActor [weak self] in
+            await self?.pursueFleetLinkUntilPositionTelemetry(
+                sessionID: sessionID,
+                link: link,
+                defaults: defaults
+            )
+        }
+    }
+
+    private func pursueFleetLinkUntilPositionTelemetry(
+        sessionID: UUID,
+        link: FleetLinkService,
+        defaults: SimSpawnDefaults
+    ) async {
+        let maxDuration: TimeInterval = 90
+        let deadline = Date().addingTimeInterval(maxDuration)
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        var reconnectAttempts = 0
+
+        while Date() < deadline {
+            guard let inst = instances.first(where: { $0.id == sessionID && $0.isAlive }) else {
+                link.appendSimulationLog("Fleet link pursuit ended: simulator session is not running.")
+                return
+            }
+            let vehicleID = inst.guardianVehicleStreamKey
+            if GuardianSitlFleetLinkReconnectPolicy.simulatorFleetLinkReadyWithMavsdkSession(
+                fleetLink: link,
+                vehicleID: vehicleID
+            ) {
+                if reconnectAttempts > 0 {
+                    link.appendSimulationLog(
+                        "Fleet link ready for \(vehicleID) after \(reconnectAttempts) MAVSDK reconnect(s)."
+                    )
+                }
+                return
+            }
+
+            if reconnectAttempts == 0 {
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                reconnectAttempts = 1
+                continue
+            }
+
+            reconnectAttempts += 1
+            link.appendSimulationLog(
+                "Fleet link: waiting for position telemetry on \(vehicleID); MAVSDK reconnect \(reconnectAttempts)…"
+            )
+            _ = await reconnectFleetLink(instance: inst, link: link, spawnDefaults: defaults)
+            let backoffS = min(6.0, 0.75 * Double(reconnectAttempts))
+            try? await Task.sleep(nanoseconds: UInt64(backoffS * 1_000_000_000))
+        }
+
+        link.appendSimulationLog(
+            "Fleet link timed out after \(Int(maxDuration))s with no position telemetry (session \(sessionID.uuidString))."
+        )
     }
 
     /// Finds the next PX4 `-i` instance index (legacy mode also requires the formula GCS port to be bindable).
@@ -547,7 +655,8 @@ final class SitlService: ObservableObject {
         mavlinkIngressPort: Int? = nil,
         mavlinkSystemID: Int? = nil,
         platform: SimulationPlatform = .px4,
-        preset: SimulationVehiclePreset = .uavMultirotor
+        preset: SimulationVehiclePreset = .uavMultirotor,
+        spawnOwner: SitlSpawnOwner = .vehicles
     ) {
         let port: Int
         switch platform {
@@ -570,7 +679,8 @@ final class SitlService: ObservableObject {
                 mavlinkSystemID: sysid,
                 px4GcsUdpPort: gcs,
                 isAlive: true,
-                lastExitCode: nil
+                lastExitCode: nil,
+                spawnOwner: spawnOwner
             )
         )
     }

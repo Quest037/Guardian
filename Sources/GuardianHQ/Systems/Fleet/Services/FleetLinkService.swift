@@ -1,7 +1,7 @@
 import AppKit
 import Combine
 import Foundation
-import Mavsdk
+@preconcurrency import Mavsdk
 @preconcurrency import RxSwift
 
 /// Shared Rx scheduler for MAVSDK generated plugins that call blocking `wait()` inside `subscribe`.
@@ -152,6 +152,21 @@ struct FleetLinkParameterError: Error, CustomStringConvertible {
     var localizedDescription: String { message }
 }
 
+/// Non-Sendable MAVSDK `Drone` bridge for background `connect` / `initPlugins` (see ``FleetLinkService/mavsdkPluginConnectTask``).
+private final class MavsdkPluginConnectHandle: @unchecked Sendable {
+    let drone: Drone
+    let grpcPort: Int
+
+    init(drone: Drone, grpcPort: Int) {
+        self.drone = drone
+        self.grpcPort = grpcPort
+    }
+
+    final class ActiveSubscription: @unchecked Sendable {
+        var disposable: Disposable?
+    }
+}
+
 @MainActor
 final class FleetLinkService: ObservableObject {
     private static let defaultsKey = "fleetLink.configuration.v1"
@@ -211,6 +226,8 @@ final class FleetLinkService: ObservableObject {
         var manualStream: ManualControlStream?
         /// Mission Control squad convoy wingman OFFBOARD / Guided position stream (not Live Drive).
         var formationFollowStream: FormationFollowStream?
+        /// Training lab velocity-body skill episodes (not formation / Live Drive).
+        var trainingControlStream: TrainingControlStream?
         /// One-shot: after MAVSDK reports connected, `applySimState` reinforces spawn pose/SIM fields from `SimSpawnDefaults`.
         var pendingSpawnSimState: FleetSimState?
 
@@ -244,6 +261,8 @@ final class FleetLinkService: ObservableObject {
     private var simulationStdoutLogDedupe = SimulationStdoutLogDedupeState()
     /// Vehicle stream keys (`sysid:n`) created by `registerSimulatedVehicle` (built-in SITL only).
     private var simulatedFleetVehicleIDs: Set<String> = []
+    /// Serializes MAVSDK `Drone.connect` / `initPlugins` (each plugin spins SwiftNIO threads — never overlap on the main actor).
+    private var mavsdkPluginConnectTask: Task<Void, Never>?
 
     /// Per-stream narrow observation for MC‑R roster tiles (strategy **A** — ``README_FULL.md`` → **MC-R live UI row contracts** → **Fleet per-vehicle observation strategy (locked)**).
     private var mcrRosterLiveChannelsByVehicleID: [String: FleetVehicleLiveChannel] = [:]
@@ -1661,11 +1680,30 @@ final class FleetLinkService: ObservableObject {
             }
         }
         let uClass = vehicleModelsByVehicleID[vehicleID]?.data.vehicleType.universalClass ?? .unknown
+        let profile = ManualControlSettingsStore.defaultStepProfilesByVehicleClass[uClass]
+            ?? ManualControlSettingsStore.defaultStepProfilesByVehicleClass[.ugv]!
         let stream = FormationFollowStream(
             drone: session.drone,
             stack: stack,
             universalClass: uClass,
+            profile: profile,
             initialTarget: initialTarget,
+            requestPx4ManualMode: { [weak self] in
+                guard let self, stack == .px4,
+                      let port = self.px4GcsUdpPort(for: session)
+                else { return }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                let targetSys = UInt8(clamping: session.systemID)
+                await Px4ModeCommander.setMode(
+                    port: port,
+                    targetSystem: targetSys,
+                    mainMode: .manual
+                )
+                self.appendVehicleLog(
+                    "Formation follow: PX4 MANUAL for throttle/steering pursuit.",
+                    vehicleID: vehicleID
+                )
+            },
             awaitCompletable: { [weak self] c in
                 guard let self else { return }
                 try await self.awaitCompletableForManualStream(c)
@@ -1708,6 +1746,102 @@ final class FleetLinkService: ObservableObject {
               let stream = session.formationFollowStream
         else { return }
         session.formationFollowStream = nil
+        await stream.stop()
+    }
+
+    // MARK: - Training control stream (skill lab)
+
+    func isTrainingControlStreaming(vehicleID: String) -> Bool {
+        sessionsByVehicleID[vehicleID]?.trainingControlStream?.isRunning == true
+    }
+
+    @discardableResult
+    func startTrainingControlStream(vehicleID: String) async -> Bool {
+        guard let session = sessionsByVehicleID[vehicleID] else {
+            appendVehicleLog("Training control: no MAVSDK session.", vehicleID: vehicleID)
+            return false
+        }
+        if let existing = session.trainingControlStream, existing.isRunning {
+            return true
+        }
+        await stopFormationFollowStream(vehicleID: vehicleID)
+        await prepareVehicleForFormationFollow(vehicleID: vehicleID)
+        let stack = vehicleModelsByVehicleID[vehicleID]?.data.telemetry?.autopilotStack
+            ?? hubTelemetryByVehicleID[vehicleID]?.autopilotStack
+            ?? .unknown
+        let uClass = vehicleModelsByVehicleID[vehicleID]?.data.vehicleType.universalClass ?? .unknown
+        let actuatorKind = GuardianVehicleMotionActuatorRouting.kind(stack: stack, universalClass: uClass)
+        let profile = ManualControlSettingsStore.defaultStepProfilesByVehicleClass[uClass]
+            ?? ManualControlSettingsStore.defaultStepProfilesByVehicleClass[.ugv]!
+
+        if stack == .ardupilot, actuatorKind == .offboardBodyVelocity,
+           uClass == .uav || uClass == .ugv || uClass == .usv {
+            do {
+                try await awaitCompletableForManualStream(
+                    ardupilotSetModeCompletable(
+                        mode: .guided,
+                        vehicleID: vehicleID,
+                        session: session,
+                        vehicleClass: uClass
+                    )
+                )
+            } catch {
+                appendVehicleLog(
+                    "Training control: guided mode failed (\(mavsdkPublicErrorDescription(error))).",
+                    vehicleID: vehicleID
+                )
+                return false
+            }
+        }
+
+        let stream = TrainingControlStream(
+            drone: session.drone,
+            stack: stack,
+            universalClass: uClass,
+            profile: profile,
+            awaitCompletable: { [weak self] c in
+                guard let self else { return }
+                try await self.awaitCompletableForManualStream(c)
+            },
+            log: { [weak self] line in
+                self?.appendVehicleLog(line, vehicleID: vehicleID)
+            }
+        )
+        session.trainingControlStream = stream
+        let started = await stream.start()
+        if !started {
+            session.trainingControlStream = nil
+            return false
+        }
+
+        if actuatorKind == .px4GroundThrottleSteering, let port = px4GcsUdpPort(for: session) {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            let target = UInt8(clamping: session.systemID)
+            await Px4ModeCommander.setMode(
+                port: port,
+                targetSystem: target,
+                mainMode: .manual
+            )
+            appendVehicleLog(
+                "Training control: PX4 MANUAL for throttle/steering (gcs udp 127.0.0.1:\(port)).",
+                vehicleID: vehicleID
+            )
+        }
+        return true
+    }
+
+    func executeTrainingSegment(vehicleID: String, segment: TrainingControlSegment) async throws {
+        guard let stream = sessionsByVehicleID[vehicleID]?.trainingControlStream else {
+            throw TrainingControlStreamError.notRunning
+        }
+        try await stream.executeSegment(segment)
+    }
+
+    func stopTrainingControlStream(vehicleID: String) async {
+        guard let session = sessionsByVehicleID[vehicleID],
+              let stream = session.trainingControlStream
+        else { return }
+        session.trainingControlStream = nil
         await stream.stop()
     }
 
@@ -2806,44 +2940,68 @@ final class FleetLinkService: ObservableObject {
             config.additionalMavlinkConnectionURLs = []
             try session.runner.start(configuration: config)
             appendVehicleLog("Started mavsdk_server gRPC \(session.grpcPort) (\(session.mavlinkConnectionURL))", vehicleID: vehicleID)
-            session.drone.connect(mavsdkServerAddress: "127.0.0.1", mavsdkServerPort: Int32(session.grpcPort))
-                .subscribe(
-                    onCompleted: { [weak self] in
-                        Task { @MainActor [weak self] in
-                            self?.appendVehicleLog("Native telemetry client connected.", vehicleID: vehicleID)
-                        }
-                    },
-                    onError: { [weak self] error in
-                        Task { @MainActor [weak self] in
-                            self?.appendVehicleLog("Telemetry connect error: \(error.localizedDescription)", vehicleID: vehicleID)
-                        }
-                    }
-                )
-                .disposed(by: session.bag)
-
-            session.drone.core.connectionState
-                .observe(on: MainScheduler.asyncInstance)
-                .subscribe(onNext: { [weak self] state in
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        self.bridgePhase = state.isConnected ? .live : .awaitingVehicle
-                        self.applyLifecycleStatus(VehicleLifecycleStatus(
-                            stage: state.isConnected ? .awaitingTelemetry : .reconnecting
-                        ), vehicleID: vehicleID)
-                        if state.isConnected {
-                            self.applyMavlinkBatteryTelemetryTuningOnce(session: session, vehicleID: vehicleID)
-                            self.scheduleApplyPendingSpawnSimStateIfNeeded(session: session, vehicleID: vehicleID)
-                        }
-                    }
-                })
-                .disposed(by: session.bag)
-
-            bindTelemetry(for: session, vehicleID: vehicleID, systemID: systemID)
+            let priorConnect = mavsdkPluginConnectTask
+            mavsdkPluginConnectTask = Task { [weak self] in
+                await priorConnect?.value
+                await self?.connectMavsdkPluginsAndBindTelemetry(session: session)
+            }
         } catch {
             appendVehicleLog("Failed to start session: \(error.localizedDescription)", vehicleID: vehicleID)
             lastError = error.localizedDescription
             stopSession(vehicleID: vehicleID)
         }
+    }
+
+    /// Runs `Drone.connect` / per-plugin SwiftNIO setup off the main actor, then binds Rx telemetry on the main actor.
+    private func connectMavsdkPluginsAndBindTelemetry(session: VehicleSession) async {
+        let vehicleID = session.vehicleID
+        let systemID = session.systemID
+        guard sessionsByVehicleID[vehicleID] === session else { return }
+
+        let connectHandle = MavsdkPluginConnectHandle(drone: session.drone, grpcPort: session.grpcPort)
+        let connectError: String? = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let active = MavsdkPluginConnectHandle.ActiveSubscription()
+                active.disposable = connectHandle.drone
+                    .connect(mavsdkServerAddress: "127.0.0.1", mavsdkServerPort: Int32(connectHandle.grpcPort))
+                    .subscribe(
+                        onCompleted: {
+                            active.disposable = nil
+                            continuation.resume(returning: nil)
+                        },
+                        onError: { error in
+                            active.disposable = nil
+                            continuation.resume(returning: error.localizedDescription)
+                        }
+                    )
+            }
+        }
+
+        guard sessionsByVehicleID[vehicleID] === session else { return }
+        if let connectError {
+            appendVehicleLog("Telemetry connect error: \(connectError)", vehicleID: vehicleID)
+        } else {
+            appendVehicleLog("Native telemetry client connected.", vehicleID: vehicleID)
+        }
+
+        session.drone.core.connectionState
+            .observe(on: MainScheduler.asyncInstance)
+            .subscribe(onNext: { [weak self] state in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.bridgePhase = state.isConnected ? .live : .awaitingVehicle
+                    self.applyLifecycleStatus(VehicleLifecycleStatus(
+                        stage: state.isConnected ? .awaitingTelemetry : .reconnecting
+                    ), vehicleID: vehicleID)
+                    if state.isConnected {
+                        self.applyMavlinkBatteryTelemetryTuningOnce(session: session, vehicleID: vehicleID)
+                        self.scheduleApplyPendingSpawnSimStateIfNeeded(session: session, vehicleID: vehicleID)
+                    }
+                }
+            })
+            .disposed(by: session.bag)
+
+        bindTelemetry(for: session, vehicleID: vehicleID, systemID: systemID)
     }
 
     private func bindTelemetry(for session: VehicleSession, vehicleID: String, systemID: Int) {
@@ -3026,6 +3184,10 @@ final class FleetLinkService: ObservableObject {
         if let formation = session.formationFollowStream {
             session.formationFollowStream = nil
             Task { await formation.stop() }
+        }
+        if let training = session.trainingControlStream {
+            session.trainingControlStream = nil
+            Task { await training.stop() }
         }
         session.bag = DisposeBag()
         session.drone.disconnect()

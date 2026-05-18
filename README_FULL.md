@@ -1151,6 +1151,23 @@ let answer = await OperatorPromptResumptionChannel.shared.awaitAnswer(for: event
 
 Do **not** treat a registered descriptor as "done" unless the stack converter either performs a real, verifiable action **or** returns a deliberate, documented `.notImplemented` because the required transport is genuinely unavailable. The same rule applies to recipe bodies — a registered body that no step can actually run is worse than no body at all.
 
+## Stack wiki (local autopilot docs)
+
+Dev-only PX4 and ArduPilot documentation for **Cursor agents** (not shipped in the app bundle).
+
+| Item | Location |
+|------|----------|
+| Chunk index | `Resources/StackWiki/index/chunks.jsonl` |
+| Manifest (commits, `retrieved_at`) | `Resources/StackWiki/manifest.json` |
+| Refresh | `make stack-wiki-refresh` (`make stack-wiki-deps` once for docutils) |
+| Agent rule | `.cursor/rules/stack-wiki-docs-local.mdc` |
+
+**Retrieval order:** local stack wiki → Guardian docs (`README_FULL.md`, catalogues) → web only if the index is missing, out of scope, operator asks for latest upstream, or `manifest.json` `retrieved_at` is older than **14 days** on parameter/mode-sensitive answers.
+
+**Licenses:** PX4 User Guide — CC BY 4.0; ArduPilot Wiki — CC BY-SA 3.0. Cite license + `retrieved_at` + chunk `url` when quoting.
+
+Upstream clones under `Resources/StackWiki/upstream/` are gitignored; the pipeline uses sparse PX4 `docs/` and full `ardupilot_wiki`.
+
 ## Adding another autopilot “stack” later
 
 Rough checklist so fleet badges, sim picker, and MAVLink stay consistent:

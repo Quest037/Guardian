@@ -62,6 +62,23 @@ enum GuardianSitlSpawnRegistry {
         (try? readAll()) ?? []
     }
 
+    /// PIDs Guardian registered since `launchTime` (current session spawns — must not be orphan-blitzed).
+    static func protectedPIDSet(registeredSince launchTime: TimeInterval) -> Set<pid_t> {
+        Set(
+            allRecords()
+                .filter { $0.registeredAt >= launchTime }
+                .map { pid_t($0.pid) }
+        )
+    }
+
+    /// Drops persisted rows from prior sessions; keeps rows registered at or after `launchTime`.
+    static func removeRecordsRegisteredBefore(_ launchTime: TimeInterval) {
+        do {
+            let kept = try readAll().filter { $0.registeredAt >= launchTime }
+            try writeAll(kept)
+        } catch {}
+    }
+
     /// Clears persisted PIDs (e.g. after a startup orphan blitz).
     static func clearAll() {
         try? writeAll([])

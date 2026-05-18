@@ -144,21 +144,27 @@ final class FormationsPlaygroundController: ObservableObject {
 
         let count = min(10, max(1, simCount))
         simCount = count
-        isBusy = true
         phase = .spawning
-        defer { isBusy = false }
-
         await stopAllStreams()
         stopPlaygroundSquadTrackedInstancesOnly(sitl: sitl)
+        await sitl.waitForRecentlyReleasedPortsToSettle()
         clearFormationLogs()
         slots = []
 
+        isBusy = true
         for index in 0..<count {
             statusText = "Spawning simulator \(index + 1) of \(count)…"
             let before = Set(sitl.instances.map(\.id))
             let defaults = staggeredSpawnDefaults(slotIndex: index)
-            sitl.spawn(preset: vehicleClass.simulationPreset, platform: simulationPlatform, defaults: defaults)
-            let added = sitl.instances.filter { !before.contains($0.id) }
+            sitl.spawn(
+                preset: vehicleClass.simulationPreset,
+                platform: simulationPlatform,
+                defaults: defaults,
+                owner: .formationsPlayground
+            )
+            let added = sitl.instances.filter {
+                !before.contains($0.id) && $0.spawnOwner == .formationsPlayground
+            }
             for row in added {
                 slots.append(
                     FormationsPlaygroundSlotState(
@@ -172,6 +178,7 @@ final class FormationsPlaygroundController: ObservableObject {
             }
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
+        isBusy = false
 
         phase = .connecting
         statusText = "Waiting for fleet link (\(count) simulators in Vehicles)…"
@@ -229,30 +236,59 @@ final class FormationsPlaygroundController: ObservableObject {
         Task { await refreshFormationStreams() }
     }
 
-    func retryPreflight(
+    func retrySimulatorConnection(
         slotID: UUID,
         missionControl: MissionControlStore
     ) async {
         guard let fleetLink, let sitl,
-              let index = slots.firstIndex(where: { $0.id == slotID }),
-              let vehicleID = slots[index].vehicleID
+              let index = slots.firstIndex(where: { $0.id == slotID })
         else { return }
 
-        isBusy = true
-        defer { isBusy = false }
+        var slot = slots[index]
+        guard let vehicleID = slot.vehicleID else { return }
 
+        phase = .connecting
+        statusText = slot.linkReady ? "Retrying preflight…" : "Reconnecting telemetry…"
         await fleetLink.stopFormationFollowStream(vehicleID: vehicleID)
 
-        if !slotFleetReady(fleetLink: fleetLink, vehicleID: vehicleID) {
-            statusText = "Waiting for live telemetry before preflight…"
-            guard await waitForSlotFleetReady(slotID: slotID, fleetLink: fleetLink) else {
+        if !slot.linkReady,
+           let inst = sitl.instances.first(where: { $0.id == slot.sitlSessionID && $0.isAlive }) {
+            let reconnected = await bindFleetLinkToFormationSimulator(
+                inst: inst,
+                fleetLink: fleetLink,
+                sitl: sitl
+            )
+            if !reconnected {
                 slots[index].preflightPassed = false
-                slots[index].preflightDetail = MissionControlStore.preflightProbeNotConnectedDetail
-                statusText = "Simulator not connected. Open Vehicles to reconnect, then retry."
+                slots[index].preflightDetail = sitl.lastError ?? "Reconnect failed."
+                slots[index].linkReady = false
+                statusText = slots[index].preflightDetail ?? "Reconnect failed."
+                phase = .idle
                 return
             }
         }
 
+        refreshSlotRows(fleetLink: fleetLink)
+        guard let refreshedIndex = slots.firstIndex(where: { $0.id == slotID }) else {
+            phase = .idle
+            return
+        }
+        slot = slots[refreshedIndex]
+
+        if !slotFleetReady(fleetLink: fleetLink, vehicleID: vehicleID) {
+            statusText = "Waiting for live telemetry…"
+            guard await waitForSlotFleetReady(slotID: slotID, fleetLink: fleetLink) else {
+                slots[refreshedIndex].preflightPassed = false
+                slots[refreshedIndex].preflightDetail = MissionControlStore.preflightProbeNotConnectedDetail
+                slots[refreshedIndex].linkReady = false
+                statusText = "Timed out waiting for telemetry. Try Replace or check SITL logs."
+                phase = .idle
+                return
+            }
+            slots[refreshedIndex].linkReady = true
+        }
+
+        phase = .preflight
         statusText = "Retrying preflight…"
         let probe = await missionControl.runSingleVehiclePreflightProbe(
             vehicleID: vehicleID,
@@ -262,8 +298,10 @@ final class FormationsPlaygroundController: ObservableObject {
             allowDuringLiveMission: true,
             preflightAuditSource: Self.preflightSource
         )
-        slots[index].preflightPassed = probe.passed
-        slots[index].preflightDetail = probe.detail
+        slots[refreshedIndex].preflightPassed = probe.passed
+        slots[refreshedIndex].preflightDetail = probe.detail
+        slots[refreshedIndex].linkReady = true
+        phase = .idle
         statusText = probe.passed
             ? liveStatusLabel()
             : "Preflight failed: \(probe.detail)"
@@ -274,16 +312,18 @@ final class FormationsPlaygroundController: ObservableObject {
         !slot.linkReady || slot.preflightPassed != true
     }
 
-    /// True when live telemetry is available enough to run (or re-run) preflight on this row.
-    func shouldOfferRetryPreflight(
-        slot: FormationsPlaygroundSlotState,
-        fleetLink: FleetLinkService
-    ) -> Bool {
-        guard slot.vehicleID != nil, slot.preflightPassed != true else { return false }
-        if slot.linkReady { return true }
-        guard let vehicleID = slot.vehicleID else { return false }
-        return slotFleetReady(fleetLink: fleetLink, vehicleID: vehicleID)
+    func shouldOfferSimulatorRetry(slot: FormationsPlaygroundSlotState) -> Bool {
+        GuardianSimulatorSlotRecoveryPolicy.shouldOfferRetry(slot: slot)
     }
+
+    func retryButtonTitle(for slot: FormationsPlaygroundSlotState) -> String {
+        GuardianSimulatorSlotRecoveryPolicy.formationRetryButtonTitle(
+            linkReady: slot.linkReady,
+            isConnecting: phase == .connecting || phase == .preflight
+        )
+    }
+
+    var cardActionsLocked: Bool { isBusy }
 
     func replaceSlot(
         slotID: UUID,
@@ -292,22 +332,35 @@ final class FormationsPlaygroundController: ObservableObject {
         guard let fleetLink, let sitl,
               let index = slots.firstIndex(where: { $0.id == slotID })
         else { return }
+        guard fleetLink.isSimulateEnabled else {
+            statusText = "Turn on Simulate in the top bar before replacing."
+            return
+        }
         let old = slots[index]
         if let vid = old.vehicleID {
             await fleetLink.stopFormationFollowStream(vehicleID: vid)
         }
+        if let oldInst = sitl.instances.first(where: { $0.id == old.sitlSessionID }) {
+            fleetLink.unregisterSimulatedVehicle(systemID: oldInst.mavlinkSystemID)
+        }
         sitl.stop(id: old.sitlSessionID)
+        await sitl.waitForRecentlyReleasedPortsToSettle()
         slots.remove(at: index)
 
         statusText = "Replacing simulator (stop + spawn)…"
         isBusy = true
-        defer { isBusy = false }
-
         let before = Set(sitl.instances.map(\.id))
         let defaults = staggeredSpawnDefaults(slotIndex: index)
-        sitl.spawn(preset: vehicleClass.simulationPreset, platform: simulationPlatform, defaults: defaults)
-        guard let row = sitl.instances.first(where: { !before.contains($0.id) }) else {
-            statusText = "Could not spawn replacement simulator."
+        sitl.spawn(
+            preset: vehicleClass.simulationPreset,
+            platform: simulationPlatform,
+            defaults: defaults,
+            owner: .formationsPlayground
+        )
+        guard let row = sitl.instances.first(where: {
+            !before.contains($0.id) && $0.spawnOwner == .formationsPlayground
+        }) else {
+            statusText = sitl.lastError ?? "Could not spawn replacement simulator."
             return
         }
         let replacement = FormationsPlaygroundSlotState(
@@ -318,6 +371,11 @@ final class FormationsPlaygroundController: ObservableObject {
             preflightDetail: nil
         )
         slots.insert(replacement, at: index)
+        isBusy = false
+
+        if let inst = sitl.instances.first(where: { $0.id == replacement.sitlSessionID && $0.isAlive }) {
+            _ = await bindFleetLinkToFormationSimulator(inst: inst, fleetLink: fleetLink, sitl: sitl)
+        }
 
         guard await waitForSlotFleetReady(slotID: replacement.id, fleetLink: fleetLink) else {
             statusText = "Replacement simulator did not reach live telemetry in time."
@@ -326,7 +384,7 @@ final class FormationsPlaygroundController: ObservableObject {
         refreshSlotRows(fleetLink: fleetLink)
         try? await Task.sleep(nanoseconds: 750_000_000)
 
-        await retryPreflight(slotID: replacement.id, missionControl: missionControl)
+        await retrySimulatorConnection(slotID: replacement.id, missionControl: missionControl)
 
         if phase == .following, replacement.vehicleID != nil, slots[index].preflightPassed == true {
             await refreshFormationStreams()
@@ -579,10 +637,19 @@ final class FormationsPlaygroundController: ObservableObject {
 
     private func staggeredSpawnDefaults(slotIndex: Int) -> SimSpawnDefaults {
         var d = spawnDefaults
-        let row = slotIndex / 3
-        let col = slotIndex % 3
-        d.latitudeDeg += Double(row) * 0.00004
-        d.longitudeDeg += Double(col) * 0.00004
+        guard slotIndex > 0 else { return d }
+        // Spread wingmen astern / lateral so rear-row slots are not all "ahead of slot" (reverse OFFBOARD).
+        let asternLaneM = Double((slotIndex + 1) / 2) * 5.0
+        let lateralM = (slotIndex % 2 == 0 ? 1.0 : -1.0) * min(3.0, Double((slotIndex - 1) % 3 + 1))
+        let offset = MissionSquadFormationGeometry.offsetCoordinate(
+            latitudeDeg: d.latitudeDeg,
+            longitudeDeg: d.longitudeDeg,
+            headingDeg: d.headingDeg,
+            forwardMeters: -asternLaneM,
+            rightMeters: lateralM
+        )
+        d.latitudeDeg = offset.lat
+        d.longitudeDeg = offset.lon
         return d
     }
 
@@ -604,7 +671,9 @@ final class FormationsPlaygroundController: ObservableObject {
 
     private func syncSlotsFromRunningSitl(fleetLink: FleetLinkService) {
         guard let sitl else { return }
-        let alive = sitl.instances.filter(\.isAlive).sorted { $0.stackInstanceIndex < $1.stackInstanceIndex }
+        let alive = sitl.instances
+            .aliveInstances(owner: .formationsPlayground)
+            .sorted { $0.stackInstanceIndex < $1.stackInstanceIndex }
         guard !alive.isEmpty else {
             slots = slots.filter { row in
                 sitl.instances.contains(where: { $0.id == row.sitlSessionID && $0.isAlive })
@@ -639,6 +708,18 @@ final class FormationsPlaygroundController: ObservableObject {
         simCount = max(simCount, merged.count)
     }
 
+    private func bindFleetLinkToFormationSimulator(
+        inst: SitlRunningInstance,
+        fleetLink: FleetLinkService,
+        sitl: SitlService
+    ) async -> Bool {
+        let vehicleID = vehicleID(forStackInstance: inst.stackInstanceIndex, fleetLink: fleetLink)
+        await fleetLink.stopFormationFollowStream(vehicleID: vehicleID)
+        fleetLink.unregisterSimulatedVehicle(systemID: inst.mavlinkSystemID)
+        try? await Task.sleep(nanoseconds: 350_000_000)
+        return await sitl.reconnectFleetLink(sitlSessionID: inst.id, spawnDefaults: spawnDefaults)
+    }
+
     private func stopAllStreams() async {
         Utilities.movements.sequenceStore.clearAll()
         guard let fleetLink else { return }
@@ -648,22 +729,19 @@ final class FormationsPlaygroundController: ObservableObject {
     }
 
     private func slotFleetReady(fleetLink: FleetLinkService, vehicleID: String) -> Bool {
-        guard fleetLink.vehicleModel(forVehicleID: vehicleID) != nil else { return false }
-        guard fleetLink.vehicleModel(forVehicleID: vehicleID)?.collections.lifecycleStatus.stage == .live else {
-            return false
-        }
-        guard let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID),
-              hub.latitudeDeg != nil,
-              hub.longitudeDeg != nil
-        else { return false }
-        return true
+        GuardianSitlFleetLinkReconnectPolicy.simulatorFleetLinkReady(
+            fleetLink: fleetLink,
+            vehicleID: vehicleID
+        )
     }
 
     private func refreshSlotRows(fleetLink: FleetLinkService) {
         guard let sitl else { return }
         for index in slots.indices {
             let sessionID = slots[index].sitlSessionID
-            if let row = sitl.instances.first(where: { $0.id == sessionID }) {
+            if let row = sitl.instances.first(where: {
+                $0.id == sessionID && $0.spawnOwner == .formationsPlayground
+            }) {
                 slots[index].vehicleID = vehicleID(
                     forStackInstance: row.stackInstanceIndex,
                     fleetLink: fleetLink
@@ -922,28 +1000,35 @@ final class FormationsPlaygroundController: ObservableObject {
         )
         await ensureFormationStream(vehicleID: primaryID, target: primaryTarget, fleetLink: fleetLink)
 
-        var wingmanOrdinal = 0
-        for vehicleID in ready.dropFirst() {
-            let slot = Utilities.mission.squadFormation.desiredPadSlot(
-                formation: formation,
-                primaryLatitudeDeg: formationAnchorLat,
-                primaryLongitudeDeg: formationAnchorLon,
-                primaryHeadingDeg: formationAnchorHeadingDeg,
-                wingmanOrdinal: wingmanOrdinal,
-                spacing: spacing
-            )
-            let vType = fleetLink.vehicleModel(forVehicleID: vehicleID)?.data.vehicleType ?? vehicleClass.fleetVehicleType
-            let target = FormationsPlaygroundStreamTargets.wingmanPursuit(
-                wingmanVehicleID: vehicleID,
-                slot: slot,
-                primaryHeadingDeg: formationAnchorHeadingDeg,
-                vehicleType: vType,
-                wingmanAbsoluteAltitudeM: formationAnchorAltM,
-                primarySpeedMS: primarySpeed,
-                fleetLink: fleetLink
-            )
-            await ensureFormationStream(vehicleID: vehicleID, target: target, fleetLink: fleetLink)
-            wingmanOrdinal += 1
+        await withTaskGroup(of: Void.self) { group in
+            var wingmanOrdinal = 0
+            for vehicleID in ready.dropFirst() {
+                let ordinal = wingmanOrdinal
+                wingmanOrdinal += 1
+                let slot = Utilities.mission.squadFormation.desiredPadSlot(
+                    formation: formation,
+                    primaryLatitudeDeg: formationAnchorLat,
+                    primaryLongitudeDeg: formationAnchorLon,
+                    primaryHeadingDeg: formationAnchorHeadingDeg,
+                    wingmanOrdinal: ordinal,
+                    spacing: spacing
+                )
+                let vType = fleetLink.vehicleModel(forVehicleID: vehicleID)?.data.vehicleType
+                    ?? vehicleClass.fleetVehicleType
+                let target = FormationsPlaygroundStreamTargets.wingmanPursuit(
+                    wingmanVehicleID: vehicleID,
+                    slot: slot,
+                    primaryHeadingDeg: formationAnchorHeadingDeg,
+                    vehicleType: vType,
+                    wingmanAbsoluteAltitudeM: formationAnchorAltM,
+                    primarySpeedMS: primarySpeed,
+                    fleetLink: fleetLink
+                )
+                group.addTask { [weak self] in
+                    guard let self else { return }
+                    await self.ensureFormationStream(vehicleID: vehicleID, target: target, fleetLink: fleetLink)
+                }
+            }
         }
     }
 

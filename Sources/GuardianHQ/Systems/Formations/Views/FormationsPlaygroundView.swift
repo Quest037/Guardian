@@ -9,25 +9,49 @@ private enum FormationsSidePanelTab: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-/// Formation sandbox (Simulate on): map at default SIM spawn + live OFFBOARD/GUIDED spacing.
-struct FormationsPlaygroundView: View {
+private enum TrainingSidePanelTab: String, CaseIterable, Identifiable {
+    case controls = "Controls"
+    case logs = "Logs"
+    case skill = "Skill"
+
+    var id: String { rawValue }
+}
+
+/// Simulate panel: **Vehicle** mode (skill training, default) and **Formation** mode (spacing sandbox).
+struct TrainingPanelView: View {
     @ObservedObject var fleetLink: FleetLinkService
     @ObservedObject var sitl: SitlService
     @ObservedObject var missionControl: MissionControlStore
     @ObservedObject var generalSettings: GeneralSettingsStore
     @StateObject private var playground = FormationsPlaygroundController()
+    @StateObject private var training = TrainingPanelController()
 
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var toastCenter: ToastCenter
 
+    @State private var panelMode: TrainingPanelMode = .vehicle
     @State private var sidePanelTab: FormationsSidePanelTab = .controls
+    @State private var trainingSidePanelTab: TrainingSidePanelTab = .controls
     @State private var calibrationContext: FormationsCalibrationContext?
     @State private var showTelemetryTrace = false
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
-    private var controlsLocked: Bool {
+    private var formationControlsLocked: Bool {
         playground.isBusy || playground.phase != .idle
+    }
+
+    private var vehicleControlsLocked: Bool {
+        training.isBusy
+            || training.phase == .teaching
+            || training.phase == .spawning
+            || training.phase == .connecting
+            || training.phase == .preflight
+    }
+
+    /// Target-slot map edit toggle is off-limits while a teaching run is active (or spawn/preflight is busy).
+    private var trainingTargetSlotMapEditLocked: Bool {
+        vehicleControlsLocked || training.phase == .teaching
     }
 
     var body: some View {
@@ -68,27 +92,32 @@ struct FormationsPlaygroundView: View {
         }
         .animation(GuardianMotion.confirmPresent, value: calibrationContext?.id)
         .onAppear {
-            playground.attach(
-                fleetLink: fleetLink,
-                sitl: sitl,
-                spawnDefaults: generalSettings.simSpawnDefaults,
-                simulationPlatform: generalSettings.defaultSimulationPlatform
-            )
-            playground.syncFromFleetOnAppear(fleetLink: fleetLink)
-            refreshMapHome()
-            fitMapToPlayground()
+            attachControllersForCurrentMode()
+            refreshActiveMap()
         }
         .onDisappear {
+            training.leavePanel()
             playground.leavePanel()
         }
         .onChange(of: generalSettings.simSpawnDefaults) { defaults in
+            training.attach(
+                fleetLink: fleetLink,
+                sitl: sitl,
+                spawnDefaults: defaults,
+                simulationPlatform: generalSettings.defaultSimulationPlatform
+            )
+            training.spawnDefaultsDidChange()
             playground.attach(
                 fleetLink: fleetLink,
                 sitl: sitl,
                 spawnDefaults: defaults,
                 simulationPlatform: generalSettings.defaultSimulationPlatform
             )
-            refreshMapHome()
+            if panelMode == .vehicle {
+                refreshTrainingMap()
+            } else {
+                refreshMapHome()
+            }
         }
         .onChange(of: generalSettings.defaultSimulationPlatform) { platform in
             playground.attach(
@@ -99,6 +128,7 @@ struct FormationsPlaygroundView: View {
             )
         }
         .onChange(of: playground.formation) { _ in
+            guard panelMode == .formation else { return }
             playground.formationSettingsDidChange(fleetLink: fleetLink)
             if playground.isSlotGroupMapEditEnabled {
                 syncFormationSlotMapEditChrome()
@@ -107,6 +137,7 @@ struct FormationsPlaygroundView: View {
             }
         }
         .onChange(of: playground.shape) { _ in
+            guard panelMode == .formation else { return }
             playground.formationSettingsDidChange(fleetLink: fleetLink)
             if playground.isSlotGroupMapEditEnabled {
                 syncFormationSlotMapEditChrome()
@@ -114,14 +145,78 @@ struct FormationsPlaygroundView: View {
                 syncMapContent()
             }
         }
+        .onChange(of: training.taskKind) { _ in
+            guard panelMode == .vehicle else { return }
+            training.taskKindDidChange()
+            training.loadPromotedSkill()
+        }
+        .onChange(of: training.targetSlot) { _ in
+            guard panelMode == .vehicle else { return }
+            refreshTrainingMap()
+        }
+        .onChange(of: training.isTargetSlotMapEditEnabled) { _ in
+            guard panelMode == .vehicle else { return }
+            refreshTrainingMap()
+        }
         .onReceive(fleetLink.$hubFleetTelemetryTick) { _ in
-            playground.refreshConnectedSimCount(fleetLink: fleetLink)
-            syncMapMarkers()
+            if panelMode == .vehicle {
+                training.refreshSimulatorSlot(fleetLink: fleetLink)
+                syncTrainingMapMarkers()
+            } else {
+                playground.refreshConnectedSimCount(fleetLink: fleetLink)
+                syncMapMarkers()
+            }
         }
         .onChange(of: sidePanelTab) { tab in
             if tab == .sims {
                 playground.refreshConnectedSimCount(fleetLink: fleetLink)
             }
+        }
+    }
+
+    private func attachControllersForCurrentMode() {
+        training.attach(
+            fleetLink: fleetLink,
+            sitl: sitl,
+            spawnDefaults: generalSettings.simSpawnDefaults,
+            simulationPlatform: generalSettings.defaultSimulationPlatform
+        )
+        playground.attach(
+            fleetLink: fleetLink,
+            sitl: sitl,
+            spawnDefaults: generalSettings.simSpawnDefaults,
+            simulationPlatform: generalSettings.defaultSimulationPlatform
+        )
+        if panelMode == .vehicle {
+            playground.leavePanel()
+            training.syncFromFleetOnAppear(fleetLink: fleetLink)
+            training.loadPromotedSkill()
+            refreshTrainingMap()
+        } else {
+            training.leavePanel()
+            playground.syncFromFleetOnAppear(fleetLink: fleetLink)
+        }
+    }
+
+    private func handlePanelModeChange(_ mode: TrainingPanelMode) {
+        switch mode {
+        case .vehicle:
+            playground.leavePanel()
+            training.syncFromFleetOnAppear(fleetLink: fleetLink)
+            training.loadPromotedSkill()
+        case .formation:
+            training.leavePanel()
+            playground.syncFromFleetOnAppear(fleetLink: fleetLink)
+        }
+        refreshActiveMap()
+    }
+
+    private func refreshActiveMap() {
+        if panelMode == .vehicle {
+            refreshTrainingMap()
+        } else {
+            refreshMapHome()
+            fitMapToPlayground()
         }
     }
 
@@ -138,16 +233,30 @@ struct FormationsPlaygroundView: View {
             model: mapModel,
             toolbar: GuardianMapToolbarOptions(
                 mapResetAction: { model in
-                    fitMapToPlayground(mapModel: model)
+                    if panelMode == .vehicle {
+                        fitTrainingMap(mapModel: model)
+                    } else {
+                        fitMapToPlayground(mapModel: model)
+                    }
                 }
             ),
             onFormationSlotGroupCenterMoved: { lat, lon in
-                playground.previewFormationSlotGroupCenter(lat: lat, lon: lon)
-                syncFormationSlotMapEditChrome()
+                if panelMode == .vehicle {
+                    training.moveTargetSlotCenter(latitudeDeg: lat, longitudeDeg: lon)
+                    syncTrainingTargetSlotMapEdit()
+                } else {
+                    playground.previewFormationSlotGroupCenter(lat: lat, lon: lon)
+                    syncFormationSlotMapEditChrome()
+                }
             },
             onFormationSlotGroupHeadingMoved: { headingDeg in
-                playground.previewFormationSlotGroupHeading(headingDeg: headingDeg)
-                syncFormationSlotMapEditChrome()
+                if panelMode == .vehicle {
+                    training.setTargetSlotHeading(headingDeg: headingDeg)
+                    syncTrainingTargetSlotMapEdit()
+                } else {
+                    playground.previewFormationSlotGroupHeading(headingDeg: headingDeg)
+                    syncFormationSlotMapEditChrome()
+                }
             }
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -156,25 +265,58 @@ struct FormationsPlaygroundView: View {
 
     private var sidePanel: some View {
         VStack(spacing: 0) {
-            sidePanelToolbar
+            panelModePicker
+                .padding(.horizontal, GuardianSpacing.md)
+                .padding(.top, GuardianSpacing.sm)
+                .padding(.bottom, GuardianSpacing.xsTight)
+
+            if panelMode == .vehicle {
+                vehicleSidePanelToolbar
+            } else {
+                sidePanelToolbar
+            }
 
             Rectangle()
                 .fill(theme.borderSubtle)
                 .frame(height: 1)
 
             Group {
-                switch sidePanelTab {
-                case .controls:
-                    controlsTab
-                case .sims:
-                    simsTab
-                case .logs:
-                    logsTab
+                if panelMode == .vehicle {
+                    switch trainingSidePanelTab {
+                    case .controls:
+                        vehicleControlsTab
+                    case .logs:
+                        vehicleLogsTab
+                    case .skill:
+                        vehicleSkillTab
+                    }
+                } else {
+                    switch sidePanelTab {
+                    case .controls:
+                        controlsTab
+                    case .sims:
+                        simsTab
+                    case .logs:
+                        logsTab
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .background(theme.backgroundBase)
+    }
+
+    private var panelModePicker: some View {
+        Picker("Panel mode", selection: $panelMode) {
+            ForEach(TrainingPanelMode.allCases) { mode in
+                Text(mode.rawValue).tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .onChange(of: panelMode) { mode in
+            handlePanelModeChange(mode)
+        }
     }
 
     private var sidePanelToolbar: some View {
@@ -299,7 +441,7 @@ struct FormationsPlaygroundView: View {
                     .labelsHidden()
                     .pickerStyle(.menu)
                     .fixedSize()
-                    .disabled(controlsLocked)
+                    .disabled(formationControlsLocked)
                 }
 
                 formationControl(
@@ -319,7 +461,7 @@ struct FormationsPlaygroundView: View {
                             step: 1
                         )
                         .labelsHidden()
-                        .disabled(controlsLocked)
+                        .disabled(formationControlsLocked)
                     }
                 }
 
@@ -585,208 +727,40 @@ struct FormationsPlaygroundView: View {
     }
 
     private func simSlotCard(index: Int, slot: FormationsPlaygroundSlotState) -> some View {
-        let lifecycle = lifecycleStatus(for: slot)
-        let preflight = preflightStatusPresentation(for: slot)
-        let vehicleModel = slot.vehicleID.flatMap { fleetLink.vehicleModel(forVehicleID: $0) }
-        let statusColor = lifecycle?.color.uiColor ?? theme.borderSubtle
-
-        return VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
-            HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.xs) {
-                Text(index == 0 ? "Primary" : "Wingman \(index)")
-                    .font(GuardianTypography.font(.denseCaption12Medium))
-                    .foregroundStyle(theme.textPrimary)
-                Spacer(minLength: GuardianSpacing.xsTight)
-                if let shortID = vehicleModel?.displayShortID, !shortID.isEmpty {
-                    Text(shortID)
-                        .font(GuardianTypography.font(.telemetryMono10Semibold))
-                        .foregroundStyle(theme.textSecondary)
-                        .lineLimit(1)
+        GuardianSimulatorSlotCardView(
+            title: index == 0 ? "Primary" : "Wingman \(index)",
+            slot: slot,
+            fleetLink: fleetLink,
+            sitl: sitl,
+            showRetry: playground.shouldOfferSimulatorRetry(slot: slot),
+            retryButtonTitle: playground.retryButtonTitle(for: slot),
+            showReplace: playground.canReplaceSlot(slot),
+            cardActionsLocked: playground.cardActionsLocked,
+            onInspect: { vehicleID, fallback in
+                calibrationContext = FormationsCalibrationContext(
+                    vehicleID: vehicleID,
+                    fallback: fallback
+                )
+            },
+            onRetry: {
+                Task { @MainActor in
+                    await playground.retrySimulatorConnection(
+                        slotID: slot.id,
+                        missionControl: missionControl
+                    )
+                    syncMapContent()
+                }
+            },
+            onReplace: {
+                Task { @MainActor in
+                    await playground.replaceSlot(
+                        slotID: slot.id,
+                        missionControl: missionControl
+                    )
+                    syncMapContent()
                 }
             }
-
-            HStack(alignment: .firstTextBaseline, spacing: GuardianSpacing.sm) {
-                if let lifecycle {
-                    Text(lifecycle.compactTwoWordStatus)
-                        .font(GuardianTypography.font(.formFieldLabel))
-                        .foregroundStyle(lifecycle.color.uiColor.opacity(0.95))
-                } else {
-                    Text("Link connecting")
-                        .font(GuardianTypography.font(.formFieldLabel))
-                        .foregroundStyle(Color.yellow.opacity(0.95))
-                }
-                Spacer(minLength: 0)
-                Text(preflight.twoWordLabel)
-                    .font(GuardianTypography.font(.formFieldLabel))
-                    .foregroundStyle(preflight.color.opacity(0.95))
-            }
-
-            if let detail = preflight.detailLine {
-                Text(detail)
-                    .font(GuardianTypography.font(.denseCaption10Regular))
-                    .foregroundStyle(theme.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if let lifecycle {
-                Text(lifecycle.sentence)
-                    .font(GuardianTypography.font(.denseCaption10Regular))
-                    .foregroundStyle(theme.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            simSlotActionBar(
-                slot: slot,
-                vehicleModel: vehicleModel,
-                lifecycle: lifecycle
-            )
-        }
-        .padding(GuardianSpacing.sm)
-        .background(theme.backgroundRaised)
-        .clipShape(RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius))
-        .overlay {
-            RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous)
-                .strokeBorder(statusColor.opacity(0.55), lineWidth: 1)
-        }
-    }
-
-    private func simSlotActionBar(
-        slot: FormationsPlaygroundSlotState,
-        vehicleModel: FleetVehicleModel?,
-        lifecycle: VehicleLifecycleStatus?
-    ) -> some View {
-        let showRetry = playground.shouldOfferRetryPreflight(slot: slot, fleetLink: fleetLink)
-        let showReplace = playground.canReplaceSlot(slot)
-        let actionsEnabled = !playground.isBusy
-
-        return HStack(spacing: GuardianSpacing.xs) {
-            if let vehicleID = slot.vehicleID {
-                GuardianThemedButton(
-                    accent: .neutral,
-                    surface: .outline,
-                    size: .small,
-                    shape: .cornered,
-                    isEnabled: actionsEnabled,
-                    contentSizing: .squareToolbarCell,
-                    action: {
-                        calibrationContext = FormationsCalibrationContext(
-                            vehicleID: vehicleID,
-                            fallback: vehicleModel
-                        )
-                    },
-                    label: {
-                        Image(systemName: "waveform.path.ecg.rectangle")
-                            .font(GuardianTypography.font(.sectionHeadingSemibold))
-                    }
-                )
-                .help("Open Vehicle Inspector (calibration, preflight, telemetry)")
-                .guardianPointerOnHover()
-            }
-            if showRetry {
-                GuardianThemedButton(
-                    title: "Retry",
-                    accent: .primary,
-                    surface: .outline,
-                    size: .small,
-                    shape: .cornered,
-                    isEnabled: actionsEnabled,
-                    action: {
-                        Task {
-                            await playground.retryPreflight(
-                                slotID: slot.id,
-                                missionControl: missionControl
-                            )
-                            syncMapContent()
-                        }
-                    }
-                )
-                .help("Run preflight again on this simulator")
-                .guardianPointerOnHover()
-            }
-            if showReplace {
-                GuardianThemedButton(
-                    title: "Replace",
-                    accent: .danger,
-                    surface: .outline,
-                    size: .small,
-                    shape: .cornered,
-                    isEnabled: actionsEnabled,
-                    action: {
-                        Task {
-                            await playground.replaceSlot(
-                                slotID: slot.id,
-                                missionControl: missionControl
-                            )
-                            syncMapContent()
-                        }
-                    }
-                )
-                .help(
-                    slot.linkReady
-                        ? "Stop this simulator and spawn a new one at this squad position"
-                        : "Stop the stuck simulator and spawn a new one at this squad position"
-                )
-                .guardianPointerOnHover()
-            }
-            Spacer(minLength: 0)
-        }
-    }
-
-    private struct PreflightStatusPresentation {
-        let twoWordLabel: String
-        let color: Color
-        let detailLine: String?
-    }
-
-    private func preflightStatusPresentation(for slot: FormationsPlaygroundSlotState) -> PreflightStatusPresentation {
-        guard slot.linkReady else {
-            return PreflightStatusPresentation(
-                twoWordLabel: "Not connected",
-                color: GuardianSemanticColors.warningStroke,
-                detailLine: "Use Replace to stop this SITL and spawn a new simulator."
-            )
-        }
-        if let passed = slot.preflightPassed {
-            if passed {
-                return PreflightStatusPresentation(
-                    twoWordLabel: "Preflight passed",
-                    color: GuardianSemanticColors.successStroke,
-                    detailLine: slot.preflightDetail
-                )
-            }
-            return PreflightStatusPresentation(
-                twoWordLabel: "Preflight failed",
-                color: GuardianSemanticColors.dangerStroke,
-                detailLine: slot.preflightDetail ?? "Preflight failed"
-            )
-        }
-        return PreflightStatusPresentation(
-            twoWordLabel: "Preflight pending",
-            color: GuardianSemanticColors.warningStroke,
-            detailLine: "Run spawn or Retry preflight"
         )
-    }
-
-    private func lifecycleStatus(for slot: FormationsPlaygroundSlotState) -> VehicleLifecycleStatus? {
-        guard let inst = sitl.instances.first(where: { $0.id == slot.sitlSessionID }) else { return nil }
-        let resolvedVehicleID = fleetLink.vehicleID(forSystemID: inst.mavlinkSystemID)
-            ?? slot.vehicleID
-            ?? inst.guardianVehicleStreamKey
-        let model = fleetLink.vehicleModel(forVehicleID: resolvedVehicleID)
-        if let code = inst.lastExitCode, !inst.isAlive {
-            return VehicleLifecycleStatus(
-                stage: .failed,
-                sentenceOverride:
-                    "The simulator exited with code \(code), so telemetry is unavailable until this vehicle is restarted."
-            )
-        }
-        if let explicit = model?.collections.lifecycleStatus ?? fleetLink.vehicleStatus(forVehicleID: resolvedVehicleID) {
-            return explicit
-        }
-        if model?.data.telemetry != nil {
-            return VehicleLifecycleStatus(stage: .live)
-        }
-        if inst.isAlive {
-            return VehicleLifecycleStatus(stage: .connecting)
-        }
-        return VehicleLifecycleStatus(stage: .stopped)
     }
 
     @ViewBuilder
@@ -864,5 +838,414 @@ struct FormationsPlaygroundView: View {
             points: playground.formationMapFitPoints(fleetLink: fleetLink),
             style: .formationContent
         )
+    }
+
+    // MARK: - Vehicle mode (skill training)
+
+    private var vehicleSidePanelToolbar: some View {
+        HStack(spacing: GuardianSpacing.sm) {
+            Picker("Panel", selection: $trainingSidePanelTab) {
+                ForEach(TrainingSidePanelTab.allCases) { tab in
+                    Text(tab.rawValue).tag(tab)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize(horizontal: true, vertical: false)
+
+            Spacer(minLength: GuardianSpacing.sm)
+
+            if training.vehicleID != nil {
+                GuardianThemedButton(
+                    accent: .primary,
+                    surface: .solid,
+                    size: .small,
+                    shape: .cornered,
+                    isEnabled: !training.cardActionsLocked,
+                    contentSizing: .squareToolbarCell,
+                    action: {
+                        Task { await training.resetEpisode() }
+                    },
+                    label: {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(GuardianTypography.font(.sectionHeadingSemibold))
+                    }
+                )
+                .help("Reset to task start pose")
+                .guardianPointerOnHover()
+            }
+            GuardianThemedButton(
+                accent: .primary,
+                surface: .solid,
+                size: .small,
+                shape: .cornered,
+                isEnabled: !training.cardActionsLocked && fleetLink.isSimulateEnabled,
+                contentSizing: .squareToolbarCell,
+                action: {
+                    Task { @MainActor in
+                        await training.spawnTrainingSim(missionControl: missionControl)
+                        refreshTrainingMap()
+                    }
+                },
+                label: {
+                    Image(systemName: training.cardActionsLocked ? "hourglass" : "wand.and.stars")
+                        .font(GuardianTypography.font(.sectionHeadingSemibold))
+                }
+            )
+            .help(vehicleSpawnButtonHelp)
+            .guardianPointerOnHover()
+
+            if training.vehicleID != nil {
+                GuardianThemedButton(
+                    accent: .danger,
+                    surface: .outline,
+                    size: .small,
+                    shape: .cornered,
+                    isEnabled: !training.cardActionsLocked,
+                    contentSizing: .squareToolbarCell,
+                    action: {
+                        Task { @MainActor in
+                            await training.stopSimulator()
+                            refreshTrainingMap()
+                        }
+                    },
+                    label: {
+                        Image(systemName: "trash")
+                            .font(GuardianTypography.font(.sectionHeadingSemibold))
+                    }
+                )
+                .help("Stop simulator")
+                .guardianPointerOnHover()
+            }
+        }
+        .padding(.horizontal, GuardianSpacing.md)
+        .padding(.vertical, GuardianSpacing.sm)
+    }
+
+    private var vehicleSpawnButtonHelp: String {
+        if !fleetLink.isSimulateEnabled {
+            return "Turn on Simulate in the top bar before spawning."
+        }
+        if training.vehicleID != nil {
+            return "Respawn training simulator"
+        }
+        return "Spawn training simulator"
+    }
+
+    private var vehicleControlsTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: GuardianSpacing.sectionStack) {
+                if !fleetLink.isSimulateEnabled {
+                    Text("Turn on Simulate in the top bar to train on simulators.")
+                        .font(GuardianTypography.font(.denseFootnoteRegular))
+                        .foregroundStyle(theme.textSecondary)
+                }
+
+                Text(training.statusText)
+                    .font(GuardianTypography.font(.denseFootnoteRegular))
+                    .foregroundStyle(theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let slot = training.simulatorSlot {
+                    GuardianSimulatorSlotCardView(
+                        title: "Training vehicle",
+                        slot: slot,
+                        fleetLink: fleetLink,
+                        sitl: sitl,
+                        showRetry: training.shouldOfferSimulatorRetry(slot: slot),
+                        retryButtonTitle: training.retryButtonTitle(for: slot),
+                        showReplace: training.canReplaceSlot(slot),
+                        cardActionsLocked: training.cardActionsLocked,
+                        onInspect: { vehicleID, fallback in
+                            calibrationContext = FormationsCalibrationContext(
+                                vehicleID: vehicleID,
+                                fallback: fallback
+                            )
+                        },
+                        onRetry: {
+                            Task { @MainActor in
+                                await training.retrySimulatorConnection(missionControl: missionControl)
+                                refreshTrainingMap()
+                            }
+                        },
+                        onReplace: {
+                            Task { @MainActor in
+                                await training.replaceSimulator(missionControl: missionControl)
+                                refreshTrainingMap()
+                            }
+                        }
+                    )
+                }
+
+                trainingRow(title: "Vehicle class", help: "SITL type for training.") {
+                    Picker("Vehicle class", selection: $training.vehicleClass) {
+                        ForEach(TrainingVehicleClass.allCases) { kind in
+                            Text(kind.displayTitle).tag(kind)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .disabled(vehicleControlsLocked)
+                }
+
+                trainingRow(title: "Task", help: training.taskKind.summary) {
+                    Picker("Task", selection: $training.taskKind) {
+                        ForEach(TrainingTaskKind.allCases) { task in
+                            Text(task.displayTitle).tag(task)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .disabled(vehicleControlsLocked)
+                }
+
+                trainingRow(
+                    title: "Adjust target slot on map",
+                    help: "Drag the gold diamond to move the slot. Drag the handle on the circle to set heading. Changing the task does not move the slot."
+                ) {
+                    Toggle(
+                        isOn: Binding(
+                            get: { training.isTargetSlotMapEditEnabled },
+                            set: { enabled in
+                                training.setTargetSlotMapEditEnabled(enabled)
+                                if enabled {
+                                    syncTrainingTargetSlotMapEdit()
+                                } else {
+                                    refreshTrainingMap()
+                                }
+                            }
+                        )
+                    ) {
+                        EmptyView()
+                    }
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .accessibilityLabel("Adjust target slot on map")
+                    .disabled(trainingTargetSlotMapEditLocked)
+                }
+
+                vehicleForbiddenControlsSection
+            }
+            .padding(10)
+        }
+    }
+
+    private var vehicleForbiddenControlsSection: some View {
+        let supported = Array(
+            Utilities.training.supportedAxes(vehicleType: training.vehicleClass.fleetVehicleType)
+        ).sorted { $0.displayTitle < $1.displayTitle }
+        return VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
+            Text("Forbidden controls")
+                .font(GuardianTypography.font(.disclosureRowTitle))
+                .foregroundStyle(theme.textPrimary)
+            Text("Turn on a control to forbid it during autonomous teaching. All controls are allowed until you mark one forbidden.")
+                .font(GuardianTypography.font(.denseFootnoteRegular))
+                .foregroundStyle(theme.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(supported, id: \.self) { axis in
+                Toggle(
+                    axis.displayTitle,
+                    isOn: Binding(
+                        get: { training.forbiddenAxes.contains(axis) },
+                        set: { on in
+                            if on {
+                                training.forbiddenAxes.insert(axis)
+                            } else {
+                                training.forbiddenAxes.remove(axis)
+                            }
+                        }
+                    )
+                )
+                .disabled(vehicleControlsLocked)
+            }
+        }
+    }
+
+    private var vehicleLogsTab: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+                if training.logLines.isEmpty {
+                    Text("Teaching logs appear here.")
+                        .font(GuardianTypography.font(.denseFootnoteRegular))
+                        .foregroundStyle(theme.textTertiary)
+                } else {
+                    ForEach(training.logLines) { line in
+                        Text(line.message)
+                            .font(GuardianTypography.font(.denseFootnoteRegular))
+                            .foregroundStyle(theme.textSecondary)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            .padding(10)
+        }
+    }
+
+    private var vehicleSkillTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: GuardianSpacing.md) {
+                if let skill = training.promotedSkill {
+                    Text("Promoted skill")
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
+                    Text(skill.summary)
+                        .font(GuardianTypography.font(.denseFootnoteRegular))
+                        .foregroundStyle(theme.textSecondary)
+                    Text(
+                        String(
+                            format: "Score: %.1f m, heading %.0f°",
+                            skill.score.positionErrorM,
+                            skill.score.headingErrorDeg
+                        )
+                    )
+                    .font(GuardianTypography.font(.denseFootnoteRegular))
+                    .foregroundStyle(theme.textTertiary)
+                    Text("\(skill.segments.count) segments")
+                        .font(GuardianTypography.font(.denseFootnoteRegular))
+                    ForEach(Array(skill.segments.enumerated()), id: \.offset) { index, segment in
+                        Text(vehicleSegmentDescription(segment, index: index))
+                            .font(GuardianTypography.font(.denseFootnoteRegular))
+                            .foregroundStyle(theme.textSecondary)
+                    }
+                } else {
+                    Text("No promoted skill for this task and vehicle class yet. Run autonomous teaching.")
+                        .font(GuardianTypography.font(.denseFootnoteRegular))
+                        .foregroundStyle(theme.textTertiary)
+                }
+            }
+            .padding(10)
+        }
+        .onAppear { training.loadPromotedSkill() }
+    }
+
+    @ViewBuilder
+    private func trainingRow<Content: View>(
+        title: String,
+        help: String,
+        @ViewBuilder control: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
+            Text(title)
+                .font(GuardianTypography.font(.disclosureRowTitle))
+                .foregroundStyle(theme.textPrimary)
+            Text(help)
+                .font(GuardianTypography.font(.denseFootnoteRegular))
+                .foregroundStyle(theme.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            control()
+        }
+    }
+
+    private func vehicleSegmentDescription(_ segment: TrainingControlSegment, index: Int) -> String {
+        var parts: [String] = []
+        if abs(segment.bodyForwardMS) > 0.02 { parts.append(String(format: "fwd %.2f m/s", segment.bodyForwardMS)) }
+        if abs(segment.bodyRightMS) > 0.02 { parts.append(String(format: "right %.2f m/s", segment.bodyRightMS)) }
+        if abs(segment.yawspeedDegS) > 0.5 { parts.append(String(format: "yaw %.0f°/s", segment.yawspeedDegS)) }
+        if parts.isEmpty { parts.append("hold") }
+        return "\(index + 1). \(parts.joined(separator: ", ")) · \(String(format: "%.1f", segment.durationS)) s"
+    }
+
+    private func refreshTrainingMap() {
+        let defaults = generalSettings.simSpawnDefaults
+        let home = RouteHome(
+            coord: RouteCoordinate(lat: defaults.latitudeDeg, lon: defaults.longitudeDeg),
+            altitude: RouteAltitude(value: defaults.altitudeM, unit: .m, reference: .agl),
+            heading: defaults.headingDeg,
+            radiusMeters: 8,
+            dockAllowed: true,
+            fallbackOnly: false
+        )
+        var geometry = GuardianRouteMapGeometry.empty
+        geometry.home = home
+        geometry.preserveView = true
+        geometry.formationSlotGroupMapEdit = training.buildTargetSlotMapEdit()
+        mapModel.applyMapContent(routeGeometry: geometry, vehicleMarkers: buildTrainingMapMarkers())
+        fitTrainingMap()
+    }
+
+    private func syncTrainingTargetSlotMapEdit() {
+        var geometry = mapModel.routeGeometry
+        geometry.preserveView = true
+        geometry.formationSlotGroupMapEdit = training.buildTargetSlotMapEdit()
+        mapModel.applyMapContent(
+            routeGeometry: geometry,
+            vehicleMarkers: buildTrainingMapMarkers()
+        )
+    }
+
+    private func syncTrainingMapMarkers() {
+        syncTrainingTargetSlotMapEdit()
+    }
+
+    private func buildTrainingMapMarkers() -> [MapVehicleMarker] {
+        guard let layout = training.taskLayout else { return [] }
+        var markers: [MapVehicleMarker] = [
+            MapVehicleMarker(
+                id: "training:start",
+                lat: layout.start.latitudeDeg,
+                lon: layout.start.longitudeDeg,
+                label: "Start",
+                colorHex: "#4A90D9",
+                glyphKind: .formationSlotTarget,
+                imageDataURL: nil,
+                showLabel: true,
+                selected: false,
+                draggable: false,
+                headingDeg: layout.start.headingDeg,
+                accessibilityTitle: "Task start"
+            ),
+            MapVehicleMarker(
+                id: "training:targetSlot",
+                lat: layout.goal.latitudeDeg,
+                lon: layout.goal.longitudeDeg,
+                label: "Target slot",
+                colorHex: "#2ECC71",
+                glyphKind: .trainingSlotGoal,
+                imageDataURL: nil,
+                showLabel: true,
+                selected: false,
+                draggable: false,
+                headingDeg: layout.goal.headingDeg,
+                accessibilityTitle: "Target slot — yellow edge is heading"
+            ),
+        ]
+        if let vid = training.vehicleID,
+           let hub = fleetLink.hubTelemetry(forVehicleID: vid),
+           let lat = hub.latitudeDeg,
+           let lon = hub.longitudeDeg {
+            let vType = fleetLink.vehicleModel(forVehicleID: vid)?.data.vehicleType
+                ?? training.vehicleClass.fleetVehicleType
+            markers.append(
+                MapVehicleMarker(
+                    id: vid,
+                    lat: lat,
+                    lon: lon,
+                    label: "Sim",
+                    colorHex: "#E67E22",
+                    glyphKind: GuardianMapVehicleGlyphKind.forFleetVehicleType(vType),
+                    imageDataURL: nil,
+                    showLabel: true,
+                    selected: true,
+                    draggable: false,
+                    headingDeg: MissionSquadFormationHeadingPolicy.wingmanHeadingDeg(hub: hub)
+                )
+            )
+        }
+        return markers
+    }
+
+    private func fitTrainingMap(mapModel: GuardianMapModel? = nil) {
+        guard let layout = training.taskLayout else { return }
+        var points: [(Double, Double)] = [
+            (layout.start.latitudeDeg, layout.start.longitudeDeg),
+            (layout.goal.latitudeDeg, layout.goal.longitudeDeg),
+        ]
+        if let vid = training.vehicleID,
+           let hub = fleetLink.hubTelemetry(forVehicleID: vid),
+           let lat = hub.latitudeDeg,
+           let lon = hub.longitudeDeg {
+            points.append((lat, lon))
+        }
+        let model = mapModel ?? self.mapModel
+        model.fitToVisible(points: points, style: .formationContent)
     }
 }

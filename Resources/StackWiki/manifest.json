@@ -1,0 +1,23 @@
+{
+  "retrieved_at": "2026-05-18",
+  "chunks_file": "index/chunks.jsonl",
+  "chunks_gzip_local": "index/chunks.jsonl.gz",
+  "content_hash": "23f17fdfd5a95b986715556e6bf37b08f8d1bf0e04608331fc94d55d9d6b8103",
+  "chunk_count": 11939,
+  "px4": {
+    "repo": "https://github.com/PX4/PX4-Autopilot.git",
+    "ref": "main",
+    "commit": "7261e064c7e2019702b5e163c7f46b776a4ee853",
+    "doc_version": "main",
+    "license": "CC BY 4.0",
+    "chunk_count": 10048
+  },
+  "ardupilot": {
+    "repo": "https://github.com/ArduPilot/ardupilot_wiki.git",
+    "ref": "master",
+    "commit": "3224bdf0a414ba8a447492eebcb8d65b85320d03",
+    "doc_version": "wiki/master",
+    "license": "CC BY-SA 3.0",
+    "chunk_count": 1891
+  }
+}

@@ -1,0 +1,37 @@
+---
+description: PX4 and ArduPilot documentation — search local StackWiki index before web fetch
+alwaysApply: false
+---
+
+# Stack wiki — local PX4 & ArduPilot docs
+
+When answering questions about **PX4**, **ArduPilot**, autopilot **modes**, **parameters**, **MAVLink** usage documented by those projects, **offboard / guided** behaviour, or **SITL** setup described in upstream user guides:
+
+## Retrieval order (strict)
+
+1. **Local stack wiki** — `Resources/StackWiki/index/chunks.jsonl` (JSONL; one object per line). Use **Grep**, **Read**, or **SemanticSearch** scoped to `Resources/StackWiki/`. Prefer chunks whose `project` matches the stack in question. Check `Resources/StackWiki/manifest.json` for `retrieved_at` and upstream commits.
+2. **Guardian internal docs** — `README_FULL.md`, `AGENTS.md`, `CommandsCatalogueDoc.md`, relevant `*ToDo.md`, and code under `Sources/GuardianHQ/` for *Guardian-specific* behaviour.
+3. **WebSearch / WebFetch** — only if:
+   - the local index is **missing** (`Resources/StackWiki/index/chunks.jsonl` not present),
+   - the topic is **outside** indexed trees (e.g. a third-party tool),
+   - the operator explicitly asks for **latest upstream** wording, or
+   - `Resources/StackWiki/manifest.json` shows `retrieved_at` older than **14 days** *and* the answer depends on parameters/modes that change frequently — **say that local docs may be stale** before web fetch.
+
+Do **not** open docs.px4.io or ardupilot.org via web tools when an adequate local chunk exists.
+
+## Citations (required when quoting stack docs)
+
+- Inline: *According to PX4 Offboard Mode docs, …* or *ArduPilot Rover Guided mode docs state …*
+- Footer line:
+  - PX4: `Source: PX4 User Guide, CC BY 4.0, retrieved YYYY-MM-DD` (+ URL from chunk when available)
+  - ArduPilot: `Source: ArduPilot Wiki, CC BY-SA 3.0, retrieved YYYY-MM-DD` (+ URL)
+
+Use `title`, `url`, `license`, and `retrieved_at` from the chunk JSON; do not invent URLs.
+
+## Building / refreshing the index
+
+Refresh: `make stack-wiki-refresh` or `scripts/stack_wiki/refresh_stack_wiki.sh`. See `Resources/StackWiki/README.md` and `README_FULL.md` → **Stack wiki (local autopilot docs)**.
+
+## Vehicle vocabulary
+
+Follow `.cursor/rules/vehicle-vocabulary-no-aircraft.mdc` in operator-facing paraphrases; upstream doc titles may still say “aircraft” in quoted titles.

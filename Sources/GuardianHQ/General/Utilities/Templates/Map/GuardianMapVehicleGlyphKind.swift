@@ -12,6 +12,8 @@ enum GuardianMapVehicleGlyphKind: String, Equatable, Codable, Sendable {
     case formationSlotTarget = "formationTarget"
     /// Gold-outline preview clone (Formations playground map edit — not streamed until edit ends).
     case formationSlotClone = "formationSlotClone"
+    /// Training goal slot — square outline; **heading edge** drawn yellow in Leaflet (see ``OSMMapView``).
+    case trainingSlotGoal = "trainingSlotGoal"
 
     static func forFleetVehicleType(_ type: FleetVehicleType) -> GuardianMapVehicleGlyphKind {
         switch type {

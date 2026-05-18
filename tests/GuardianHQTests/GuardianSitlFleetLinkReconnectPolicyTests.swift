@@ -12,6 +12,51 @@ final class GuardianSitlFleetLinkReconnectPolicyTests: XCTestCase {
         XCTAssertNil(sitl.sitlSessionID(forGuardianVehicleID: "live"))
     }
 
+    func test_simulatorFleetLinkReadyWithMavsdkSession_requires_session_and_position() {
+        let fleet = FleetLinkService()
+        fleet.setSimulateEnabled(true)
+        XCTAssertFalse(
+            GuardianSitlFleetLinkReconnectPolicy.simulatorFleetLinkReadyWithMavsdkSession(
+                fleetLink: fleet,
+                vehicleID: "sysid:5"
+            )
+        )
+        fleet.registerSimulatedVehicle(
+            systemID: 5,
+            mavlinkConnectionURL: "udpin://0.0.0.0:14555",
+            autopilotStack: .ardupilot,
+            vehicleType: .ugvWheeled,
+            spawnDefaults: .default
+        )
+        XCTAssertTrue(fleet.isGuardianManagedSitlStream(vehicleID: "sysid:5"))
+        XCTAssertFalse(
+            GuardianSitlFleetLinkReconnectPolicy.simulatorFleetLinkReadyWithMavsdkSession(
+                fleetLink: fleet,
+                vehicleID: "sysid:5"
+            ),
+            "MAVSDK session without MAVLink position must keep pursuit/reconnect running."
+        )
+    }
+
+    func test_simulatorFleetLinkReady_false_until_position_telemetry() {
+        let fleet = FleetLinkService()
+        fleet.setSimulateEnabled(true)
+        fleet.registerSimulatedVehicle(
+            systemID: 2,
+            mavlinkConnectionURL: "udpin://0.0.0.0:14551",
+            autopilotStack: .px4,
+            vehicleType: .uavCopter,
+            spawnDefaults: .default
+        )
+        XCTAssertFalse(
+            GuardianSitlFleetLinkReconnectPolicy.simulatorFleetLinkReady(
+                fleetLink: fleet,
+                vehicleID: "sysid:2"
+            ),
+            "Spawn-default seeds must not count as a live map position."
+        )
+    }
+
     func test_mavlinkPositionTelemetryIsUp_requires_lat_and_lon() {
         let fleet = FleetLinkService()
         fleet.registerSimulatedVehicle(

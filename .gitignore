@@ -24,6 +24,11 @@ DerivedData/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
 
+# Stack wiki — dev-only autopilot doc index (not bundled into GuardianHQ).
+Resources/StackWiki/upstream/
+Resources/StackWiki/source/
+Resources/StackWiki/index/chunks.jsonl.gz
+
 # Local scratch scaffold folder (not part of app source)
 GuardianMacApp/
 

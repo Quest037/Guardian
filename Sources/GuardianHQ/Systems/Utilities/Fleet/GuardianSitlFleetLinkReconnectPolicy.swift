@@ -38,4 +38,16 @@ enum GuardianSitlFleetLinkReconnectPolicy {
         guard let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID) else { return false }
         return hub.latitudeDeg != nil && hub.longitudeDeg != nil
     }
+
+    /// Built-in SITL row is linked for spawn panels / preflight (position telemetry, not lifecycle stage alone).
+    static func simulatorFleetLinkReady(fleetLink: FleetLinkService, vehicleID: String) -> Bool {
+        guard fleetLink.vehicleModel(forVehicleID: vehicleID) != nil else { return false }
+        return mavlinkPositionTelemetryIsUp(fleetLink: fleetLink, vehicleID: vehicleID)
+    }
+
+    /// Position telemetry is up **and** a Guardian MAVSDK session is active (ignores orphan hub rows with no session).
+    static func simulatorFleetLinkReadyWithMavsdkSession(fleetLink: FleetLinkService, vehicleID: String) -> Bool {
+        guard fleetLink.isGuardianManagedSitlStream(vehicleID: vehicleID) else { return false }
+        return simulatorFleetLinkReady(fleetLink: fleetLink, vehicleID: vehicleID)
+    }
 }

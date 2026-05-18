@@ -105,10 +105,8 @@ Missions are the templates created by users that involve telling one or more veh
   - Offer these by default in a modal when user clicks "Add Mission", with the first option being a blank mission.
 
 ### Mission Mechanics
-- **Mission Task.staggerDelay:** - Add a field (or fields) to control a tasks stagger delay between drone groups when method is staggered. (duration + time style e.g. 30+seconds, 10+mins, 1+hour)
 
 ### Mission Roster Slots
-
 
 ## Mission Control
 

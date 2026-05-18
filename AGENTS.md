@@ -24,5 +24,6 @@ This repo keeps product and AI guardrails in **`.cursor/rules/`**. When editing 
 - **Build / version / missions / tests:** See the other rules in `.cursor/rules/` as relevant.
 - **Operator copy:** `.cursor/rules/no-future-version-user-copy.mdc` — no “future build” / “coming soon” teases in UI; describe the current product only.
 - **SITL random MAVLink port / sysid:** ``README_FULL.md`` → **Built-in SITL MAVLink endpoints**; wipe/orphan backlog — ``SITLRandomPortToDo.md``.
+- **Stack wiki (PX4 / ArduPilot docs for agents):** ``Resources/StackWiki/`` + ``README_FULL.md`` → **Stack wiki (local autopilot docs)**; refresh ``make stack-wiki-refresh``; retrieval policy ``.cursor/rules/stack-wiki-docs-local.mdc``.
 
 **Theme reference:** use the in-app **Theme** plugin (`ThemePanelView` / `ThemeCatalogContent`) as the living catalog; rules live in `guardian-theme-tokens.mdc` above.

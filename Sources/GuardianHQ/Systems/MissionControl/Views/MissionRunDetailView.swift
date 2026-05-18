@@ -406,7 +406,7 @@ struct MissionRunDetailView: View {
                         appDrawer.dismiss(animation: anim)
                         return
                     }
-                    let systemID = inst.stackInstanceIndex + 1
+                    let systemID = inst.mavlinkSystemID
                     let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
                     let resolvedShortID = fleetLink.vehicleModel(forVehicleID: vehicleID)?.displayShortID
                         ?? "\(inst.preset.fleetVehicleType.classCode):\(systemID)"
@@ -530,7 +530,7 @@ struct MissionRunDetailView: View {
         let beforeIDs = Set(sitl.instances.map(\.id))
         sitl.spawn(preset: preset, platform: platform, defaults: defaults)
         guard let inst = sitl.instances.first(where: { !beforeIDs.contains($0.id) }) else { return nil }
-        let systemID = inst.stackInstanceIndex + 1
+        let systemID = inst.mavlinkSystemID
         let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
         let resolvedShortID = fleetLink.vehicleModel(forVehicleID: vehicleID)?.displayShortID
             ?? "\(inst.preset.fleetVehicleType.classCode):\(systemID)"
@@ -577,6 +577,11 @@ struct MissionRunDetailView: View {
             applyFleetVehicle(pickable, assignmentId: assignment.id)
             assignedAny = true
             await clearRosterBulkSimSpawnWorkingAfterLayoutCatchup()
+            if GuardianSitlPortReleaseSettle.shouldPauseBetweenBulkSpawns {
+                try? await Task.sleep(
+                    nanoseconds: GuardianSitlPortReleaseSettle.bulkSpawnInterSpawnPauseNanoseconds()
+                )
+            }
         }
         return assignedAny
     }
@@ -605,6 +610,11 @@ struct MissionRunDetailView: View {
             applyFleetVehicleToReservePoolSlot(vehicle: pickable, taskID: taskID, slotID: slot.id)
             assignedAny = true
             await clearRosterBulkSimSpawnWorkingAfterLayoutCatchup()
+            if GuardianSitlPortReleaseSettle.shouldPauseBetweenBulkSpawns {
+                try? await Task.sleep(
+                    nanoseconds: GuardianSitlPortReleaseSettle.bulkSpawnInterSpawnPauseNanoseconds()
+                )
+            }
         }
         return assignedAny
     }
@@ -612,6 +622,7 @@ struct MissionRunDetailView: View {
     /// One built-in SITL per empty roster slot for this task (after confirm): preset from ``RosterDevice/vehicleClass``, stack + spawn from ``GeneralSettingsStore``.
     private func performBulkSpawnSitlForEmptyRosterSlots(task: MissionTask, mission: Mission) async {
         guard fleetLink.isSimulateEnabled else { return }
+        await sitl.waitForRecentlyReleasedPortsToSettle()
         rosterBulkSimSpawnBusy = .singleTask(task.id)
         defer {
             rosterBulkSimSpawnBusy = nil
@@ -631,6 +642,7 @@ struct MissionRunDetailView: View {
     /// One built-in SITL per empty roster slot for **every** task and the legacy mission roster (after confirm).
     private func performBulkSpawnSitlForAllMissionSlots(mission: Mission) async {
         guard fleetLink.isSimulateEnabled else { return }
+        await sitl.waitForRecentlyReleasedPortsToSettle()
         rosterBulkSimSpawnBusy = .allMissionSlots
         defer {
             rosterBulkSimSpawnBusy = nil
@@ -1868,7 +1880,7 @@ struct MissionRunDetailView: View {
 
     private func isSimulationVehicleID(_ vehicleID: String) -> Bool {
         sitl.instances.contains { inst in
-            let sid = inst.stackInstanceIndex + 1
+            let sid = inst.mavlinkSystemID
             let resolved = fleetLink.vehicleID(forSystemID: sid) ?? "sysid:\(sid)"
             return resolved == vehicleID
         }
@@ -4814,7 +4826,7 @@ struct MissionRunDetailView: View {
            let token = FleetMissionVehicleToken(storageKey: key),
            case .sitl(let uuid) = token,
            let inst = sitl.instances.first(where: { $0.id == uuid }) {
-            let systemID = inst.stackInstanceIndex + 1
+            let systemID = inst.mavlinkSystemID
             return "\(inst.preset.fleetVehicleType.classCode):\(systemID)"
         }
         let prefix = "sysid:"
@@ -8103,7 +8115,7 @@ struct MissionRunDetailView: View {
                   case .sitl(let sitlInstanceID) = token,
                   let inst = sitl.instances.first(where: { $0.id == sitlInstanceID })
             else { continue }
-            let systemID = inst.stackInstanceIndex + 1
+            let systemID = inst.mavlinkSystemID
             let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
             let stack = fleetLink.hubTelemetry(forVehicleID: vehicleID)?.autopilotStack
                 ?? fleetLink.vehicleModel(forVehicleID: vehicleID)?.data.telemetry?.autopilotStack
@@ -8146,7 +8158,7 @@ struct MissionRunDetailView: View {
                   case .sitl(let sitlInstanceID) = token
             else { continue }
             guard let inst = sitl.instances.first(where: { $0.id == sitlInstanceID }) else { continue }
-            let systemID = inst.stackInstanceIndex + 1
+            let systemID = inst.mavlinkSystemID
             let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
             let stack = fleetLink.hubTelemetry(forVehicleID: vehicleID)?.autopilotStack
                 ?? fleetLink.vehicleModel(forVehicleID: vehicleID)?.data.telemetry?.autopilotStack
@@ -8237,7 +8249,7 @@ struct MissionRunDetailView: View {
               case .sitl(let sitlInstanceID) = token,
               let inst = sitl.instances.first(where: { $0.id == sitlInstanceID })
         else { return nil }
-        let systemID = inst.stackInstanceIndex + 1
+        let systemID = inst.mavlinkSystemID
         let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
         guard let hub = fleetLink.hubTelemetry(forVehicleID: vehicleID),
               let lat = hub.latitudeDeg,
@@ -8824,7 +8836,7 @@ struct MissionRunDetailView: View {
         else { return }
         guard case .sitl(let sitlInstanceID) = token else { return }
         guard let inst = sitl.instances.first(where: { $0.id == sitlInstanceID }) else { return }
-        let systemID = inst.stackInstanceIndex + 1
+        let systemID = inst.mavlinkSystemID
         let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
         let stack = fleetLink.hubTelemetry(forVehicleID: vehicleID)?.autopilotStack
             ?? fleetLink.vehicleModel(forVehicleID: vehicleID)?.data.telemetry?.autopilotStack
@@ -8888,7 +8900,7 @@ struct MissionRunDetailView: View {
               case .sitl(let sitlInstanceID) = token,
               let inst = sitl.instances.first(where: { $0.id == sitlInstanceID })
         else { return }
-        let systemID = inst.stackInstanceIndex + 1
+        let systemID = inst.mavlinkSystemID
         let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
         let stack = fleetLink.hubTelemetry(forVehicleID: vehicleID)?.autopilotStack
             ?? fleetLink.vehicleModel(forVehicleID: vehicleID)?.data.telemetry?.autopilotStack
@@ -9279,7 +9291,7 @@ struct MissionRunDetailView: View {
                         appDrawer.dismiss(animation: anim)
                         return
                     }
-                    let systemID = inst.stackInstanceIndex + 1
+                    let systemID = inst.mavlinkSystemID
                     let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
                     let resolvedShortID = fleetLink.vehicleModel(forVehicleID: vehicleID)?.displayShortID
                         ?? "\(inst.preset.fleetVehicleType.classCode):\(systemID)"
@@ -9538,7 +9550,7 @@ struct MissionRunDetailView: View {
         case .sitl(let uuid):
             return sitl.instances.first(where: { $0.id == uuid })?.preset.fleetVehicleType
         case .live:
-            let simVehicleIDs = Set(sitl.instances.map { "sysid:\($0.stackInstanceIndex + 1)" })
+            let simVehicleIDs = Set(sitl.instances.map(\.guardianVehicleStreamKey))
             for vid in fleetLink.telemetryByVehicleID.keys.sorted() where !simVehicleIDs.contains(vid) {
                 return fleetLink.vehicleModel(forVehicleID: vid)?.data.vehicleType
             }

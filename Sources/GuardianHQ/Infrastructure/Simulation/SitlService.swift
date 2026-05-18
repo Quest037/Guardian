@@ -9,20 +9,34 @@ struct SitlRunningInstance: Identifiable, Equatable {
     let preset: SimulationVehiclePreset
     /// ArduPilot `sim_vehicle.py -I` index, or PX4 `px4 -i` instance id.
     let stackInstanceIndex: Int
+    /// UDP port Guardian listens on for this sim (`udpin://0.0.0.0:port`).
+    let mavlinkIngressPort: Int
+    /// Allocated MAVLink system id; fleet stream key is ``guardianVehicleStreamKey``.
+    let mavlinkSystemID: Int
+    /// PX4 GCS mavlink local UDP bind (`px4-rc.mavlink`); `nil` for ArduPilot.
+    let px4GcsUdpPort: Int?
     var isAlive: Bool
     var lastExitCode: Int32?
+}
+
+extension SitlRunningInstance {
+    /// Guardian fleet stream key (`sysid:n`) where `n` is ``mavlinkSystemID``.
+    var guardianVehicleStreamKey: String { "sysid:\(mavlinkSystemID)" }
 }
 
 /// Spawns and supervises built-in SITL processes. Logs are forwarded into `FleetLinkService` via `attachFleetLink`.
 @MainActor
 final class SitlService: ObservableObject {
     @Published private(set) var instances: [SitlRunningInstance] = []
+
     @Published private(set) var lastError: String?
 
     weak var fleetLink: FleetLinkService?
 
     private var runners: [UUID: SitlProcessRunner] = [:]
     private var nextSimulationInstance: Int = 0
+    private var recentlyReleasedUdpPorts: Set<Int> = []
+    private var portReleaseSettleTask: Task<Void, Never>?
 
     init() {
         GuardianAppQuitCoordinator.shared.noteSitlServiceCreated(self)
@@ -37,18 +51,112 @@ final class SitlService: ObservableObject {
             nextSimulationInstance = 0
         }
         guard let link = fleetLink else { return }
-        let anyAlive = instances.contains { $0.isAlive }
+        let aliveSystemIDs = activeSystemIDs()
+        link.pruneSimulatedVehicleSessions(exceptAliveSystemIDs: aliveSystemIDs)
+        let anyAlive = !aliveSystemIDs.isEmpty
         if !anyAlive {
             link.clearStaleVehicleStateWhenNoSitlAlive()
+            GuardianSitlOrphanBlitz.kickoffWhenAllInstancesStopped()
+            schedulePortReleaseSettle()
         }
+    }
+
+    private func recordReleasedUdpPorts(from instance: SitlRunningInstance) {
+        recentlyReleasedUdpPorts.insert(instance.mavlinkIngressPort)
+        if let gcs = instance.px4GcsUdpPort {
+            recentlyReleasedUdpPorts.insert(gcs)
+        }
+    }
+
+    private func schedulePortReleaseSettle() {
+        guard !SitlLaunchRecipe.usesLegacySitlPorts(), !recentlyReleasedUdpPorts.isEmpty else { return }
+        portReleaseSettleTask?.cancel()
+        portReleaseSettleTask = Task { [weak self] in
+            await self?.waitForRecentlyReleasedPortsToSettle()
+        }
+    }
+
+    /// Waits for UDP ports from recently stopped sims to become bindable (random-port respawn / bulk MCS spawn).
+    func waitForRecentlyReleasedPortsToSettle(timeout: TimeInterval? = nil) async {
+        portReleaseSettleTask?.cancel()
+        portReleaseSettleTask = nil
+        guard !SitlLaunchRecipe.usesLegacySitlPorts() else {
+            recentlyReleasedUdpPorts.removeAll()
+            return
+        }
+        let ports = recentlyReleasedUdpPorts
+        guard !ports.isEmpty else { return }
+        let waitBudget = timeout ?? GuardianSitlPortReleaseSettle.portReleaseSettleTimeout()
+        fleetLink?.appendSimulationLog(
+            "Waiting for \(ports.count) sim UDP port(s) to release (timeout=\(waitBudget)s)…"
+        )
+        for port in ports.sorted() {
+            let freed = await GuardianUdpPortUtilities.waitForUdpInboundPortBindable(port: port, timeout: waitBudget)
+            if !freed {
+                fleetLink?.appendSimulationLog("Sim UDP port \(port) still busy after \(waitBudget)s.")
+            }
+        }
+        recentlyReleasedUdpPorts.removeAll()
     }
 
     private func activeSystemIDs() -> Set<Int> {
         Set(
             instances
                 .filter { $0.isAlive }
-                .map { $0.stackInstanceIndex + 1 }
+                .map(\.mavlinkSystemID)
         )
+    }
+
+    private struct MavlinkEndpoints {
+        let ingressPort: Int
+        let systemID: Int
+        let px4GcsUdpPort: Int?
+    }
+
+    private func occupiedUdpPortsForAllocation() -> Set<Int> {
+        var ports = Set(instances.map(\.mavlinkIngressPort))
+        for gcs in instances.compactMap(\.px4GcsUdpPort) {
+            ports.insert(gcs)
+        }
+        return ports
+    }
+
+    private func allocateMavlinkEndpoints(platform: SimulationPlatform, stackInstance: Int) -> MavlinkEndpoints? {
+        let occupiedPorts = occupiedUdpPortsForAllocation()
+        let occupiedSystemIDs = activeSystemIDs()
+
+        if SitlLaunchRecipe.usesLegacySitlPorts() {
+            let ingressPort: Int
+            let px4Gcs: Int?
+            switch platform {
+            case .ardupilot:
+                ingressPort = SitlLaunchRecipe.ardupilotMavproxyOutPort(instance: stackInstance)
+                px4Gcs = nil
+            case .px4:
+                ingressPort = SitlLaunchRecipe.px4OffboardRemotePort(instance: stackInstance)
+                px4Gcs = SitlLaunchRecipe.px4SihGcsUdpPort(instance: stackInstance)
+            }
+            let systemID = stackInstance + 1
+            guard !occupiedSystemIDs.contains(systemID) else { return nil }
+            return MavlinkEndpoints(ingressPort: ingressPort, systemID: systemID, px4GcsUdpPort: px4Gcs)
+        }
+
+        switch platform {
+        case .ardupilot:
+            guard let systemID = GuardianSitlMavlinkEndpointAllocator.reserveMavlinkSystemID(occupied: occupiedSystemIDs),
+                  let ingressPort = GuardianSitlMavlinkEndpointAllocator.reserveMavlinkIngressPort(occupied: occupiedPorts)
+            else { return nil }
+            return MavlinkEndpoints(ingressPort: ingressPort, systemID: systemID, px4GcsUdpPort: nil)
+        case .px4:
+            guard let systemID = GuardianSitlMavlinkEndpointAllocator.reserveMavlinkSystemID(occupied: occupiedSystemIDs),
+                  let ingressPort = GuardianSitlMavlinkEndpointAllocator.reserveMavlinkIngressPort(occupied: occupiedPorts)
+            else { return nil }
+            var occupiedWithIngress = occupiedPorts
+            occupiedWithIngress.insert(ingressPort)
+            guard let gcsPort = GuardianSitlMavlinkEndpointAllocator.reserveMavlinkIngressPort(occupied: occupiedWithIngress)
+            else { return nil }
+            return MavlinkEndpoints(ingressPort: ingressPort, systemID: systemID, px4GcsUdpPort: gcsPort)
+        }
     }
 
     private func reserveNextSimulationInstance(maxScan: Int = 256) -> Int? {
@@ -71,6 +179,9 @@ final class SitlService: ObservableObject {
 
     /// Terminate every SITL child (PX4 / ArduPilot) and stop all MAVSDK sessions on the fleet link. Does not run stale-cache reconcile (used from app quit after fleet teardown).
     func stopAllForApplicationQuit() {
+        for inst in instances {
+            recordReleasedUdpPorts(from: inst)
+        }
         for id in Array(runners.keys) {
             if let runner = runners.removeValue(forKey: id) {
                 runner.onLogLine = nil
@@ -87,16 +198,21 @@ final class SitlService: ObservableObject {
 
     /// Stops a running SITL process and removes its row.
     func stop(id: UUID) {
-        guard let idx = instances.firstIndex(where: { $0.id == id }), instances[idx].isAlive else {
-            dismiss(id: id)
+        guard let idx = instances.firstIndex(where: { $0.id == id }) else { return }
+        let inst = instances[idx]
+        if !inst.isAlive {
+            fleetLink?.unregisterSimulatedVehicle(systemID: inst.mavlinkSystemID)
+            instances.removeAll { $0.id == id && !$0.isAlive }
+            reconcileFleetLinkVehicleCacheAfterSitlChange()
             return
         }
+        recordReleasedUdpPorts(from: inst)
         if let runner = runners.removeValue(forKey: id) {
             runner.onLogLine = nil
             runner.onTerminated = nil
             runner.stop()
         }
-        let systemID = instances[idx].stackInstanceIndex + 1
+        let systemID = inst.mavlinkSystemID
         fleetLink?.unregisterSimulatedVehicle(systemID: systemID)
         instances.removeAll { $0.id == id }
         reconcileFleetLinkVehicleCacheAfterSitlChange()
@@ -104,6 +220,9 @@ final class SitlService: ObservableObject {
 
     /// Removes a finished instance row from the list.
     func dismiss(id: UUID) {
+        if let inst = instances.first(where: { $0.id == id && !$0.isAlive }) {
+            fleetLink?.unregisterSimulatedVehicle(systemID: inst.mavlinkSystemID)
+        }
         instances.removeAll { $0.id == id && !$0.isAlive }
         reconcileFleetLinkVehicleCacheAfterSitlChange()
     }
@@ -114,8 +233,7 @@ final class SitlService: ObservableObject {
         guard vehicleID.hasPrefix(prefix) else { return nil }
         let rest = String(vehicleID.dropFirst(prefix.count))
         guard let systemID = Int(rest), systemID >= 1 else { return nil }
-        let stackIndex = systemID - 1
-        return instances.first(where: { $0.isAlive && $0.stackInstanceIndex == stackIndex })?.id
+        return instances.first(where: { $0.isAlive && $0.mavlinkSystemID == systemID })?.id
     }
 
     /// Restarts Guardian's MAVSDK session to a running built-in SITL without stopping the sim process.
@@ -156,19 +274,17 @@ final class SitlService: ObservableObject {
         spawnDefaults: SimSpawnDefaults?
     ) async -> Bool {
         let stackIndex = inst.stackInstanceIndex
-        let systemID = stackIndex + 1
-        let mavlinkURL: String
+        let systemID = inst.mavlinkSystemID
+        let mavlinkURL = "udpin://0.0.0.0:\(inst.mavlinkIngressPort)"
         let stack: FleetAutopilotStack
         switch inst.platform {
         case .ardupilot:
-            mavlinkURL = "udpin://0.0.0.0:\(SitlLaunchRecipe.ardupilotMavproxyOutPort(instance: stackIndex))"
             stack = .ardupilot
         case .px4:
-            mavlinkURL = "udpin://0.0.0.0:\(SitlLaunchRecipe.px4OffboardRemotePort(instance: stackIndex))"
             stack = .px4
         }
         link.appendSimulationLog(
-            "Reconnecting MAVSDK link [vehicle=\(inst.preset.displayName) instance=\(stackIndex) mavlink_sysid=\(systemID) session=\(inst.id.uuidString)] \(mavlinkURL)"
+            "Reconnecting MAVSDK link [vehicle=\(inst.preset.displayName) instance=\(stackIndex) mavlink_port=\(inst.mavlinkIngressPort) mavlink_sysid=\(systemID) session=\(inst.id.uuidString)] \(mavlinkURL)"
         )
         let ok = await link.reconnectSimulatedVehicleSession(
             systemID: systemID,
@@ -210,10 +326,22 @@ final class SitlService: ObservableObject {
             return
         }
 
+        guard let endpoints = allocateMavlinkEndpoints(platform: .ardupilot, stackInstance: instance) else {
+            lastError = "No available MAVLink port or system id for ArduPilot SITL."
+            return
+        }
+
         let id = UUID()
         let spec: SitlProcessSpec
         do {
-            spec = try SitlLaunchRecipe.arduPilotSpec(root: root, preset: preset, instance: instance, spawnDefaults: defaults)
+            spec = try SitlLaunchRecipe.arduPilotSpec(
+                root: root,
+                preset: preset,
+                instance: instance,
+                spawnDefaults: defaults,
+                mavlinkIngressPort: endpoints.ingressPort,
+                mavlinkSystemID: endpoints.systemID
+            )
         } catch {
             lastError = error.localizedDescription
             return
@@ -242,24 +370,28 @@ final class SitlService: ObservableObject {
             return
         }
 
+        let mavlinkSystemID = endpoints.systemID
+        let mavsdkIngressPort = endpoints.ingressPort
+
         let runner = SitlProcessRunner()
         runner.onLogLine = { [weak link] line in
             guard let link else { return }
             link.appendSimulationLog(line)
-            link.updateSimulationLifecycleFromSitlLog(systemID: instance + 1, line: line)
+            link.updateSimulationLifecycleFromSitlLog(systemID: mavlinkSystemID, line: line)
         }
         runner.onTerminated = { [weak self, weak link] code in
             guard let self else { return }
             self.runners.removeValue(forKey: id)
             if let idx = self.instances.firstIndex(where: { $0.id == id }) {
+                self.recordReleasedUdpPorts(from: self.instances[idx])
                 var row = self.instances[idx]
                 row.isAlive = false
                 row.lastExitCode = code
                 self.instances[idx] = row
             }
-            link?.unregisterSimulatedVehicle(systemID: instance + 1)
+            link?.unregisterSimulatedVehicle(systemID: mavlinkSystemID)
             link?.appendSimulationLog(
-                "SITL exited [platform=ArduPilot instance=\(instance) mavlink_sysid=\(instance + 1) session=\(id.uuidString)] code=\(code)"
+                "SITL exited [platform=ArduPilot instance=\(instance) mavlink_port=\(mavsdkIngressPort) mavlink_sysid=\(mavlinkSystemID) session=\(id.uuidString)] code=\(code)"
             )
             self.reconcileFleetLinkVehicleCacheAfterSitlChange()
         }
@@ -267,26 +399,28 @@ final class SitlService: ObservableObject {
         do {
             try runner.start(spec: spec)
             runners[id] = runner
-            let mavsdkIngressPort = SitlLaunchRecipe.ardupilotMavproxyOutPort(instance: instance)
             instances.append(
                 SitlRunningInstance(
                     id: id,
                     platform: .ardupilot,
                     preset: preset,
                     stackInstanceIndex: instance,
+                    mavlinkIngressPort: mavsdkIngressPort,
+                    mavlinkSystemID: mavlinkSystemID,
+                    px4GcsUdpPort: nil,
                     isAlive: true,
                     lastExitCode: nil
                 )
             )
             link.registerSimulatedVehicle(
-                systemID: instance + 1,
+                systemID: mavlinkSystemID,
                 mavlinkConnectionURL: "udpin://0.0.0.0:\(mavsdkIngressPort)",
                 autopilotStack: .ardupilot,
                 vehicleType: preset.fleetVehicleType,
                 spawnDefaults: defaults
             )
             link.appendSimulationLog(
-                "Started ArduPilot SITL [vehicle=\(preset.displayName) instance=\(instance) mavlink_sysid=\(instance + 1) session=\(id.uuidString)] primary_link=\(mavsdkIngressPort)"
+                "Started ArduPilot SITL [vehicle=\(preset.displayName) instance=\(instance) mavlink_port=\(mavsdkIngressPort) mavlink_sysid=\(mavlinkSystemID) session=\(id.uuidString)] primary_link=\(mavsdkIngressPort)"
             )
         } catch {
             lastError = error.localizedDescription
@@ -306,36 +440,51 @@ final class SitlService: ObservableObject {
             return
         }
 
+        guard let endpoints = allocateMavlinkEndpoints(platform: .px4, stackInstance: instance) else {
+            lastError = "No available MAVLink port or system id for PX4 SITL."
+            return
+        }
+
+        let gcsUdpPort = endpoints.px4GcsUdpPort ?? SitlLaunchRecipe.px4SihGcsUdpPort(instance: instance)
+        let mavsdkIngressPort = endpoints.ingressPort
+        let mavlinkSystemID = endpoints.systemID
+
         let id = UUID()
         let spec: SitlProcessSpec
         do {
-            spec = try SitlLaunchRecipe.px4Spec(root: root, preset: preset, instance: instance, spawnDefaults: defaults)
+            spec = try SitlLaunchRecipe.px4Spec(
+                root: root,
+                preset: preset,
+                instance: instance,
+                spawnDefaults: defaults,
+                mavlinkIngressPort: mavsdkIngressPort,
+                mavlinkSystemID: mavlinkSystemID,
+                px4GcsUdpPort: gcsUdpPort
+            )
         } catch {
             lastError = error.localizedDescription
             return
         }
 
-        let gcsUdpPort = SitlLaunchRecipe.px4SihGcsUdpPort(instance: instance)
-        let mavsdkIngressPort = SitlLaunchRecipe.px4OffboardRemotePort(instance: instance)
-
         let runner = SitlProcessRunner()
         runner.onLogLine = { [weak link] line in
             guard let link else { return }
             link.appendSimulationLog(line)
-            link.updateSimulationLifecycleFromSitlLog(systemID: instance + 1, line: line)
+            link.updateSimulationLifecycleFromSitlLog(systemID: mavlinkSystemID, line: line)
         }
         runner.onTerminated = { [weak self, weak link] code in
             guard let self else { return }
             self.runners.removeValue(forKey: id)
             if let idx = self.instances.firstIndex(where: { $0.id == id }) {
+                self.recordReleasedUdpPorts(from: self.instances[idx])
                 var row = self.instances[idx]
                 row.isAlive = false
                 row.lastExitCode = code
                 self.instances[idx] = row
             }
-            link?.unregisterSimulatedVehicle(systemID: instance + 1)
+            link?.unregisterSimulatedVehicle(systemID: mavlinkSystemID)
             link?.appendSimulationLog(
-                "SITL exited [platform=PX4 instance=\(instance) mavlink_sysid=\(instance + 1) session=\(id.uuidString)] code=\(code)"
+                "SITL exited [platform=PX4 instance=\(instance) mavlink_port=\(mavsdkIngressPort) mavlink_sysid=\(mavlinkSystemID) session=\(id.uuidString)] code=\(code)"
             )
             self.reconcileFleetLinkVehicleCacheAfterSitlChange()
         }
@@ -349,19 +498,22 @@ final class SitlService: ObservableObject {
                     platform: .px4,
                     preset: preset,
                     stackInstanceIndex: instance,
+                    mavlinkIngressPort: mavsdkIngressPort,
+                    mavlinkSystemID: mavlinkSystemID,
+                    px4GcsUdpPort: gcsUdpPort,
                     isAlive: true,
                     lastExitCode: nil
                 )
             )
             link.registerSimulatedVehicle(
-                systemID: instance + 1,
+                systemID: mavlinkSystemID,
                 mavlinkConnectionURL: "udpin://0.0.0.0:\(mavsdkIngressPort)",
                 autopilotStack: .px4,
                 vehicleType: preset.fleetVehicleType,
                 spawnDefaults: defaults
             )
             link.appendSimulationLog(
-                "Started PX4 SITL [sim=SIH vehicle=\(preset.displayName) model=\(preset.px4SitlSimModel()) instance=\(instance) mavlink_sysid=\(instance + 1) session=\(id.uuidString)] gcs_udp=\(gcsUdpPort) mavsdk_udpin=\(mavsdkIngressPort)"
+                "Started PX4 SITL [sim=SIH vehicle=\(preset.displayName) model=\(preset.px4SitlSimModel()) instance=\(instance) mavlink_port=\(mavsdkIngressPort) mavlink_sysid=\(mavlinkSystemID) session=\(id.uuidString)] gcs_udp=\(gcsUdpPort) mavsdk_udpin=\(mavsdkIngressPort)"
             )
         } catch {
             lastError = error.localizedDescription
@@ -370,13 +522,16 @@ final class SitlService: ObservableObject {
         }
     }
 
-    /// Finds the next PX4 instance whose GCS UDP port is not currently occupied.
+    /// Finds the next PX4 `-i` instance index (legacy mode also requires the formula GCS port to be bindable).
     private func reserveNextAvailablePx4Instance(maxScan: Int = 64) -> Int? {
+        if !SitlLaunchRecipe.usesLegacySitlPorts() {
+            return reserveNextSimulationInstance(maxScan: maxScan)
+        }
         var candidate = instances.isEmpty ? 0 : max(0, nextSimulationInstance)
         let occupiedByGuardian = Set(instances.map(\.stackInstanceIndex))
         for _ in 0..<maxScan {
             let gcsPort = SitlLaunchRecipe.px4SihGcsUdpPort(instance: candidate)
-            if !occupiedByGuardian.contains(candidate), isUdpPortBindable(gcsPort) {
+            if !occupiedByGuardian.contains(candidate), GuardianUdpPortUtilities.isUdpPortBindable(gcsPort) {
                 nextSimulationInstance = candidate + 1
                 return candidate
             }
@@ -385,39 +540,35 @@ final class SitlService: ObservableObject {
         return nil
     }
 
-    /// True when we can bind to the UDP port now (best-effort conflict probe).
-    private func isUdpPortBindable(_ port: Int) -> Bool {
-        let fd = socket(AF_INET, SOCK_DGRAM, 0)
-        if fd < 0 { return false }
-        defer { close(fd) }
-
-        var addr = sockaddr_in()
-        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.stride)
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = in_port_t(UInt16(port).bigEndian)
-        addr.sin_addr = in_addr(s_addr: INADDR_ANY.bigEndian)
-
-        let ok = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
-                bind(fd, saPtr, socklen_t(MemoryLayout<sockaddr_in>.stride)) == 0
-            }
-        }
-        return ok
-    }
-
     /// Inserts a running SITL row so ``resolvedFleetStreamVehicleID`` resolves without spawning (tests only).
     func seedMissionRunTestSitlRunningInstance(
         id: UUID,
         stackInstanceIndex: Int = 0,
+        mavlinkIngressPort: Int? = nil,
+        mavlinkSystemID: Int? = nil,
         platform: SimulationPlatform = .px4,
         preset: SimulationVehiclePreset = .uavMultirotor
     ) {
+        let port: Int
+        switch platform {
+        case .ardupilot:
+            port = mavlinkIngressPort ?? SitlLaunchRecipe.ardupilotMavproxyOutPort(instance: stackInstanceIndex)
+        case .px4:
+            port = mavlinkIngressPort ?? SitlLaunchRecipe.px4OffboardRemotePort(instance: stackInstanceIndex)
+        }
+        let sysid = mavlinkSystemID ?? (stackInstanceIndex + 1)
+        let gcs: Int? = platform == .px4
+            ? SitlLaunchRecipe.px4SihGcsUdpPort(instance: stackInstanceIndex)
+            : nil
         instances.append(
             SitlRunningInstance(
                 id: id,
                 platform: platform,
                 preset: preset,
                 stackInstanceIndex: stackInstanceIndex,
+                mavlinkIngressPort: port,
+                mavlinkSystemID: sysid,
+                px4GcsUdpPort: gcs,
                 isAlive: true,
                 lastExitCode: nil
             )

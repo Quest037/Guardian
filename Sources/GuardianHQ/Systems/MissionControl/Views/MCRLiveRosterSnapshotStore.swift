@@ -161,7 +161,7 @@ enum MCRLiveRosterRowSnapshotFactory {
            let token = FleetMissionVehicleToken(storageKey: key),
            case .sitl(let uuid) = token,
            let inst = sitl.instances.first(where: { $0.id == uuid }) {
-            let systemID = inst.stackInstanceIndex + 1
+            let systemID = inst.mavlinkSystemID
             return "\(inst.preset.fleetVehicleType.classCode):\(systemID)"
         }
         let prefix = "sysid:"

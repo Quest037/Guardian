@@ -240,12 +240,12 @@ struct VehiclesView: View {
                         onReconnectLink: nil
                     )
                 case .sim(let inst):
-                    let systemID = inst.stackInstanceIndex + 1
-                    let resolvedVehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
+                    let resolvedVehicleID = fleetLink.vehicleID(forSystemID: inst.mavlinkSystemID)
+                        ?? inst.guardianVehicleStreamKey
                     let model = fleetLink.vehicleModel(forVehicleID: resolvedVehicleID)
                     let status = statusForSim(
                         resolvedVehicleID: resolvedVehicleID,
-                        systemID: systemID,
+                        systemID: inst.mavlinkSystemID,
                         instance: inst,
                         model: model
                     )
@@ -256,7 +256,7 @@ struct VehiclesView: View {
                         }
                         return FleetVehicleModel(
                             vehicleID: resolvedVehicleID,
-                            systemID: systemID,
+                            systemID: inst.mavlinkSystemID,
                             vehicleType: inst.preset.fleetVehicleType,
                             initialStatus: status
                         )
@@ -344,13 +344,10 @@ struct VehiclesView: View {
 
     private var fleetGridEntries: [FleetGridEntry] {
         var rows: [FleetGridEntry] = []
-        let simVehicleIDs = Set(
-            sitl.instances.map { "sysid:\($0.stackInstanceIndex + 1)" }
-        )
-        let liveHardwareVehicleIDs = fleetLink.vehicleModelsByVehicleID.keys
+        let simVehicleIDs = Set(sitl.instances.map(\.guardianVehicleStreamKey))
+        let liveHardwareSessionIDs = fleetLink.activeVehicleSessionIDs()
             .filter { !simVehicleIDs.contains($0) }
-            .sorted()
-        if let firstHardwareVehicleID = liveHardwareVehicleIDs.first,
+        if let firstHardwareVehicleID = liveHardwareSessionIDs.first,
            let model = fleetLink.vehicleModel(forVehicleID: firstHardwareVehicleID),
            model.collections.telemetrySnapshot != nil {
             rows.append(.live(vehicleID: firstHardwareVehicleID, model: model))

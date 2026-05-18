@@ -430,8 +430,7 @@ final class MissionControlStore: ObservableObject {
 
     private func isVehicleSimulationStream(vehicleID: String, fleetLink: FleetLinkService, sitl: SitlService) -> Bool {
         for inst in sitl.instances {
-            let sid = inst.stackInstanceIndex + 1
-            let vid = fleetLink.vehicleID(forSystemID: sid) ?? "sysid:\(sid)"
+            let vid = fleetLink.vehicleID(forSystemID: inst.mavlinkSystemID) ?? inst.guardianVehicleStreamKey
             if vid == vehicleID { return true }
         }
         return false

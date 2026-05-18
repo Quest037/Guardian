@@ -30,6 +30,7 @@ let package = Package(
                 .copy("Resources/SitlDeps"),
                 .copy("Resources/ArduPilotSitl"),
                 .copy("Resources/Px4SitlBundle"),
+                .copy("Resources/Px4SitlMavlink"),
                 .copy("Resources/SimulationDevices"),
                 .copy("Resources/MissionBadge"),
                 .copy("Resources/FleetCalibrationAnchors.json"),

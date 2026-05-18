@@ -2,7 +2,8 @@ import Darwin
 import Dispatch
 import Foundation
 
-/// After **force quit**, PX4 / ArduPilot children can survive as OS orphans. On each **cold launch** we:
+/// After **force quit**, PX4 / ArduPilot children can survive as OS orphans. On **cold launch** and when the
+/// in-app sim list has **no alive processes**, we:
 /// 1. Kill PIDs recorded in ``GuardianSitlSpawnRegistry`` (every root `SitlProcessRunner` spawn) if they still match their saved fingerprint.
 /// 2. Kill processes matching **bundle paths**, **developer checkout paths** (from `SitlLaunchRecipe`), and common helpers (`px4-mavlink`, runtime dirs).
 /// 3. Expand each matched root to its whole **subtree** via `pgrep -P` so `mavproxy`, `px4-mavlink`, etc. are included.
@@ -13,6 +14,15 @@ enum GuardianSitlOrphanBlitz {
     private static let sigtermWaitUsec: useconds_t = 280_000
 
     static func kickoffFromColdLaunch() {
+        kickoffInBackground()
+    }
+
+    /// When every built-in SITL row is stopped (e.g. after **Stop all** or mission SIM cleanup).
+    static func kickoffWhenAllInstancesStopped() {
+        kickoffInBackground()
+    }
+
+    private static func kickoffInBackground() {
         guard ProcessInfo.processInfo.environment[skipEnvKey] == nil else { return }
         DispatchQueue.global(qos: .utility).async {
             runBlocking()

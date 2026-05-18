@@ -54,7 +54,7 @@ func buildMissionPickableVehicles(
 ) -> [MissionPickableFleetVehicle] {
     var rows: [MissionPickableFleetVehicle] = []
     let simVehicleIDs = Set(
-        sitl.instances.map { "sysid:\($0.stackInstanceIndex + 1)" }
+        sitl.instances.map(\.guardianVehicleStreamKey)
     )
     let liveHardwareVehicleIDs = fleetLink.telemetryByVehicleID.keys
         .filter { !simVehicleIDs.contains($0) }
@@ -79,18 +79,17 @@ func buildMissionPickableVehicles(
         )
     }
     for inst in sitl.instances {
-        let systemID = inst.stackInstanceIndex + 1
-        let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
+        let vehicleID = fleetLink.vehicleID(forSystemID: inst.mavlinkSystemID) ?? inst.guardianVehicleStreamKey
         let lifecycle = fleetLink.vehicleStatus(forVehicleID: vehicleID)
             ?? (inst.isAlive ? .init(stage: .awaitingTelemetry) : .init(stage: .stopped))
         let resolvedShortID = fleetLink.vehicleModel(forVehicleID: vehicleID)?.displayShortID
-            ?? "\(inst.preset.fleetVehicleType.classCode):\(systemID)"
+            ?? "\(inst.preset.fleetVehicleType.classCode):\(inst.mavlinkSystemID)"
         rows.append(
             MissionPickableFleetVehicle(
                 token: .sitl(inst.id),
                 title: inst.preset.displayName,
                 detailLine: inst.platform.displayName,
-                vehicleIDText: "\(systemID)",
+                vehicleIDText: "\(inst.mavlinkSystemID)",
                 vehicleShortID: resolvedShortID,
                 lifecycleStatus: lifecycle,
                 autopilotStack: FleetAutopilotStack(simulationPlatform: inst.platform),
@@ -117,12 +116,11 @@ func resolvedFleetStreamVehicleID(
     case .sitl(let uuid):
         guard let sitl else { return nil }
         guard let inst = sitl.instances.first(where: { $0.id == uuid }) else { return nil }
-        let systemID = inst.stackInstanceIndex + 1
-        return fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
+        return fleetLink.vehicleID(forSystemID: inst.mavlinkSystemID) ?? inst.guardianVehicleStreamKey
     case .live:
         var excluded = Set(fleetLink.telemetryByVehicleID.keys.filter { fleetLink.isGuardianManagedSitlStream(vehicleID: $0) })
         if let sitl {
-            excluded.formUnion(sitl.instances.map { "sysid:\($0.stackInstanceIndex + 1)" })
+            excluded.formUnion(sitl.instances.map(\.guardianVehicleStreamKey))
         }
         return fleetLink.telemetryByVehicleID.keys
             .filter { !excluded.contains($0) }

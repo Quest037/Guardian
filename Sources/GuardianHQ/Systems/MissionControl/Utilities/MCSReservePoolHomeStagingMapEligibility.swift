@@ -27,8 +27,7 @@ enum MCSReservePoolHomeStagingMapEligibility {
               case .sitl(let sitlInstanceID) = token
         else { return false }
         guard let inst = sitl.instances.first(where: { $0.id == sitlInstanceID }) else { return false }
-        let systemID = inst.stackInstanceIndex + 1
-        let vehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
+        let vehicleID = fleetLink.vehicleID(forSystemID: inst.mavlinkSystemID) ?? inst.guardianVehicleStreamKey
         let stack = fleetLink.hubTelemetry(forVehicleID: vehicleID)?.autopilotStack
             ?? fleetLink.vehicleModel(forVehicleID: vehicleID)?.data.telemetry?.autopilotStack
             ?? .unknown

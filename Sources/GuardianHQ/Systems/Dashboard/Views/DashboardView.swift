@@ -26,7 +26,7 @@ struct DashboardView: View {
     }
 
     private var simVehicleIDs: Set<String> {
-        Set(sitl.instances.map { "sysid:\($0.stackInstanceIndex + 1)" })
+        Set(sitl.instances.map(\.guardianVehicleStreamKey))
     }
 
     /// Same cardinality as `fleetGridEntries` on Devices (live MAVLink row when connected, plus every SITL row).
@@ -34,8 +34,9 @@ struct DashboardView: View {
         allVehicleIDs.count
     }
 
+    /// Active MAVSDK sessions plus running built-in SITL rows (matches Devices — no orphan models after sim stop).
     private var allVehicleIDs: [String] {
-        Array(Set(fleetLink.vehicleModelsByVehicleID.keys).union(simVehicleIDs)).sorted()
+        Array(Set(fleetLink.activeVehicleSessionIDs()).union(simVehicleIDs)).sorted()
     }
 
     private var liveVehicleCount: Int {

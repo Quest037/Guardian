@@ -61,6 +61,12 @@ fi
   git rev-parse --short HEAD 2>/dev/null || echo "unknown"
 ) >"$DEST/.guardian_px4_git_rev"
 
+PATCH="$ROOT/Sources/GuardianHQ/Resources/Px4SitlMavlink/px4-rc.mavlink"
+if [[ -f "$PATCH" ]]; then
+  install -m 644 "$PATCH" "$DEST/etc/init.d-posix/px4-rc.mavlink"
+  echo "Installed Guardian px4-rc.mavlink overlay (GUARDIAN_PX4_* port env)."
+fi
+
 # Ad-hoc sign main binary (px4-* are symlinks to it). Distribution still needs Developer ID.
 if command -v codesign >/dev/null 2>&1; then
   codesign -s - --force "$DEST/bin/px4" 2>/dev/null || true

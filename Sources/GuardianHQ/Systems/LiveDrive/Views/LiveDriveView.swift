@@ -1051,8 +1051,7 @@ struct LiveDriveView: View {
 
     private func isSimulationVehicle(vehicleID: String) -> Bool {
         sitl.instances.contains { inst in
-            let sid = inst.stackInstanceIndex + 1
-            let resolved = fleetLink.vehicleID(forSystemID: sid) ?? "sysid:\(sid)"
+            let resolved = fleetLink.vehicleID(forSystemID: inst.mavlinkSystemID) ?? inst.guardianVehicleStreamKey
             return resolved == vehicleID
         }
     }

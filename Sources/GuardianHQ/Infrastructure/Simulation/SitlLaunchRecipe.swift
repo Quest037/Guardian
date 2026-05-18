@@ -86,6 +86,19 @@ enum ArduPilotSitlLocator {
 }
 
 enum SitlLaunchRecipe {
+    private static let legacyPortsEnvKey = "GUARDIAN_SITL_LEGACY_PORTS"
+
+    /// Offboard/API remote UDP port read by Guardian ``Resources/Px4SitlMavlink/px4-rc.mavlink``.
+    static let px4OffboardPortRemoteEnvKey = "GUARDIAN_PX4_OFFBOARD_PORT_REMOTE"
+
+    /// GCS mavlink local UDP bind port read by the Guardian mavlink overlay.
+    static let px4GcsPortLocalEnvKey = "GUARDIAN_PX4_GCS_PORT_LOCAL"
+
+    /// When `GUARDIAN_SITL_LEGACY_PORTS=1`, ArduPilot MAVProxy and PX4 use formula ports (`14550+10×instance`, etc.).
+    static func usesLegacySitlPorts() -> Bool {
+        ProcessInfo.processInfo.environment[legacyPortsEnvKey] == "1"
+    }
+
     /// Per-app-run writable ArduPilot runtime root. Keeps SITL logs/state out of bundled resources.
     private static let ardupilotRuntimeSessionRoot: String = {
         let fm = FileManager.default
@@ -173,14 +186,16 @@ enum SitlLaunchRecipe {
 
     /// ArduPilot `sim_vehicle.py` invocation for one SITL instance (`-I` separates MAVLink stacks).
     /// First spawn may run **waf** to compile `bin/arducopter` (etc.) under `ArduPilotSitl/build/sitl`; that is **one-time per tree** until the build dir is removed (e.g. clean DerivedData).
-    /// MAVLink reaches Guardian via MAVProxy’s default `--out` to UDP 14550+10*instance (see `sim_vehicle.py`).
+    /// MAVLink reaches Guardian via MAVProxy `--out` to ``mavlinkIngressPort`` (random band by default; legacy uses 14550+10×instance).
     ///
     /// Do **not** pass `--console`: MAVProxy’s console module expects a TTY and exits immediately when spawned from `Process`, which ends `sim_vehicle.py` and drops the UI row.
     static func arduPilotSpec(
         root: String,
         preset: SimulationVehiclePreset,
         instance: Int,
-        spawnDefaults: SimSpawnDefaults
+        spawnDefaults: SimSpawnDefaults,
+        mavlinkIngressPort: Int,
+        mavlinkSystemID: Int
     ) throws -> SitlProcessSpec {
         guard let python = python3Executable() else { throw SitlError.missingPython3 }
         let script = (root as NSString).appendingPathComponent("Tools/autotest/sim_vehicle.py")
@@ -207,6 +222,18 @@ enum SitlLaunchRecipe {
         }
         // sim_vehicle.py accepts custom start via -l/--custom-location.
         args.append(contentsOf: ["-l", "\(spawnDefaults.latitudeDeg),\(spawnDefaults.longitudeDeg),0,\(spawnDefaults.headingDeg)"])
+
+        if mavlinkSystemID >= 1, mavlinkSystemID <= 255 {
+            args.append(contentsOf: ["--sysid", "\(mavlinkSystemID)"])
+        }
+
+        let legacyPort = ardupilotMavproxyOutPort(instance: instance)
+        if usesLegacySitlPorts(), mavlinkIngressPort == legacyPort {
+            // Default MAVProxy outputs (14550 + 10 × instance) from sim_vehicle.
+        } else {
+            args.append("--no-extra-ports")
+            args.append(contentsOf: ["--out", "127.0.0.1:\(mavlinkIngressPort)"])
+        }
 
         let cwd = URL(fileURLWithPath: root, isDirectory: true)
         var env = ProcessInfo.processInfo.environment
@@ -331,12 +358,52 @@ enum SitlLaunchRecipe {
         return nil
     }
 
+    /// Writable session copy of bundled `etc/` with Guardian ``px4-rc.mavlink`` overlay (random-port mode only).
+    static func px4EtcDirectoryForSpawn(sourceEtcPath: String) throws -> String {
+        if usesLegacySitlPorts() {
+            return sourceEtcPath
+        }
+        let fm = FileManager.default
+        let sessionEtc = (px4RuntimeSessionRoot as NSString).appendingPathComponent("etc")
+        let marker = (sessionEtc as NSString).appendingPathComponent(".guardian_px4_mavlink_overlay")
+        if !fm.fileExists(atPath: marker) {
+            if fm.fileExists(atPath: sessionEtc) {
+                try fm.removeItem(atPath: sessionEtc)
+            }
+            try fm.copyItem(atPath: sourceEtcPath, toPath: sessionEtc)
+            try installGuardianPx4MavlinkOverlay(intoEtcRoot: sessionEtc)
+            fm.createFile(atPath: marker, contents: Data(), attributes: nil)
+        }
+        return sessionEtc
+    }
+
+    /// Replaces `etc/init.d-posix/px4-rc.mavlink` with the bundled Guardian overlay.
+    static func installGuardianPx4MavlinkOverlay(intoEtcRoot: String) throws {
+        guard let patchURL = Bundle.module.url(
+            forResource: "px4-rc",
+            withExtension: "mavlink",
+            subdirectory: "Px4SitlMavlink"
+        ) else {
+            throw SitlError.startFailed("Guardian PX4 mavlink overlay missing from app bundle.")
+        }
+        let destDir = (intoEtcRoot as NSString).appendingPathComponent("init.d-posix")
+        try FileManager.default.createDirectory(atPath: destDir, withIntermediateDirectories: true, attributes: nil)
+        let destPath = (destDir as NSString).appendingPathComponent("px4-rc.mavlink")
+        if FileManager.default.fileExists(atPath: destPath) {
+            try FileManager.default.removeItem(atPath: destPath)
+        }
+        try FileManager.default.copyItem(at: patchURL, to: URL(fileURLWithPath: destPath))
+    }
+
     /// Spawns `bin/px4` with `PX4_SIM_MODEL` set for built-in SIH airframes (no Gazebo / jMAVSim).
     static func px4Spec(
         root: String,
         preset: SimulationVehiclePreset,
         instance: Int,
-        spawnDefaults: SimSpawnDefaults
+        spawnDefaults: SimSpawnDefaults,
+        mavlinkIngressPort: Int,
+        mavlinkSystemID: Int,
+        px4GcsUdpPort: Int
     ) throws -> SitlProcessSpec {
         guard let layout = px4ResolvedBuildLayout(root: root) else {
             throw SitlError.missingPx4SitlBuild
@@ -352,6 +419,8 @@ enum SitlLaunchRecipe {
             attributes: nil
         )
 
+        let etcPath = try px4EtcDirectoryForSpawn(sourceEtcPath: layout.etc)
+
         let model = preset.px4SitlSimModel()
         var env = ProcessInfo.processInfo.environment
         env["PX4_SIM_MODEL"] = model
@@ -362,12 +431,17 @@ enum SitlLaunchRecipe {
         env["PX4_HOME_ALT"] = "0"
         // `etc/init.d-posix/rcS` applies `PX4_PARAM_*` so the battery library has a non-zero capacity in SIH SITL.
         env["PX4_PARAM_BAT1_CAPACITY"] = "5000"
+        env["PX4_PARAM_MAV_SYS_ID"] = "\(mavlinkSystemID)"
+        if !usesLegacySitlPorts() {
+            env[px4OffboardPortRemoteEnvKey] = "\(mavlinkIngressPort)"
+            env[px4GcsPortLocalEnvKey] = "\(px4GcsUdpPort)"
+        }
         // rcS runs `. px4-alias.sh`; that file lives next to px4 under bin/ (must be on PATH).
         let binDir = (layout.build as NSString).appendingPathComponent("bin")
         env["PATH"] = binDir + ":" + augmentedPATH(existing: env["PATH"] ?? "")
 
         let cwd = URL(fileURLWithPath: instanceRootfs, isDirectory: true)
-        let args = ["-i", "\(instance)", "-d", layout.etc]
+        let args = ["-i", "\(instance)", "-d", etcPath]
         return SitlProcessSpec(
             executable: layout.px4Binary,
             arguments: args,

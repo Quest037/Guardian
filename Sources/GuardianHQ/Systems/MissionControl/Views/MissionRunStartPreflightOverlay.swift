@@ -392,8 +392,7 @@ struct MissionRunStartPreflightOverlay: View {
            let token = FleetMissionVehicleToken(storageKey: key),
            case .sitl(let uuid) = token,
            let inst = sitl.instances.first(where: { $0.id == uuid }) {
-            let systemID = inst.stackInstanceIndex + 1
-            return "[\(inst.preset.fleetVehicleType.classCode):\(systemID)]"
+            return "[\(inst.preset.fleetVehicleType.classCode):\(inst.mavlinkSystemID)]"
         }
         let prefix = "sysid:"
         if vid.hasPrefix(prefix), let n = Int(vid.dropFirst(prefix.count)) {

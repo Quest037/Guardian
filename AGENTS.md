@@ -23,5 +23,6 @@ This repo keeps product and AI guardrails in **`.cursor/rules/`**. When editing 
 - **Modals / confirms:** `.cursor/rules/modal-central-template.mdc`, `.cursor/rules/guardian-confirm-dialogs.mdc`
 - **Build / version / missions / tests:** See the other rules in `.cursor/rules/` as relevant.
 - **Operator copy:** `.cursor/rules/no-future-version-user-copy.mdc` — no “future build” / “coming soon” teases in UI; describe the current product only.
+- **SITL random MAVLink port / sysid:** ``README_FULL.md`` → **Built-in SITL MAVLink endpoints**; wipe/orphan backlog — ``SITLRandomPortToDo.md``.
 
 **Theme reference:** use the in-app **Theme** plugin (`ThemePanelView` / `ThemeCatalogContent`) as the living catalog; rules live in `guardian-theme-tokens.mdc` above.

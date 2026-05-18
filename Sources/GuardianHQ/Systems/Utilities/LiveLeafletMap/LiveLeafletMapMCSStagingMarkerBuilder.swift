@@ -59,8 +59,8 @@ enum LiveLeafletMapMCSStagingMarkerBuilder {
         switch token {
         case .sitl(let uuid):
             guard let inst = inputs.sitl.instances.first(where: { $0.id == uuid }) else { return nil }
-            let systemID = inst.stackInstanceIndex + 1
-            let vehicleID = inputs.fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
+            let vehicleID = inputs.fleetLink.vehicleID(forSystemID: inst.mavlinkSystemID)
+                ?? inst.guardianVehicleStreamKey
             let colorHex = inputs.fleetLink.mapColorHex(forVehicleID: vehicleID)
             if let optimistic = inputs.rosterSimDragByAssignmentID[assignment.id] {
                 let heading: Double? = {
@@ -209,8 +209,8 @@ enum LiveLeafletMapMCSStagingMarkerBuilder {
               case .sitl(let sitlInstanceID) = token,
               let inst = inputs.sitl.instances.first(where: { $0.id == sitlInstanceID })
         else { return nil }
-        let systemID = inst.stackInstanceIndex + 1
-        let vehicleID = inputs.fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
+        let vehicleID = inputs.fleetLink.vehicleID(forSystemID: inst.mavlinkSystemID)
+            ?? inst.guardianVehicleStreamKey
         guard let hub = inputs.fleetLink.hubTelemetry(forVehicleID: vehicleID),
               let lat = hub.latitudeDeg,
               let lon = hub.longitudeDeg

@@ -1140,6 +1140,43 @@ final class FleetLinkService: ObservableObject {
         clearMcrRosterLiveChannelFleetSlicesForAllKeys()
     }
 
+    /// Stops `sysid:n` MAVSDK sessions that no longer have a matching **alive** built-in SITL row.
+    func pruneSimulatedVehicleSessions(exceptAliveSystemIDs: Set<Int>) {
+        for (vehicleID, session) in Array(sessionsByVehicleID) {
+            guard vehicleID.hasPrefix("sysid:") else { continue }
+            guard !exceptAliveSystemIDs.contains(session.systemID) else { continue }
+            stopSession(vehicleID: vehicleID)
+        }
+        pruneOrphanVehicleModelsWithoutActiveSession()
+    }
+
+    /// Removes fleet models left after teardown (e.g. late telemetry or lifecycle updates with no session).
+    func pruneOrphanVehicleModelsWithoutActiveSession() {
+        let orphans = vehicleModelsByVehicleID.keys.filter { sessionsByVehicleID[$0] == nil }
+        guard !orphans.isEmpty else { return }
+        for vehicleID in orphans {
+            vehicleModelsByVehicleID.removeValue(forKey: vehicleID)
+            vehicleStatusByVehicleID.removeValue(forKey: vehicleID)
+            telemetryByVehicleID.removeValue(forKey: vehicleID)
+            hubTelemetryByVehicleID.removeValue(forKey: vehicleID)
+            logLinesByVehicleID.removeValue(forKey: vehicleID)
+            recentVehicleStatusMessagesByVehicleID[vehicleID] = nil
+            mcrRosterLiveChannelsByVehicleID[vehicleID]?.clearFleetSlice()
+        }
+        if hubTelemetryByVehicleID.isEmpty {
+            telemetry = nil
+            hubTelemetry = nil
+            bridgePhase = .awaitingVehicle
+            lastTelemetryMutationVehicleID = nil
+            publishHubFleetTelemetryTickAndRefreshMcrChannels()
+        } else if let survivor = hubTelemetryByVehicleID.keys.sorted().first {
+            hubTelemetry = hubTelemetryByVehicleID[survivor]
+            telemetry = telemetryByVehicleID[survivor]
+            lastTelemetryMutationVehicleID = survivor
+            publishHubFleetTelemetryTickAndRefreshMcrChannels()
+        }
+    }
+
     func vehicleStatus(forVehicleID vehicleID: String) -> VehicleLifecycleStatus? {
         vehicleModelsByVehicleID[vehicleID]?.collections.lifecycleStatus
             ?? vehicleStatusByVehicleID[vehicleID]
@@ -2636,6 +2673,8 @@ final class FleetLinkService: ObservableObject {
 
     func updateSimulationLifecycleFromSitlLog(systemID: Int, line: String) {
         let vehicleID = "sysid:\(systemID)"
+        // SITL stdout can keep printing after `stopSession`; do not resurrect fleet rows from logs alone.
+        guard sessionsByVehicleID[vehicleID] != nil else { return }
         let lowered = line.lowercased()
         let currentStage = vehicleModelsByVehicleID[vehicleID]?.collections.lifecycleStatus.stage
             ?? vehicleStatusByVehicleID[vehicleID]?.stage
@@ -2758,13 +2797,7 @@ final class FleetLinkService: ObservableObject {
         session.runner.onTerminated = { [weak self] code in
             guard let self else { return }
             self.appendVehicleLog("mavsdk_server exited (code \(code)).", vehicleID: vehicleID)
-            self.applyLifecycleStatus(
-                VehicleLifecycleStatus(
-                stage: .failed,
-                sentenceOverride: "The MAVSDK server exited with code \(code), so telemetry is unavailable for this vehicle."
-                ),
-                vehicleID: vehicleID
-            )
+            self.stopSession(vehicleID: vehicleID)
         }
         do {
             var config = configuration
@@ -3070,6 +3103,7 @@ final class FleetLinkService: ObservableObject {
     }
 
     private func applyNativeTelemetry(vehicleID: String, systemID: Int, mutate: (inout FleetHubVehicleTelemetry) -> Void) {
+        guard sessionsByVehicleID[vehicleID] != nil else { return }
         let wasAlreadyLive = vehicleStatusByVehicleID[vehicleID]?.stage == .live
         ensureVehicleModel(vehicleID: vehicleID, systemID: systemID, initialStatus: .init(stage: .connecting))
         if var model = vehicleModelsByVehicleID[vehicleID] {
@@ -3145,6 +3179,9 @@ final class FleetLinkService: ObservableObject {
     }
 
     private func applyLifecycleStatus(_ status: VehicleLifecycleStatus, vehicleID: String) {
+        guard vehicleModelsByVehicleID[vehicleID] != nil || sessionsByVehicleID[vehicleID] != nil else {
+            return
+        }
         vehicleStatusByVehicleID[vehicleID] = status
         if var model = vehicleModelsByVehicleID[vehicleID] {
             model.applyLifecycleStatus(status)
@@ -3152,12 +3189,18 @@ final class FleetLinkService: ObservableObject {
             telemetryByVehicleID[vehicleID] = model.collections.telemetrySnapshot
             hubTelemetryByVehicleID[vehicleID] = model.data.telemetry
         } else {
+            guard sessionsByVehicleID[vehicleID] != nil else { return }
             vehicleModelsByVehicleID[vehicleID] = FleetVehicleModel(
                 vehicleID: vehicleID,
                 systemID: nil,
                 initialStatus: status
             )
         }
+    }
+
+    /// Vehicle stream keys with an active MAVSDK session (excludes orphan models left after sim teardown).
+    func activeVehicleSessionIDs() -> [String] {
+        Array(sessionsByVehicleID.keys).sorted()
     }
 
     /// MAVSDK maps MAVLink unknown `battery_remaining` (-1) as a small negative fraction; valid remaining is **0…1** (fraction) or **0…100** (percent) from the wire.

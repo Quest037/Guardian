@@ -42,6 +42,17 @@ Then **Product → Run** (⌘R). Xcode uses the same SwiftPM target.
 - **Prewarm both SITL stacks:** `make sitl-prewarm` (ArduPilot full prebuild), or include PX4 too: `PX4_AUTOPILOT_ROOT=/path/to/PX4-Autopilot make sitl-prewarm`
 - **MAVSDK-Python bridge:** `make bridge-deps`
 
+### Built-in SITL MAVLink endpoints
+
+Guardian allocates a **random UDP ingress port** and **MAVLink system id** per built-in SITL spawn so stop → respawn does not reuse the same `udpin://0.0.0.0:port` listener or `sysid:n` fleet stream key as the previous session.
+
+- **Ingress port band:** `42000`–`42999` (`GuardianSitlMavlinkEndpointAllocator`). Bind-probed before use; stored on ``SitlRunningInstance/mavlinkIngressPort`` and passed to MAVProxy via `sim_vehicle.py --no-extra-ports` and `--out=127.0.0.1:<port>`.
+- **System id:** random free id in `1`–`254`, stored on ``SitlRunningInstance/mavlinkSystemID``; ArduPilot launch uses `--sysid`. Fleet streams remain `sysid:n` where `n` is the allocated id.
+- **Legacy formula ports:** set `GUARDIAN_SITL_LEGACY_PORTS=1` to restore `14550 + 10 × instance` and `sysid = instance + 1` (bisect upstream sim issues).
+- **PX4:** same random ingress band and sysid allocation; `px4-rc.mavlink` reads `GUARDIAN_PX4_OFFBOARD_PORT_REMOTE` and `GUARDIAN_PX4_GCS_PORT_LOCAL` (overlay in `Resources/Px4SitlMavlink/`, applied at runtime and by `scripts/sync_px4_sitl_bundle.sh`). `PX4_PARAM_MAV_SYS_ID` sets the allocated system id.
+- **Port release after stop:** When every built-in sim is stopped, Guardian waits (``GuardianUdpPortUtilities/waitForUdpInboundPortBindable``) on recently used ingress/GCS ports before the next bulk MCS spawn (`GUARDIAN_SITL_PORT_RELEASE_SETTLE_TIMEOUT`, default `2.5` s). MCS bulk spawn also pauses between rows (`GUARDIAN_SITL_BULK_SPAWN_INTER_SPAWN_MS`, default `150` ms) in random-port mode.
+- **Orphan blitz:** ``GuardianSitlOrphanBlitz`` runs on cold launch and when the sim list has no alive processes (`GUARDIAN_SKIP_SITL_ORPHAN_BLITZ=1` disables).
+
 ## SITL command-catalogue smoke tests
 
 End-to-end coverage for the Layer 0 fleet command catalogue (`command.fleet.vehicle.*`) ships as an **opt-in** XCTest suite, `GuardianHQSitlSmokeTests` in `Tests/GuardianHQTests/`. It is not part of normal `swift test` runs because it boots real **ArduPilot** and **PX4** SITL instances, starts `mavsdk_server` sessions, and drives the real `SitlService` → `FleetLinkService` → `FleetCommandsCatalogue` path against them. The same harness also runs **Layer 1** recipes through `FleetRecipeRunner`: Pattern-A `recipe.fleet.calibrate.{compass,accelerometer,gyro,baro,level}`, two-step `recipe.fleet.diagnose.armprobe`, the composite `recipe.fleet.errors.fix.calibrationrequired`, and **cancel mid-recipe** (`test_cancelMidRecipe_runsDeclaredCancelRecipe_cancelCalibration_sitlBothStacks` — wraps the catalogue to assert `cancelRecipe` dispatches `command.fleet.vehicle.cancel.calibration`). **Recipe escalation → operator prompt** routing (lift, ``OperatorPromptRouter``, ``OperatorPromptResumptionChannel``) is covered in normal `swift test` by ``RecipeEscalationOperatorPromptIntegrationTests`` — see **Fleet Commands & Recipes architecture → Stage G**.

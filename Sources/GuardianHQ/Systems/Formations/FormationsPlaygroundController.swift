@@ -89,20 +89,26 @@ final class FormationsPlaygroundController: ObservableObject {
             telemetryTraceSampleCount = telemetryRecorder.samples.count
         }
         phase = .idle
-        Task { await stopAllStreams() }
-        guard let sitl else {
-            slots = []
-            connectedSimCount = 0
-            statusText = "Spawn simulators to preview formation spacing."
-            return
-        }
-        for slot in slots {
-            sitl.stop(id: slot.sitlSessionID)
-        }
+        let slotsToStop = slots
         slots = []
         connectedSimCount = 0
-        clearFormationLogs()
-        statusText = "Spawn simulators to preview formation spacing."
+        statusText = "Stopping simulators…"
+        Task { @MainActor in
+            await stopAllStreams()
+            guard let sitl else {
+                clearFormationLogs()
+                statusText = "Spawn simulators to preview formation spacing."
+                return
+            }
+            for slot in slotsToStop {
+                sitl.stop(id: slot.sitlSessionID)
+            }
+            if let fleetLink, !sitl.instances.contains(where: \.isAlive) {
+                fleetLink.clearStaleVehicleStateWhenNoSitlAlive()
+            }
+            clearFormationLogs()
+            statusText = "Spawn simulators to preview formation spacing."
+        }
     }
 
     /// Reconcile slot rows with running SITLs after returning to the panel.
@@ -564,6 +570,9 @@ final class FormationsPlaygroundController: ObservableObject {
     // MARK: - Private
 
     private func vehicleID(forStackInstance index: Int, fleetLink: FleetLinkService) -> String {
+        if let inst = sitl?.instances.first(where: { $0.stackInstanceIndex == index && $0.isAlive }) {
+            return fleetLink.vehicleID(forSystemID: inst.mavlinkSystemID) ?? inst.guardianVehicleStreamKey
+        }
         let systemID = index + 1
         return fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
     }

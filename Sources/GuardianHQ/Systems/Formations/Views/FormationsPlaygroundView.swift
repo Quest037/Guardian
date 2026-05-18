@@ -766,8 +766,9 @@ struct FormationsPlaygroundView: View {
 
     private func lifecycleStatus(for slot: FormationsPlaygroundSlotState) -> VehicleLifecycleStatus? {
         guard let inst = sitl.instances.first(where: { $0.id == slot.sitlSessionID }) else { return nil }
-        let systemID = inst.stackInstanceIndex + 1
-        let resolvedVehicleID = fleetLink.vehicleID(forSystemID: systemID) ?? slot.vehicleID ?? "sysid:\(systemID)"
+        let resolvedVehicleID = fleetLink.vehicleID(forSystemID: inst.mavlinkSystemID)
+            ?? slot.vehicleID
+            ?? inst.guardianVehicleStreamKey
         let model = fleetLink.vehicleModel(forVehicleID: resolvedVehicleID)
         if let code = inst.lastExitCode, !inst.isAlive {
             return VehicleLifecycleStatus(

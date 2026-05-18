@@ -188,6 +188,14 @@ final class FleetLinkService: ObservableObject {
     }
 
     @Published private(set) var bridgePhase: TelemetryBridgePhase = .awaitingVehicle
+    @Published private(set) var ros2BridgeProcessPhase: Ros2BridgeProcessPhase = .inactive
+    /// Shared Training Nav2 stack (`planner_server`) is up and accepting `compute_path_to_pose`.
+    @Published private(set) var nav2TrainingStackReady: Bool = false
+    /// Last Nav2 training stack event from the ROS bridge (`inactive`, `starting`, `ready`, `timeout`, `unavailable`, `error`, `stopped`).
+    @Published private(set) var nav2TrainingStackStatus: String = "inactive"
+    @Published private(set) var ros2ConnectionStateByVehicleID: [String: Ros2VehicleConnectionState] = [:]
+    /// Nav2 vs Aerostack2 planner registered for each PX4 stream (`none` when disabled or non-PX4).
+    @Published private(set) var autonomyPlannerByVehicleID: [String: GuardianAutonomyPlannerKind] = [:]
     @Published private(set) var telemetry: FleetTelemetrySnapshot?
     @Published private(set) var hubTelemetry: FleetHubVehicleTelemetry?
     @Published private(set) var hubTelemetryByVehicleID: [String: FleetHubVehicleTelemetry] = [:]
@@ -230,6 +238,10 @@ final class FleetLinkService: ObservableObject {
         var trainingControlStream: TrainingControlStream?
         /// One-shot: after MAVSDK reports connected, `applySimState` reinforces spawn pose/SIM fields from `SimSpawnDefaults`.
         var pendingSpawnSimState: FleetSimState?
+        /// Prevents duplicate spawn-handshake tasks when both gRPC connect and `connectionState` fire.
+        var simSpawnHandshakeScheduled = false
+        /// True after MAVSDK `connectionState` has reported linked at least once (distinguishes first connect vs drop).
+        var hasSeenMavlinkSessionConnected = false
 
         init(vehicleID: String, systemID: Int, grpcPort: Int, mavlinkConnectionURL: String, runner: MavsdkServerRunner, drone: Drone) {
             self.vehicleID = vehicleID
@@ -263,6 +275,12 @@ final class FleetLinkService: ObservableObject {
     private var simulatedFleetVehicleIDs: Set<String> = []
     /// Serializes MAVSDK `Drone.connect` / `initPlugins` (each plugin spins SwiftNIO threads — never overlap on the main actor).
     private var mavsdkPluginConnectTask: Task<Void, Never>?
+    /// PX4 SITL `-i` index per `sysid:n` stream (ROS 2 namespace planning).
+    private var px4SitlInstanceByVehicleID: [String: Int] = [:]
+    /// PX4 streams enrolled in the shared ROS 2 sidecar (fleet-wide target; phased rollout — see ``README_AUTONOMY.md``).
+    private var px4Ros2SidecarDesiredVehicleIDs: Set<String> = []
+    private let ros2BridgeCoordinator = FleetRos2BridgeCoordinator()
+    private var lastRos2BridgeReconcileFingerprint: String?
 
     /// Per-stream narrow observation for MC‑R roster tiles (strategy **A** — ``README_FULL.md`` → **MC-R live UI row contracts** → **Fleet per-vehicle observation strategy (locked)**).
     private var mcrRosterLiveChannelsByVehicleID: [String: FleetVehicleLiveChannel] = [:]
@@ -282,6 +300,41 @@ final class FleetLinkService: ObservableObject {
     init(userDefaults: UserDefaults = .standard) {
         configuration = Self.load(from: userDefaults) ?? .defaults
         GuardianAppQuitCoordinator.shared.noteFleetLinkServiceCreated(self)
+        ros2BridgeCoordinator.onProcessPhaseChanged = { [weak self] phase in
+            self?.ros2BridgeProcessPhase = phase
+        }
+        ros2BridgeCoordinator.onVehicleConnectionState = { [weak self] vehicleID, state in
+            guard let self else { return }
+            if state == .disconnected {
+                self.ros2ConnectionStateByVehicleID.removeValue(forKey: vehicleID)
+            } else {
+                self.ros2ConnectionStateByVehicleID[vehicleID] = state
+            }
+        }
+        ros2BridgeCoordinator.onAutonomyPlannerRegistered = { [weak self] vehicleID, kind in
+            guard let self else { return }
+            if kind == .none {
+                self.autonomyPlannerByVehicleID.removeValue(forKey: vehicleID)
+            } else {
+                self.autonomyPlannerByVehicleID[vehicleID] = kind
+            }
+        }
+        ros2BridgeCoordinator.onNav2TrainingStackReadyChanged = { [weak self] ready in
+            self?.nav2TrainingStackReady = ready
+        }
+        ros2BridgeCoordinator.onNav2TrainingStackStatusChanged = { [weak self] status, _ in
+            self?.nav2TrainingStackStatus = status
+        }
+        ros2BridgeCoordinator.onLogLine = { [weak self] line in
+            self?.appendSimulationLog(line)
+        }
+    }
+
+    /// Non-blocking fleet Nav2 warm-start at application launch (see ``FleetRos2BridgeCoordinator/beginFleetNav2WarmStart()``).
+    func beginFleetNav2WarmStartAtApplicationLaunch() {
+        nav2TrainingStackStatus = "starting"
+        nav2TrainingStackReady = false
+        ros2BridgeCoordinator.beginFleetNav2WarmStart()
     }
 
     // MARK: - MC‑R per-vehicle live channels (roster strip)
@@ -367,6 +420,15 @@ final class FleetLinkService: ObservableObject {
         lastMissionProgressLoggedPairByVehicleID.removeAll(keepingCapacity: true)
         mcrRosterLiveChannelsByVehicleID.removeAll(keepingCapacity: true)
         mcrRosterLiveChannelRefCount.removeAll(keepingCapacity: true)
+        px4SitlInstanceByVehicleID.removeAll(keepingCapacity: true)
+        px4Ros2SidecarDesiredVehicleIDs.removeAll(keepingCapacity: true)
+        ros2ConnectionStateByVehicleID.removeAll(keepingCapacity: true)
+        autonomyPlannerByVehicleID.removeAll(keepingCapacity: true)
+        ros2BridgeCoordinator.stopAll()
+        ros2BridgeProcessPhase = .inactive
+        nav2TrainingStackReady = false
+        nav2TrainingStackStatus = "inactive"
+        lastRos2BridgeReconcileFingerprint = nil
     }
 
     /// Install or clear the Live Drive control session (see `liveDriveControlSessionVehicleID`).
@@ -401,6 +463,7 @@ final class FleetLinkService: ObservableObject {
     func applyConfiguration(_ config: FleetLinkConfiguration) {
         configuration = config
         save()
+        reconcileRos2Bridge()
     }
 
     func setSimulateEnabled(_ enabled: Bool) {
@@ -998,14 +1061,17 @@ final class FleetLinkService: ObservableObject {
         }
     }
 
-    /// After SITL spawn, once MAVSDK is connected, re-apply `SimSpawnDefaults` on the wire (see `applySimState`).
+    /// After SITL spawn, once MAVSDK can reach the autopilot, re-apply `SimSpawnDefaults` (SIH pose → hub lat/lon).
     private func scheduleApplyPendingSpawnSimStateIfNeeded(session: VehicleSession, vehicleID: String) {
-        guard let payload = session.pendingSpawnSimState else { return }
-        session.pendingSpawnSimState = nil
+        guard session.pendingSpawnSimState != nil else { return }
+        guard !session.simSpawnHandshakeScheduled else { return }
+        session.simSpawnHandshakeScheduled = true
         Task { @MainActor [weak self] in
             guard let self else { return }
             try? await Task.sleep(nanoseconds: 500_000_000)
             guard self.sessionsByVehicleID[vehicleID] === session else { return }
+            guard let payload = session.pendingSpawnSimState else { return }
+            session.pendingSpawnSimState = nil
             let stack = self.vehicleModelsByVehicleID[vehicleID]?.data.telemetry?.autopilotStack ?? .unknown
             await self.applySimState(
                 vehicleID: vehicleID,
@@ -1016,14 +1082,33 @@ final class FleetLinkService: ObservableObject {
         }
     }
 
+    private func lifecycleStageForMavlinkConnectionState(
+        session: VehicleSession,
+        isConnected: Bool
+    ) -> VehicleLifecycleStage {
+        if isConnected {
+            return .awaitingTelemetry
+        }
+        return session.hasSeenMavlinkSessionConnected ? .reconnecting : .connecting
+    }
+
     func registerSimulatedVehicle(
         systemID: Int,
         mavlinkConnectionURL: String,
         autopilotStack: FleetAutopilotStack? = nil,
         vehicleType: FleetVehicleType = .unknown,
-        spawnDefaults: SimSpawnDefaults? = nil
+        spawnDefaults: SimSpawnDefaults? = nil,
+        px4SitlInstance: Int? = nil,
+        px4Ros2SidecarDesired: Bool? = nil
     ) {
         let vehicleID = "sysid:\(systemID)"
+        if let px4Ros2SidecarDesired {
+            if px4Ros2SidecarDesired {
+                px4Ros2SidecarDesiredVehicleIDs.insert(vehicleID)
+            } else {
+                px4Ros2SidecarDesiredVehicleIDs.remove(vehicleID)
+            }
+        }
         if sessionsByVehicleID[vehicleID] != nil {
             appendVehicleLog("Replacing stale MAVSDK session before reconnecting sim.", vehicleID: vehicleID)
             stopSession(vehicleID: vehicleID)
@@ -1074,9 +1159,37 @@ final class FleetLinkService: ObservableObject {
         }
         logLinesByVehicleID[vehicleID] = []
         simulatedFleetVehicleIDs.insert(vehicleID)
+        if let px4SitlInstance {
+            px4SitlInstanceByVehicleID[vehicleID] = px4SitlInstance
+        } else {
+            px4SitlInstanceByVehicleID.removeValue(forKey: vehicleID)
+        }
         lastTelemetryMutationVehicleID = vehicleID
         scheduleHubFleetTelemetryTickThrottled()
         start(session: session)
+        // ROS 2 / Micro XRCE starts after MAVLink position is up (see ``reconcileRos2BridgeAfterSimulatorLinked``).
+    }
+
+    /// Start or refresh the PX4 ROS 2 sidecar after built-in SITL has live MAVLink position (not at register time).
+    func reconcileRos2BridgeAfterSimulatorLinked() {
+        reconcileRos2Bridge()
+    }
+
+    /// Enroll a PX4 stream (`sysid:n` or future live id) in the shared ROS 2 sidecar; start the bridge once MAVLink position is up.
+    func ensurePx4Ros2Sidecar(forVehicleID vehicleID: String) {
+        px4Ros2SidecarDesiredVehicleIDs.insert(vehicleID)
+        if GuardianSitlFleetLinkReconnectPolicy.mavlinkPositionTelemetryIsUp(
+            fleetLink: self,
+            vehicleID: vehicleID
+        ) {
+            reconcileRos2BridgeAfterSimulatorLinked()
+        }
+    }
+
+    /// Fleet-link pursuit: run pending SIH / SIM spawn handshake when MAVLink position is slow to arrive.
+    func kickSitlSpawnHandshakeIfPending(vehicleID: String) {
+        guard let session = sessionsByVehicleID[vehicleID] else { return }
+        scheduleApplyPendingSpawnSimStateIfNeeded(session: session, vehicleID: vehicleID)
     }
 
     /// Tear down and recreate the MAVSDK session for a built-in SITL (same URL), waiting briefly for the UDP listen port to free.
@@ -1086,7 +1199,9 @@ final class FleetLinkService: ObservableObject {
         mavlinkConnectionURL: String,
         autopilotStack: FleetAutopilotStack,
         vehicleType: FleetVehicleType,
-        spawnDefaults: SimSpawnDefaults? = nil
+        spawnDefaults: SimSpawnDefaults? = nil,
+        px4SitlInstance: Int? = nil,
+        px4Ros2SidecarDesired: Bool? = nil
     ) async -> Bool {
         lastError = nil
         let vehicleID = "sysid:\(systemID)"
@@ -1114,7 +1229,9 @@ final class FleetLinkService: ObservableObject {
             mavlinkConnectionURL: mavlinkConnectionURL,
             autopilotStack: autopilotStack,
             vehicleType: vehicleType,
-            spawnDefaults: spawnDefaults
+            spawnDefaults: spawnDefaults,
+            px4SitlInstance: px4SitlInstance,
+            px4Ros2SidecarDesired: px4Ros2SidecarDesired
         )
         guard sessionsByVehicleID[vehicleID] != nil else {
             if lastError == nil {
@@ -1128,6 +1245,7 @@ final class FleetLinkService: ObservableObject {
 
     func unregisterSimulatedVehicle(systemID: Int) {
         let vehicleID = "sysid:\(systemID)"
+        px4Ros2SidecarDesiredVehicleIDs.remove(vehicleID)
         stopSession(vehicleID: vehicleID)
     }
 
@@ -1154,6 +1272,7 @@ final class FleetLinkService: ObservableObject {
         autopilotMissionCompletionLatchByVehicleID.removeAll(keepingCapacity: true)
         autopilotMissionCycleHasInProgressLegByVehicleID.removeAll(keepingCapacity: true)
         simulatedFleetVehicleIDs.removeAll(keepingCapacity: true)
+        px4Ros2SidecarDesiredVehicleIDs.removeAll(keepingCapacity: true)
         liveDriveControlSessionVehicleID = nil
         bridgePhase = .awaitingVehicle
         clearMcrRosterLiveChannelFleetSlicesForAllKeys()
@@ -1843,6 +1962,24 @@ final class FleetLinkService: ObservableObject {
         else { return }
         session.trainingControlStream = nil
         await stream.stop()
+    }
+
+    /// Training map: plan path from task start to target slot (Nav2 when running; geodesic fallback).
+    func requestTrainingNav2PlanPath(
+        vehicleID: String,
+        layout: TrainingTaskLayout
+    ) async -> TrainingNav2PlanPathResponse {
+        guard sessionsByVehicleID[vehicleID] != nil else { return .unavailable }
+        guard ros2BridgeProcessPhase == .running else { return .unavailable }
+        let namespace = Ros2BridgeVehiclePlan.rosNamespace(
+            px4SitlInstance: px4SitlInstanceByVehicleID[vehicleID]
+        )
+        return await ros2BridgeCoordinator.requestTrainingNav2PlanPath(
+            vehicleID: vehicleID,
+            rosNamespace: namespace,
+            start: layout.start,
+            goal: layout.goal
+        )
     }
 
     // MARK: - Manual Control Stream (Live Drive continuous setpoints)
@@ -2982,6 +3119,8 @@ final class FleetLinkService: ObservableObject {
             appendVehicleLog("Telemetry connect error: \(connectError)", vehicleID: vehicleID)
         } else {
             appendVehicleLog("Native telemetry client connected.", vehicleID: vehicleID)
+            applyLifecycleStatus(.init(stage: .awaitingTelemetry), vehicleID: vehicleID)
+            scheduleApplyPendingSpawnSimStateIfNeeded(session: session, vehicleID: vehicleID)
         }
 
         session.drone.core.connectionState
@@ -2989,9 +3128,16 @@ final class FleetLinkService: ObservableObject {
             .subscribe(onNext: { [weak self] state in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
+                    guard self.sessionsByVehicleID[vehicleID] === session else { return }
+                    if state.isConnected {
+                        session.hasSeenMavlinkSessionConnected = true
+                    }
                     self.bridgePhase = state.isConnected ? .live : .awaitingVehicle
                     self.applyLifecycleStatus(VehicleLifecycleStatus(
-                        stage: state.isConnected ? .awaitingTelemetry : .reconnecting
+                        stage: self.lifecycleStageForMavlinkConnectionState(
+                            session: session,
+                            isConnected: state.isConnected
+                        )
                     ), vehicleID: vehicleID)
                     if state.isConnected {
                         self.applyMavlinkBatteryTelemetryTuningOnce(session: session, vehicleID: vehicleID)
@@ -3205,6 +3351,10 @@ final class FleetLinkService: ObservableObject {
         recentVehicleStatusMessagesByVehicleID[vehicleID] = nil
         logLinesByVehicleID.removeValue(forKey: vehicleID)
         mcrRosterLiveChannelsByVehicleID[vehicleID]?.clearFleetSlice()
+        px4SitlInstanceByVehicleID.removeValue(forKey: vehicleID)
+        ros2ConnectionStateByVehicleID.removeValue(forKey: vehicleID)
+        autonomyPlannerByVehicleID.removeValue(forKey: vehicleID)
+        reconcileRos2Bridge()
         if hubTelemetryByVehicleID.isEmpty {
             telemetry = nil
             hubTelemetry = nil
@@ -3361,6 +3511,11 @@ final class FleetLinkService: ObservableObject {
     }
 
     /// Vehicle stream keys with an active MAVSDK session (excludes orphan models left after sim teardown).
+    /// True when a MAVSDK session is active for this stream key (built-in SITL or hardware).
+    func hasActiveVehicleSession(forVehicleID vehicleID: String) -> Bool {
+        sessionsByVehicleID[vehicleID] != nil
+    }
+
     func activeVehicleSessionIDs() -> [String] {
         Array(sessionsByVehicleID.keys).sorted()
     }
@@ -4702,6 +4857,28 @@ final class FleetLinkService: ObservableObject {
         let x = cosδ - sinφ1 * sinφ2
         let λ2 = λ1 + atan2(y, x)
         return (φ2 * 180 / .pi, λ2 * 180 / .pi)
+    }
+
+    private func reconcileRos2Bridge() {
+        let contexts: [Ros2BridgeVehiclePlan.SessionContext] = sessionsByVehicleID.keys.sorted().compactMap { vehicleID in
+            guard px4Ros2SidecarDesiredVehicleIDs.contains(vehicleID) else { return nil }
+            let stack = vehicleModelsByVehicleID[vehicleID]?.data.telemetry?.autopilotStack ?? .unknown
+            let vehicleType = vehicleModelsByVehicleID[vehicleID]?.data.vehicleType ?? .unknown
+            return Ros2BridgeVehiclePlan.SessionContext(
+                vehicleID: vehicleID,
+                autopilotStack: stack,
+                vehicleType: vehicleType,
+                px4SitlInstance: px4SitlInstanceByVehicleID[vehicleID],
+                ros2SidecarDesired: true
+            )
+        }
+        let entries = Ros2BridgeVehiclePlan.entries(from: contexts)
+        let fingerprint = entries.map {
+            "\($0.vehicleID)|\($0.rosNamespace)|\($0.autonomyPlanner)|\($0.enabled)"
+        }.joined(separator: ";")
+        guard fingerprint != lastRos2BridgeReconcileFingerprint else { return }
+        lastRos2BridgeReconcileFingerprint = fingerprint
+        ros2BridgeCoordinator.reconcile(vehicles: entries)
     }
 
     private func save(userDefaults: UserDefaults = .standard) {

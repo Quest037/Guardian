@@ -1,0 +1,3 @@
+Guardian keeps this folder so SwiftPM can bundle Ros2Runtime resources.
+Populate install/ and bin/MicroXRCEAgent by running from the Guardian repo:
+  make ros2-runtime

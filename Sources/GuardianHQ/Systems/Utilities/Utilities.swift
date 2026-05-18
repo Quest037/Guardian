@@ -252,6 +252,7 @@ final class MissionPathWaypointUtilities {
 @MainActor
 final class FleetUtilities {
     let vehicle = FleetVehicleUtilities()
+    let autonomy = FleetAutonomyUtilities()
 }
 
 @MainActor

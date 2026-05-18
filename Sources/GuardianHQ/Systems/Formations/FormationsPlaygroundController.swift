@@ -715,9 +715,20 @@ final class FormationsPlaygroundController: ObservableObject {
     ) async -> Bool {
         let vehicleID = vehicleID(forStackInstance: inst.stackInstanceIndex, fleetLink: fleetLink)
         await fleetLink.stopFormationFollowStream(vehicleID: vehicleID)
+
+        if GuardianSitlFleetLinkReconnectPolicy.simulatorFleetLinkReadyWithMavsdkSession(
+            fleetLink: fleetLink,
+            vehicleID: vehicleID
+        ) {
+            refreshSlotRows(fleetLink: fleetLink)
+            return true
+        }
+
         fleetLink.unregisterSimulatedVehicle(systemID: inst.mavlinkSystemID)
         try? await Task.sleep(nanoseconds: 350_000_000)
-        return await sitl.reconnectFleetLink(sitlSessionID: inst.id, spawnDefaults: spawnDefaults)
+        let ok = await sitl.reconnectFleetLink(sitlSessionID: inst.id, spawnDefaults: spawnDefaults)
+        refreshSlotRows(fleetLink: fleetLink)
+        return ok
     }
 
     private func stopAllStreams() async {

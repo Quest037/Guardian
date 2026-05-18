@@ -45,42 +45,61 @@ final class GuardianConfirmOverlayHost: ObservableObject {
         @ViewBuilder dialog: @escaping () -> Dialog
     ) {
         if let existing = session, existing.ownerID != ownerID {
-            existing.syncDismiss()
-            existing.onTeardown?()
+            clearSession(existing, syncBinding: true, runTeardown: true, animated: false)
         }
-        session = ActiveSession(
-            ownerID: ownerID,
-            syncDismiss: syncDismiss,
-            onTeardown: onTeardown,
-            build: { AnyView(dialog()) }
-        )
-        presentationEpoch &+= 1
+        withAnimation(GuardianMotion.confirmPresent) {
+            session = ActiveSession(
+                ownerID: ownerID,
+                syncDismiss: syncDismiss,
+                onTeardown: onTeardown,
+                build: { AnyView(dialog()) }
+            )
+            presentationEpoch &+= 1
+        }
     }
 
     /// Binding already reflects dismissal (e.g. user tapped Cancel); only run teardown and clear the host.
     func dismissIfOwner(_ ownerID: UUID) {
         guard let s = session, s.ownerID == ownerID else { return }
-        s.onTeardown?()
-        session = nil
-        presentationEpoch &+= 1
+        clearSession(s, syncBinding: false, runTeardown: true, animated: false)
     }
 
     /// Escape / chrome: sync bindings first, then teardown, then clear.
     func dismissFromChrome(ownerID: UUID) {
         guard let s = session, s.ownerID == ownerID else { return }
-        s.syncDismiss()
-        s.onTeardown?()
-        session = nil
-        presentationEpoch &+= 1
+        clearSession(s, syncBinding: true, runTeardown: true, animated: false)
     }
 
     /// View removed while still presented (tab change, navigation) — force bindings to dismiss and tear down.
     func abandonOwner(_ ownerID: UUID) {
         guard let s = session, s.ownerID == ownerID else { return }
-        s.syncDismiss()
-        s.onTeardown?()
-        session = nil
-        presentationEpoch &+= 1
+        clearSession(s, syncBinding: true, runTeardown: true, animated: false)
+    }
+
+    private func clearSession(
+        _ s: ActiveSession,
+        syncBinding: Bool,
+        runTeardown: Bool,
+        animated: Bool
+    ) {
+        if syncBinding {
+            s.syncDismiss()
+        }
+        if runTeardown {
+            s.onTeardown?()
+        }
+        let apply = {
+            self.session = nil
+            self.presentationEpoch &+= 1
+        }
+        if animated {
+            withAnimation(GuardianMotion.confirmPresent, apply)
+        } else {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction, apply)
+        }
+        GuardianPresentationChromeTeardown.run()
     }
 }
 
@@ -131,10 +150,12 @@ private struct GuardianConfirmOverlayRootLayer: View {
         }
         .guardianDropShadow(GuardianElevation.overlayPanel)
         .transition(.opacity.combined(with: .scale(scale: GuardianConfirmOverlayTokens.transitionScale)))
-        .animation(GuardianMotion.confirmPresent, value: host.presentationEpoch)
         .modifier(GuardianConfirmOverlayEscapeModifier {
             host.dismissFromChrome(ownerID: session.ownerID)
         })
+        .onDisappear {
+            GuardianPresentationChromeTeardown.run()
+        }
         .zIndex(10_000)
     }
 }
@@ -147,8 +168,10 @@ private struct GuardianConfirmOverlayRootModifier: ViewModifier {
             content
             if let session = host.session {
                 GuardianConfirmOverlayRootLayer(host: host, session: session)
+                    .transition(.opacity.combined(with: .scale(scale: GuardianConfirmOverlayTokens.transitionScale)))
             }
         }
+        .animation(GuardianMotion.confirmPresent, value: host.presentationEpoch)
     }
 }
 

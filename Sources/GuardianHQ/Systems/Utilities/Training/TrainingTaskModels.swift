@@ -6,6 +6,9 @@ enum TrainingVehicleClass: String, CaseIterable, Identifiable, Codable, Sendable
     case ugvWheeled
     case ugvTracked
 
+    /// Temporary product lock: Training → Vehicle panel offers UGV-W and UGV-T only.
+    static let trainingPanelSelectableCases: [TrainingVehicleClass] = [.ugvWheeled, .ugvTracked]
+
     var id: String { rawValue }
 
     var displayTitle: String {

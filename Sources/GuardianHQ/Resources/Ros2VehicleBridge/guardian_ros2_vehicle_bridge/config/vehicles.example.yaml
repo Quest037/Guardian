@@ -1,0 +1,23 @@
+# Example multi-vehicle ROS 2 bridge config (PX4 uXRCE-DDS).
+# Copy and set GUARDIAN_ROS2_BRIDGE_CONFIG or pass --config to the bridge node.
+
+timing:
+  discovery_interval_s: 2.0
+  stale_topic_s: 5.0
+
+vehicles:
+  # SITL instance 0 — default PX4 namespace is often empty (topics at /fmu/out/...).
+  - vehicle_id: sitl_px4_0
+    stack: px4
+    vehicle_class: uav_copter
+    ros_namespace: ""
+    autonomy_planner: aerostack2
+    enabled: true
+
+  # Second SITL / XRCE client — set namespace to match PX4 instance (e.g. px4_1).
+  - vehicle_id: sitl_px4_1
+    stack: px4
+    vehicle_class: ugv_wheeled
+    ros_namespace: px4_1
+    autonomy_planner: nav2
+    enabled: false

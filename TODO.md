@@ -3,6 +3,10 @@
 ## Clean Up
 - Replace references to "path" with "task" so that we can get rid of legacy concept.
 
+## Training
+
+- **Gazebo 3D simulation (Training + Formation):** Replace or augment open-field SITL-only playgrounds with **Gazebo** worlds so operators can author **obstacle courses** and richer terrain for skill training and formation rehearsal. Scope: spawn/lifecycle from Guardian (like SITL today), map/costmap export or sync for Nav2, and alignment with PX4 rover models. Depends on simulation platform choice per tab (Training vehicle vs Formation squad).
+
 ## App System
 
 - Make clicking non-input UI areas unfocus the currently focused input field (desktop blur-on-background-click behavior).
@@ -20,6 +24,8 @@
 
 ## Vehicles System
 
+- **Live vehicle links (MAVSDK + ROS 2):** Implement fleet registration for **live** (non-SITL) vehicles — dedicated MAVSDK session path (not only ``registerSimulatedVehicle`` from ``SitlService``), enroll via ``FleetLinkService/ensurePx4Ros2Sidecar(forVehicleID:)`` when stack is PX4, per-vehicle ROS namespace config, and uXRCE on the airframe (Guardian cannot set params on hardware like SITL spawn). **Phased:** Training sim enrolls first; Formation / MCR / garage / live follow (see ``Sources/GuardianHQ/Resources/Ros2VehicleBridge/README_AUTONOMY.md`` → **ROS sidecar rollout**).
+- **Autonomous planning (ROS 2 — Nav2 + Aerostack2):** v1 **planner routing** is in ``guardian_ros2_vehicle_bridge`` (UGV → Nav2, UAV → Aerostack2; see ``README_AUTONOMY.md``). Still to build: live goal injection, costmaps, action clients, Guardian ↔ planner health in UI, and Mission Control / Paladin dispatch hooks.
 - **Vehicle Calibration:**
   - Finalise `Sources/GuardianHQ/Systems/Fleet/Models/FleetTelemetryFieldCatalog.swift` — review every group assignment, display label, and formatter; tighten the per-system field lists used by the Vehicle Inspector calibration tab. Anything not yet catalogued falls through to the Telemetry tab "Other" chip.
   - Fine tune `Sources/GuardianHQ/Resources/FleetCalibrationAnchors.json` marker positions against the vehicle class artwork.

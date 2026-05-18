@@ -12,6 +12,9 @@ enum GuardianSitlFleetLinkReconnectPolicy {
     ) -> Bool {
         guard fleetLink.isSimulateEnabled,
               lifecycleStage != .live,
+              lifecycleStage != .starting,
+              lifecycleStage != .connecting,
+              lifecycleStage != .awaitingTelemetry,
               sitl.sitlSessionID(forGuardianVehicleID: vehicleID) != nil,
               !mavlinkPositionTelemetryIsUp(fleetLink: fleetLink, vehicleID: vehicleID)
         else { return false }

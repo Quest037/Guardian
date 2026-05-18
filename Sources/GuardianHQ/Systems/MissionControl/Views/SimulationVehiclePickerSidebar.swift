@@ -25,6 +25,7 @@ struct SimulationVehiclePickerSidebar: View {
                 .labelsHidden()
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 200)
+                .help("Wheeled, tracked, and legged UGV always spawn with PX4.")
                 Button {
                     onClose()
                 } label: {
@@ -54,6 +55,9 @@ struct SimulationVehiclePickerSidebar: View {
 
     private func vehicleCard(_ preset: SimulationVehiclePreset) -> some View {
         Button {
+            if SimulationSpawnPolicy.forcesPx4ForUGV(preset: preset) {
+                platform = .px4
+            }
             onSelect(preset)
         } label: {
             HStack(spacing: GuardianSpacing.cardBodyInset) {
@@ -66,9 +70,14 @@ struct SimulationVehiclePickerSidebar: View {
                         .font(GuardianTypography.font(.panelSecondaryHeadingSemibold))
                         .foregroundStyle(theme.textPrimary)
                         .multilineTextAlignment(.leading)
-                    Text(preset.vehicleDomain.rawValue)
-                        .font(GuardianTypography.font(.inlineNoticeDetail))
-                        .foregroundStyle(theme.textSecondary)
+                    HStack(spacing: GuardianSpacing.xxs) {
+                        Text(preset.vehicleDomain.rawValue)
+                        if SimulationSpawnPolicy.forcesPx4ForUGV(preset: preset) {
+                            Text("· PX4")
+                        }
+                    }
+                    .font(GuardianTypography.font(.inlineNoticeDetail))
+                    .foregroundStyle(theme.textSecondary)
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right")

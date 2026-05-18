@@ -1,0 +1,34 @@
+{
+  "ros_distro": "humble",
+  "description": "Upstream ROS 2 autonomy stacks vendored for Guardian colcon integration. Refs align with Aerostack2 (Humble) and Nav2 humble branch.",
+  "repos": [
+    {
+      "id": "navigation2",
+      "url": "https://github.com/ros-navigation/navigation2.git",
+      "ref": "humble",
+      "dir": "navigation2",
+      "verify_path": "nav2_bringup/package.xml"
+    },
+    {
+      "id": "aerostack2",
+      "url": "https://github.com/aerostack2/aerostack2.git",
+      "ref": "main",
+      "dir": "aerostack2",
+      "verify_path": "as2_core/package.xml"
+    },
+    {
+      "id": "as2_platform_pixhawk",
+      "url": "https://github.com/aerostack2/as2_platform_pixhawk.git",
+      "ref": "main",
+      "dir": "as2_platform_pixhawk",
+      "verify_path": "package.xml"
+    },
+    {
+      "id": "px4_msgs",
+      "url": "https://github.com/PX4/px4_msgs.git",
+      "ref": "release/1.15",
+      "dir": "px4_msgs",
+      "verify_path": "package.xml"
+    }
+  ]
+}

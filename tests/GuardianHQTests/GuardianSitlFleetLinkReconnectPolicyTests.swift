@@ -88,12 +88,21 @@ final class GuardianSitlFleetLinkReconnectPolicyTests: XCTestCase {
             vehicleType: .uavCopter,
             spawnDefaults: .default
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             GuardianSitlFleetLinkReconnectPolicy.mayOfferReconnectLink(
                 fleetLink: fleet,
                 sitl: sitl,
                 vehicleID: "sysid:1",
                 lifecycleStage: .connecting
+            ),
+            "Retry must not appear during first connect — it replaces MAVSDK mid-boot."
+        )
+        XCTAssertTrue(
+            GuardianSitlFleetLinkReconnectPolicy.mayOfferReconnectLink(
+                fleetLink: fleet,
+                sitl: sitl,
+                vehicleID: "sysid:1",
+                lifecycleStage: .reconnecting
             )
         )
         XCTAssertFalse(

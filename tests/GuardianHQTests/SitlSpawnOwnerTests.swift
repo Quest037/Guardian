@@ -28,7 +28,8 @@ final class SitlSpawnOwnerTests: XCTestCase {
             px4GcsUdpPort: 18570,
             isAlive: alive,
             lastExitCode: nil,
-            spawnOwner: owner
+            spawnOwner: owner,
+            startedAt: Date()
         )
     }
 }

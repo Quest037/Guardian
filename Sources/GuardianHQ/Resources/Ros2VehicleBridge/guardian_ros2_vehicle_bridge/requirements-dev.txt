@@ -1,0 +1,2 @@
+# Optional pip deps for editable install outside full rosdep (ROS 2 + px4_msgs still required).
+PyYAML>=6.0

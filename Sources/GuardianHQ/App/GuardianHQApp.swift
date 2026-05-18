@@ -3,7 +3,7 @@ import AppKit
 
 enum AppSection: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"
-    case devices = "Vehicles"
+    case devices = "Garage"
     case liveDrive = "Live Drive"
     case logs = "Logs"
     case missions = "Missions"
@@ -173,6 +173,7 @@ struct GuardianHQApp: App {
                 GuardianPluginBootstrap.ensureRegistered()
                 FleetCommandsCatalogueBootstrap.ensureRegistered()
                 FleetRecipesCatalogueBootstrap.ensureRegistered()
+                fleetLinkService.beginFleetNav2WarmStartAtApplicationLaunch()
             }
             .task {
                 guard showingSplash else { return }

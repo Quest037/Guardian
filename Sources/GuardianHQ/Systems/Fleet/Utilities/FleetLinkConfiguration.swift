@@ -17,6 +17,33 @@ struct FleetLinkConfiguration: Codable, Equatable, Sendable {
         primaryMavlinkConnectionURL: "udpin://0.0.0.0:14550",
         additionalMavlinkConnectionURLs: []
     )
+
+    init(
+        grpcPort: Int,
+        mavsdkServerPath: String,
+        primaryMavlinkConnectionURL: String,
+        additionalMavlinkConnectionURLs: [String]
+    ) {
+        self.grpcPort = grpcPort
+        self.mavsdkServerPath = mavsdkServerPath
+        self.primaryMavlinkConnectionURL = primaryMavlinkConnectionURL
+        self.additionalMavlinkConnectionURLs = additionalMavlinkConnectionURLs
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        grpcPort = try c.decode(Int.self, forKey: .grpcPort)
+        mavsdkServerPath = try c.decode(String.self, forKey: .mavsdkServerPath)
+        primaryMavlinkConnectionURL = try c.decode(String.self, forKey: .primaryMavlinkConnectionURL)
+        additionalMavlinkConnectionURLs = try c.decode([String].self, forKey: .additionalMavlinkConnectionURLs)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case grpcPort
+        case mavsdkServerPath
+        case primaryMavlinkConnectionURL
+        case additionalMavlinkConnectionURLs
+    }
 }
 
 enum FleetLinkError: LocalizedError {

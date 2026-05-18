@@ -92,6 +92,7 @@ struct TrainingPanelView: View {
         }
         .animation(GuardianMotion.confirmPresent, value: calibrationContext?.id)
         .onAppear {
+            training.clampVehicleClassToTrainingPanelOptions()
             attachControllersForCurrentMode()
             refreshActiveMap()
         }
@@ -152,7 +153,20 @@ struct TrainingPanelView: View {
         }
         .onChange(of: training.targetSlot) { _ in
             guard panelMode == .vehicle else { return }
+            training.scheduleNav2PlanPathRefresh()
             refreshTrainingMap()
+        }
+        .onChange(of: training.nav2PlannedPath) { _ in
+            guard panelMode == .vehicle else { return }
+            refreshTrainingMap()
+        }
+        .onChange(of: training.vehicleClass) { _ in
+            guard panelMode == .vehicle else { return }
+            training.scheduleNav2PlanPathRefresh()
+        }
+        .onChange(of: fleetLink.nav2TrainingStackReady) { _ in
+            guard panelMode == .vehicle else { return }
+            training.scheduleNav2PlanPathRefresh()
         }
         .onChange(of: training.isTargetSlotMapEditEnabled) { _ in
             guard panelMode == .vehicle else { return }
@@ -191,6 +205,7 @@ struct TrainingPanelView: View {
             playground.leavePanel()
             training.syncFromFleetOnAppear(fleetLink: fleetLink)
             training.loadPromotedSkill()
+            training.scheduleNav2PlanPathRefresh()
             refreshTrainingMap()
         } else {
             training.leavePanel()
@@ -302,8 +317,34 @@ struct TrainingPanelView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+            if panelMode == .vehicle, fleetLink.isDebugEnabled {
+                trainingPathOverlayDebugRail
+            }
         }
         .background(theme.backgroundBase)
+    }
+
+    private var trainingPathOverlayDebugRail: some View {
+        VStack(spacing: 0) {
+            Rectangle()
+                .fill(theme.borderSubtle)
+                .frame(height: 1)
+            HStack(spacing: GuardianSpacing.xs) {
+                Text("debug")
+                    .font(GuardianTypography.font(.denseCaption10Regular))
+                    .foregroundStyle(theme.textTertiary)
+                Text(training.trainingPathOverlayDebugLine)
+                    .font(GuardianTypography.font(.denseCaption12Medium))
+                    .foregroundStyle(theme.textSecondary)
+                    .textSelection(.enabled)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, GuardianSpacing.md)
+            .padding(.vertical, GuardianSpacing.sm)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(training.trainingPathOverlayDebugLine)
     }
 
     private var panelModePicker: some View {
@@ -979,7 +1020,7 @@ struct TrainingPanelView: View {
 
                 trainingRow(title: "Vehicle class", help: "SITL type for training.") {
                     Picker("Vehicle class", selection: $training.vehicleClass) {
-                        ForEach(TrainingVehicleClass.allCases) { kind in
+                        ForEach(TrainingVehicleClass.trainingPanelSelectableCases) { kind in
                             Text(kind.displayTitle).tag(kind)
                         }
                     }
@@ -1158,6 +1199,9 @@ struct TrainingPanelView: View {
         geometry.home = home
         geometry.preserveView = true
         geometry.formationSlotGroupMapEdit = training.buildTargetSlotMapEdit()
+        if training.nav2PlannedPath.count >= 2 {
+            geometry.debugOverlayPolylines = [training.nav2PlannedPath]
+        }
         mapModel.applyMapContent(routeGeometry: geometry, vehicleMarkers: buildTrainingMapMarkers())
         fitTrainingMap()
     }
@@ -1166,6 +1210,11 @@ struct TrainingPanelView: View {
         var geometry = mapModel.routeGeometry
         geometry.preserveView = true
         geometry.formationSlotGroupMapEdit = training.buildTargetSlotMapEdit()
+        if training.nav2PlannedPath.count >= 2 {
+            geometry.debugOverlayPolylines = [training.nav2PlannedPath]
+        } else {
+            geometry.debugOverlayPolylines = []
+        }
         mapModel.applyMapContent(
             routeGeometry: geometry,
             vehicleMarkers: buildTrainingMapMarkers()

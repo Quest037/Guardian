@@ -17,6 +17,27 @@ Sources/GuardianHQ/Resources/ArduPilotSitl/*
 Sources/GuardianHQ/Resources/Px4SitlBundle/*
 !Sources/GuardianHQ/Resources/Px4SitlBundle/_GUARDIAN_DO_NOT_DELETE.txt
 
+# ROS 2 autonomy upstream (Nav2, Aerostack2, as2_platform_pixhawk — make ros2-autonomy-stacks-fetch).
+Sources/GuardianHQ/Resources/Ros2AutonomyStacks/upstream/*
+!Sources/GuardianHQ/Resources/Ros2AutonomyStacks/upstream/_GUARDIAN_DO_NOT_DELETE.txt
+Sources/GuardianHQ/Resources/Ros2AutonomyStacks/.guardian_ros2_autonomy_lock
+
+# ROS 2 merged runtime (install/ + MicroXRCEAgent — make ros2-runtime).
+Sources/GuardianHQ/Resources/Ros2Runtime/overlay/
+Sources/GuardianHQ/Resources/Ros2Runtime/install/setup.bash
+Sources/GuardianHQ/Resources/Ros2Runtime/.guardian_ros2_runtime_built
+Sources/GuardianHQ/Resources/Ros2Runtime/.guardian_ros2_runtime_built.meta
+build/ros2_runtime_ws/
+build/guardian_ros2_vehicle_bridge/
+build/px4_msgs/
+build/.built_by
+build/COLCON_IGNORE
+log/
+Sources/GuardianHQ/Resources/Ros2Runtime/bin/*
+!Sources/GuardianHQ/Resources/Ros2Runtime/bin/.gitkeep
+Sources/GuardianHQ/Resources/Ros2Runtime/lib/*
+!Sources/GuardianHQ/Resources/Ros2Runtime/lib/.gitkeep
+
 # Swift / Xcode / SPM artifacts
 .build/
 .swiftpm/
@@ -28,6 +49,9 @@ DerivedData/
 Resources/StackWiki/upstream/
 Resources/StackWiki/source/
 Resources/StackWiki/index/chunks.jsonl.gz
+
+# Local ROS 2 system prefix marker + RoboStack install (make ros2-system-install)
+.guardian/
 
 # Local scratch scaffold folder (not part of app source)
 GuardianMacApp/

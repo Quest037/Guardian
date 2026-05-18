@@ -403,7 +403,9 @@ enum SitlLaunchRecipe {
         spawnDefaults: SimSpawnDefaults,
         mavlinkIngressPort: Int,
         mavlinkSystemID: Int,
-        px4GcsUdpPort: Int
+        px4GcsUdpPort: Int,
+        enableRos2UxrcDds: Bool = false,
+        microXrceUdpPort: Int = 8888
     ) throws -> SitlProcessSpec {
         guard let layout = px4ResolvedBuildLayout(root: root) else {
             throw SitlError.missingPx4SitlBuild
@@ -432,6 +434,11 @@ enum SitlLaunchRecipe {
         // `etc/init.d-posix/rcS` applies `PX4_PARAM_*` so the battery library has a non-zero capacity in SIH SITL.
         env["PX4_PARAM_BAT1_CAPACITY"] = "5000"
         env["PX4_PARAM_MAV_SYS_ID"] = "\(mavlinkSystemID)"
+        if enableRos2UxrcDds {
+            env["PX4_PARAM_UXRCE_DDS_CFG"] = "udp://127.0.0.1:\(microXrceUdpPort)"
+            env["PX4_PARAM_UXRCE_DDS_DOM_ID"] = "\(instance)"
+        }
+        // Garage / Formation: do not set UXRCE_DDS_CFG (many PX4 builds lack the param; baked rootfs may still start uXRCE).
         if !usesLegacySitlPorts() {
             env[px4OffboardPortRemoteEnvKey] = "\(mavlinkIngressPort)"
             env[px4GcsPortLocalEnvKey] = "\(px4GcsUdpPort)"

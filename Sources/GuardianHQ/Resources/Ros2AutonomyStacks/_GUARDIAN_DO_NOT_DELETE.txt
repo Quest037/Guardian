@@ -1,0 +1,4 @@
+Guardian keeps this folder so SwiftPM can bundle Ros2AutonomyStacks resources.
+Populate upstream/ by running from the Guardian repo:
+  make ros2-autonomy-stacks-fetch
+(or: ./scripts/fetch_ros2_autonomy_stacks.sh)

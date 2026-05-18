@@ -4,6 +4,15 @@ import AppKit
 struct TacticalSplashView: View {
     @State private var spin = false
     @State private var pulse = false
+    @State private var statusLineIndex = 0
+
+    private static let statusLines: [String] = [
+        "Loading autonomous planner",
+        "Building training suite",
+        "Building mission designer",
+        "Preparing fleet link services",
+        "Registering mission recipes",
+    ]
 
     var body: some View {
         ZStack {
@@ -53,6 +62,15 @@ struct TacticalSplashView: View {
                     .font(GuardianTypography.font(.subsectionTitleSemibold))
                     .tracking(3.0)
                     .foregroundStyle(Color.cyan.opacity(0.9))
+
+                Text(Self.statusLines[statusLineIndex])
+                    .font(GuardianTypography.font(.operatorCaption))
+                    .tracking(0.6)
+                    .foregroundStyle(Color.white.opacity(0.5))
+                    .frame(minHeight: 18)
+                    .padding(.top, GuardianSpacing.xs)
+                    .animation(.easeInOut(duration: 0.32), value: statusLineIndex)
+                    .accessibilityLabel(Self.statusLines[statusLineIndex])
             }
         }
         .onAppear {
@@ -62,6 +80,18 @@ struct TacticalSplashView: View {
             withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)) {
                 pulse = true
             }
+        }
+        .task {
+            await rotateStatusLines()
+        }
+    }
+
+    private func rotateStatusLines() async {
+        let stepNs: UInt64 = 450_000_000
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: stepNs)
+            guard !Task.isCancelled else { return }
+            statusLineIndex = (statusLineIndex + 1) % Self.statusLines.count
         }
     }
 }

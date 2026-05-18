@@ -1,0 +1,2 @@
+Upstream clones (navigation2, aerostack2, as2_platform_pixhawk) are gitignored.
+Run: make ros2-autonomy-stacks-fetch

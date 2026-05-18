@@ -20,6 +20,9 @@ final class TrainingPanelController: ObservableObject {
     /// True only during stop/spawn shell work — not during link wait or preflight.
     var cardActionsLocked: Bool { isBusy }
     @Published private(set) var taskLayout: TrainingTaskLayout?
+    /// Planned A→B path for map overlay (Nav2 or geodesic fallback from ROS 2 bridge).
+    @Published private(set) var nav2PlannedPath: [RouteCoordinate] = []
+    @Published private(set) var nav2PlanPathSource: TrainingNav2PlanPathResponse.Source = .unavailable
     /// Operator-placed target slot on the map (independent of task kind).
     @Published var targetSlot: TrainingTaskPose = TrainingTaskLayoutFactory.defaultTargetSlot(spawn: .default)
     @Published var isTargetSlotMapEditEnabled = false
@@ -29,6 +32,7 @@ final class TrainingPanelController: ObservableObject {
     private var spawnDefaults: SimSpawnDefaults = .default
     private var simulationPlatform: SimulationPlatform = .ardupilot
     private var teachTask: Task<Void, Never>?
+    private var nav2PlanTask: Task<Void, Never>?
 
     private static let linkWaitTimeoutS: TimeInterval = 60
     private static let preflightSource = "training.panel.preflight"
@@ -45,7 +49,11 @@ final class TrainingPanelController: ObservableObject {
         self.fleetLink = fleetLink
         self.sitl = sitl
         self.spawnDefaults = spawnDefaults
-        self.simulationPlatform = simulationPlatform
+        clampVehicleClassToTrainingPanelOptions()
+        self.simulationPlatform = SimulationSpawnPolicy.effectivePlatform(
+            for: vehicleClass.simulationPreset,
+            requested: simulationPlatform
+        )
         restoreTargetSlotFromPersistence()
         refreshTaskLayout()
     }
@@ -62,6 +70,12 @@ final class TrainingPanelController: ObservableObject {
 
     func spawnDefaultsDidChange() {
         refreshTaskLayout()
+    }
+
+    /// Keeps persisted or legacy values on the temporary UGV-only Training Vehicle panel list.
+    func clampVehicleClassToTrainingPanelOptions() {
+        guard !TrainingVehicleClass.trainingPanelSelectableCases.contains(vehicleClass) else { return }
+        vehicleClass = .ugvWheeled
     }
 
     /// Leaving the Training tab: stop streamed control only (SITL stays in Vehicles).
@@ -153,6 +167,121 @@ final class TrainingPanelController: ObservableObject {
     func refreshTaskLayout() {
         let start = TrainingTaskLayoutFactory.startPose(spawn: spawnDefaults)
         taskLayout = Utilities.training.taskLayout(start: start, goal: targetSlot)
+        scheduleNav2PlanPathRefresh()
+    }
+
+    /// Re-request Nav2 / geodesic path when layout, vehicle, or ROS bridge changes.
+    func scheduleNav2PlanPathRefresh() {
+        nav2PlanTask?.cancel()
+        nav2PlanTask = Task { [weak self] in
+            await self?.refreshNav2PlannedPath()
+        }
+    }
+
+    /// Debug rail copy for Training path overlay source (Settings → Debug).
+    var trainingPathOverlayDebugLine: String {
+        switch GuardianAutonomyPlannerRouting.defaultPlannerKind(for: vehicleClass.fleetVehicleType) {
+        case .nav2:
+            break
+        default:
+            return "Path overlay: not used for this vehicle class"
+        }
+        guard let fleetLink else {
+            return "Path overlay: none (ROS bridge inactive)"
+        }
+        if fleetLink.ros2BridgeProcessPhase != .running {
+            return "Path overlay: Python fallback (ROS bridge not running — use Training spawn/Replace so this sim is enrolled)"
+        }
+        let nav2StackReady = fleetLink.nav2TrainingStackReady
+        let nav2Status = fleetLink.nav2TrainingStackStatus
+        if nav2PlannedPath.count >= 2 {
+            return Self.pathOverlayDebugLine(
+                source: nav2PlanPathSource,
+                nav2StackReady: nav2StackReady,
+                nav2StackStatus: nav2Status,
+                hasPath: true
+            )
+        }
+        if !nav2StackReady {
+            return "Path overlay: none (\(Self.nav2StackStatusPhrase(nav2Status)))"
+        }
+        return "Path overlay: none"
+    }
+
+    /// Operator/debug label for the dashed Training path (Nav2 vs Python geodesic fallback).
+    static func pathOverlayDebugLine(
+        source: TrainingNav2PlanPathResponse.Source,
+        nav2StackReady: Bool,
+        nav2StackStatus: String,
+        hasPath: Bool
+    ) -> String {
+        let fallbackStackNote = nav2StackReady ? "" : " — \(nav2StackStatusPhrase(nav2StackStatus))"
+        switch source {
+        case .nav2:
+            return hasPath ? "Path overlay: Nav2" : "Path overlay: none"
+        case .geodesicFallback:
+            return hasPath
+                ? "Path overlay: Python fallback\(fallbackStackNote)"
+                : "Path overlay: none\(nav2StackReady ? "" : " (\(nav2StackStatusPhrase(nav2StackStatus)))")"
+        case .error:
+            return hasPath
+                ? "Path overlay: Python fallback (bridge error)\(fallbackStackNote)"
+                : "Path overlay: none (bridge error)"
+        case .unavailable:
+            return nav2StackReady ? "Path overlay: none" : "Path overlay: none (\(nav2StackStatusPhrase(nav2StackStatus)))"
+        }
+    }
+
+    static func nav2StackStatusPhrase(_ status: String) -> String {
+        switch status {
+        case "ready":
+            return "Nav2 ready"
+        case "starting":
+            return "Nav2 starting (up to ~2 min)"
+        case "restarting":
+            return "Nav2 restarting"
+        case "timeout":
+            return "Nav2 failed — planner service timeout"
+        case "unavailable":
+            return "Nav2 not in ROS runtime (run make ros2-runtime)"
+        case "error":
+            return "Nav2 launch error"
+        case "stopped":
+            return "Nav2 stopped"
+        case "inactive":
+            return "Nav2 pending"
+        default:
+            return "Nav2 \(status)"
+        }
+    }
+
+    private func refreshNav2PlannedPath() async {
+        guard !Task.isCancelled else { return }
+        guard let layout = taskLayout else {
+            nav2PlannedPath = []
+            nav2PlanPathSource = .unavailable
+            return
+        }
+        let planner = GuardianAutonomyPlannerRouting.defaultPlannerKind(for: vehicleClass.fleetVehicleType)
+        guard planner == .nav2 else {
+            nav2PlannedPath = []
+            nav2PlanPathSource = .unavailable
+            return
+        }
+        guard let fleetLink, let vehicleID else {
+            nav2PlannedPath = []
+            nav2PlanPathSource = .unavailable
+            return
+        }
+        let response = await fleetLink.requestTrainingNav2PlanPath(vehicleID: vehicleID, layout: layout)
+        guard !Task.isCancelled else { return }
+        if response.points.count >= 2 {
+            nav2PlannedPath = response.points
+            nav2PlanPathSource = response.source
+        } else {
+            nav2PlannedPath = TrainingGeodesicPathPlanner.plan(start: layout.start, goal: layout.goal)
+            nav2PlanPathSource = response.source == .unavailable ? .geodesicFallback : response.source
+        }
     }
 
     func setTargetSlotMapEditEnabled(_ enabled: Bool) {
@@ -440,6 +569,7 @@ final class TrainingPanelController: ObservableObject {
             phase = .idle
             return
         }
+        fleetLink.ensurePx4Ros2Sidecar(forVehicleID: linkedVehicleID)
         try? await Task.sleep(nanoseconds: 750_000_000)
 
         phase = .preflight
@@ -477,16 +607,21 @@ final class TrainingPanelController: ObservableObject {
     }
 
     private func applySlot(_ slot: FormationsPlaygroundSlotState) {
+        let linkBecameReady = simulatorSlot?.linkReady != true && slot.linkReady
         simulatorSlot = slot
         vehicleID = slot.vehicleID
         sitlSessionID = slot.sitlSessionID
+        if linkBecameReady, let vehicleID {
+            fleetLink?.ensurePx4Ros2Sidecar(forVehicleID: vehicleID)
+            scheduleNav2PlanPathRefresh()
+        }
     }
 
     private func endSpawnShellBusyState() {
         isBusy = false
     }
 
-    /// Tear down any MAVSDK session for this SITL row and open a fresh one (avoids stale link after replace).
+    /// Ensure MAVSDK + ROS sidecar for this training SITL row without tearing down other fleet sims.
     private func bindFleetLinkToTrainingSimulator(
         inst: SitlRunningInstance,
         fleetLink: FleetLinkService,
@@ -494,10 +629,24 @@ final class TrainingPanelController: ObservableObject {
     ) async -> Bool {
         let vehicleID = resolvedVehicleID(for: inst, fleetLink: fleetLink)
         await fleetLink.stopTrainingControlStream(vehicleID: vehicleID)
+
+        if GuardianSitlFleetLinkReconnectPolicy.simulatorFleetLinkReadyWithMavsdkSession(
+            fleetLink: fleetLink,
+            vehicleID: vehicleID
+        ) {
+            fleetLink.ensurePx4Ros2Sidecar(forVehicleID: vehicleID)
+            refreshSimulatorSlot(fleetLink: fleetLink)
+            return true
+        }
+
+        // Stale or missing session (e.g. after Replace): reconnect this sysid only — does not affect other sims.
         fleetLink.unregisterSimulatedVehicle(systemID: inst.mavlinkSystemID)
         try? await Task.sleep(nanoseconds: 350_000_000)
         let ok = await sitl.reconnectFleetLink(sitlSessionID: inst.id, spawnDefaults: spawnDefaults)
         refreshSimulatorSlot(fleetLink: fleetLink)
+        if ok {
+            fleetLink.ensurePx4Ros2Sidecar(forVehicleID: vehicleID)
+        }
         return ok
     }
 

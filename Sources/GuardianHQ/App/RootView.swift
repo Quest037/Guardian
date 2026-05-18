@@ -142,7 +142,7 @@ struct RootView: View {
                                 isSidebarCollapsed = false
                             }
                         } label: {
-                            GuardianSidebarLogoView(maxHeight: 28)
+                            GuardianSidebarLogoView(maxHeight: 28, showsWordmark: false)
                                 .frame(width: 44, height: 28)
                         }
                         .buttonStyle(GuardianPointerPlainButtonStyle())
@@ -159,7 +159,7 @@ struct RootView: View {
                             isSidebarCollapsed = true
                         }
                     } label: {
-                        GuardianSidebarLogoView(maxHeight: 32)
+                        GuardianSidebarLogoView(maxHeight: 32, showsWordmark: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .contentShape(Rectangle())
                     }

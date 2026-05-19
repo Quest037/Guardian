@@ -138,6 +138,21 @@ enum Ros2BridgeLocator {
         return prefixes
     }
 
+    /// Bash fragment to run the editable bridge module after ``source setup.bash``.
+    /// Uses ROS ``python3`` (3.11 under RoboStack), not macOS/Xcode 3.9 — see ``README_AUTONOMY.md``.
+    static func bashLaunchGuardianBridgeModule(configFilePath: String, packageSourceRoot: String) -> String {
+        """
+
+        export GUARDIAN_NAV2_LAUNCH_DISABLED=1
+        export PYTHONPATH="\(packageSourceRoot):${PYTHONPATH:-}"
+        if [ -n "${GUARDIAN_PYTHON:-}" ]; then
+          exec "${GUARDIAN_PYTHON}" -m guardian_ros2_vehicle_bridge.multi_vehicle_bridge --config "\(configFilePath)"
+        else
+          exec python3 -m guardian_ros2_vehicle_bridge.multi_vehicle_bridge --config "\(configFilePath)"
+        fi
+        """
+    }
+
     private static func whichExecutable(named: String) -> String? {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/which")

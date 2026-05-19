@@ -5,7 +5,8 @@
 
 ## Training
 
-- **Gazebo 3D simulation (Training + Formation):** Replace or augment open-field SITL-only playgrounds with **Gazebo** worlds so operators can author **obstacle courses** and richer terrain for skill training and formation rehearsal. Scope: spawn/lifecycle from Guardian (like SITL today), map/costmap export or sync for Nav2, and alignment with PX4 rover models. Depends on simulation platform choice per tab (Training vehicle vs Formation squad).
+- **Training + Mission app split + brain export:** `AppTrainingMissionSplitToDo.md` — two apps from one codebase; versioned **Guardian Brain Pack** import; MRE default **OFFBOARD** from pack; MC-R squads via **Nav2** / **Aerostack2**.
+- **Gazebo 3D simulation (Training + Formation):** `TrainingGazeboSimulationToDo.md` — bundled Gazebo (or equivalent), training environment catalogue + authoring (obstacles, start/goal, terrain), single-vehicle Training then Formation squads / multi-squad; replaces Leaflet in those simulate tabs when shippable (Training app target).
 
 ## App System
 

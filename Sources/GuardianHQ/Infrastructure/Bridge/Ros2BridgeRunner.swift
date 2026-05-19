@@ -20,11 +20,6 @@ final class Ros2BridgeRunner {
         guard process == nil else { return }
         didTeardown = false
 
-        let python = Self.resolvePython3Executable()
-        guard FileManager.default.isExecutableFile(atPath: python) else {
-            throw FleetLinkError.startFailed("python3 not executable at \(python).")
-        }
-
         let setup = launchPlan.setupScriptPath
         var script = """
         set -euo pipefail
@@ -32,21 +27,27 @@ final class Ros2BridgeRunner {
         export GUARDIAN_ROS2_BRIDGE_CONFIG="\(configFilePath)"
         """
 
-        if launchPlan.usesBundledMergedInstall {
+        // Prefer in-app Python sources over a stale colcon install (ensures ensure_nav2, boot Nav2, retries).
+        // Use ``python3`` from the sourced ROS environment (RoboStack 3.11) — not Xcode/system 3.9 before ``source``.
+        if let packageRoot = Ros2BridgeLocator.bundledPackageSourceURL() {
+            script += Ros2BridgeLocator.bashLaunchGuardianBridgeModule(
+                configFilePath: configFilePath,
+                packageSourceRoot: packageRoot.path
+            )
+        } else if launchPlan.usesBundledMergedInstall {
             script += """
 
+            export GUARDIAN_NAV2_LAUNCH_DISABLED=1
             exec ros2 run guardian_ros2_vehicle_bridge guardian_ros2_vehicle_bridge --config "\(configFilePath)"
             """
         } else {
             guard let packageRoot = launchPlan.packageSourceDirectory else {
                 throw FleetLinkError.startFailed("ROS 2 bridge package root missing.")
             }
-            let moduleRoot = packageRoot.path
-            script += """
-
-            export PYTHONPATH="\(moduleRoot):${PYTHONPATH:-}"
-            exec "\(python)" -m guardian_ros2_vehicle_bridge.multi_vehicle_bridge --config "\(configFilePath)"
-            """
+            script += Ros2BridgeLocator.bashLaunchGuardianBridgeModule(
+                configFilePath: configFilePath,
+                packageSourceRoot: packageRoot.path
+            )
         }
 
         let proc = Process()
@@ -196,15 +197,4 @@ final class Ros2BridgeRunner {
         cb?(exitCode)
     }
 
-    private static func resolvePython3Executable() -> String {
-        if let env = ProcessInfo.processInfo.environment["GUARDIAN_PYTHON"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !env.isEmpty,
-           FileManager.default.isExecutableFile(atPath: env) {
-            return env
-        }
-        for candidate in ["/usr/bin/python3", "/usr/local/bin/python3", "/opt/homebrew/bin/python3"] {
-            if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
-        }
-        return "/usr/bin/python3"
-    }
 }

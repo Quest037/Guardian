@@ -79,15 +79,48 @@ class Nav2TrainingStack:
         """Start Nav2 in a background thread (never blocks the bridge main loop)."""
         with self._state_lock:
             self._desired_active = True
-            proc = self._proc
-            if proc is not None and proc.poll() is None and self._ready:
+            if self._ready:
                 return
             if self._starting:
                 return
             self._starting = True
-        thread = threading.Thread(target=self._start_worker, name="guardian-nav2-training", daemon=True)
+        if os.environ.get("GUARDIAN_NAV2_LAUNCH_DISABLED") == "1":
+            thread = threading.Thread(target=self._poll_only_worker, name="guardian-nav2-poll", daemon=True)
+        else:
+            thread = threading.Thread(target=self._start_worker, name="guardian-nav2-training", daemon=True)
         self._worker_thread = thread
         thread.start()
+
+    def _poll_only_worker(self) -> None:
+        """Swift owns ``ros2 launch``; bridge only mirrors readiness on stdout."""
+        try:
+            if _compute_path_service_available(env=os.environ.copy()):
+                with self._state_lock:
+                    self._ready = True
+                emit({"type": "ros2_nav2_training_stack", "status": "ready"})
+                return
+            emit({"type": "ros2_nav2_training_stack", "status": "starting"})
+            deadline = time.monotonic() + _ready_timeout_s()
+            while time.monotonic() < deadline:
+                with self._state_lock:
+                    if not self._desired_active:
+                        return
+                if _compute_path_service_available(env=os.environ.copy()):
+                    with self._state_lock:
+                        self._ready = True
+                    emit({"type": "ros2_nav2_training_stack", "status": "ready"})
+                    return
+                time.sleep(0.4)
+            emit(
+                {
+                    "type": "ros2_nav2_training_stack",
+                    "status": "timeout",
+                    "message": "compute_path_to_pose_unavailable",
+                }
+            )
+        finally:
+            with self._state_lock:
+                self._starting = False
 
     def set_desired_active(self, active: bool) -> None:
         """Retain API for tests; production defers launch to ``ensure_running_async``."""
@@ -150,6 +183,13 @@ class Nav2TrainingStack:
 
     def _start_once(self) -> bool:
         """Launch stack once. Returns True when failure is permanent (no in-app retry)."""
+        env = os.environ.copy()
+        if _compute_path_service_available(env=env):
+            with self._state_lock:
+                self._ready = True
+            emit({"type": "ros2_nav2_training_stack", "status": "ready"})
+            return False
+
         if not _nav2_launch_available():
             log_err("nav2 training: nav2_planner not in ROS environment")
             emit(
@@ -160,8 +200,6 @@ class Nav2TrainingStack:
                 }
             )
             return True
-
-        env = os.environ.copy()
 
         cmd = [
             "ros2",

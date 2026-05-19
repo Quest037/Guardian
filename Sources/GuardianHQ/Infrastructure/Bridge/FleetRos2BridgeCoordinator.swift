@@ -5,6 +5,7 @@ import Foundation
 final class FleetRos2BridgeCoordinator {
     private let xrceAgent = MicroXrceAgentRunner()
     private let bridge = Ros2BridgeRunner()
+    private let nav2StackRunner = FleetNav2StackRunner()
     private var configFileURL: URL?
     private var lastUnavailableReason: String?
     private var didLogUnavailable = false
@@ -28,6 +29,7 @@ final class FleetRos2BridgeCoordinator {
         nav2StackRestartTask?.cancel()
         nav2StackRestartTask = nil
         fleetNav2WarmStartDesired = false
+        nav2StackRunner.stop()
         teardownBridgeProcesses()
         setProcessPhase(.inactive)
     }
@@ -47,7 +49,35 @@ final class FleetRos2BridgeCoordinator {
             return
         }
         fleetNav2WarmStartDesired = true
+        wireNav2StackRunnerCallbacksIfNeeded()
+        nav2StackRunner.ensureRunning()
         reconcile(vehicles: [])
+    }
+
+    func restartFleetNav2Stack() {
+        guard fleetNav2WarmStartDesired, Self.isFleetNav2WarmStartEnabled else { return }
+        wireNav2StackRunnerCallbacksIfNeeded()
+        nav2StackRunner.stop()
+        nav2StackRunner.ensureRunning()
+    }
+
+    private func wireNav2StackRunnerCallbacksIfNeeded() {
+        nav2StackRunner.onStatus = { [weak self] status, message in
+            guard let self else { return }
+            self.onLogLine?("Nav2 training stack: \(status)")
+            self.onNav2TrainingStackStatusChanged?(status, message)
+            switch status {
+            case "ready":
+                self.onNav2TrainingStackReadyChanged?(true)
+            case "stopped", "unavailable", "error", "timeout":
+                self.onNav2TrainingStackReadyChanged?(false)
+            default:
+                break
+            }
+        }
+        nav2StackRunner.onLogLine = { [weak self] line in
+            self?.onLogLine?(line)
+        }
     }
 
     func reconcile(vehicles: [Ros2VehicleBridgeEntry]) {
@@ -107,9 +137,6 @@ final class FleetRos2BridgeCoordinator {
         if bridge.isRunning {
             setProcessPhase(.running)
             bridge.updateVehicles(vehicles)
-            if nav2OnlyHost {
-                bridge.sendEnsureNav2Stack()
-            }
             let label = nav2OnlyHost ? "Nav2 warm-start host" : "ROS 2 bridge vehicles updated (\(vehicles.count))"
             onLogLine?(label)
             return
@@ -156,9 +183,8 @@ final class FleetRos2BridgeCoordinator {
         nav2StackRestartTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 8_000_000_000)
             guard let self, !Task.isCancelled, self.fleetNav2WarmStartDesired else { return }
-            if self.bridge.isRunning {
-                self.bridge.sendEnsureNav2Stack()
-            } else {
+            self.nav2StackRunner.ensureRunning()
+            if !self.bridge.isRunning {
                 self.reconcile(vehicles: [])
             }
         }
@@ -255,18 +281,15 @@ final class FleetRos2BridgeCoordinator {
                 onLogLine?("ROS 2 bridge error: \(message)")
             }
         case "ros2_nav2_training_stack":
+            // Swift ``FleetNav2StackRunner`` owns launch; ignore duplicate bridge poll events unless runner is idle.
+            guard !nav2StackRunner.isLaunchProcessRunning else { return }
             if let status = event.trainingStackStatus {
-                onLogLine?("Nav2 training stack: \(status)")
+                onLogLine?("Nav2 training stack (bridge): \(status)")
                 onNav2TrainingStackStatusChanged?(status, event.message)
                 switch status {
                 case "ready":
                     onNav2TrainingStackReadyChanged?(true)
                 case "stopped", "unavailable", "error", "timeout":
-                    onNav2TrainingStackReadyChanged?(false)
-                    if status == "timeout" || status == "error" {
-                        scheduleNav2StackRestartIfRecoverable()
-                    }
-                case "restarting":
                     onNav2TrainingStackReadyChanged?(false)
                 default:
                     break

@@ -193,6 +193,8 @@ final class FleetLinkService: ObservableObject {
     @Published private(set) var nav2TrainingStackReady: Bool = false
     /// Last Nav2 training stack event from the ROS bridge (`inactive`, `starting`, `ready`, `timeout`, `unavailable`, `error`, `stopped`).
     @Published private(set) var nav2TrainingStackStatus: String = "inactive"
+    private var nav2StackWatchdogTask: Task<Void, Never>?
+    private var nav2StackStatusBecameStartingAt: Date?
     @Published private(set) var ros2ConnectionStateByVehicleID: [String: Ros2VehicleConnectionState] = [:]
     /// Nav2 vs Aerostack2 planner registered for each PX4 stream (`none` when disabled or non-PX4).
     @Published private(set) var autonomyPlannerByVehicleID: [String: GuardianAutonomyPlannerKind] = [:]
@@ -323,7 +325,21 @@ final class FleetLinkService: ObservableObject {
             self?.nav2TrainingStackReady = ready
         }
         ros2BridgeCoordinator.onNav2TrainingStackStatusChanged = { [weak self] status, _ in
-            self?.nav2TrainingStackStatus = status
+            guard let self else { return }
+            self.nav2TrainingStackStatus = status
+            switch status {
+            case "starting", "restarting":
+                if self.nav2StackStatusBecameStartingAt == nil {
+                    self.nav2StackStatusBecameStartingAt = Date()
+                }
+                self.startNav2StackWatchdogIfNeeded()
+            case "ready", "timeout", "unavailable", "error", "stopped", "inactive":
+                self.nav2StackStatusBecameStartingAt = nil
+                self.nav2StackWatchdogTask?.cancel()
+                self.nav2StackWatchdogTask = nil
+            default:
+                break
+            }
         }
         ros2BridgeCoordinator.onLogLine = { [weak self] line in
             self?.appendSimulationLog(line)
@@ -332,9 +348,32 @@ final class FleetLinkService: ObservableObject {
 
     /// Non-blocking fleet Nav2 warm-start at application launch (see ``FleetRos2BridgeCoordinator/beginFleetNav2WarmStart()``).
     func beginFleetNav2WarmStartAtApplicationLaunch() {
-        nav2TrainingStackStatus = "starting"
         nav2TrainingStackReady = false
         ros2BridgeCoordinator.beginFleetNav2WarmStart()
+    }
+
+    private func startNav2StackWatchdogIfNeeded() {
+        guard nav2StackWatchdogTask == nil else { return }
+        nav2StackWatchdogTask = Task { @MainActor [weak self] in
+            let stallThreshold: TimeInterval = 135
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                guard let self, !Task.isCancelled else { return }
+                guard self.nav2TrainingStackStatus == "starting" || self.nav2TrainingStackStatus == "restarting" else {
+                    return
+                }
+                let started = self.nav2StackStatusBecameStartingAt ?? Date()
+                guard Date().timeIntervalSince(started) >= stallThreshold else { continue }
+                self.appendSimulationLog(
+                    "Fleet Nav2: still not ready after \(Int(stallThreshold))s — retrying launch."
+                )
+                self.nav2TrainingStackStatus = "timeout"
+                self.nav2TrainingStackReady = false
+                self.nav2StackStatusBecameStartingAt = nil
+                self.ros2BridgeCoordinator.restartFleetNav2Stack()
+                return
+            }
+        }
     }
 
     // MARK: - MC‑R per-vehicle live channels (roster strip)
@@ -428,6 +467,9 @@ final class FleetLinkService: ObservableObject {
         ros2BridgeProcessPhase = .inactive
         nav2TrainingStackReady = false
         nav2TrainingStackStatus = "inactive"
+        nav2StackWatchdogTask?.cancel()
+        nav2StackWatchdogTask = nil
+        nav2StackStatusBecameStartingAt = nil
         lastRos2BridgeReconcileFingerprint = nil
     }
 

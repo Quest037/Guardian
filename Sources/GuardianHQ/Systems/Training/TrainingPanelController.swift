@@ -249,7 +249,7 @@ final class TrainingPanelController: ObservableObject {
         case "stopped":
             return "Nav2 stopped"
         case "inactive":
-            return "Nav2 pending"
+            return "Nav2 pending (fleet warm-start)"
         default:
             return "Nav2 \(status)"
         }

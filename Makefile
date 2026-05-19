@@ -1,5 +1,5 @@
 # Default: bundled mavsdk_server + Ros2Runtime, then swift build.
-.PHONY: build bridge-deps ros2-bridge-deps ros2-autonomy-stacks-fetch ros2-system-install ros2-runtime ros2-runtime-full build-with-ros2 sitl-runtime sitl-deps sitl-patch-waf sitl-prewarm sync-simulation-devices px4_sitl_default px4-sitl-runtime stack-wiki-fetch stack-wiki-refresh stack-wiki-deps
+.PHONY: build bridge-deps ros2-bridge-deps ros2-autonomy-stacks-fetch ros2-system-install ros2-runtime ros2-runtime-full build-with-ros2 sitl-runtime sitl-deps sitl-patch-waf sitl-prewarm sync-simulation-devices px4_sitl_default px4-sitl-runtime gazebo-runtime gzweb-viewer stack-wiki-fetch stack-wiki-refresh stack-wiki-deps
 
 # PX4 is not built from this repo; this target exists so `make px4_sitl_default` here explains what to run instead of "No rule".
 px4_sitl_default:
@@ -28,6 +28,16 @@ sitl-runtime:
 # Copy built PX4 POSIX SITL (bin/px4 + etc/) from PX4_AUTOPILOT_ROOT into Resources/Px4SitlBundle.
 px4-sitl-runtime:
 	./scripts/sync_px4_sitl_bundle.sh
+
+# Stage Gazebo Harmonic (gz-sim) into Resources/GazeboRuntime (brew install osrf/simulation/gz-harmonic first).
+gazebo-runtime:
+	chmod +x scripts/fetch_gazebo_runtime.sh
+	./scripts/fetch_gazebo_runtime.sh
+
+# Bundle gzweb for the World Builder embedded viewport (Node.js required).
+gzweb-viewer:
+	chmod +x scripts/fetch_gzweb_viewer.sh
+	./scripts/fetch_gzweb_viewer.sh
 
 # Re-apply waf git fallback on an existing ArduPilot tree (fixes SITL build when git rev-parse fails in bundles).
 sitl-patch-waf:

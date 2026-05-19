@@ -44,10 +44,12 @@ class Aerostack2PlannerBridge:
         ]
 
     def health_snapshot(self) -> dict[str, object]:
-        return {
+        detail: dict[str, object] = {
             "planner": "aerostack2",
             "vehicle_id": self.vehicle_id,
             "status": "STUB",
             "expected_topics": self.expected_graph_topics(),
             "note": "Aerostack2 mission and motion-reference wiring not implemented",
         }
+        detail.update(self._config.brain_overlay_detail())
+        return detail

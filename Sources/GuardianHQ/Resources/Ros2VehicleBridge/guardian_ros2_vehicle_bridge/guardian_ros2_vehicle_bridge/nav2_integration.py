@@ -47,7 +47,7 @@ class Nav2PlannerBridge:
         ready = bool(stack.get("ready"))
         starting = bool(stack.get("starting"))
         status = "READY" if ready else ("STARTING" if starting else "LAZY")
-        return {
+        detail: dict[str, object] = {
             "planner": "nav2",
             "vehicle_id": self.vehicle_id,
             "status": status,
@@ -55,3 +55,5 @@ class Nav2PlannerBridge:
             "expected_topics": self.expected_graph_topics(),
             "note": "Training overlay uses global open-field planner_server",
         }
+        detail.update(self._config.brain_overlay_detail())
+        return detail

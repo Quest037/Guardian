@@ -27,6 +27,8 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
     @Published var reportCyclesCompleted: Int?
     @Published var completionKind: MissionRunCompletionKind?
     @Published var policies: MissionRunPolicies = MissionRunPolicies()
+    /// Pinned autonomy brains copied into this run at create time (`brain_id` + `brain_version` per task kind + vehicle class).
+    @Published var brainBindings: [MissionRunBrainBinding] = []
     /// Run-only **additional** geofences for a specific task id (merged after mission-wide augmentation).
     @Published var taskGeofenceAugmentationsByTaskID: [UUID: [MissionGeofence]] = [:]
     /// Per-run Mission Control chrome and completion side-effects (cloned from app Mission Run defaults at create time).
@@ -207,7 +209,8 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
             executor: MissionRunExecutionSubsystem(),
             scheduling: MissionRunSchedulingSubsystem(),
             policyAuthority: MissionRunPolicyAuthoritySubsystem(),
-            squadFollow: MissionRunSquadFollowSubsystem()
+            squadFollow: MissionRunSquadFollowSubsystem(),
+            brainExecution: MissionRunBrainExecutionSubsystem()
         )
         self.id = id
         self.missionId = mission.id
@@ -233,6 +236,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         self.systems.policyAuthority.environment = self
         self.systems.squadFollow.environment = self
         self.systems.squadFollow.cycleLaunchExecutor = self.systems.executor
+        self.systems.brainExecution.environment = self
         refreshDerivedTaskStates()
         syncRosterRoleResolutions(from: mission)
         syncRuntimeMissionPointsFromTemplate(mission, reason: .initial)
@@ -585,6 +589,7 @@ final class MissionRunEnvironment: ObservableObject, Identifiable {
         operatorWindDown: MissionRunOperatorWindDown,
         oneOffAutopilotFinished: Bool = false
     ) {
+        clearBrainRos2SidecarEnrollment()
         clearMissionTaskScopedOrchestrationState(preserveEndModeSettlement: true)
         systems.scheduling.cancelAllScheduledTasks()
         systems.scheduling.clearDeferredOneOffExecution()

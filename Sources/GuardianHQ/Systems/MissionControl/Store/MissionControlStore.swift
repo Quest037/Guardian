@@ -37,6 +37,10 @@ final class MissionControlStore: ObservableObject {
     /// Creates an in-memory run fork. Roster rows follow ``MissionTask/rosterDeviceIds`` (squad topology
     /// is template data); per-squad **runtime** maps live only on ``MissionRunEnvironment`` until reset.
     func createRun(from mission: Mission, cloningMissionRunDefaultsFrom appMissionRunDefaults: GeneralSettingsStore) -> MissionRunEnvironment {
+        assert(
+            GuardianAppSessionBootstrap.activeProduct != .training,
+            "Guardian Training does not create Mission Control runs; use FleetLinkService for lab vehicles only."
+        )
         var assignments: [MissionRunAssignment] = []
         for path in mission.routeMacro.tasks {
             for deviceId in path.rosterDeviceIds {
@@ -70,6 +74,7 @@ final class MissionControlStore: ObservableObject {
             resetSimToStartPoseOnSuccessfulComplete: appMissionRunDefaults.missionRunResetSitlToStartPoseOnSuccessfulComplete,
             simBatteryDrainRateDuringRun: appMissionRunDefaults.missionRunSimBatteryDrainRate
         )
+        run.brainBindings = (try? GuardianBrainPinDefaultsStore.missionRunBindings()) ?? []
         /// The convenience initializer seeds a **placeholder** ``MissionRunEnvironment/template`` (empty tasks).
         /// Hydrate from a **value copy** of the catalog ``Mission`` so MCS / MC‑R edits stay on the run fork
         /// (``MissionStore`` templates are edited only from the Missions workspace).

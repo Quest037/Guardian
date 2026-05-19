@@ -96,6 +96,7 @@ struct MissionControlView: View {
             AddMissionRunSheet(
                 missionStore: missionStore,
                 onCreateRun: { mission in
+                    guard GuardianAppSessionBootstrap.activeProduct != .training else { return }
                     let run = controlStore.createRun(from: mission, cloningMissionRunDefaultsFrom: generalSettings)
                     selectedRunID = run.id
                 }

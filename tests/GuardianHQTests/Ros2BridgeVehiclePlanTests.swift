@@ -65,4 +65,26 @@ final class Ros2BridgeVehiclePlanTests: XCTestCase {
         XCTAssertEqual(entry?.autonomyPlanner, "nav2")
     }
 
+    func test_entry_includes_brain_planner_overlay() {
+        let brainId = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
+        let entry = Ros2BridgeVehiclePlan.entry(
+            for: .init(
+                vehicleID: "sysid:4",
+                autopilotStack: .px4,
+                vehicleType: .ugvWheeled,
+                px4SitlInstance: 1,
+                ros2SidecarDesired: true,
+                brainPlannerOverlay: Ros2BrainPlannerSidecarOverlay(
+                    brainId: brainId,
+                    brainVersion: GuardianBrainVersion.fromLegacyInteger(4),
+                    nav2ParamOverlayJSON: "{\"captured_from\":\"guardian_training_lab\"}",
+                    aerostack2ParamOverlayJSON: nil
+                )
+            )
+        )
+        XCTAssertEqual(entry?.brainId, brainId.uuidString)
+        XCTAssertEqual(entry?.brainVersion, "0.0.4")
+        XCTAssertTrue(entry?.nav2ParamOverlayJSON?.contains("guardian_training_lab") == true)
+    }
+
 }

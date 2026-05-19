@@ -38,6 +38,25 @@ def test_ardupilot_stack_rejected():
         )
 
 
+def test_vehicle_config_brain_overlay_fields():
+    cfg = VehicleConnectionConfig.from_mapping(
+        {
+            "vehicle_id": "sysid:3",
+            "stack": "px4",
+            "vehicle_class": "ugv_wheeled",
+            "brain_id": "11111111-1111-1111-1111-111111111111",
+            "brain_version": 2,
+            "nav2_param_overlay_json": "{\"captured_from\":\"lab\"}",
+        }
+    )
+    assert cfg.brain_id == "11111111-1111-1111-1111-111111111111"
+    assert cfg.brain_version == 2
+    assert "lab" in cfg.nav2_param_overlay_json
+    detail = cfg.brain_overlay_detail()
+    assert detail["brain_version"] == 2
+    assert detail["nav2_param_overlay_present"] is True
+
+
 def test_bridge_config_from_mapping():
     cfg = BridgeConfig.from_mapping(
         {

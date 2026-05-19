@@ -281,6 +281,8 @@ final class FleetLinkService: ObservableObject {
     private var px4SitlInstanceByVehicleID: [String: Int] = [:]
     /// PX4 streams enrolled in the shared ROS 2 sidecar (fleet-wide target; phased rollout — see ``README_AUTONOMY.md``).
     private var px4Ros2SidecarDesiredVehicleIDs: Set<String> = []
+    /// Mission-run brain pack planner overlays keyed by fleet stream id (`sysid:n`).
+    private var brainRos2PlannerOverlayByVehicleID: [String: Ros2BrainPlannerSidecarOverlay] = [:]
     private let ros2BridgeCoordinator = FleetRos2BridgeCoordinator()
     private var lastRos2BridgeReconcileFingerprint: String?
 
@@ -302,6 +304,10 @@ final class FleetLinkService: ObservableObject {
     init(userDefaults: UserDefaults = .standard) {
         configuration = Self.load(from: userDefaults) ?? .defaults
         GuardianAppQuitCoordinator.shared.noteFleetLinkServiceCreated(self)
+        GuardianApplicationLifecycle.shared.noteFleetLinkService(self)
+        ros2BridgeCoordinator.shouldDeliverStdoutOnMainActor = {
+            GuardianApplicationLifecycle.shared.shouldDeliverRosBridgeStdoutToMainActor
+        }
         ros2BridgeCoordinator.onProcessPhaseChanged = { [weak self] phase in
             self?.ros2BridgeProcessPhase = phase
         }
@@ -348,8 +354,26 @@ final class FleetLinkService: ObservableObject {
 
     /// Non-blocking fleet Nav2 warm-start at application launch (see ``FleetRos2BridgeCoordinator/beginFleetNav2WarmStart()``).
     func beginFleetNav2WarmStartAtApplicationLaunch() {
+        GuardianRos2OrphanBlitz.blockUntilColdLaunchBlitzFinishedIfNeeded()
         nav2TrainingStackReady = false
         ros2BridgeCoordinator.beginFleetNav2WarmStart()
+    }
+
+    func pauseFleetNav2ForApplicationBackground() {
+        ros2BridgeCoordinator.pauseFleetNav2ForApplicationBackground()
+    }
+
+    func resumeFleetNav2AfterApplicationBackground() {
+        ros2BridgeCoordinator.resumeFleetNav2AfterApplicationBackground()
+    }
+
+    private var hubFleetTickDeferredWhileInactive = false
+
+    /// Publishes a coalesced hub tick if one was skipped while the app was inactive.
+    func flushDeferredHubTelemetryTickIfNeeded() {
+        guard hubFleetTickDeferredWhileInactive else { return }
+        hubFleetTickDeferredWhileInactive = false
+        publishHubFleetTelemetryTickAndRefreshMcrChannels()
     }
 
     private func startNav2StackWatchdogIfNeeded() {
@@ -461,9 +485,11 @@ final class FleetLinkService: ObservableObject {
         mcrRosterLiveChannelRefCount.removeAll(keepingCapacity: true)
         px4SitlInstanceByVehicleID.removeAll(keepingCapacity: true)
         px4Ros2SidecarDesiredVehicleIDs.removeAll(keepingCapacity: true)
+        brainRos2PlannerOverlayByVehicleID.removeAll(keepingCapacity: true)
         ros2ConnectionStateByVehicleID.removeAll(keepingCapacity: true)
         autonomyPlannerByVehicleID.removeAll(keepingCapacity: true)
         ros2BridgeCoordinator.stopAll()
+        GuardianRos2OrphanBlitz.runBlocking()
         ros2BridgeProcessPhase = .inactive
         nav2TrainingStackReady = false
         nav2TrainingStackStatus = "inactive"
@@ -471,6 +497,11 @@ final class FleetLinkService: ObservableObject {
         nav2StackWatchdogTask = nil
         nav2StackStatusBecameStartingAt = nil
         lastRos2BridgeReconcileFingerprint = nil
+    }
+
+    /// True when Live Drive holds the manual control session for this bridge vehicle key.
+    func isLiveDriveControlSessionActive(forVehicleID vehicleID: String) -> Bool {
+        liveDriveControlSessionVehicleID == vehicleID
     }
 
     /// Install or clear the Live Drive control session (see `liveDriveControlSessionVehicleID`).
@@ -1226,6 +1257,34 @@ final class FleetLinkService: ObservableObject {
         ) {
             reconcileRos2BridgeAfterSimulatorLinked()
         }
+    }
+
+    /// Enrolls PX4 streams for MCR brain execution and attaches planner param overlays from run bindings.
+    func applyMissionBrainRos2SidecarPolicy(
+        overlaysByVehicleID: [String: Ros2BrainPlannerSidecarOverlay],
+        enrollPX4VehicleIDs: Set<String>,
+        mergeOverlays: Bool = false
+    ) {
+        if mergeOverlays {
+            for (vehicleID, overlay) in overlaysByVehicleID {
+                brainRos2PlannerOverlayByVehicleID[vehicleID] = overlay
+            }
+        } else {
+            brainRos2PlannerOverlayByVehicleID = overlaysByVehicleID
+        }
+        for vehicleID in enrollPX4VehicleIDs {
+            px4Ros2SidecarDesiredVehicleIDs.insert(vehicleID)
+        }
+        lastRos2BridgeReconcileFingerprint = nil
+        reconcileRos2Bridge()
+    }
+
+    /// Clears mission-run brain overlays; sidecar enrollment for those streams is unchanged.
+    func clearMissionBrainRos2SidecarPolicy() {
+        guard !brainRos2PlannerOverlayByVehicleID.isEmpty else { return }
+        brainRos2PlannerOverlayByVehicleID.removeAll(keepingCapacity: true)
+        lastRos2BridgeReconcileFingerprint = nil
+        reconcileRos2Bridge()
     }
 
     /// Fleet-link pursuit: run pending SIH / SIM spawn handshake when MAVLink position is slow to arrive.
@@ -3441,6 +3500,11 @@ final class FleetLinkService: ObservableObject {
                 self.hubTelemetry = self.hubTelemetryByVehicleID[vid]
                 self.telemetry = self.telemetryByVehicleID[vid]
             }
+            guard GuardianApplicationLifecycle.shared.isApplicationActive else {
+                self.hubFleetTickDeferredWhileInactive = true
+                return
+            }
+            self.hubFleetTickDeferredWhileInactive = false
             self.publishHubFleetTelemetryTickAndRefreshMcrChannels()
         }
         if elapsed >= minInterval {
@@ -4911,12 +4975,15 @@ final class FleetLinkService: ObservableObject {
                 autopilotStack: stack,
                 vehicleType: vehicleType,
                 px4SitlInstance: px4SitlInstanceByVehicleID[vehicleID],
-                ros2SidecarDesired: true
+                ros2SidecarDesired: true,
+                brainPlannerOverlay: brainRos2PlannerOverlayByVehicleID[vehicleID]
             )
         }
         let entries = Ros2BridgeVehiclePlan.entries(from: contexts)
         let fingerprint = entries.map {
-            "\($0.vehicleID)|\($0.rosNamespace)|\($0.autonomyPlanner)|\($0.enabled)"
+            let overlayKey = $0.nav2ParamOverlayJSON ?? $0.aerostack2ParamOverlayJSON ?? ""
+            let brainKey = "\($0.brainId ?? ""):\($0.brainVersion ?? "")"
+            return "\($0.vehicleID)|\($0.rosNamespace)|\($0.autonomyPlanner)|\($0.enabled)|\(brainKey)|\(overlayKey)"
         }.joined(separator: ";")
         guard fingerprint != lastRos2BridgeReconcileFingerprint else { return }
         lastRos2BridgeReconcileFingerprint = fingerprint

@@ -150,6 +150,8 @@ struct MissionLiveVehicleHealthCard: View {
     let slotTitle: String
     /// Same text as roster slot subtitle (`roleType` · position hint, or "—").
     let rosterSubtitle: String
+    /// Imported brain label for this vehicle class (`displayName · vN`), when bound on the run.
+    var brainBindingCaption: String? = nil
     /// Canonical short stream label with brackets (e.g. `[UAV-C:1]`); `—` when unresolved.
     let bracketedVehicleShortID: String
     let vehicleID: String?
@@ -255,11 +257,20 @@ struct MissionLiveVehicleHealthCard: View {
                         .help(vehicleID.map { "Bridge vehicle key: \($0)" } ?? "No bridge vehicle key")
                 }
                 HStack(alignment: .center, spacing: GuardianSpacing.xs) {
-                    Text(rosterSubtitle)
-                        .font(GuardianTypography.font(.denseCaption10Regular))
-                        .foregroundStyle(theme.textSecondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(rosterSubtitle)
+                            .font(GuardianTypography.font(.denseCaption10Regular))
+                            .foregroundStyle(theme.textSecondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        if let brainBindingCaption {
+                            Text(brainBindingCaption)
+                                .font(GuardianTypography.font(.denseCaption10Regular))
+                                .foregroundStyle(theme.textTertiary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                    }
                     Spacer(minLength: 0)
                     if showCompactBattery {
                         HStack(alignment: .center, spacing: GuardianSpacing.xxs) {

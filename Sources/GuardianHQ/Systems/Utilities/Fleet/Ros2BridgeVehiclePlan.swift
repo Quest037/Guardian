@@ -10,6 +10,8 @@ enum Ros2BridgeVehiclePlan {
         var px4SitlInstance: Int?
         /// When false, the ROS 2 / Micro XRCE sidecar is not started (Vehicles / Formation MAVLink-only spawns).
         var ros2SidecarDesired: Bool = false
+        /// Mission brain pack planner overlay (MCR runs with bindings).
+        var brainPlannerOverlay: Ros2BrainPlannerSidecarOverlay?
     }
 
     /// ROS namespace prefix before `fmu/out/...` (empty → `/fmu/out/vehicle_status`).
@@ -22,7 +24,7 @@ enum Ros2BridgeVehiclePlan {
     static func entry(for context: SessionContext) -> Ros2VehicleBridgeEntry? {
         guard context.ros2SidecarDesired, context.autopilotStack == .px4 else { return nil }
         let planner = GuardianAutonomyPlannerRouting.defaultPlannerKind(for: context.vehicleType).configToken
-        return Ros2VehicleBridgeEntry(
+        var entry = Ros2VehicleBridgeEntry(
             vehicleID: context.vehicleID,
             stack: "px4",
             vehicleClass: context.vehicleType.ros2ConfigClassValue,
@@ -30,6 +32,13 @@ enum Ros2BridgeVehiclePlan {
             autonomyPlanner: planner,
             enabled: true
         )
+        if let overlay = context.brainPlannerOverlay {
+            entry.brainId = overlay.brainId.uuidString
+            entry.brainVersion = overlay.brainVersion.semverString
+            entry.nav2ParamOverlayJSON = overlay.nav2ParamOverlayJSON
+            entry.aerostack2ParamOverlayJSON = overlay.aerostack2ParamOverlayJSON
+        }
+        return entry
     }
 
     static func entries(from contexts: [SessionContext]) -> [Ros2VehicleBridgeEntry] {

@@ -2,6 +2,9 @@
 
 This repo keeps product and AI guardrails in **`.cursor/rules/`**. When editing GuardianHQ (especially SwiftUI):
 
+- **Two macOS apps (Training / Mission):** ``README_FULL.md`` → **Two-app SwiftPM products**; `swift build --product GuardianTraining` / `GuardianMission`; tracker ``AppTrainingMissionSplitToDo.md``. **`GuardianAppProduct`** drives splash, window title, sidebar logo, and which ``AppSection`` rails appear. Training omits Missions / Mission Control / Live Drive **nav** but keeps ``MissionStore`` + ``MissionControlStore`` for MRE/fleet hooks.
+- **Gazebo 3D training worlds:** ``README_FULL.md`` → **Gazebo training simulation**; ``GazeboService`` / ``GazeboLaunchRecipe``; tracker ``TrainingGazeboSimulationToDo.md``. Training + full HQ only (`GuardianAppProduct/includesGazeboSimulation`). Stage runtime with `make gazebo-runtime`.
+
 - **Plugin-owned fleet catalogue rows:** ``Sources/GuardianHQ/Plugins/PLUGIN_FLEET_CONTRIBUTIONS.md`` (manifest claims, JSON bodies, bootstrap).
 - **Mission Control floating reserve pool (run envelope):** ``README_FULL.md`` → **Floating reserve pool (Mission Control run)**; deferred automation in ``NEXTVERSION.md`` → **Floating reserve pool — deferred phases** (2026-05-12).
 - **Mission Control reserve swap-in (live active ↔ reserve):** backlog for arm/mission/reposition/commit pipeline, fixed `.reserve` + floating pool, triggers, and class matching — ``MissionRosterReservesToDo.md``.
@@ -25,6 +28,6 @@ This repo keeps product and AI guardrails in **`.cursor/rules/`**. When editing 
 - **Operator copy:** `.cursor/rules/no-future-version-user-copy.mdc` — no “future build” / “coming soon” teases in UI; describe the current product only.
 - **SITL random MAVLink port / sysid:** ``README_FULL.md`` → **Built-in SITL MAVLink endpoints**; wipe/orphan backlog — ``SITLRandomPortToDo.md``.
 - **Stack wiki (PX4 / ArduPilot docs for agents):** ``Resources/StackWiki/`` + ``README_FULL.md`` → **Stack wiki (local autopilot docs)**; refresh ``make stack-wiki-refresh``; retrieval policy ``.cursor/rules/stack-wiki-docs-local.mdc``.
-- **ROS 2 autonomy (Nav2 / Aerostack2, fleet-wide sidecar):** ``Sources/GuardianHQ/Resources/Ros2VehicleBridge/README_AUTONOMY.md`` — **ROS sidecar rollout** (Training first; Formation / MCR / live follow). Enroll streams with ``FleetLinkService/ensurePx4Ros2Sidecar(forVehicleID:)`` after MAVLink position is up; do not start the bridge at raw SITL register for every garage spawn.
+- **ROS 2 autonomy (Nav2 / Aerostack2, fleet-wide sidecar):** ``Sources/GuardianHQ/Resources/Ros2VehicleBridge/README_AUTONOMY.md`` — **ROS sidecar rollout** (Training first; Formation / MCR / live follow). Enroll streams with ``FleetLinkService/ensurePx4Ros2Sidecar(forVehicleID:)`` after MAVLink position is up; do not start the bridge at raw SITL register for every garage spawn. **Orphan cleanup:** ``GuardianRos2OrphanBlitz`` + ``GuardianRos2SpawnRegistry`` (cold launch, ``stopAll``, app quit; `GUARDIAN_SKIP_ROS2_ORPHAN_BLITZ=1`) — ``README_FULL.md`` → **Child processes and cold launch**.
 
 **Theme reference:** use the in-app **Theme** plugin (`ThemePanelView` / `ThemeCatalogContent`) as the living catalog; rules live in `guardian-theme-tokens.mdc` above.

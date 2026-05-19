@@ -4,10 +4,13 @@ struct RootView: View {
     @Binding var selection: AppSection
     @ObservedObject var fleetLinkService: FleetLinkService
     @ObservedObject var sitlService: SitlService
+    @ObservedObject var gazeboService: GazeboService
     @ObservedObject var generalSettingsStore: GeneralSettingsStore
     @EnvironmentObject private var appDrawer: AppDrawer
+    @EnvironmentObject private var toastCenter: ToastCenter
     @EnvironmentObject private var operatorPromptCenter: OperatorPromptCenter
     @EnvironmentObject private var operatorPromptReviewFocus: OperatorPromptReviewFocusController
+    @ObservedObject private var networkReachability = GuardianNetworkReachability.shared
     @EnvironmentObject private var pluginRegistry: GuardianPluginRegistry
     @StateObject private var missionStore = MissionStore()
     @StateObject private var missionControlStore = MissionControlStore()
@@ -16,16 +19,19 @@ struct RootView: View {
     @State private var settingsPane: SettingsPane = .general
     @State private var isSidebarCollapsed: Bool
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.guardianAppProduct) private var appProduct
 
     init(
         selection: Binding<AppSection>,
         fleetLinkService: FleetLinkService,
         sitlService: SitlService,
+        gazeboService: GazeboService,
         generalSettingsStore: GeneralSettingsStore
     ) {
         _selection = selection
         self.fleetLinkService = fleetLinkService
         self.sitlService = sitlService
+        self.gazeboService = gazeboService
         self.generalSettingsStore = generalSettingsStore
         _isSidebarCollapsed = State(
             initialValue: generalSettingsStore.mainSidebarLaunchMode == .collapsed
@@ -102,12 +108,18 @@ struct RootView: View {
                     sitl: sitlService
                 )
             }
+            if !appProduct.includesSidebarSection(selection) {
+                selection = appProduct.defaultAppSection
+            }
         }
         .onChange(of: fleetLinkService.isSimulateEnabled) { sim in
             if !sim {
                 sitlService.stopAll()
+                if appProduct.includesGazeboSimulation {
+                    gazeboService.stopAll(purpose: .run)
+                }
                 if selection == .training {
-                    selection = .dashboard
+                    selection = appProduct.defaultAppSection
                 }
             }
         }
@@ -119,11 +131,24 @@ struct RootView: View {
                 isSidebarCollapsed = (mode == .collapsed)
             }
         }
-        .onChange(of: selection) { _ in
+        .onChange(of: selection) { newSelection in
+            if !appProduct.includesSidebarSection(newSelection) {
+                selection = appProduct.defaultAppSection
+                return
+            }
             appDrawer.dismiss()
+            notifyOfflineGazeboSectionIfNeeded(newSelection)
+        }
+        .onChange(of: networkReachability.isOnline) { online in
+            guard online == false else { return }
+            notifyOfflineGazeboSectionIfNeeded(selection)
         }
         .onChange(of: operatorPromptReviewFocus.pendingPrimarySection) { newSection in
             guard let newSection else { return }
+            guard appProduct.includesSidebarSection(newSection) else {
+                operatorPromptReviewFocus.consumePendingPrimarySection()
+                return
+            }
             if selection != newSection {
                 selection = newSection
             }
@@ -148,7 +173,7 @@ struct RootView: View {
                         .buttonStyle(GuardianPointerPlainButtonStyle())
                         .contentShape(Rectangle())
                         .help("Expand sidebar")
-                        .accessibilityLabel("Guardian")
+                        .accessibilityLabel(appProduct.displayName)
                         .accessibilityHint("Expands the sidebar")
                         Spacer(minLength: 0)
                     }
@@ -166,7 +191,7 @@ struct RootView: View {
                     .buttonStyle(GuardianPointerPlainButtonStyle())
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .help("Collapse sidebar")
-                    .accessibilityLabel("Guardian")
+                    .accessibilityLabel(appProduct.displayName)
                     .accessibilityHint("Collapses the sidebar")
                     .transition(.opacity.combined(with: .move(edge: .leading)))
                 }
@@ -177,7 +202,10 @@ struct RootView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
-                    ForEach(AppSection.primarySidebarRail(simulateEnabled: fleetLinkService.isSimulateEnabled), id: \.self) { section in
+                    ForEach(
+                        appProduct.primarySidebarRail(simulateEnabled: fleetLinkService.isSimulateEnabled),
+                        id: \.self
+                    ) { section in
                         sidebarSectionRow(section: section)
                     }
                     ForEach(pluginRegistry.sidebarItems(for: .primary)) { item in
@@ -193,7 +221,7 @@ struct RootView: View {
                 ForEach(pluginRegistry.sidebarItems(for: .secondary)) { item in
                     sidebarPluginRow(item: item)
                 }
-                ForEach(AppSection.secondarySidebarSections, id: \.self) { section in
+                ForEach(appProduct.secondarySidebarSections(), id: \.self) { section in
                     sidebarSectionRow(section: section)
                 }
 
@@ -212,9 +240,18 @@ struct RootView: View {
         }
     }
 
+    private func notifyOfflineGazeboSectionIfNeeded(_ section: AppSection) {
+        GuardianGazeboWebViewerPolicy.showOfflineToastIfNeeded(
+            productIncludesGazebo: appProduct.includesGazeboSimulation,
+            toastCenter: toastCenter,
+            section: section
+        )
+    }
+
     private func sidebarSectionRow(section: AppSection) -> some View {
         Button {
             selection = section
+            notifyOfflineGazeboSectionIfNeeded(section)
         } label: {
             Group {
                 if isSidebarCollapsed {
@@ -418,6 +455,8 @@ struct RootView: View {
                     missionControlStore: missionControlStore,
                     generalSettings: generalSettingsStore
                 )
+            case .brains:
+                GuardianBrainCatalogueView()
             case .missionControl:
                 MissionControlView(
                     missionStore: missionStore,
@@ -460,7 +499,14 @@ struct RootView: View {
                     fleetLink: fleetLinkService,
                     sitl: sitlService,
                     missionControl: missionControlStore,
-                    generalSettings: generalSettingsStore
+                    generalSettings: generalSettingsStore,
+                    gazebo: gazeboService,
+                    requiresGazeboRunWorld: appProduct.includesGazeboSimulation
+                )
+            case .worlds:
+                WorldBuilderView(
+                    fleetLink: fleetLinkService,
+                    gazebo: gazeboService
                 )
             }
         }

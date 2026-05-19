@@ -17,10 +17,14 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.0.39</string>
+	<string>0.0.40</string>
 	<key>CFBundleVersion</key>
 	<string>2</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
+	<key>NSAllowsLocalNetworking</key>
+	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Guardian connects to the local Gazebo simulator and 3D viewer on this Mac.</string>
 </dict>
 </plist>

@@ -5,8 +5,9 @@
 
 ## Training
 
-- **Training + Mission app split + brain export:** `AppTrainingMissionSplitToDo.md` — two apps from one codebase; versioned **Guardian Brain Pack** import; MRE default **OFFBOARD** from pack; MC-R squads via **Nav2** / **Aerostack2**.
+- **Training + Mission app split + brain export:** `AppTrainingMissionSplitToDo.md` — Phase 1 `GuardianCore` + SwiftPM Gazebo resource split; corners-cut planner-only / SIM smoke.
 - **Gazebo 3D simulation (Training + Formation):** `TrainingGazeboSimulationToDo.md` — bundled Gazebo (or equivalent), training environment catalogue + authoring (obstacles, start/goal, terrain), single-vehicle Training then Formation squads / multi-squad; replaces Leaflet in those simulate tabs when shippable (Training app target).
+- **Gazebo embedded viewer — offline mode:** Regenerate `Resources/GazeboWeb/dist/gzweb.bundle.mjs` via `make gzweb-viewer` after gzweb bumps; commit the bundle so packaged apps need no network for the 3D panel.
 
 ## App System
 

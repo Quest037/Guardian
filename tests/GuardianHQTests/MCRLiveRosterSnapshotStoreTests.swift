@@ -17,7 +17,8 @@ final class MCRLiveRosterSnapshotStoreTests: XCTestCase {
             vehicleClassForBundledDeviceArt: .uavCopter,
             vehicleModel: FleetVehicleOperationalModel(hub: nil, lifecycleStatus: nil),
             slotAttention: nil,
-            accessibilitySummary: nil
+            accessibilitySummary: nil,
+            brainBindingCaption: nil
         )
         let rosterDeviceId = UUID()
         let proj = MissionRunAssignmentLiveProjection(
@@ -48,7 +49,8 @@ final class MCRLiveRosterSnapshotStoreTests: XCTestCase {
             vehicleClassForBundledDeviceArt: .unknown,
             vehicleModel: m,
             slotAttention: nil,
-            accessibilitySummary: nil
+            accessibilitySummary: nil,
+            brainBindingCaption: nil
         )
         let b = MCRLiveRosterRowSnapshot(
             slotTitle: "A",
@@ -59,7 +61,8 @@ final class MCRLiveRosterSnapshotStoreTests: XCTestCase {
             vehicleClassForBundledDeviceArt: .unknown,
             vehicleModel: m,
             slotAttention: nil,
-            accessibilitySummary: nil
+            accessibilitySummary: nil,
+            brainBindingCaption: nil
         )
         XCTAssertEqual(a, b)
     }

@@ -13,6 +13,8 @@ final class Ros2BridgeRunner {
     var onStdoutLine: ((String) -> Void)?
     var onStderrLine: ((String) -> Void)?
     var onTerminated: ((Int32) -> Void)?
+    /// When false, readability handlers skip scheduling `consumeStdoutChunk` on the main actor.
+    var shouldDeliverChunksOnMainActor: () -> Bool = { true }
 
     var isRunning: Bool { process?.isRunning == true }
 
@@ -73,12 +75,18 @@ final class Ros2BridgeRunner {
         stdinPipe = input
         stdoutPipe = out
         stderrPipe = err
+        GuardianRos2SpawnRegistry.register(
+            pid: proc.processIdentifier,
+            executablePath: "/bin/bash",
+            arguments: proc.arguments ?? []
+        )
 
         out.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard let self, !data.isEmpty else { return }
             guard let chunk = String(data: data, encoding: .utf8) else { return }
             Task { @MainActor in
+                guard self.shouldDeliverChunksOnMainActor() else { return }
                 self.consumeStdoutChunk(chunk)
             }
         }
@@ -87,6 +95,7 @@ final class Ros2BridgeRunner {
             guard let self, !data.isEmpty else { return }
             guard let chunk = String(data: data, encoding: .utf8) else { return }
             Task { @MainActor in
+                guard self.shouldDeliverChunksOnMainActor() else { return }
                 self.consumeStderrChunk(chunk)
             }
         }
@@ -133,7 +142,7 @@ final class Ros2BridgeRunner {
 
     func updateVehicles(_ vehicles: [Ros2VehicleBridgeEntry]) {
         let payload: [[String: Any]] = vehicles.map { entry in
-            [
+            var row: [String: Any] = [
                 "vehicle_id": entry.vehicleID,
                 "stack": entry.stack,
                 "vehicle_class": entry.vehicleClass,
@@ -141,6 +150,19 @@ final class Ros2BridgeRunner {
                 "autonomy_planner": entry.autonomyPlanner,
                 "enabled": entry.enabled,
             ]
+            if let brainId = entry.brainId, !brainId.isEmpty {
+                row["brain_id"] = brainId
+            }
+            if let brainVersion = entry.brainVersion {
+                row["brain_version"] = brainVersion
+            }
+            if let nav2 = entry.nav2ParamOverlayJSON, !nav2.isEmpty {
+                row["nav2_param_overlay_json"] = nav2
+            }
+            if let as2 = entry.aerostack2ParamOverlayJSON, !as2.isEmpty {
+                row["aerostack2_param_overlay_json"] = as2
+            }
+            return row
         }
         sendStdinCommand([
             "type": "set_vehicles",
@@ -179,6 +201,9 @@ final class Ros2BridgeRunner {
     private func teardownOnce(exitCode: Int32) {
         guard !didTeardown else { return }
         didTeardown = true
+        if let pid = process?.processIdentifier {
+            GuardianRos2SpawnRegistry.unregister(pid: pid)
+        }
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         try? stdoutPipe?.fileHandleForReading.close()

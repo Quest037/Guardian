@@ -23,11 +23,15 @@ struct TrainingPanelView: View {
     @ObservedObject var sitl: SitlService
     @ObservedObject var missionControl: MissionControlStore
     @ObservedObject var generalSettings: GeneralSettingsStore
+    @ObservedObject var gazebo: GazeboService
+    var requiresGazeboRunWorld: Bool = false
     @StateObject private var playground = FormationsPlaygroundController()
     @StateObject private var training = TrainingPanelController()
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.guardianAppProduct) private var appProduct
     @EnvironmentObject private var toastCenter: ToastCenter
+    @EnvironmentObject private var applicationLifecycle: GuardianApplicationLifecycle
 
     @State private var panelMode: TrainingPanelMode = .vehicle
     @State private var sidePanelTab: FormationsSidePanelTab = .controls
@@ -59,7 +63,7 @@ struct TrainingPanelView: View {
             GeometryReader { geo in
                 let mapWidth = geo.size.width * 0.7
                 HStack(spacing: 0) {
-                    mapColumn
+                    trainingMainColumn
                         .frame(width: mapWidth, height: geo.size.height, alignment: .top)
 
                     Rectangle()
@@ -105,7 +109,10 @@ struct TrainingPanelView: View {
                 fleetLink: fleetLink,
                 sitl: sitl,
                 spawnDefaults: defaults,
-                simulationPlatform: generalSettings.defaultSimulationPlatform
+                simulationPlatform: generalSettings.defaultSimulationPlatform,
+                gazebo: gazebo,
+                requiresGazeboRunWorld: requiresGazeboRunWorld,
+                toastCenter: toastCenter
             )
             training.spawnDefaultsDidChange()
             playground.attach(
@@ -149,6 +156,7 @@ struct TrainingPanelView: View {
         .onChange(of: training.taskKind) { _ in
             guard panelMode == .vehicle else { return }
             training.taskKindDidChange()
+            training.trainingTaskOrVehicleDidChange()
             training.loadPromotedSkill()
         }
         .onChange(of: training.targetSlot) { _ in
@@ -160,7 +168,11 @@ struct TrainingPanelView: View {
             guard panelMode == .vehicle else { return }
             refreshTrainingMap()
         }
+        .onChange(of: training.selectedEnvironmentID) { _ in
+            training.environmentSelectionDidChange()
+        }
         .onChange(of: training.vehicleClass) { _ in
+            training.trainingTaskOrVehicleDidChange()
             guard panelMode == .vehicle else { return }
             training.scheduleNav2PlanPathRefresh()
         }
@@ -173,12 +185,22 @@ struct TrainingPanelView: View {
             refreshTrainingMap()
         }
         .onReceive(fleetLink.$hubFleetTelemetryTick) { _ in
+            guard applicationLifecycle.isApplicationActive else { return }
             if panelMode == .vehicle {
                 training.refreshSimulatorSlot(fleetLink: fleetLink)
                 syncTrainingMapMarkers()
             } else {
                 playground.refreshConnectedSimCount(fleetLink: fleetLink)
                 syncMapMarkers()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .guardianApplicationDidBecomeActive)) { _ in
+            if panelMode == .vehicle {
+                training.refreshSimulatorSlot(fleetLink: fleetLink)
+                refreshTrainingMap()
+            } else {
+                playground.refreshConnectedSimCount(fleetLink: fleetLink)
+                refreshActiveMap()
             }
         }
         .onChange(of: sidePanelTab) { tab in
@@ -193,7 +215,10 @@ struct TrainingPanelView: View {
             fleetLink: fleetLink,
             sitl: sitl,
             spawnDefaults: generalSettings.simSpawnDefaults,
-            simulationPlatform: generalSettings.defaultSimulationPlatform
+            simulationPlatform: generalSettings.defaultSimulationPlatform,
+            gazebo: gazebo,
+            requiresGazeboRunWorld: requiresGazeboRunWorld,
+            toastCenter: toastCenter
         )
         playground.attach(
             fleetLink: fleetLink,
@@ -222,6 +247,10 @@ struct TrainingPanelView: View {
         case .formation:
             training.leavePanel()
             playground.syncFromFleetOnAppear(fleetLink: fleetLink)
+            GuardianGazeboWebViewerPolicy.showOfflineToastIfNeeded(
+                productIncludesGazebo: appProduct.includesGazeboSimulation,
+                toastCenter: toastCenter
+            )
         }
         refreshActiveMap()
     }
@@ -241,6 +270,54 @@ struct TrainingPanelView: View {
         var id: String { vehicleID }
         let vehicleID: String
         let fallback: FleetVehicleModel?
+    }
+
+    @ViewBuilder
+    private var trainingMainColumn: some View {
+        if panelMode == .vehicle, training.usesGazeboTrainingViewport {
+            trainingGazeboViewport
+        } else {
+            mapColumn
+        }
+    }
+
+    private var trainingGazeboViewport: some View {
+        VStack(alignment: .leading, spacing: GuardianSpacing.md) {
+            Text("Gazebo simulation")
+                .font(GuardianTypography.font(.sectionHeadingSemibold))
+                .foregroundStyle(theme.textPrimary)
+            Text(
+                gazebo.runtimeAvailable
+                    ? "The training world runs in the Gazebo simulator window. An embedded 3D view will replace this panel in a later release."
+                    : "Gazebo is not available in this build. Run make gazebo-runtime after installing Gazebo Harmonic, then rebuild."
+            )
+            .font(GuardianTypography.Scale.body.font())
+            .foregroundStyle(theme.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            if let env = training.selectedEnvironment {
+                Text(env.manifest.displayName)
+                    .font(GuardianTypography.Scale.caption.font(weight: .medium))
+                    .foregroundStyle(theme.textPrimary)
+            }
+
+            if let gazeboStatus = training.gazeboWorldStatusText {
+                Text(gazeboStatus)
+                    .font(GuardianTypography.Scale.caption.font())
+                    .foregroundStyle(theme.textTertiary)
+            }
+
+            if let err = gazebo.lastError, training.activeGazeboWorldID == nil, training.simulatorSlot != nil {
+                Text(err)
+                    .font(GuardianTypography.Scale.caption.font())
+                    .foregroundStyle(GuardianSemanticColors.dangerForeground)
+            }
+
+            Spacer()
+        }
+        .padding(GuardianSpacing.lg)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(theme.backgroundRaised)
     }
 
     private var mapColumn: some View {
@@ -1041,28 +1118,51 @@ struct TrainingPanelView: View {
                 }
 
                 trainingRow(
-                    title: "Adjust target slot on map",
-                    help: "Drag the gold diamond to move the slot. Drag the handle on the circle to set heading. Changing the task does not move the slot."
+                    title: "Environment",
+                    help: training.selectedEnvironment?.manifest.description
+                        ?? "Gazebo world package for training spawn."
                 ) {
-                    Toggle(
-                        isOn: Binding(
-                            get: { training.isTargetSlotMapEditEnabled },
-                            set: { enabled in
-                                training.setTargetSlotMapEditEnabled(enabled)
-                                if enabled {
-                                    syncTrainingTargetSlotMapEdit()
-                                } else {
-                                    refreshTrainingMap()
-                                }
+                    if training.availableEnvironments.isEmpty {
+                        Text("No environments installed.")
+                            .font(GuardianTypography.font(.denseFootnoteRegular))
+                            .foregroundStyle(theme.textSecondary)
+                    } else {
+                        Picker("Environment", selection: $training.selectedEnvironmentID) {
+                            ForEach(training.availableEnvironments, id: \.id) { env in
+                                Text(env.manifest.displayName).tag(env.id)
                             }
-                        )
-                    ) {
-                        EmptyView()
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .disabled(vehicleControlsLocked)
                     }
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .accessibilityLabel("Adjust target slot on map")
-                    .disabled(trainingTargetSlotMapEditLocked)
+                }
+
+                if !training.usesGazeboTrainingViewport {
+                    trainingRow(
+                        title: "Adjust target slot on map",
+                        help: "Drag the gold diamond to move the slot. Drag the handle on the circle to set heading. Changing the task does not move the slot."
+                    ) {
+                        Toggle(
+                            isOn: Binding(
+                                get: { training.isTargetSlotMapEditEnabled },
+                                set: { enabled in
+                                    training.setTargetSlotMapEditEnabled(enabled)
+                                    if enabled {
+                                        syncTrainingTargetSlotMapEdit()
+                                    } else {
+                                        refreshTrainingMap()
+                                    }
+                                }
+                            )
+                        ) {
+                            EmptyView()
+                        }
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .accessibilityLabel("Adjust target slot on map")
+                        .disabled(trainingTargetSlotMapEditLocked)
+                    }
                 }
 
                 vehicleForbiddenControlsSection
@@ -1147,6 +1247,41 @@ struct TrainingPanelView: View {
                             .font(GuardianTypography.font(.denseFootnoteRegular))
                             .foregroundStyle(theme.textSecondary)
                     }
+
+                    Toggle("Auto-export brain pack on promote", isOn: $training.autoExportBrainOnPromote)
+                        .font(GuardianTypography.font(.denseFootnoteRegular))
+                        .foregroundStyle(theme.textSecondary)
+
+                    if training.promotedSkill != nil {
+                        if panelMode == .formation {
+                            Text("Formation rehearsal metadata (shape, spacing, sim count) is included in the brain pack squad profile.")
+                                .font(GuardianTypography.font(.denseFootnoteRegular))
+                                .foregroundStyle(theme.textTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if training.exportPlannerHintsSnapshot() != nil {
+                            Text("Nav2 or Aerostack2 lab overlays (path source, layout, environment) are included in planner hints.")
+                                .font(GuardianTypography.font(.denseFootnoteRegular))
+                                .foregroundStyle(theme.textTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+                        GuardianPrimaryProminentButton(title: "Export brain pack…") {
+                            training.exportPromotedBrainPack(squadProfile: brainExportSquadProfile())
+                        }
+                        if training.lastExportedBrainId != nil {
+                            GuardianThemedButton(
+                                title: "Export new version…",
+                                accent: .primary,
+                                surface: .outline
+                            ) {
+                                training.exportPromotedBrainPackNewVersion(squadProfile: brainExportSquadProfile())
+                            }
+                        }
+                    }
+                    .padding(.top, GuardianSpacing.sm)
                 } else {
                     Text("No promoted skill for this task and vehicle class yet. Run autonomous teaching.")
                         .font(GuardianTypography.font(.denseFootnoteRegular))
@@ -1296,5 +1431,20 @@ struct TrainingPanelView: View {
         }
         let model = mapModel ?? self.mapModel
         model.fitToVisible(points: points, style: .formationContent)
+    }
+
+    private func brainExportSquadProfile() -> GuardianBrainPackSquadProfile? {
+        guard panelMode == .formation else { return nil }
+        let vehicleClass: TrainingVehicleClass = switch playground.vehicleClass {
+        case .uavCopter: .uavCopter
+        case .ugvWheeled: .ugvWheeled
+        case .ugvTracked: .ugvTracked
+        }
+        return GuardianBrainPackBuilder.squadProfile(
+            formation: playground.formation,
+            shape: playground.shape,
+            vehicleClass: vehicleClass,
+            simCount: playground.simCount
+        )
     }
 }

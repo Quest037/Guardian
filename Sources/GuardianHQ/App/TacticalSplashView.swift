@@ -2,17 +2,42 @@ import SwiftUI
 import AppKit
 
 struct TacticalSplashView: View {
+    let product: GuardianAppProduct
+
     @State private var spin = false
     @State private var pulse = false
     @State private var statusLineIndex = 0
 
-    private static let statusLines: [String] = [
-        "Loading autonomous planner",
-        "Building training suite",
-        "Building mission designer",
-        "Preparing fleet link services",
-        "Registering mission recipes",
-    ]
+    private var splashLogo: NSImage? {
+        GuardianBundledPNGAsset.nsImage(resourceName: product.splashLogoResourceName)
+    }
+
+    private var statusLines: [String] {
+        switch product {
+        case .fullHQ:
+            return [
+                "Loading autonomous planner",
+                "Building training suite",
+                "Building mission designer",
+                "Preparing fleet link services",
+                "Registering mission recipes",
+            ]
+        case .mission:
+            return [
+                "Preparing fleet link services",
+                "Registering mission recipes",
+                "Loading mission designer",
+                "Connecting autonomy planners",
+            ]
+        case .training:
+            return [
+                "Building training suite",
+                "Preparing fleet link services",
+                "Loading skill teacher",
+                "Connecting simulation stack",
+            ]
+        }
+    }
 
     var body: some View {
         ZStack {
@@ -41,7 +66,7 @@ struct TacticalSplashView: View {
                         .frame(width: 170, height: 2)
                         .rotationEffect(.degrees(spin ? 360 : 0))
 
-                    if let splashLogo = SplashLogoLoader.logoImage {
+                    if let splashLogo {
                         Image(nsImage: splashLogo)
                             .resizable()
                             .scaledToFit()
@@ -54,23 +79,23 @@ struct TacticalSplashView: View {
                     }
                 }
 
-                Text("GUARDIAN HQ")
+                Text(product.splashHeadline)
                     .font(GuardianTypography.relativeFixed(size: 34, weight: .heavy, design: .rounded, relativeTo: .title))
                     .foregroundStyle(.white)
 
-                Text("SECURE MISSION OPERATIONS")
+                Text(product.splashTagline)
                     .font(GuardianTypography.font(.subsectionTitleSemibold))
                     .tracking(3.0)
                     .foregroundStyle(Color.cyan.opacity(0.9))
 
-                Text(Self.statusLines[statusLineIndex])
+                Text(statusLines[statusLineIndex])
                     .font(GuardianTypography.font(.operatorCaption))
                     .tracking(0.6)
                     .foregroundStyle(Color.white.opacity(0.5))
                     .frame(minHeight: 18)
                     .padding(.top, GuardianSpacing.xs)
                     .animation(.easeInOut(duration: 0.32), value: statusLineIndex)
-                    .accessibilityLabel(Self.statusLines[statusLineIndex])
+                    .accessibilityLabel(statusLines[statusLineIndex])
             }
         }
         .onAppear {
@@ -91,17 +116,7 @@ struct TacticalSplashView: View {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: stepNs)
             guard !Task.isCancelled else { return }
-            statusLineIndex = (statusLineIndex + 1) % Self.statusLines.count
+            statusLineIndex = (statusLineIndex + 1) % statusLines.count
         }
     }
-}
-
-private enum SplashLogoLoader {
-    static let logoImage: NSImage? = {
-        if let bundledIconURL = Bundle.module.url(forResource: "AppIcon", withExtension: "icns"),
-           let bundledIcon = NSImage(contentsOf: bundledIconURL) {
-            return bundledIcon
-        }
-        return nil
-    }()
 }

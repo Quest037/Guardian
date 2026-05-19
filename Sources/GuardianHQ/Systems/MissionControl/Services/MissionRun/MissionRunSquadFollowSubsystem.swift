@@ -196,11 +196,13 @@ final class MissionRunSquadFollowSubsystem {
             primaryAssignmentID: squad.primaryAssignment.id,
             mission: environment?.template
         )
-        let spacing = MissionSquadConvoySpacingPolicy.resolvedSpacing(
-            taskPattern: task.pattern,
+        let spacing = resolvedSquadConvoySpacing(
+            primaryAssignmentID: squad.primaryAssignment.id,
+            task: task,
             primaryGranularClass: squad.primaryRosterDevice.vehicleClass,
+            formation: formation,
             shape: shape,
-            formation: formation
+            mission: environment?.template
         )
         return bindings.enumerated().map { ordinal, binding in
             let slot = MissionControlSquadConvoyFormationUtilities.desiredFormationSlot(
@@ -308,6 +310,7 @@ final class MissionRunSquadFollowSubsystem {
         lockConvoyHoldPose(active: &active, primaryHub: primaryHub, force: true)
         activePrimaries[primaryID] = active
 
+        let plannerSummary = GuardianSquadAutonomyPlannerRouting.summary(squad: squad)
         environment.systems.logging.appendLogEvent(
             level: .info,
             taskID: squadLog.id,
@@ -319,6 +322,19 @@ final class MissionRunSquadFollowSubsystem {
                 "wingmanCount": String(wingmanIDs.count),
             ]
         )
+        environment.systems.logging.appendLogEvent(
+            level: .info,
+            taskID: squadLog.id,
+            taskLabel: squadLog.label,
+            speaker: .missionControl,
+            templateKey: MissionRunLogTemplateKey.squadPlannerBackendChosen,
+            templateParams: [
+                "squad": squadLog.label,
+                "planner": plannerSummary.logSummary,
+                "primaryPlanner": plannerSummary.primaryToken,
+            ]
+        )
+        environment.syncSquadBrainRos2SidecarEnrollment(squad: squad, sitl: sitl)
 
         ensureTickLoop(fleetLink: fleetLink, sitl: sitl)
         Task {
@@ -1754,6 +1770,11 @@ final class MissionRunSquadFollowSubsystem {
               let mission,
               let assignment = environment.assignments.first(where: { $0.id == primaryAssignmentID })
         else { return .convoy }
+        if assignment.policies.squadFormationOverride == nil,
+           let brain = brainSquadTuning(primaryAssignmentID: primaryAssignmentID, mission: mission),
+           let formation = brain.formation {
+            return formation
+        }
         return MissionRunPolicyResolution.resolvedSquadFormation(assignment: assignment, mission: mission)
     }
 
@@ -1765,7 +1786,46 @@ final class MissionRunSquadFollowSubsystem {
               let mission,
               let assignment = environment.assignments.first(where: { $0.id == primaryAssignmentID })
         else { return .normal }
+        if assignment.policies.squadFormationShapeOverride == nil,
+           let brain = brainSquadTuning(primaryAssignmentID: primaryAssignmentID, mission: mission),
+           let shape = brain.shape {
+            return shape
+        }
         return MissionRunPolicyResolution.resolvedSquadFormationShape(assignment: assignment, mission: mission)
+    }
+
+    private func resolvedSquadConvoySpacing(
+        primaryAssignmentID: UUID,
+        task: MissionTask,
+        primaryGranularClass: FleetVehicleType?,
+        formation: MissionSquadFormationKind,
+        shape: MissionSquadFormationShape,
+        mission: Mission?
+    ) -> MissionSquadConvoySpacing {
+        if let brain = brainSquadTuning(primaryAssignmentID: primaryAssignmentID, mission: mission),
+           let spacing = brain.spacing {
+            return spacing
+        }
+        return MissionSquadConvoySpacingPolicy.resolvedSpacing(
+            taskPattern: task.pattern,
+            primaryGranularClass: primaryGranularClass,
+            shape: shape,
+            formation: formation
+        )
+    }
+
+    private func brainSquadTuning(
+        primaryAssignmentID: UUID,
+        mission: Mission?
+    ) -> GuardianBrainSquadProfileTuning? {
+        guard let environment, let mission,
+              let assignment = environment.assignments.first(where: { $0.id == primaryAssignmentID }),
+              let device = mission.rosterDevices.first(where: { $0.id == assignment.rosterDeviceId })
+        else { return nil }
+        return GuardianBrainSquadProfileResolution.tuning(
+            for: device.vehicleClass,
+            bindings: environment.brainBindings
+        )
     }
 
     private func computeConvoyTargetsFromBindings(
@@ -1797,11 +1857,13 @@ final class MissionRunSquadFollowSubsystem {
         }()
         let formation = resolvedSquadFormation(primaryAssignmentID: primaryAssignmentID, mission: mission)
         let shape = resolvedSquadFormationShape(primaryAssignmentID: primaryAssignmentID, mission: mission)
-        let spacing = MissionSquadConvoySpacingPolicy.resolvedSpacing(
-            taskPattern: task.pattern,
+        let spacing = resolvedSquadConvoySpacing(
+            primaryAssignmentID: primaryAssignmentID,
+            task: task,
             primaryGranularClass: primaryDevice?.vehicleClass ?? wingmanClass,
+            formation: formation,
             shape: shape,
-            formation: formation
+            mission: mission
         )
         var ordinal = 0
         var out: [WingmanFollowTarget] = []

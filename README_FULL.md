@@ -11,13 +11,86 @@ Guardian is a native macOS operator console built with SwiftUI.
 - Top bar with app title
 - Per-page content title/subtitle so navigation changes are obvious
 
+### Two-app SwiftPM products (Training / Mission)
+
+Shared code lives in the **`GuardianHQ` library** target. Three macOS executables ship from one repo:
+
+| SwiftPM product | Role |
+| --- | --- |
+| **`GuardianHQ`** | Full monolith during cutover (Training + Mission surfaces) — implemented by `GuardianHQRun` |
+| **`GuardianMission`** | Operations app — Missions, Mission Control, Live Drive, Garage; **no** Training tab |
+| **`GuardianTraining`** | Lab app — Training + Formation; **no** Missions / Mission Control / Live Drive **nav panels** |
+
+**`GuardianAppProduct`** (`Sources/GuardianHQ/App/GuardianAppProduct.swift`) locks per-executable shell behaviour:
+
+- **Splash + window title:** Guardian Mission / Guardian Training (not Guardian HQ).
+- **Splash centre mark:** `splash_logo_mission.png` / `splash_logo_training.png`.
+- **Dock + Finder / `.app` icon:** runtime `NSApp.applicationIconImage` from `dock_logo_mission.png` / `dock_logo_training.png`; packaged `.app` builds `AppIcon.icns` from the same dock PNG via `scripts/package-macos-app.sh`.
+- **Sidebar logo:** Mission → `sidebar_logo.png`; Training → `sidebar_logo_training.png`.
+- **Training MRE:** Training still constructs `MissionStore` / `MissionControlStore` and wires fleet hooks; only operator-facing Missions / MC views are omitted from the rail.
+- **Default panel:** All executables open on **Dashboard** (no product-specific default section).
+- **Bundle display name:** Each executable embeds its own `MainBundle-Info.plist` (`CFBundleDisplayName` = Guardian Mission / Guardian Training) so system prompts (e.g. Local Network) do not truncate the SwiftPM binary name `GuardianTraining` → `GuardianTrainin`.
+
+**`.app` bundles:** `scripts/package-macos-app.sh [debug\|release] [GuardianHQ\|GuardianMission\|GuardianTraining]` → `build/Guardian Mission.app`, etc. **Guardian Mission** builds omit `GazeboRuntime`, `GazeboWeb`, and `TrainingEnvironments` from the embedded resource bundle (Training / HQ retain them).
+
+Tracker: `AppTrainingMissionSplitToDo.md` (`GuardianCore` extraction + SwiftPM resource split still open).
+
+### Guardian Brain Pack (`.guardianbrain`)
+
+Portable JSON autonomy export (format version **1**). Code: `Sources/GuardianHQ/Systems/Utilities/BrainPack/`.
+
+| Piece | Role |
+| --- | --- |
+| **`GuardianBrainPack`** | `manifest`, `skill` (segments + layout + score), optional `planner_hints` / `squad_profile`, `provenance` + SHA-256 |
+| **Training export** | Training → Skill tab → **Export brain pack…** / **Export new version…** (`GuardianBrainPackExportService`) |
+| **Mission import** | **Brains** sidebar (Mission / HQ apps) → import; on disk at `Application Support/Guardian/brains/<brain_id>/<brain_version>/brain.guardianbrain` |
+| **Pin defaults** | Brains tab → **Pin as default** per task kind + vehicle class; `GuardianBrainPinDefaultsStore` |
+| **Run binding** | `MissionRunEnvironment.brainBindings` seeded from pins at `MissionControlStore.createRun`; MCS **Setup → Rules → Autonomy brains** overrides catalogue version per task kind + vehicle class before Start Run |
+| **MC-R chrome** | Task triage strip lists run brains; roster tiles show brain caption per vehicle class when bound |
+| **Log export** | Copy/save mission log prepends a JSON `# Guardian brain bindings` block (`brain_id`, `brain_version`, `format_version`, task/vehicle tags) |
+| **MRE segment dispatch** | Non-convoy primaries with segment brains run `FleetLinkService/executeTrainingSegment` at task start (skips MAVLink upload); convoy + planner-only packs still open |
+| **Training auto-export** | Skill tab toggle **Auto-export brain pack on promote** → catalogue + **pin as default** for that task/class |
+| **Formation squad_profile** | Formation mode brain export embeds formation kind, shape, spacing, and sim count in `squad_profile` |
+| **Planner hints export** | Training brain export embeds `planner_hints` (Nav2 or Aerostack2 JSON overlay, layout, path source, environment id, inferred `max_speed_m_s`) |
+| **Brain squad_profile in MRE** | When a run binding’s pack includes `squad_profile`, wingman follow uses exported formation / shape / spacing unless the primary slot overrides formation in MCS |
+| **Squad follow failure prompt** | `MissionRunSquadFollowOperatorPromptBridge` adds **Policy** facts (brain display name + version, brain id) from the primary slot’s run binding when wingman OFFBOARD follow is exhausted |
+| **MCR ROS sidecar + brain overlays** | At run start, `GuardianBrainRos2SidecarPolicy` enrolls PX4 streams with `ensurePx4Ros2Sidecar` and passes `planner_hints` JSON (`nav2_param_overlay_json` / `aerostack2_param_overlay_json`) + brain id/version into `Ros2VehicleBridgeEntry`; cleared on run end |
+| **Class-aware squad planner (v1)** | `GuardianSquadAutonomyPlannerRouting` picks Nav2 vs Aerostack2 from roster class; convoy assembly logs `squadPlannerBackendChosen` and merges squad ROS sidecar enrollment; wingman motion remains MAVLink OFFBOARD streams until ROS squad execution ships |
+| **Convoy vs brain dispatch** | Convoy-pattern tasks log `brainDispatchConvoyPreferred` when run bindings exist; non-convoy failures still use `brainDispatchFallback` |
+| **Brain segment cycle** | `MissionRunBrainExecutionSubsystem/finishBrainSegmentSuccess` posts `missionCycleFinished` after segment success (see `MissionRunBrainExecutionSubsystemTests`) |
+| **Catalogue change toast** | Training auto-export posts `GuardianBrainCatalogueChangeNotification`; Guardian Mission / HQ show an info toast to open Settings → Brains |
+| **Training background lab runs** | `GuardianApplicationLifecycle`: resign-active pauses Nav2 warm-start + hub map ticks + ROS stdout on main; **teaching continues** (`beginBackgroundLabRun` + App Nap activity); refresh UI on `guardianApplicationDidBecomeActive` |
+| **Planner-only MRE** | Packs with `planner_hints` and no segments run synthesized open-loop OFFBOARD segments (Nav2 path at launch when available; geodesic fallback) |
+| **Brain stagger** | Delayed primaries schedule brain segment runs on the same wall-clock stagger as MAVLink starts |
+| **Mission app rail** | Guardian Mission omits **Training** and **Worlds** sidebar entries (`GuardianAppProduct`); full HQ monolith retains both during cutover |
+| **Training vs MRE** | `MissionControlStore/createRun` asserts when `GuardianAppSessionBootstrap.activeProduct == .training` |
+| **Legacy skill migration** | First open of **Brains** runs `GuardianBrainLegacySkillMigration` (imports `TrainingSkillStore` JSON into catalogue once per Mac) |
+| **Compatibility** | `GuardianBrainPackFormat.supportedFormatVersionRange` — Mission rejects unknown `format_version` with operator-readable errors |
+
+`brain_id` is stable across revisions. **`brain_version`** is **semver** (`major.minor.patch`, JSON string) with a **named major line** on the catalogue: major `0` → **subodai**, `1` → **caesar**, `2` → **sikander** (see ``GuardianBrainMajorLines``). Operator labels use ``GuardianBrainVersion/displayLabel`` (e.g. `subodai · 0.3.45`). Training auto-export and **Export new version…** bump the **patch** on the highest catalogue revision for that `brain_id` (first export starts at `0.0.1`). Legacy integer versions in old packs or pin files decode as `0.0.n`. On disk: `Application Support/Guardian/brains/<brain_id>/<semver>/brain.guardianbrain`.
+
+#### Mission sim vs Training worlds (product lock)
+
+A **brain** is one logical catalogue identity (`brain_id`) whose skills accumulate across **many** Training worlds over time — **not** one pack per Gazebo map. Mission Control does **not** load Training’s 3D environment into MC-R.
+
+| Surface | Simulator / map | Brain use |
+| --- | --- | --- |
+| **Guardian Training** | Gazebo Harmonic worlds + Leaflet playgrounds (see **Gazebo training simulation** below) | Promote skills → export semver packs; optional `gazebo_environment_id` on the manifest records **where** the skill was last trained (audit / provenance only). |
+| **Guardian Mission (MC-R SIM)** | Built-in **SITL** + mission **Leaflet** overview (Cesium when integrated); mission geofences and task waypoints define the operational frame | Import catalogue packs; MCS pins/overrides pick **`brain_version`** per task kind + vehicle class; MRE runs OFFBOARD segments / planner hints in the **mission** frame — independent of which Training world produced the pack. |
+
+**Transfer rule:** Skills, segments, `planner_hints`, and `squad_profile` in the pack are portable. **`gazebo_environment_id`** must not gate Mission import or run binding — operators may train in world A and run the same brain version in open-field or geofenced MC-R SIM without re-exporting for a map id.
+
+**Packaged Mission app:** `scripts/package-macos-app.sh GuardianMission` strips `GazeboRuntime`, `GazeboWeb`, and `TrainingEnvironments` from the copied SwiftPM resource bundle (Training / HQ bundles retain them). Runtime code already gates Gazebo UI and orphan blitz via ``GuardianAppProduct/includesGazeboSimulation``.
+
 ## Build and run
 
 From the `Guardian` directory (SwiftPM):
 
 ```bash
 swift build
-swift run GuardianHQ
+swift run GuardianHQ          # full monolith
+swift run GuardianMission     # operations app
+swift run GuardianTraining    # training lab app
 ```
 
 Or use the Makefile (also fetches bundled `mavsdk_server` on first build), then run the binary SwiftPM emitted (path varies by architecture):
@@ -41,6 +114,7 @@ Then **Product → Run** (⌘R). Xcode uses the same SwiftPM target.
 - **PX4 SITL runtime slice** (`bin/px4` + `etc/`): build PX4 elsewhere, then `PX4_AUTOPILOT_ROOT=/path/to/PX4-Autopilot make px4-sitl-runtime`
 - **Prewarm both SITL stacks:** `make sitl-prewarm` (ArduPilot full prebuild), or include PX4 too: `PX4_AUTOPILOT_ROOT=/path/to/PX4-Autopilot make sitl-prewarm`
 - **MAVSDK-Python bridge:** `make bridge-deps`
+- **Gazebo Harmonic (Training):** `brew install osrf/simulation/gz-harmonic` then `make gazebo-runtime`. **World Builder 3D viewport** also needs the `gz-launch` websocket plugin: `brew install libwebsockets && brew reinstall gz-launch7`, then re-run `make gazebo-runtime` (Homebrew skips the plugin when `libwebsockets` was missing at build time).
 
 ### Built-in SITL MAVLink endpoints
 
@@ -52,6 +126,36 @@ Guardian allocates a **random UDP ingress port** and **MAVLink system id** per b
 - **PX4:** same random ingress band and sysid allocation; `px4-rc.mavlink` reads `GUARDIAN_PX4_OFFBOARD_PORT_REMOTE` and `GUARDIAN_PX4_GCS_PORT_LOCAL` (overlay in `Resources/Px4SitlMavlink/`, applied at runtime and by `scripts/sync_px4_sitl_bundle.sh`). `PX4_PARAM_MAV_SYS_ID` sets the allocated system id.
 - **Port release after stop:** When every built-in sim is stopped, Guardian waits (``GuardianUdpPortUtilities/waitForUdpInboundPortBindable``) on recently used ingress/GCS ports before the next bulk MCS spawn (`GUARDIAN_SITL_PORT_RELEASE_SETTLE_TIMEOUT`, default `2.5` s). MCS bulk spawn also pauses between rows (`GUARDIAN_SITL_BULK_SPAWN_INTER_SPAWN_MS`, default `150` ms) in random-port mode.
 - **Orphan blitz:** ``GuardianSitlOrphanBlitz`` runs on cold launch and when the sim list has no alive processes (`GUARDIAN_SKIP_SITL_ORPHAN_BLITZ=1` disables).
+
+### Gazebo training simulation (Harmonic / gz-sim)
+
+**Product lock (Training + Formation simulate tabs):** Replace flat Leaflet playgrounds with **authored 3D worlds** (obstacles, start/goal, terrain). **Guardian Mission** does not ship Gazebo; **Guardian Training** (and the full monolith during cutover) do. Mission Control / Live Drive maps stay on Leaflet / Cesium.
+
+| Decision | v1 lock |
+| --- | --- |
+| Simulator stack | **Gazebo Harmonic** (`gz sim`, gz-sim 8.x). Staged under `Sources/GuardianHQ/Resources/GazeboRuntime/` via `make gazebo-runtime` (`scripts/fetch_gazebo_runtime.sh`). Developer override: `GUARDIAN_GZ_INSTALL_PREFIX` or `GUARDIAN_GZ_ROOT`. Apple Silicon: native Homebrew `osrf/simulation/gz-harmonic`; containerized sim is dev-only fallback, not the shipped path. |
+| PX4 + UGV | Training UGV classes use existing ``SimulationSpawnPolicy`` (PX4 for UGV presets). Open-field **SIH** SITL remains until Phase 4 wires spawn poses from a selected environment into Gazebo + PX4. |
+| ROS / Nav2 | World frame **`guardian_world`** (ENU origin per environment). Open-field Nav2 overlay stays until Phase 7 publishes occupancy/elevation from Gazebo. |
+| Surfaces | **Worlds (Builder)** embedded 3D viewport (shipped); **Training** / **Formation** 3D panels reuse the same stack later. Mission app: no Gazebo. Leaflet stays in Training/Formation until those panels ship. |
+| License | Gazebo **Apache 2.0** — same redistribution discipline as ``Px4SitlBundle`` / ``Ros2Runtime``. |
+
+**Environment packages:** `Resources/TrainingEnvironments/<id>/manifest.json` + `world.sdf` (bundled); operator copies under `Application Support/Guardian/training/environments/<id>/`. Catalogue: ``TrainingEnvironmentCatalogue``; anchors in ENU metres (`TrainingEnvironmentPose`). Default bundled id: `guardian-open-field`.
+
+**Session purposes:** ``GazeboSessionPurpose`` — `.build` / `.preview` (World Builder; Simulate off; **headless server + websocket + in-panel gzweb**) and `.run` (Training / Formation; Simulate on; full `gz sim` until Training viewport lands). ``GazeboService/spawnWorld(purpose:package:…)`` is only called from orchestrators, never at app launch.
+
+**World Builder 3D panel:** ``GazeboWebViewportView`` loads ``Resources/GazeboWeb/guardian_viewer.html`` (``gzweb`` ``SceneManager`` over ``ws://127.0.0.1:<port>``). All JS deps are rolled into ``Resources/GazeboWeb/dist/gzweb.bundle.mjs`` (single offline ESM; no CDN or import map). Regenerate with ``make gzweb-viewer`` or ``./scripts/fetch_gzweb_viewer.sh`` after gzweb version bumps. ``gz sim -s`` and the gz-launch websocket bridge share ``GZ_PARTITION`` and ``GZ_IP=127.0.0.1`` so Harmonic discovery stays on loopback (avoids macOS multicast *No route to host* between processes). Guardian waits for sim *Publishing scene information* before starting the websocket bridge.
+
+**Runtime layout:** `GazeboRuntime/bin/gz`, `lib/`, `share/`, stamps `.guardian_gazebo_runtime_built` / `.guardian_gz_sim_version`.
+
+**Process launcher:** ``GazeboService`` + ``GazeboLaunchRecipe`` + ``GazeboProcessRunner`` (mirror SITL). `.run` sessions require **Simulate**; `.build` / `.preview` do not. Turning Simulate off stops `.run` worlds only. Logs under `NSTemporaryDirectory()/guardian-gazebo-runtime/…` and the simulation log strip.
+
+**Concurrency:** at most **`GUARDIAN_GAZEBO_MAX_CONCURRENT_WORLDS`** worlds at once (default **2**, cap **16**). Documented minimum host: **16 GB RAM**, **4 CPU cores** for one world + one PX4 SITL; scale down concurrent worlds on smaller machines.
+
+**Orphan cleanup:** ``GuardianGazeboOrphanBlitz`` on cold launch (Training / full HQ only), when every tracked world has stopped, and on app quit (`GUARDIAN_SKIP_GAZEBO_ORPHAN_BLITZ=1` disables). Matches `gz` launchers plus Harmonic Ruby workers (`GazeboRuntime/lib/ruby/gz`, `cmdsim` / `cmdgui`, `gz sim server` / `gui`, Homebrew `Cellar/gz-*/lib/ruby/gz`). Persisted roots: ``GuardianGazeboSpawnRegistry``.
+
+**Packaging:** `scripts/package-macos-app.sh` copies the SwiftPM resource bundle (includes `GazeboRuntime` when staged). First run on a dev machine: `brew install osrf/simulation/gz-harmonic && make gazebo-runtime && swift build --product GuardianTraining`.
+
+Tracker: `TrainingGazeboSimulationToDo.md` (environment catalogue, viewport, PX4-in-world spawn — later phases).
 
 ## SITL command-catalogue smoke tests
 
@@ -1181,12 +1285,21 @@ Keep `vehicle_stack` JSON values aligned with `FleetAutopilotStack` `rawValue` s
 
 ## Child processes and cold launch (orphan cleanup)
 
-After a **force quit**, macOS can leave Guardian-spawned subprocesses running. On each **cold app launch**, `GuardianSitlOrphanBlitz` tears down known orphans: persisted root PIDs from `GuardianSitlSpawnRegistry`, ArduPilot/PX4-oriented `pgrep` patterns derived from `SitlLaunchRecipe`, and the **whole process tree** under each matched root (so helpers like MAVProxy or `px4-mavlink` go away with the parent).
+After a **force quit**, macOS can leave Guardian-spawned subprocesses running. On each **cold app launch**, orphan blitzes tear down known children and expand each matched root to its **whole process tree** via `pgrep -P`:
 
-**If you add new spawn methods or long-lived services**—including anything **outside** ArduPilot/PX4—you need to keep that behavior correct:
+| Stack | Blitz | Registry | Disable env |
+| --- | --- | --- | --- |
+| ArduPilot / PX4 SITL | ``GuardianSitlOrphanBlitz`` | ``GuardianSitlSpawnRegistry`` | `GUARDIAN_SKIP_SITL_ORPHAN_BLITZ=1` |
+| Gazebo (Training / HQ) | ``GuardianGazeboOrphanBlitz`` (incl. orphaned `/usr/bin/ruby` `gz` workers) | ``GuardianGazeboSpawnRegistry`` | `GUARDIAN_SKIP_GAZEBO_ORPHAN_BLITZ=1` |
+| Fleet ROS / Nav2 / bridge | ``GuardianRos2OrphanBlitz`` | ``GuardianRos2SpawnRegistry`` | `GUARDIAN_SKIP_ROS2_ORPHAN_BLITZ=1` |
+
+**ROS / Nav2:** Matches RoboStack (`~/.guardian/ros/humble`), bundled ``Ros2Runtime``, `guardian_ros2_vehicle_bridge`, and `nav2_training.launch.py`. Cold launch runs before fleet Nav2 warm-start (``FleetLinkService/beginFleetNav2WarmStartAtApplicationLaunch`` blocks until the blitz finishes). ``FleetRos2BridgeCoordinator/stopAll()`` and app quit kick a follow-up blitz to reap `ros2 launch` children left when only the bash parent was terminated.
+
+**If you add new spawn methods or long-lived services** you need to keep that behavior correct:
 
 1. Prefer spawning through **`SitlProcessRunner`** (or the same registration hook it uses) so the root PID is recorded in **`GuardianSitlSpawnRegistry`** after `Process.run()` succeeds, and unregistered when the process exits cleanly.
-2. If the new stack cannot use `SitlProcessRunner`, you must still **register** the root PID (same registry API) and ensure **`GuardianSitlOrphanBlitz`** can find it again after a crash—typically by adding **narrow, path-specific** `pgrep` patterns (see existing ArduPilot/PX4 patterns) so unrelated user processes are never matched.
-3. For local debugging only, `GUARDIAN_SKIP_SITL_ORPHAN_BLITZ=1` disables the startup blitz.
+2. For fleet ROS subprocesses, register in **`GuardianRos2SpawnRegistry`** from ``FleetNav2StackRunner``, ``Ros2BridgeRunner``, or ``MicroXrceAgentRunner`` (or add narrow `pgrep` patterns in ``GuardianRos2OrphanBlitz``).
+3. If the new stack cannot use those runners, you must still **register** the root PID and ensure the matching blitz can find it again after a crash—typically by adding **narrow, path-specific** `pgrep` patterns so unrelated user processes are never matched.
+4. For local debugging only, use the `GUARDIAN_SKIP_*_ORPHAN_BLITZ=1` env vars above.
 
 Skipping the above leaves orphans after force quit and breaks the expectation that Guardian cleans up everything it started.

@@ -8,10 +8,12 @@ enum AppSection: String, CaseIterable, Identifiable {
     case logs = "Logs"
     case missions = "Missions"
     case missionControl = "Mission Control"
+    case brains = "Brains"
     case theme = "Theme"
     case settings = "Settings"
     case plugins = "Plugins"
     case training = "Training"
+    case worlds = "Worlds"
 
     var id: String { rawValue }
 
@@ -29,8 +31,12 @@ enum AppSection: String, CaseIterable, Identifiable {
             return "list.bullet.rectangle.portrait"
         case .missionControl:
             return "slider.horizontal.3"
+        case .brains:
+            return "brain.head.profile"
         case .training:
             return "graduationcap"
+        case .worlds:
+            return "globe.americas.fill"
         case .theme:
             return "paintpalette.fill"
         case .settings:
@@ -54,8 +60,12 @@ enum AppSection: String, CaseIterable, Identifiable {
             return "Server and vehicle log streams."
         case .missionControl:
             return "Operate active missions in real time."
+        case .brains:
+            return "Import and pin autonomy brains for Mission Control runs."
         case .training:
             return "Train movement skills and preview formation spacing on simulators."
+        case .worlds:
+            return "Author Gazebo training worlds, start and goal poses, and obstacles."
         case .theme:
             return "UI chrome catalog and layout defaults."
         case .settings:
@@ -69,7 +79,7 @@ enum AppSection: String, CaseIterable, Identifiable {
 extension AppSection {
     /// Upper sidebar scroll area (core destinations + ``GuardianPluginSidebarPlacement/primary`` contributions).
     static var primarySidebarRail: [AppSection] {
-        [.dashboard, .missions, .missionControl, .devices, .liveDrive, .logs]
+        [.dashboard, .missions, .brains, .missionControl, .devices, .liveDrive, .logs]
     }
 
     /// Primary rail entries visible for the current session (simulate-only surfaces appended when enabled).
@@ -88,126 +98,16 @@ extension AppSection {
     }
 }
 
-@main
-struct GuardianHQApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var selection: AppSection = .dashboard
-    @State private var showingSplash = true
-    @StateObject private var toastCenter = ToastCenter()
-    @StateObject private var guardianConfirmOverlayHost = GuardianConfirmOverlayHost()
-    @StateObject private var appDrawer = AppDrawer()
-    @StateObject private var fleetLinkService = FleetLinkService()
-    @StateObject private var sitlService = SitlService()
-    @StateObject private var generalSettingsStore = GeneralSettingsStore()
-    @StateObject private var osmRoutingService = OSMRoutingService()
-    @StateObject private var pluginPreferences = PluginPreferencesStore()
-    @StateObject private var operatorPromptReviewFocusController = OperatorPromptReviewFocusController()
-
-    init() {
-        // Force-quit leaves PX4 / ArduPilot children; clear before any new SITL or MAVSDK work this session.
-        GuardianSitlOrphanBlitz.kickoffFromColdLaunch()
-    }
-
-    var body: some Scene {
-        WindowGroup("Guardian HQ") {
-            Group {
-                if showingSplash {
-                    TacticalSplashView()
-                } else {
-                    // Theme 12.1 — window stack: RootView → AppDrawer → blocking confirm host → persistent operator toasts → ephemeral toasts (see `GuardianLayoutPatterns`).
-                    RootView(
-                        selection: $selection,
-                        fleetLinkService: fleetLinkService,
-                        sitlService: sitlService,
-                        generalSettingsStore: generalSettingsStore
-                    )
-                        .withAppDrawer()
-                        .withGuardianConfirmOverlayHost()
-                        .withOperatorPromptPersistentToasts()
-                        .withToasts()
-                        .environmentObject(appDrawer)
-                        .environmentObject(OperatorPromptCenter.shared)
-                        .environmentObject(operatorPromptReviewFocusController)
-                        .environmentObject(osmRoutingService)
-                        .onAppear {
-                            // SwiftPM / early launch: re-run after splash so permission + System Settings registration line up with a real NSApplication + window session.
-                            UserNotificationService.shared.configure()
-                        }
-                }
-            }
-            // Single injection point for the window scene: ``ToastHost`` (``View/withToasts()``) and every
-            // descendant must resolve the same ``ToastCenter`` instance — do not attach only inside the
-            // post-splash branch or modifier-order bugs can strand auto-dismiss behind a stale host binding.
-            .environmentObject(toastCenter)
-            .onReceive(NotificationCenter.default.publisher(for: GuardianReserveSwapPostCommitOperatorToastNotification.name)) { note in
-                guard let message = note.userInfo?[GuardianReserveSwapPostCommitOperatorToastNotification.messageKey] as? String else { return }
-                let raw = note.userInfo?[GuardianReserveSwapPostCommitOperatorToastNotification.severityRawKey] as? String
-                let style = GuardianFeedbackSeverity(rawValue: raw ?? "") ?? .error
-                toastCenter.show(message, style: style, duration: 4.5)
-            }
-            .onReceive(NotificationCenter.default.publisher(for: GuardianMissionRunSimCleanupOperatorToastNotification.name)) { note in
-                guard let message = note.userInfo?[GuardianMissionRunSimCleanupOperatorToastNotification.messageKey] as? String else { return }
-                let raw = note.userInfo?[GuardianMissionRunSimCleanupOperatorToastNotification.severityRawKey] as? String
-                let style = GuardianFeedbackSeverity(rawValue: raw ?? "") ?? .warning
-                toastCenter.show(message, style: style, duration: 4.5)
-            }
-            .onReceive(NotificationCenter.default.publisher(for: GuardianMissionRunSlotEvidenceAutoTriageToastNotification.name)) { note in
-                guard let message = note.userInfo?[GuardianMissionRunSlotEvidenceAutoTriageToastNotification.messageKey] as? String else { return }
-                let raw = note.userInfo?[GuardianMissionRunSlotEvidenceAutoTriageToastNotification.severityRawKey] as? String
-                let style = GuardianFeedbackSeverity(rawValue: raw ?? "") ?? .success
-                toastCenter.show(message, style: style, duration: 4.5)
-            }
-            // Must be an ancestor of ``View/withGuardianConfirmOverlayHost()`` so ``GuardianConfirmOverlayRootModifier`` can resolve ``@EnvironmentObject`` (it wraps the drawer, not the other way around).
-            .environmentObject(guardianConfirmOverlayHost)
-            .onChange(of: showingSplash) { stillShowingSplash in
-                guard !stillShowingSplash else { return }
-                Task { @MainActor in
-                    UserNotificationService.shared.configure()
-                }
-            }
-            .environmentObject(pluginPreferences)
-            .environmentObject(GuardianPluginRegistry.shared)
-            .onAppear {
-                sitlService.attachFleetLink(fleetLinkService)
-                GuardianPluginRegistry.shared.bindPreferences(pluginPreferences)
-                GuardianPluginBootstrap.ensureRegistered()
-                FleetCommandsCatalogueBootstrap.ensureRegistered()
-                FleetRecipesCatalogueBootstrap.ensureRegistered()
-                fleetLinkService.beginFleetNav2WarmStartAtApplicationLaunch()
-            }
-            .task {
-                guard showingSplash else { return }
-                try? await Task.sleep(nanoseconds: 1_800_000_000)
-                withAnimation(GuardianMotion.shellCrossfade) {
-                    showingSplash = false
-                }
-            }
-            .preferredColorScheme(preferredColorScheme)
-        }
-        /// ``contentMinSize`` (via ``automatic``) lets the window grow to the screen; ``contentSize`` caps
-        /// the window to the content’s size range and fights a launch-time maximize.
-        .windowResizability(.automatic)
-        .defaultSize(width: 1320, height: 860)
-    }
-
-    private var preferredColorScheme: ColorScheme? {
-        switch generalSettingsStore.appearanceMode {
-        case .system:
-            return nil
-        case .light:
-            return .light
-        case .dark:
-            return .dark
-        }
-    }
-}
-
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationDidFinishLaunching(_ notification: Notification) {
+public final class AppDelegate: NSObject, NSApplicationDelegate {
+    public override init() {
+        super.init()
+    }
+
+    public func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
         NSApp.setActivationPolicy(.regular)
-        if let logo = AppIconLoader.loadLogoIcon() {
+        if let logo = GuardianDockLogoAsset.nsImage(for: GuardianAppSessionBootstrap.activeProduct) {
             NSApp.applicationIconImage = logo
         }
         NSApp.activate(ignoringOtherApps: true)
@@ -224,7 +124,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         ) { _ in
             Task { @MainActor in
+                GuardianApplicationLifecycle.shared.applicationDidBecomeActive()
                 UserNotificationService.shared.refreshAuthorizationStatus()
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                GuardianApplicationLifecycle.shared.applicationWillResignActive()
             }
         }
     }
@@ -240,16 +150,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
+    public func applicationWillTerminate(_ notification: Notification) {
         GuardianAppQuitCoordinator.shared.teardownForApplicationQuit()
     }
 }
 
-private enum AppIconLoader {
-    static func loadLogoIcon() -> NSImage? {
-        guard let bundledURL = Bundle.module.url(forResource: "AppIcon", withExtension: "icns") else {
-            return nil
-        }
-        return NSImage(contentsOf: bundledURL)
-    }
-}

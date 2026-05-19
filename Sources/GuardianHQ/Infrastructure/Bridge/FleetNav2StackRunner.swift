@@ -135,6 +135,11 @@ final class FleetNav2StackRunner {
         try proc.run()
         launchProcess = proc
         launchStderrPipe = err
+        GuardianRos2SpawnRegistry.register(
+            pid: proc.processIdentifier,
+            executablePath: "/bin/bash",
+            arguments: proc.arguments ?? []
+        )
         onLogLine?("Fleet Nav2: ros2 launch nav2_training.launch.py (pid \(proc.processIdentifier)).")
     }
 
@@ -142,16 +147,24 @@ final class FleetNav2StackRunner {
 
     private func terminateLaunchProcess() {
         guard let proc = launchProcess else { return }
+        let pid = proc.processIdentifier
         if proc.isRunning {
             proc.terminate()
         }
+        GuardianRos2SpawnRegistry.unregister(pid: pid)
         launchProcess = nil
         launchStderrPipe = nil
     }
 
     private func drainLaunchStderr(maxBytes: Int) -> String {
         guard let pipe = launchStderrPipe else { return "" }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let handle = pipe.fileHandleForReading
+        var data = Data()
+        while data.count < maxBytes {
+            let chunk = handle.availableData
+            if chunk.isEmpty { break }
+            data.append(chunk)
+        }
         guard !data.isEmpty else { return "" }
         let text = String(data: data.prefix(maxBytes), encoding: .utf8) ?? ""
         return text.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -387,6 +387,36 @@ enum StructuredLogTemplateCatalog: Sendable {
             mcr: "MAVLink live · @{{slotID}} · {{itemCount}} items · {{formation}} · {{timing}}"
         )
         put(
+            MissionRunLogTemplateKey.brainDispatchSegmentChosen,
+            "Autonomy brain {{brain}} v{{brainVersion}} selected for @{{slotID}} ({{segmentCount}} segment(s); {{timing}}; {{source}}) — MAVLink mission upload skipped.",
+            mcr: "Brain · {{brain}} v{{brainVersion}} · @{{slotID}} · {{segmentCount}} seg · {{timing}}"
+        )
+        put(
+            MissionRunLogTemplateKey.brainDispatchSegmentStarted,
+            "Brain segment run started for @{{slotID}} ({{brain}} v{{brainVersion}}, format {{formatVersion}}, {{segmentCount}} segment(s); {{source}}).",
+            mcr: "Brain run · @{{slotID}} · {{brain}} v{{brainVersion}}"
+        )
+        put(
+            MissionRunLogTemplateKey.brainDispatchSegmentSucceeded,
+            "Brain segment run finished for @{{slotID}} ({{source}}).",
+            mcr: "Brain done · @{{slotID}}"
+        )
+        put(
+            MissionRunLogTemplateKey.brainDispatchSegmentFailed,
+            "Brain segment run failed for @{{slotID}} ({{source}}): {{detail}}.",
+            mcr: "Brain failed · @{{slotID}} · {{detail}}"
+        )
+        put(
+            MissionRunLogTemplateKey.brainDispatchPlannerPathResolved,
+            "Brain planner path resolved for @{{slotID}} ({{pathSource}}, {{segmentCount}} open-loop segment(s); {{source}}).",
+            mcr: "Brain planner · @{{slotID}} · {{pathSource}} · {{segmentCount}} seg"
+        )
+        put(
+            MissionRunLogTemplateKey.brainDispatchFallback,
+            "Brain segment dispatch skipped for @{{slotID}} — using MAVLink mission path: {{detail}}.",
+            mcr: "Brain skipped · @{{slotID}} · {{detail}}"
+        )
+        put(
             MissionRunLogTemplateKey.missionSquadFirstWaveReleased,
             "First-wave squad released for {{squad}} (@{{slotID}}); MAVLink execution starting.",
             mcr: "First wave · {{squad}} · @{{slotID}} · executing"

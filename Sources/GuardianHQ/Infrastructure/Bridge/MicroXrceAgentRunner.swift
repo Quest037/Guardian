@@ -33,6 +33,11 @@ final class MicroXrceAgentRunner {
         try proc.run()
         process = proc
         stderrPipe = err
+        GuardianRos2SpawnRegistry.register(
+            pid: proc.processIdentifier,
+            executablePath: executablePath,
+            arguments: proc.arguments ?? []
+        )
         err.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard let self, !data.isEmpty else { return }
@@ -64,6 +69,9 @@ final class MicroXrceAgentRunner {
     private func teardownOnce(exitCode: Int32) {
         guard !didTeardown else { return }
         didTeardown = true
+        if let pid = process?.processIdentifier {
+            GuardianRos2SpawnRegistry.unregister(pid: pid)
+        }
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         try? stderrPipe?.fileHandleForReading.close()
         stderrPipe = nil

@@ -101,6 +101,8 @@ struct MCRLiveRosterRowSnapshot: Equatable {
     let vehicleModel: FleetVehicleOperationalModel
     let slotAttention: MCRLiveRosterSlotAttentionSnapshot?
     let accessibilitySummary: String?
+    /// Active imported brain for this row’s vehicle class, when the run carries a binding.
+    let brainBindingCaption: String?
 }
 
 struct MCRLiveRosterRowPresentation: Identifiable, Equatable {
@@ -122,7 +124,8 @@ extension MCRLiveRosterRowSnapshot {
             vehicleClassForBundledDeviceArt: slice.vehicleClassForBundledDeviceArt,
             vehicleModel: slice.vehicleModel,
             slotAttention: slotAttention,
-            accessibilitySummary: accessibilitySummary
+            accessibilitySummary: accessibilitySummary,
+            brainBindingCaption: brainBindingCaption
         )
     }
 }
@@ -249,6 +252,10 @@ enum MCRLiveRosterRowSnapshotFactory {
                 )
             }
         }()
+        let brainBindingCaption = GuardianBrainRunUtilities.preferredBinding(
+            for: deviceArtVehicleClass,
+            bindings: run.brainBindings
+        ).map { GuardianBrainRunUtilities.bindingCaption($0) }
         return MCRLiveRosterRowSnapshot(
             slotTitle: assignment.slotName,
             rosterSubtitle: rosterRoleSubtitle(device),
@@ -259,7 +266,8 @@ enum MCRLiveRosterRowSnapshotFactory {
             vehicleModel: vehicleID.map { fleetLink.vehicleOperationalModel(forVehicleID: $0) }
                 ?? FleetVehicleOperationalModel(hub: nil, lifecycleStatus: nil),
             slotAttention: slotAttention,
-            accessibilitySummary: reserveSwapStripAccessibilitySummary
+            accessibilitySummary: reserveSwapStripAccessibilitySummary,
+            brainBindingCaption: brainBindingCaption
         )
     }
 

@@ -11,7 +11,12 @@ final class FleetRos2BridgeCoordinator {
     private var didLogUnavailable = false
     /// Keeps the ROS bridge process alive with no PX4 vehicles so fleet Nav2 can warm-start at app launch.
     private var fleetNav2WarmStartDesired = false
+    /// Suppresses Nav2 warm-start / bridge host while the app is inactive (macOS background).
+    private var fleetNav2WarmStartPausedForBackground = false
     private var nav2StackRestartTask: Task<Void, Never>?
+
+    /// When false, stdout handlers are not scheduled on the main actor (reduces background UI freeze).
+    var shouldDeliverStdoutOnMainActor: () -> Bool = { true }
 
     var processPhase: Ros2BridgeProcessPhase = .inactive
     var onProcessPhaseChanged: ((Ros2BridgeProcessPhase) -> Void)?
@@ -32,6 +37,7 @@ final class FleetRos2BridgeCoordinator {
         nav2StackRunner.stop()
         teardownBridgeProcesses()
         setProcessPhase(.inactive)
+        GuardianRos2OrphanBlitz.kickoffWhenFleetRos2Stopped()
     }
 
     private func teardownBridgeProcesses() {
@@ -49,6 +55,29 @@ final class FleetRos2BridgeCoordinator {
             return
         }
         fleetNav2WarmStartDesired = true
+        fleetNav2WarmStartPausedForBackground = false
+        wireNav2StackRunnerCallbacksIfNeeded()
+        guard !fleetNav2WarmStartPausedForBackground else { return }
+        nav2StackRunner.ensureRunning()
+        reconcile(vehicles: [])
+    }
+
+    /// Stops Nav2 launch polling and the warm-start bridge host while the app is in the background.
+    func pauseFleetNav2ForApplicationBackground() {
+        guard fleetNav2WarmStartDesired else { return }
+        fleetNav2WarmStartPausedForBackground = true
+        nav2StackRestartTask?.cancel()
+        nav2StackRestartTask = nil
+        nav2StackRunner.stop()
+        onNav2TrainingStackStatusChanged?("inactive", "app_background")
+        onNav2TrainingStackReadyChanged?(false)
+        reconcile(vehicles: [])
+    }
+
+    /// Restores fleet Nav2 warm-start after the app becomes active again.
+    func resumeFleetNav2AfterApplicationBackground() {
+        guard fleetNav2WarmStartDesired, fleetNav2WarmStartPausedForBackground else { return }
+        fleetNav2WarmStartPausedForBackground = false
         wireNav2StackRunnerCallbacksIfNeeded()
         nav2StackRunner.ensureRunning()
         reconcile(vehicles: [])
@@ -134,6 +163,10 @@ final class FleetRos2BridgeCoordinator {
         lastUnavailableReason = nil
         didLogUnavailable = false
 
+        bridge.shouldDeliverChunksOnMainActor = { [weak self] in
+            self?.shouldDeliverStdoutOnMainActor() ?? true
+        }
+
         if bridge.isRunning {
             setProcessPhase(.running)
             bridge.updateVehicles(vehicles)
@@ -218,6 +251,18 @@ final class FleetRos2BridgeCoordinator {
             lines.append("    ros_namespace: \"\(escapeYAML(v.rosNamespace))\"")
             lines.append("    autonomy_planner: \(v.autonomyPlanner)")
             lines.append("    enabled: \(v.enabled ? "true" : "false")")
+            if let brainId = v.brainId, !brainId.isEmpty {
+                lines.append("    brain_id: \"\(escapeYAML(brainId))\"")
+            }
+            if let brainVersion = v.brainVersion {
+                lines.append("    brain_version: \(brainVersion)")
+            }
+            if let nav2 = v.nav2ParamOverlayJSON, !nav2.isEmpty {
+                lines.append("    nav2_param_overlay_json: \"\(escapeYAML(nav2))\"")
+            }
+            if let as2 = v.aerostack2ParamOverlayJSON, !as2.isEmpty {
+                lines.append("    aerostack2_param_overlay_json: \"\(escapeYAML(as2))\"")
+            }
         }
         return lines.joined(separator: "\n") + "\n"
     }

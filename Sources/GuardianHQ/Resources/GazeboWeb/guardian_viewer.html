@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { margin: 0; height: 100%; background: #1e1e1e; overflow: hidden; }
+    #scene { position: absolute; inset: 0; touch-action: none; cursor: grab; }
+    #scene:active { cursor: grabbing; }
+    #scene canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    #loading {
+      position: absolute; inset: 0; z-index: 10;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 14px; background: rgba(30, 30, 30, 0.78); pointer-events: none;
+    }
+    #loading.hidden { display: none; }
+    #loading.error .spinner { display: none; }
+    #loading.error #loading-label {
+      max-width: min(420px, 90vw); text-align: center; line-height: 1.45;
+    }
+    .spinner {
+      width: 28px; height: 28px; box-sizing: border-box;
+      border: 3px solid rgba(255, 255, 255, 0.22);
+      border-top-color: rgba(255, 255, 255, 0.88);
+      border-radius: 50%;
+      animation: guardian-spin 0.85s linear infinite;
+    }
+    @keyframes guardian-spin { to { transform: rotate(360deg); } }
+    #loading-label {
+      color: #c8c8c8;
+      font: 13px -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    #camera-debug {
+      position: absolute; left: 0; right: 0; bottom: 0; z-index: 20;
+      padding: 6px 10px;
+      font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #e8e8e8;
+      background: rgba(0, 0, 0, 0.72);
+      pointer-events: none;
+      white-space: pre;
+      line-height: 1.35;
+    }
+    #camera-debug.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div id="scene"></div>
+  <div id="loading">
+    <div class="spinner" aria-hidden="true"></div>
+    <div id="loading-label">Loading scene…</div>
+  </div>
+  <div id="camera-debug" class="hidden" aria-hidden="true"></div>
+  <script type="module">
+    const loading = document.getElementById('loading');
+    const loadingLabel = document.getElementById('loading-label');
+    const cameraDebug = document.getElementById('camera-debug');
+    const root = document.getElementById('scene');
+    const params = new URLSearchParams(location.search);
+    const port = params.get('port') || '9002';
+    const worldOverride = params.get('world') || '';
+    let cameraDebugEnabled = params.get('cameraDebug') === '1';
+    const groundHalfParam = parseFloat(params.get('groundHalf') || '');
+    const MAP_GROUND_HALF_EXTENT_M = Number.isFinite(groundHalfParam) && groundHalfParam > 0
+      ? groundHalfParam
+      : 500;
+
+    const MAP_DEFAULT_CAMERA = { x: -1355.4, y: -56.11, z: 833.75 };
+    const MAP_DEFAULT_LOOK_AT = { x: 0, y: 0, z: 0 };
+    const MAP_ORBIT_POLAR_MIN = 0.15;
+    const MAP_ORBIT_POLAR_MAX = Math.PI / 2 - 0.06;
+
+    let viewerSession = null;
+    let cameraDebugFrame = 0;
+
+    function setLoading(active, label = 'Loading scene…') {
+      loading.classList.toggle('hidden', !active);
+      loading.classList.toggle('error', false);
+      loadingLabel.textContent = label;
+    }
+
+    function showLoadError(message) {
+      loading.classList.remove('hidden');
+      loading.classList.add('error');
+      loadingLabel.textContent = message;
+    }
+
+    function sceneReady() {
+      return Boolean(viewerSession?.manager?.scene?.camera && viewerSession?.manager?.scene?.controls);
+    }
+
+    function bindViewerSession(session) {
+      viewerSession = session;
+    }
+
+    function applyMapCameraPolicy(manager) {
+      const scene2 = manager.scene;
+      if (!scene2?.camera || !scene2.controls) return false;
+
+      const camera = scene2.camera;
+      camera.far = 25000;
+      camera.near = 0.5;
+      camera.updateProjectionMatrix();
+
+      const controls = scene2.controls;
+      controls.target.set(MAP_DEFAULT_LOOK_AT.x, MAP_DEFAULT_LOOK_AT.y, MAP_DEFAULT_LOOK_AT.z);
+      controls.minPolarAngle = MAP_ORBIT_POLAR_MIN;
+      controls.maxPolarAngle = MAP_ORBIT_POLAR_MAX;
+      controls.minDistance = 4;
+      controls.maxDistance = Math.max(1800, MAP_GROUND_HALF_EXTENT_M * 3.2);
+      controls.screenSpacePanning = false;
+      controls.enablePan = true;
+      controls.enableZoom = true;
+      controls.enableRotate = true;
+
+      scene2.defaultCameraPosition.set(
+        MAP_DEFAULT_CAMERA.x, MAP_DEFAULT_CAMERA.y, MAP_DEFAULT_CAMERA.z
+      );
+      scene2.defaultCameraLookAt.set(
+        MAP_DEFAULT_LOOK_AT.x, MAP_DEFAULT_LOOK_AT.y, MAP_DEFAULT_LOOK_AT.z
+      );
+      return true;
+    }
+
+    function syncControlsFromCamera(manager) {
+      const scene2 = manager.scene;
+      if (!scene2?.camera || !scene2.controls) return;
+      scene2.controls.object.position.copy(scene2.camera.position);
+      scene2.controls.update();
+    }
+
+    function viewportSize(scene2) {
+      const dom = scene2?.getDomElement?.() ?? root;
+      return {
+        width: dom.clientWidth || root.clientWidth || 1,
+        height: dom.clientHeight || root.clientHeight || 1,
+      };
+    }
+
+    function birdseyeDistanceForGround(camera, width, height) {
+      const half = MAP_GROUND_HALF_EXTENT_M;
+      const aspect = width / Math.max(height, 1);
+      const fovRad = (camera.fov * Math.PI) / 180;
+      const tanHalf = Math.tan(fovRad / 2);
+      const margin = 1.08;
+      const fitHeight = (half / tanHalf) * margin;
+      const fitWidth = (half / (tanHalf * aspect)) * margin;
+      return Math.max(fitHeight, fitWidth);
+    }
+
+    window.guardianViewer = {
+      resetDefaultView() {
+        const manager = viewerSession?.manager;
+        if (!applyMapCameraPolicy(manager)) return false;
+        manager.resetView();
+        syncControlsFromCamera(manager);
+        return true;
+      },
+      fitBirdseyeView() {
+        const manager = viewerSession?.manager;
+        const scene2 = manager?.scene;
+        if (!scene2?.camera || !scene2.controls) return false;
+        if (!applyMapCameraPolicy(manager)) return false;
+        const camera = scene2.camera;
+        const controls = scene2.controls;
+        const { width, height } = viewportSize(scene2);
+        const distance = birdseyeDistanceForGround(camera, width, height);
+        const target = MAP_DEFAULT_LOOK_AT;
+        controls.target.set(target.x, target.y, target.z);
+        camera.position.set(0, 0, distance);
+        camera.up.set(0, 1, 0);
+        camera.lookAt(target.x, target.y, target.z);
+        camera.updateProjectionMatrix();
+        controls.minPolarAngle = 0;
+        controls.maxPolarAngle = 0.08;
+        syncControlsFromCamera(manager);
+        manager.resize();
+        return true;
+      },
+      setCameraDebugEnabled(enabled) {
+        cameraDebugEnabled = Boolean(enabled);
+        if (cameraDebugEnabled) {
+          startCameraDebugHUD();
+        } else {
+          stopCameraDebugHUD();
+        }
+        return true;
+      },
+      sceneReady,
+    };
+
+    function formatCameraDebugLine(manager) {
+      const scene2 = manager?.scene;
+      const camera = scene2?.camera;
+      const controls = scene2?.controls;
+      if (!camera) return 'camera: (not ready)';
+      const p = camera.position;
+      const t = controls?.target;
+      const target = t ? `${t.x.toFixed(2)}, ${t.y.toFixed(2)}, ${t.z.toFixed(2)}` : '—';
+      let angles = '';
+      if (controls?.getPolarAngle && controls?.getAzimuthalAngle) {
+        const polarDeg = (controls.getPolarAngle() * 180) / Math.PI;
+        const azimuthDeg = (controls.getAzimuthalAngle() * 180) / Math.PI;
+        angles = `  polar ${polarDeg.toFixed(1)}°  azimuth ${azimuthDeg.toFixed(1)}°`;
+      }
+      return (
+        `cam pos  x ${p.x.toFixed(2)}  y ${p.y.toFixed(2)}  z ${p.z.toFixed(2)}\n`
+        + `target   ${target}${angles}\n`
+        + `DEFAULT  x ${MAP_DEFAULT_CAMERA.x}  y ${MAP_DEFAULT_CAMERA.y}  z ${MAP_DEFAULT_CAMERA.z}`
+      );
+    }
+
+    function stopCameraDebugHUD() {
+      if (cameraDebugFrame) {
+        cancelAnimationFrame(cameraDebugFrame);
+        cameraDebugFrame = 0;
+      }
+      cameraDebug.classList.add('hidden');
+      cameraDebug.textContent = '';
+    }
+
+    function startCameraDebugHUD() {
+      if (!cameraDebugEnabled) {
+        stopCameraDebugHUD();
+        return;
+      }
+      if (cameraDebugFrame) return;
+      cameraDebug.classList.remove('hidden');
+      const loop = () => {
+        cameraDebugFrame = requestAnimationFrame(loop);
+        const manager = viewerSession?.manager;
+        cameraDebug.textContent = formatCameraDebugLine(manager);
+      };
+      loop();
+    }
+
+    async function loadSceneManager() {
+      try {
+        const mod = await import('./dist/gzweb.bundle.mjs');
+        const SceneManager = mod.SceneManager ?? mod.default?.SceneManager;
+        if (SceneManager) return SceneManager;
+        throw new Error('SceneManager not found in bundled gzweb');
+      } catch (bundledErr) {
+        throw new Error(
+          'Bundled gzweb failed to load (rebuild the app or run ./scripts/fetch_gzweb_viewer.sh). '
+          + (bundledErr?.message || bundledErr)
+        );
+      }
+    }
+
+    function waitUntilReady(manager, timeoutMs) {
+      return new Promise((resolve, reject) => {
+        const sub = manager.getConnectionStatusAsObservable().subscribe((ready) => {
+          if (ready) {
+            sub.unsubscribe();
+            resolve();
+          }
+        });
+        setTimeout(() => {
+          sub.unsubscribe();
+          reject(new Error('Scene handshake timed out'));
+        }, timeoutMs);
+      });
+    }
+
+    function patchSceneWorldHandshake(ws, worldName) {
+      if (!worldName) return () => {};
+      const nativeSend = ws.send.bind(ws);
+      ws.send = (payload) => {
+        if (typeof payload === 'string') {
+          const parts = payload.split(',');
+          if (parts[0] === 'scene' && (!parts[1] || parts[1].trim() === '')) {
+            parts[1] = worldName;
+            nativeSend(parts.join(','));
+            return;
+          }
+        }
+        nativeSend(payload);
+      };
+      return () => { ws.send = nativeSend; };
+    }
+
+    function frameSceneWhenReady(manager, attempt = 0, onReady) {
+      manager.resize();
+      const models = typeof manager.getModels === 'function' ? manager.getModels() : [];
+      if (models.length === 0 && attempt < 40) {
+        setTimeout(() => frameSceneWhenReady(manager, attempt + 1, onReady), 250);
+        return;
+      }
+      applyMapCameraPolicy(manager);
+      manager.resetView();
+      syncControlsFromCamera(manager);
+      onReady?.();
+    }
+
+    async function connectOnce(SceneManager) {
+      const wsURL = `ws://127.0.0.1:${port}`;
+      const manager = new SceneManager({ elementId: root.id });
+      let restoreSend = () => {};
+      const onResize = () => manager.resize();
+
+      const NativeWS = window.WebSocket;
+      window.WebSocket = function(url, protocols) {
+        const ws = protocols === undefined
+          ? new NativeWS(url)
+          : new NativeWS(url, protocols);
+        if (url === wsURL) {
+          restoreSend = patchSceneWorldHandshake(ws, worldOverride);
+        }
+        return ws;
+      };
+
+      try {
+        const ready = waitUntilReady(manager, 15000);
+        await manager.connect(wsURL);
+        await ready;
+        window.addEventListener('resize', onResize);
+        await new Promise((resolve) => {
+          frameSceneWhenReady(manager, 0, resolve);
+        });
+        setLoading(false);
+        return { manager, onResize };
+      } catch (err) {
+        window.removeEventListener('resize', onResize);
+        try { manager.destroy(); } catch (_) { /* retry */ }
+        throw err;
+      } finally {
+        window.WebSocket = NativeWS;
+        restoreSend();
+      }
+    }
+
+    async function connect() {
+      setLoading(true);
+      if (cameraDebugEnabled) {
+        startCameraDebugHUD();
+      } else {
+        stopCameraDebugHUD();
+      }
+      try {
+        const SceneManager = await loadSceneManager();
+        const maxAttempts = 8;
+        let lastError = null;
+        let active = null;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          try {
+            if (active?.manager) {
+              window.removeEventListener('resize', active.onResize);
+              try { active.manager.destroy(); } catch (_) { /* reconnect */ }
+            }
+            active = await connectOnce(SceneManager);
+            bindViewerSession(active);
+            return;
+          } catch (err) {
+            lastError = err;
+            await new Promise((r) => setTimeout(r, 800 + attempt * 250));
+          }
+        }
+        throw lastError ?? new Error('Could not load scene from simulator');
+      } catch (err) {
+        showLoadError(
+          'Could not load the 3D scene. Stop Gazebo, wait a moment, then preview again. '
+          + (err?.message || '')
+        );
+      }
+    }
+
+    connect();
+  </script>
+</body>
+</html>

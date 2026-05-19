@@ -11,6 +11,7 @@ final class MissionRunSystems {
     let scheduling: MissionRunSchedulingSubsystem
     let policyAuthority: MissionRunPolicyAuthoritySubsystem
     let squadFollow: MissionRunSquadFollowSubsystem
+    let brainExecution: MissionRunBrainExecutionSubsystem
 
     init(
         lifecycle: MissionRunLifecycleSubsystem,
@@ -21,7 +22,8 @@ final class MissionRunSystems {
         executor: MissionRunExecutionSubsystem,
         scheduling: MissionRunSchedulingSubsystem,
         policyAuthority: MissionRunPolicyAuthoritySubsystem,
-        squadFollow: MissionRunSquadFollowSubsystem
+        squadFollow: MissionRunSquadFollowSubsystem,
+        brainExecution: MissionRunBrainExecutionSubsystem
     ) {
         self.lifecycle = lifecycle
         self.logging = logging
@@ -32,5 +34,6 @@ final class MissionRunSystems {
         self.scheduling = scheduling
         self.policyAuthority = policyAuthority
         self.squadFollow = squadFollow
+        self.brainExecution = brainExecution
     }
 }

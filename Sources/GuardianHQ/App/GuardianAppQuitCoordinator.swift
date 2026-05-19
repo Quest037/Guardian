@@ -8,6 +8,7 @@ final class GuardianAppQuitCoordinator {
 
     private weak var fleet: FleetLinkService?
     private weak var sitl: SitlService?
+    private weak var gazebo: GazeboService?
 
     private init() {}
 
@@ -20,7 +21,12 @@ final class GuardianAppQuitCoordinator {
         sitl = service
     }
 
+    func noteGazeboServiceCreated(_ service: GazeboService) {
+        gazebo = service
+    }
+
     func teardownForApplicationQuit() {
+        gazebo?.stopAllForApplicationQuit()
         sitl?.stopAllForApplicationQuit()
         fleet?.teardownAllForApplicationQuit()
     }

@@ -26,6 +26,7 @@ final class MissionRunExecutionSubsystem {
 
     private var pendingCommandBatches: [MissionRunQueuedCommandBatch] = []
     private var wallClockBatchTasks: [UUID: Task<Void, Never>] = [:]
+    private var brainSegmentWallClockTasks: [UUID: Task<Void, Never>] = [:]
 
     /// Set when an immediate ``MissionRunCommandQueueTag/reserveSwapPostCommit`` batch is enqueued (for diagnostics / unit tests).
     private(set) var lastEnqueuedReserveSwapPostCommitAckContext: MissionRunReserveSwapPostCommitBatchAckContext?
@@ -80,6 +81,7 @@ final class MissionRunExecutionSubsystem {
         environment.systems.squadFollow.resetAllFollowState()
         environment.captureOperatorLaunchPosesAtRunStart(fleetLink: context.fleetLink, sitl: context.sitl)
         environment.captureRosterSimStartPoseSnapshotsIfNeeded(fleetLink: context.fleetLink, sitl: context.sitl)
+        environment.syncBrainRos2SidecarEnrollment(sitl: context.sitl)
         if environment.startedAt == nil {
             environment.startedAt = Date()
         }
@@ -240,7 +242,48 @@ final class MissionRunExecutionSubsystem {
             task.cancel()
         }
         wallClockBatchTasks.removeAll()
+        for (_, task) in brainSegmentWallClockTasks {
+            task.cancel()
+        }
+        brainSegmentWallClockTasks.removeAll()
         pendingCommandBatches.removeAll()
+    }
+
+    private func scheduleDelayedBrainSegmentPlans(
+        _ delayed: [(plan: MissionRunBrainExecutionSubsystem.SegmentLaunchPlan, startAt: Date)],
+        context: MissionRunExecutionContext
+    ) {
+        guard let environment else { return }
+        for item in delayed {
+            environment.markSquadActiveInCurrentCycle(item.plan.assignmentID)
+            armDelayedBrainSegmentLaunch(plan: item.plan, fireDate: item.startAt, context: context)
+        }
+    }
+
+    private func armDelayedBrainSegmentLaunch(
+        plan: MissionRunBrainExecutionSubsystem.SegmentLaunchPlan,
+        fireDate: Date,
+        context: MissionRunExecutionContext
+    ) {
+        brainSegmentWallClockTasks[plan.assignmentID]?.cancel()
+        let assignmentID = plan.assignmentID
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                let remaining = fireDate.timeIntervalSince(Date())
+                if remaining <= 0.05 { break }
+                let chunk = min(remaining, 3600)
+                let rawNs = chunk * 1_000_000_000
+                guard rawNs.isFinite, rawNs > 0 else { break }
+                let ns = UInt64(min(Double(UInt64.max), max(1_000_000, rawNs)))
+                try? await Task.sleep(nanoseconds: ns)
+            }
+            guard !Task.isCancelled else { return }
+            self.brainSegmentWallClockTasks.removeValue(forKey: assignmentID)
+            guard let environment = self.environment, environment.status == .running else { return }
+            self.environment?.systems.brainExecution.launchSegmentPlan(plan, fleetLink: context.fleetLink)
+        }
+        brainSegmentWallClockTasks[assignmentID] = task
     }
 
     /// Rewrites each pending command’s ``MissionRunIssuedCommand/vehicleTokenKey`` from the current roster row for its ``assignmentID``.
@@ -1986,6 +2029,16 @@ final class MissionRunExecutionSubsystem {
             environment.markSquadActiveInCurrentCycle(issued.assignmentID)
             environment.appendEvent(environment.systems.commands.dispatchCommand(issued, fleetLink: context.fleetLink, sitl: context.sitl))
         }
+        if !pass.brainSegmentPlans.isEmpty || !pass.brainSegmentDelayed.isEmpty {
+            for plan in pass.brainSegmentPlans {
+                environment.markSquadActiveInCurrentCycle(plan.assignmentID)
+            }
+            environment.systems.brainExecution.launchSegmentPlans(
+                pass.brainSegmentPlans,
+                fleetLink: context.fleetLink
+            )
+            scheduleDelayedBrainSegmentPlans(pass.brainSegmentDelayed, context: context)
+        }
         if dispatched, pass.convoyAssemblyImmediatePrimaryIDs.isEmpty, pass.convoyAssemblyDelayed.isEmpty {
             environment.markFirstWaveSquadsActiveInCurrentCycle(taskID: taskID, mission: mission)
         }
@@ -2222,6 +2275,10 @@ final class MissionRunExecutionSubsystem {
         var convoyAssemblyImmediatePrimaryIDs: Set<UUID> = []
         /// Squads: begin launch leg at stagger time (wingman assembly when present).
         var convoyAssemblyDelayed: [(primaryAssignmentID: UUID, startAt: Date)] = []
+        /// Imported brain segment chains that replace MAVLink mission upload for matching primaries (immediate wave).
+        var brainSegmentPlans: [MissionRunBrainExecutionSubsystem.SegmentLaunchPlan] = []
+        /// Stagger-delayed brain segment launches (wall-clock aligned with MAVLink primary stagger).
+        var brainSegmentDelayed: [(plan: MissionRunBrainExecutionSubsystem.SegmentLaunchPlan, startAt: Date)] = []
     }
 
     private func beginConvoyAssemblyForPlannedSquads(
@@ -2389,6 +2446,8 @@ final class MissionRunExecutionSubsystem {
         var immediateLaunchPrimaryAssignmentIDs: Set<UUID> = []
         var convoyAssemblyImmediatePrimaryIDs: Set<UUID> = []
         var convoyAssemblyDelayed: [(primaryAssignmentID: UUID, startAt: Date)] = []
+        var brainSegmentPlans: [MissionRunBrainExecutionSubsystem.SegmentLaunchPlan] = []
+        var brainSegmentDelayed: [(plan: MissionRunBrainExecutionSubsystem.SegmentLaunchPlan, startAt: Date)] = []
         let resolvedTaskId: UUID? = {
             if let explicitTaskId { return explicitTaskId }
             let enabledTasks = mission.routeMacro.tasks.filter(\.enabled)
@@ -2437,7 +2496,79 @@ final class MissionRunExecutionSubsystem {
                 continue
             }
             guard let tokenKey = squad.squad.primaryAssignment.attachedFleetVehicleToken else { continue }
+            let squadLog = MissionControlSquadUtilities.squadLogContext(
+                taskID: task.id,
+                taskName: task.name,
+                squadIndex: squad.squadIndex
+            )
+            if let fleetLink = environment.fleetLink,
+               let sitl = environment.sitl,
+               let segmentPlan = environment.systems.brainExecution.brainLaunchPlan(
+                primaryAssignment: squad.squad.primaryAssignment,
+                task: task,
+                mission: mission,
+                fleetLink: fleetLink,
+                sitl: sitl,
+                bindings: environment.brainBindings,
+                skipWhenConvoyFormation: true
+               ) {
+                let offset = isNextCyclePass ? 0 : Double(squad.squadIndex) * staggerStep
+                let dispatchAt = now.addingTimeInterval(offset)
+                let timingLabel = offset > 0 ? "stagger +\(Int(offset))s" : "start now"
+                events.append(
+                    MissionRunEvent(
+                        level: .info,
+                        taskID: squadLog.id,
+                        taskLabel: squadLog.label,
+                        speaker: .missionControl,
+                        templateKey: MissionRunLogTemplateKey.brainDispatchSegmentChosen,
+                        templateParams: [
+                            "slot": squad.squad.primaryAssignment.slotName,
+                            "slotID": squad.squad.primaryAssignment.id.uuidString,
+                            "brain": segmentPlan.binding.displayName,
+                            "brainVersion": segmentPlan.binding.brainVersion.semverString,
+                            "source": segmentPlan.correlationSource,
+                            "segmentCount": String(segmentPlan.segments.count),
+                            "timing": timingLabel,
+                            "pathKind": segmentPlan.dispatchKind.rawValue,
+                        ]
+                    )
+                )
+                if offset <= 0 {
+                    brainSegmentPlans.append(segmentPlan)
+                    immediateLaunchPrimaryAssignmentIDs.insert(primaryID)
+                } else {
+                    brainSegmentDelayed.append((plan: segmentPlan, startAt: dispatchAt))
+                }
+                continue
+            }
             if !skipConvoyAssemblyGate {
+                if !environment.brainBindings.isEmpty,
+                   let fleetLink = environment.fleetLink,
+                   let sitl = environment.sitl,
+                   let reason = environment.systems.brainExecution.segmentSkipReason(
+                    primaryAssignment: squad.squad.primaryAssignment,
+                    task: task,
+                    mission: mission,
+                    fleetLink: fleetLink,
+                    sitl: sitl,
+                    bindings: environment.brainBindings
+                   ) {
+                    events.append(
+                        MissionRunEvent(
+                            level: .info,
+                            taskID: squadLog.id,
+                            taskLabel: squadLog.label,
+                            speaker: .missionControl,
+                            templateKey: MissionRunLogTemplateKey.brainDispatchConvoyPreferred,
+                            templateParams: [
+                                "slot": squad.squad.primaryAssignment.slotName,
+                                "slotID": squad.squad.primaryAssignment.id.uuidString,
+                                "detail": reason,
+                            ]
+                        )
+                    )
+                }
                 let offset = isNextCyclePass ? 0 : Double(squad.squadIndex) * staggerStep
                 let dispatchAt = now.addingTimeInterval(offset)
                 if offset <= 0 {
@@ -2447,11 +2578,33 @@ final class MissionRunExecutionSubsystem {
                 }
                 continue
             }
-            let squadLog = MissionControlSquadUtilities.squadLogContext(
-                taskID: task.id,
-                taskName: task.name,
-                squadIndex: squad.squadIndex
-            )
+            if skipConvoyAssemblyGate,
+               !environment.brainBindings.isEmpty,
+               let fleetLink = environment.fleetLink,
+               let sitl = environment.sitl,
+               let reason = environment.systems.brainExecution.segmentSkipReason(
+                primaryAssignment: squad.squad.primaryAssignment,
+                task: task,
+                mission: mission,
+                fleetLink: fleetLink,
+                sitl: sitl,
+                bindings: environment.brainBindings
+               ) {
+                events.append(
+                    MissionRunEvent(
+                        level: .warning,
+                        taskID: squadLog.id,
+                        taskLabel: squadLog.label,
+                        speaker: .missionControl,
+                        templateKey: MissionRunLogTemplateKey.brainDispatchFallback,
+                        templateParams: [
+                            "slot": squad.squad.primaryAssignment.slotName,
+                            "slotID": squad.squad.primaryAssignment.id.uuidString,
+                            "detail": reason,
+                        ]
+                    )
+                )
+            }
             let plan = Mavsdk.Mission.MissionPlan(missionItems: squad.missionItems)
             let missionItemsJSON: String
             do {
@@ -2586,7 +2739,9 @@ final class MissionRunExecutionSubsystem {
             queuedBatches: queuedBatches,
             immediateLaunchPrimaryAssignmentIDs: immediateLaunchPrimaryAssignmentIDs,
             convoyAssemblyImmediatePrimaryIDs: convoyAssemblyImmediatePrimaryIDs,
-            convoyAssemblyDelayed: convoyAssemblyDelayed
+            convoyAssemblyDelayed: convoyAssemblyDelayed,
+            brainSegmentPlans: brainSegmentPlans,
+            brainSegmentDelayed: brainSegmentDelayed
         )
     }
 
@@ -2671,13 +2826,23 @@ final class MissionRunExecutionSubsystem {
             ]
         )
 
+        let squadBrainBinding: MissionRunBrainBinding? = {
+            guard let device = mission.rosterDevices.first(where: { $0.id == assignment.rosterDeviceId })
+            else { return nil }
+            return GuardianBrainRunUtilities.preferredBinding(
+                for: device.vehicleClass,
+                bindings: environment.brainBindings
+            )
+        }()
+
         MissionRunSquadFollowOperatorPromptBridge.presentFormationFollowFailure(
             missionRunID: environment.id,
             primaryAssignmentID: primaryAssignmentID,
             primarySlotName: assignment.slotName,
             taskID: task.id,
             taskName: task.name,
-            failedWingmen: failedRows
+            failedWingmen: failedRows,
+            brainBinding: squadBrainBinding
         ) { [weak self] verb in
             guard let self, let environment = self.environment else { return }
             self.handleFormationFollowPromptResolution(
@@ -2774,6 +2939,14 @@ extension MissionRunLogTemplateKey {
     static let squadFollowBetweenCyclesHold = "missioncontrol.mre.squad_follow.between_cycles_hold"
     static let squadFollowBetweenCyclesWingmenReleased = "missioncontrol.mre.squad_follow.between_cycles_wingmen_released"
     static let squadFollowStreamExhausted = "missioncontrol.mre.squad_follow.stream_exhausted"
+    static let brainDispatchSegmentChosen = "missioncontrol.mre.brain.segment_chosen"
+    static let brainDispatchSegmentStarted = "missioncontrol.mre.brain.segment_started"
+    static let brainDispatchSegmentSucceeded = "missioncontrol.mre.brain.segment_succeeded"
+    static let brainDispatchSegmentFailed = "missioncontrol.mre.brain.segment_failed"
+    static let brainDispatchPlannerPathResolved = "missioncontrol.mre.brain.planner_path_resolved"
+    static let brainDispatchFallback = "missioncontrol.mre.brain.fallback"
+    static let brainDispatchConvoyPreferred = "missioncontrol.mre.brain.convoy_preferred"
+    static let squadPlannerBackendChosen = "missioncontrol.mre.squad.planner_backend_chosen"
     static let squadFollowWingmanPromotedToPrimary = "missioncontrol.mre.squad_follow.wingman_promoted_to_primary"
     static let squadFollowOffboardStreamLost = "missioncontrol.mre.squad_follow.offboard_stream_lost"
     static let squadFollowGuardianRouterApproachPlanned = "missioncontrol.mre.squad_follow.guardian_router_approach_planned"

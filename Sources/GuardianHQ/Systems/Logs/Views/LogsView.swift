@@ -5,8 +5,6 @@ struct LogsView: View {
     @ObservedObject var fleetLink: FleetLinkService
     @State private var selectedVehicleIDs: Set<String> = []
     @State private var vehiclesAccordionExpanded = true
-    @State private var levelsAccordionExpanded = false
-    @State private var sessionsAccordionExpanded = false
     @Environment(\.colorScheme) private var colorScheme
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
@@ -66,36 +64,6 @@ struct LogsView: View {
                                 },
                                 label: {
                                     Text("Vehicles")
-                                        .font(GuardianTypography.font(.inlineNoticeTitle))
-                                        .foregroundStyle(theme.textPrimary)
-                                }
-                            )
-
-                            DisclosureGroup(
-                                isExpanded: $levelsAccordionExpanded,
-                                content: {
-                                    Text("No options in this group.")
-                                        .font(GuardianTypography.font(.denseFootnoteRegular))
-                                        .foregroundStyle(theme.textSecondary)
-                                        .padding(.top, GuardianSpacing.xsTight)
-                                },
-                                label: {
-                                    Text("Levels")
-                                        .font(GuardianTypography.font(.inlineNoticeTitle))
-                                        .foregroundStyle(theme.textPrimary)
-                                }
-                            )
-
-                            DisclosureGroup(
-                                isExpanded: $sessionsAccordionExpanded,
-                                content: {
-                                    Text("No options in this group.")
-                                        .font(GuardianTypography.font(.denseFootnoteRegular))
-                                        .foregroundStyle(theme.textSecondary)
-                                        .padding(.top, GuardianSpacing.xsTight)
-                                },
-                                label: {
-                                    Text("Sessions")
                                         .font(GuardianTypography.font(.inlineNoticeTitle))
                                         .foregroundStyle(theme.textPrimary)
                                 }

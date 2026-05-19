@@ -12,7 +12,8 @@ final class MCRRosterFleetChannelMergeTests: XCTestCase {
             vehicleClassForBundledDeviceArt: .unknown,
             vehicleModel: FleetVehicleOperationalModel(hub: nil, lifecycleStatus: nil),
             slotAttention: nil,
-            accessibilitySummary: nil
+            accessibilitySummary: nil,
+            brainBindingCaption: nil
         )
         let slice = MCRFleetRosterTileLiveFleetSlice(
             bracketedVehicleShortID: "[NEW]",
@@ -40,7 +41,8 @@ final class MCRRosterFleetChannelMergeTests: XCTestCase {
             vehicleClassForBundledDeviceArt: .unknown,
             vehicleModel: FleetVehicleOperationalModel(hub: nil, lifecycleStatus: nil),
             slotAttention: nil,
-            accessibilitySummary: nil
+            accessibilitySummary: nil,
+            brainBindingCaption: nil
         )
         let projection = MissionRunAssignmentLiveProjection(
             assignmentID: UUID(),

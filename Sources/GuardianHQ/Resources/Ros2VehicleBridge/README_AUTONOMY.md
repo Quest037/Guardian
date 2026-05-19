@@ -65,7 +65,12 @@ Guardian assigns planner kind from vehicle class automatically when a PX4 sessio
     ros_namespace: ""
     autonomy_planner: nav2   # or aerostack2 | none
     enabled: true
+    brain_id: "…"          # optional — Mission run binding
+    brain_version: "0.0.2"   # semver; major 0 = subodai line
+    nav2_param_overlay_json: "{...}"   # from Guardian Brain Pack planner_hints
 ```
+
+Mission Control runs seed these fields via `GuardianBrainRos2SidecarPolicy` at execution start; overlays surface in `ros2_autonomy_planner` health JSON (param application to Nav2 nodes is not shipped yet).
 
 ## Bundled stacks
 

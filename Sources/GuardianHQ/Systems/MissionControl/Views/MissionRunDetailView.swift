@@ -5735,6 +5735,7 @@ struct MissionRunDetailView: View {
         MissionLiveVehicleHealthCard(
             slotTitle: s.slotTitle,
             rosterSubtitle: s.rosterSubtitle,
+            brainBindingCaption: s.brainBindingCaption,
             bracketedVehicleShortID: s.bracketedVehicleShortID,
             vehicleID: s.vehicleID,
             simulationImageBasenames: s.simulationImageBasenames,
@@ -5793,9 +5794,14 @@ struct MissionRunDetailView: View {
             }
             return nil
         }()
+        let brainBindingCaption = GuardianBrainRunUtilities.preferredBinding(
+            for: deviceArtVehicleClass,
+            bindings: run.brainBindings
+        ).map { GuardianBrainRunUtilities.bindingCaption($0) }
         MissionLiveVehicleHealthCard(
             slotTitle: assignment.slotName,
             rosterSubtitle: rosterRoleSubtitle(device),
+            brainBindingCaption: brainBindingCaption,
             bracketedVehicleShortID: bracketed,
             vehicleID: vehicleID,
             simulationImageBasenames: simulationImageBasenamesForAssignment(assignment, sitl: sitl),
@@ -6367,7 +6373,8 @@ struct MissionRunDetailView: View {
         let body = events.map {
             $0.plainTextLine(mission: resolvedMission, assignments: run.assignments)
         }
-        return ([header] + body).joined(separator: "\n")
+        let brainHeader = GuardianBrainRunUtilities.structuredBrainExportHeader(bindings: run.brainBindings)
+        return brainHeader + ([header] + body).joined(separator: "\n")
     }
 
     private func handleMcrLogURL(_ url: URL) -> OpenURLAction.Result {
@@ -7295,9 +7302,28 @@ struct MissionRunDetailView: View {
 
     private var setupRulesTabContent: some View {
         VStack(alignment: .leading, spacing: GuardianSpacing.md) {
+            setupRulesBrainsCard
             setupRulesPoliciesCard
             setupRulesEngagementCard
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var setupRulesBrainsCard: some View {
+        GuardianCard(
+            configuration: mcSetupGroupCardConfiguration,
+            header: { mcSetupGroupCardTitle("Autonomy brains") },
+            body: {
+                MissionRunBrainBindingsSetupSection(
+                    bindings: Binding(
+                        get: { run.brainBindings },
+                        set: { run.brainBindings = $0; onUpdate(run) }
+                    ),
+                    isEditable: run.status == .setup,
+                    onBindingsChanged: { onUpdate(run) }
+                )
+            }
+        )
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 

@@ -5,6 +5,7 @@ struct SettingsView: View {
     @ObservedObject var generalSettings: GeneralSettingsStore
     @ObservedObject var manualControlSettings: ManualControlSettingsStore
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.guardianAppProduct) private var appProduct
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
     @State private var isLocationPickerPresented = false
     @State private var draftSimLatitudeDeg = 0.0
@@ -174,6 +175,14 @@ struct SettingsView: View {
     private var missionsPane: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GuardianSpacing.md) {
+                if appProduct.includesSidebarSection(.missions) {
+                    GuardianCard(
+                        configuration: settingsGroupCardConfiguration,
+                        header: { settingsGroupCardTitle("Autonomy brains") },
+                        body: { GuardianBrainCatalogueSettingsSection() }
+                    )
+                }
+
                 GuardianCard(
                     configuration: settingsGroupCardConfiguration,
                     header: { settingsGroupCardTitle("Mission Control") },

@@ -9,6 +9,11 @@ struct Ros2VehicleBridgeEntry: Codable, Equatable, Sendable {
     /// `nav2`, `aerostack2`, or `none` — see ``GuardianAutonomyPlannerKind``.
     var autonomyPlanner: String
     var enabled: Bool
+    /// Imported brain pack id when MRE enrolled this stream with a run binding.
+    var brainId: String?
+    var brainVersion: String?
+    var nav2ParamOverlayJSON: String?
+    var aerostack2ParamOverlayJSON: String?
 
     enum CodingKeys: String, CodingKey {
         case vehicleID = "vehicle_id"
@@ -17,6 +22,10 @@ struct Ros2VehicleBridgeEntry: Codable, Equatable, Sendable {
         case rosNamespace = "ros_namespace"
         case autonomyPlanner = "autonomy_planner"
         case enabled
+        case brainId = "brain_id"
+        case brainVersion = "brain_version"
+        case nav2ParamOverlayJSON = "nav2_param_overlay_json"
+        case aerostack2ParamOverlayJSON = "aerostack2_param_overlay_json"
     }
 }
 

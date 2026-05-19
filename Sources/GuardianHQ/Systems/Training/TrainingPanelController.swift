@@ -12,6 +12,11 @@ final class TrainingPanelController: ObservableObject {
     @Published private(set) var statusText = "Choose a vehicle class and task, then spawn a simulator."
     @Published private(set) var logLines: [TrainingPanelLogLine] = []
     @Published private(set) var promotedSkill: TrainedVehicleSkill?
+    /// When true, a successful promote writes a new catalogue revision under Application Support (no save panel).
+    @AppStorage("GuardianTraining.autoExportBrainOnPromote") var autoExportBrainOnPromote = false
+    /// Last successful brain pack export for the current promoted skill (`brain_id` for revision exports).
+    @Published private(set) var lastExportedBrainId: UUID?
+    @Published private(set) var lastExportedBrainVersion: GuardianBrainVersion?
     @Published private(set) var trialsCompleted = 0
     @Published private(set) var trialsTotal = 0
     @Published private(set) var simulatorSlot: FormationsPlaygroundSlotState?
@@ -26,9 +31,16 @@ final class TrainingPanelController: ObservableObject {
     /// Operator-placed target slot on the map (independent of task kind).
     @Published var targetSlot: TrainingTaskPose = TrainingTaskLayoutFactory.defaultTargetSlot(spawn: .default)
     @Published var isTargetSlotMapEditEnabled = false
+    @Published private(set) var availableEnvironments: [TrainingEnvironmentPackage] = []
+    @Published var selectedEnvironmentID: String = TrainingEnvironmentManifest.defaultBundledID
+    @Published private(set) var activeGazeboWorldID: UUID?
+    @Published private(set) var gazeboWorldStatusText: String?
 
     private weak var fleetLink: FleetLinkService?
     private weak var sitl: SitlService?
+    private weak var gazebo: GazeboService?
+    private weak var toastCenter: ToastCenter?
+    private var requiresGazeboRunWorld = false
     private var spawnDefaults: SimSpawnDefaults = .default
     private var simulationPlatform: SimulationPlatform = .ardupilot
     private var teachTask: Task<Void, Never>?
@@ -44,10 +56,16 @@ final class TrainingPanelController: ObservableObject {
         fleetLink: FleetLinkService,
         sitl: SitlService,
         spawnDefaults: SimSpawnDefaults,
-        simulationPlatform: SimulationPlatform
+        simulationPlatform: SimulationPlatform,
+        gazebo: GazeboService? = nil,
+        requiresGazeboRunWorld: Bool = false,
+        toastCenter: ToastCenter? = nil
     ) {
         self.fleetLink = fleetLink
         self.sitl = sitl
+        self.gazebo = gazebo
+        self.toastCenter = toastCenter
+        self.requiresGazeboRunWorld = requiresGazeboRunWorld
         self.spawnDefaults = spawnDefaults
         clampVehicleClassToTrainingPanelOptions()
         self.simulationPlatform = SimulationSpawnPolicy.effectivePlatform(
@@ -55,16 +73,76 @@ final class TrainingPanelController: ObservableObject {
             requested: simulationPlatform
         )
         restoreTargetSlotFromPersistence()
+        reloadEnvironmentCatalogue()
+        restoreEnvironmentSelectionFromPersistence()
         refreshTaskLayout()
     }
 
-    /// Load last saved target slot, or seed once from spawn defaults (not reset when task changes).
+    var selectedEnvironment: TrainingEnvironmentPackage? {
+        availableEnvironments.first { $0.id == selectedEnvironmentID }
+            ?? TrainingEnvironmentCatalogue.package(id: selectedEnvironmentID)
+    }
+
+    func reloadEnvironmentCatalogue() {
+        availableEnvironments = TrainingEnvironmentCatalogue.loadAll()
+        if !availableEnvironments.contains(where: { $0.id == selectedEnvironmentID }),
+           let first = availableEnvironments.first {
+            selectedEnvironmentID = first.id
+        }
+    }
+
+    func restoreEnvironmentSelectionFromPersistence() {
+        if let saved = try? TrainingEnvironmentSelectionStore.selectedEnvironmentID(
+            task: taskKind,
+            vehicleClass: vehicleClass
+        ), TrainingEnvironmentCatalogue.package(id: saved) != nil {
+            selectedEnvironmentID = saved
+            return
+        }
+        if availableEnvironments.contains(where: { $0.id == TrainingEnvironmentManifest.defaultBundledID }) {
+            selectedEnvironmentID = TrainingEnvironmentManifest.defaultBundledID
+        } else if let first = availableEnvironments.first {
+            selectedEnvironmentID = first.id
+        }
+    }
+
+    func persistEnvironmentSelection() {
+        try? TrainingEnvironmentSelectionStore.setSelectedEnvironmentID(
+            selectedEnvironmentID,
+            task: taskKind,
+            vehicleClass: vehicleClass
+        )
+    }
+
+    func environmentSelectionDidChange() {
+        persistEnvironmentSelection()
+        restoreTargetSlotForSelectedEnvironment()
+        refreshTaskLayout()
+    }
+
+    func trainingTaskOrVehicleDidChange() {
+        restoreEnvironmentSelectionFromPersistence()
+    }
+
+    /// Load last saved target slot for the selected environment, or seed from manifest / spawn defaults.
     func restoreTargetSlotFromPersistence() {
-        if let saved = try? TrainingTargetSlotStore.load() {
+        restoreTargetSlotForSelectedEnvironment()
+    }
+
+    private func restoreTargetSlotForSelectedEnvironment() {
+        let envID = selectedEnvironmentID
+        if let saved = try? TrainingTargetSlotStore.load(environmentID: envID) {
             targetSlot = saved
             return
         }
-        targetSlot = TrainingTaskLayoutFactory.defaultTargetSlot(spawn: spawnDefaults)
+        if let pkg = selectedEnvironment {
+            targetSlot = TrainingEnvironmentGeodesy.taskPose(
+                environmentPose: pkg.manifest.defaultGoal,
+                origin: spawnDefaults
+            )
+        } else {
+            targetSlot = TrainingTaskLayoutFactory.defaultTargetSlot(spawn: spawnDefaults)
+        }
         persistTargetSlot()
     }
 
@@ -95,10 +173,11 @@ final class TrainingPanelController: ObservableObject {
     }
 
     private func persistTargetSlot() {
-        try? TrainingTargetSlotStore.save(targetSlot)
+        try? TrainingTargetSlotStore.save(targetSlot, environmentID: selectedEnvironmentID)
     }
 
     func syncFromFleetOnAppear(fleetLink: FleetLinkService) {
+        reloadEnvironmentCatalogue()
         syncTrainingSimulatorFromRunningSitl(fleetLink: fleetLink)
         refreshSimulatorSlot(fleetLink: fleetLink)
         loadPromotedSkill()
@@ -165,9 +244,21 @@ final class TrainingPanelController: ObservableObject {
     }
 
     func refreshTaskLayout() {
-        let start = TrainingTaskLayoutFactory.startPose(spawn: spawnDefaults)
-        taskLayout = Utilities.training.taskLayout(start: start, goal: targetSlot)
+        if let pkg = selectedEnvironment {
+            taskLayout = TrainingGazeboRunOrchestrator.layout(
+                environment: pkg,
+                targetSlot: targetSlot,
+                spawnDefaults: spawnDefaults
+            )
+        } else {
+            let start = TrainingTaskLayoutFactory.startPose(spawn: spawnDefaults)
+            taskLayout = Utilities.training.taskLayout(start: start, goal: targetSlot)
+        }
         scheduleNav2PlanPathRefresh()
+    }
+
+    var usesGazeboTrainingViewport: Bool {
+        requiresGazeboRunWorld && gazebo != nil
     }
 
     /// Re-request Nav2 / geodesic path when layout, vehicle, or ROS bridge changes.
@@ -319,6 +410,126 @@ final class TrainingPanelController: ObservableObject {
 
     func loadPromotedSkill() {
         promotedSkill = try? TrainingSkillStore.promoted(task: taskKind, vehicleClass: vehicleClass)
+        lastExportedBrainId = nil
+        lastExportedBrainVersion = nil
+    }
+
+    /// Nav2 / Aerostack2 lab overlay snapshot for brain pack export (ground/surface/aerial classes only).
+    func exportPlannerHintsSnapshot() -> GuardianBrainPackPlannerHints? {
+        guard let skill = promotedSkill, let layout = taskLayout else { return nil }
+        return GuardianBrainPackBuilder.plannerHints(
+            from: GuardianBrainPackTrainingPlannerContext(
+                vehicleClass: vehicleClass,
+                layout: layout,
+                segments: skill.segments,
+                planPathSource: nav2PlanPathSource,
+                nav2StackReady: fleetLink?.nav2TrainingStackReady ?? false,
+                nav2StackStatus: fleetLink?.nav2TrainingStackStatus ?? "inactive",
+                gazeboEnvironmentId: selectedEnvironmentID,
+                planWaypointCount: nav2PlannedPath.count
+            )
+        )
+    }
+
+    /// Writes the promoted skill into the on-disk brain catalogue (Mission import path) without a save panel.
+    func autoExportPromotedBrainToCatalogue() {
+        guard let skill = promotedSkill else { return }
+        do {
+            let brainId = lastExportedBrainId ?? skill.id
+            let nextVersion = try GuardianBrainCatalogueStore.nextPatchVersion(
+                brainId: brainId,
+                sessionPeak: lastExportedBrainVersion
+            )
+            let pack = try GuardianBrainPackBuilder.makePack(
+                from: skill,
+                brainId: brainId,
+                brainVersion: nextVersion,
+                displayName: GuardianBrainPackBuilder.defaultDisplayName(for: skill),
+                gazeboEnvironmentId: selectedEnvironmentID,
+                plannerHints: exportPlannerHintsSnapshot()
+            )
+            let url = try GuardianBrainCatalogueStore.packFileURL(brainId: brainId, brainVersion: nextVersion)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try GuardianBrainPackCodec.sealedData(for: pack).write(to: url, options: .atomic)
+            try GuardianBrainPinDefaultsStore.pin(manifest: pack.manifest)
+            lastExportedBrainId = brainId
+            lastExportedBrainVersion = nextVersion
+            GuardianBrainCatalogueChangeNotification.post(
+                displayName: pack.manifest.displayName,
+                brainVersion: nextVersion
+            )
+            appendLog("Auto-exported brain pack \(nextVersion.displayLabel) to catalogue and pinned as default.")
+            statusText = "Promoted, exported, and pinned brain \(nextVersion.displayLabel)."
+        } catch {
+            appendLog("Auto brain export failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Export promoted skill as `0.0.1` (subodai line) of a new `brain_id` (defaults to skill id).
+    @discardableResult
+    func exportPromotedBrainPack(squadProfile: GuardianBrainPackSquadProfile? = nil) -> URL? {
+        guard let skill = promotedSkill else { return nil }
+        do {
+            let brainId = skill.id
+            let pack = try GuardianBrainPackBuilder.makePack(
+                from: skill,
+                brainId: brainId,
+                brainVersion: .initial,
+                displayName: GuardianBrainPackBuilder.defaultDisplayName(for: skill),
+                gazeboEnvironmentId: selectedEnvironmentID,
+                plannerHints: exportPlannerHintsSnapshot(),
+                squadProfile: squadProfile
+            )
+            guard let url = GuardianBrainPackExportService.promptSaveToDisk(pack: pack) else { return nil }
+            lastExportedBrainId = brainId
+            lastExportedBrainVersion = .initial
+            appendLog("Exported brain pack \(GuardianBrainVersion.initial.displayLabel) to \(url.lastPathComponent).")
+            statusText = "Brain pack exported."
+            return url
+        } catch {
+            appendLog("Brain export failed: \(error.localizedDescription)")
+            statusText = "Brain export failed."
+            return nil
+        }
+    }
+
+    /// Export the next **patch** semver for the same `brain_id` as the last export (or skill id).
+    @discardableResult
+    func exportPromotedBrainPackNewVersion(squadProfile: GuardianBrainPackSquadProfile? = nil) -> URL? {
+        guard let skill = promotedSkill else { return nil }
+        do {
+            let brainId = lastExportedBrainId ?? skill.id
+            let nextVersion = try GuardianBrainCatalogueStore.nextPatchVersion(
+                brainId: brainId,
+                sessionPeak: lastExportedBrainVersion
+            )
+            let pack = try GuardianBrainPackBuilder.makePack(
+                from: skill,
+                brainId: brainId,
+                brainVersion: nextVersion,
+                displayName: GuardianBrainPackBuilder.defaultDisplayName(for: skill),
+                gazeboEnvironmentId: selectedEnvironmentID,
+                plannerHints: exportPlannerHintsSnapshot(),
+                squadProfile: squadProfile
+            )
+            guard let url = GuardianBrainPackExportService.promptSaveToDisk(pack: pack) else { return nil }
+            lastExportedBrainId = brainId
+            lastExportedBrainVersion = nextVersion
+            appendLog("Exported brain pack \(nextVersion.displayLabel) to \(url.lastPathComponent).")
+            statusText = "Brain pack \(nextVersion.displayLabel) exported."
+            return url
+        } catch {
+            appendLog("Brain export failed: \(error.localizedDescription)")
+            statusText = "Brain export failed."
+            return nil
+        }
+    }
+
+    func revealLastExportedBrainPack(at url: URL) {
+        GuardianBrainPackExportService.revealInFinder(url)
     }
 
     func canReplaceSlot(_ slot: FormationsPlaygroundSlotState) -> Bool {
@@ -414,6 +625,11 @@ final class TrainingPanelController: ObservableObject {
 
         isBusy = true
         phase = .spawning
+        guard await startTrainingGazeboRunWorldIfNeeded() else {
+            endSpawnShellBusyState()
+            phase = .idle
+            return
+        }
         if let vid = old.vehicleID {
             await fleetLink.stopTrainingControlStream(vehicleID: vid)
         }
@@ -475,6 +691,12 @@ final class TrainingPanelController: ObservableObject {
         phase = .spawning
         statusText = "Spawning training simulator…"
 
+        guard await startTrainingGazeboRunWorldIfNeeded() else {
+            endSpawnShellBusyState()
+            phase = .idle
+            return
+        }
+
         await stopPriorTrainingSitlForRespawn()
         let before = Set(sitl.instances.map(\.id))
         sitl.spawn(
@@ -486,6 +708,7 @@ final class TrainingPanelController: ObservableObject {
         guard let row = sitl.instances.first(where: {
             !before.contains($0.id) && $0.spawnOwner == .trainingVehicle
         }) else {
+            stopTrainingGazeboRunWorld()
             endSpawnShellBusyState()
             statusText = sitl.lastError ?? "Spawn failed — check SITL logs."
             phase = .idle
@@ -511,6 +734,7 @@ final class TrainingPanelController: ObservableObject {
         teachTask?.cancel()
         teachTask = nil
         isBusy = false
+        stopTrainingGazeboRunWorld()
         await stopTrainingStreamAndTrackedSitl()
         statusText = "Spawn a simulator to begin training."
         phase = .idle
@@ -709,6 +933,57 @@ final class TrainingPanelController: ObservableObject {
         try? TrainingSimulatorSessionStore.save(inst.id)
     }
 
+    @discardableResult
+    private func startTrainingGazeboRunWorldIfNeeded() async -> Bool {
+        guard requiresGazeboRunWorld else { return true }
+        guard GuardianGazeboWebViewerPolicy.guardOnlineOrShowToast(
+            productIncludesGazebo: true,
+            toastCenter: toastCenter
+        ) else { return false }
+        guard let gazebo else {
+            statusText = "Gazebo is not wired for this build."
+            return false
+        }
+        guard let pkg = selectedEnvironment else {
+            statusText = "Choose a training environment before spawning."
+            return false
+        }
+        guard gazebo.runtimeAvailable else {
+            statusText = "Gazebo is not available. Run make gazebo-runtime after installing Gazebo Harmonic."
+            return false
+        }
+
+        stopTrainingGazeboRunWorld()
+        gazeboWorldStatusText = nil
+        statusText = "Starting Gazebo world (\(pkg.manifest.displayName))…"
+        let plan = TrainingGazeboRunOrchestrator.spawnPlan(for: pkg)
+        let worldID = await gazebo.spawnWorld(purpose: plan.purpose, package: pkg)
+        guard let worldID else {
+            gazeboWorldStatusText = gazebo.lastError
+            statusText = gazebo.lastError ?? "Could not start Gazebo world."
+            return false
+        }
+        activeGazeboWorldID = worldID
+        gazeboWorldStatusText = "Gazebo: \(pkg.manifest.displayName) (\(plan.purpose.rawValue))"
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        return true
+    }
+
+    private func stopTrainingGazeboRunWorld() {
+        guard let gazebo else {
+            activeGazeboWorldID = nil
+            gazeboWorldStatusText = nil
+            return
+        }
+        if let id = activeGazeboWorldID {
+            gazebo.stopWorld(id: id)
+        } else {
+            gazebo.stopAll(purpose: .run)
+        }
+        activeGazeboWorldID = nil
+        gazeboWorldStatusText = nil
+    }
+
     /// Stops only this panel's training SITL and waits for UDP ports — does not touch formation sims.
     private func stopPriorTrainingSitlForRespawn() async {
         if let fleetLink, let sitl, let id = sitlSessionID {
@@ -735,7 +1010,9 @@ final class TrainingPanelController: ObservableObject {
         isTargetSlotMapEditEnabled = false
         isBusy = true
         phase = .teaching
+        GuardianApplicationLifecycle.shared.beginBackgroundLabRun()
         defer {
+            GuardianApplicationLifecycle.shared.endBackgroundLabRun()
             isBusy = false
             teachTask = nil
         }
@@ -845,9 +1122,14 @@ final class TrainingPanelController: ObservableObject {
                 )
                 try? TrainingSkillStore.appendPromoted(skill)
                 promotedSkill = skill
+                lastExportedBrainId = nil
+                lastExportedBrainVersion = nil
                 phase = .promoted
                 statusText = "Skill promoted — \(candidate.summary)"
                 appendLog("Promoted skill for \(taskKind.displayTitle) on \(vehicleClass.displayTitle).")
+                if autoExportBrainOnPromote {
+                    autoExportPromotedBrainToCatalogue()
+                }
                 return
             }
         }

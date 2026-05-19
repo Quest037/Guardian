@@ -6,6 +6,43 @@ enum MissionRunSquadFollowOperatorPromptBridge {
 
   private static var inFlightPromptPrimaryIDs: Set<UUID> = []
 
+  /// Context facts for squad follow failure prompts (testable without ``OperatorPromptCenter``).
+  static func formationFollowFailureContextFacts(
+    taskName: String,
+    primarySlotName: String,
+    failedWingmen: [(assignmentID: UUID, slotName: String)],
+    brainBinding: MissionRunBrainBinding?
+  ) -> [OperatorPromptContextFact] {
+    let wingmanSummary = failedWingmen.map(\.slotName).joined(separator: ", ")
+    var facts: [OperatorPromptContextFact] = []
+    if let brainBinding {
+      facts.append(
+        OperatorPromptContextFact(
+          label: "Brain",
+          value: GuardianBrainRunUtilities.bindingCaption(brainBinding),
+          group: "Policy"
+        )
+      )
+      facts.append(
+        OperatorPromptContextFact(
+          label: "Brain ID",
+          value: brainBinding.brainId.uuidString,
+          group: "Policy"
+        )
+      )
+    }
+    facts.append(contentsOf: [
+      OperatorPromptContextFact(label: "Task", value: taskName, group: "Where"),
+      OperatorPromptContextFact(label: "Primary", value: primarySlotName, group: "Where"),
+      OperatorPromptContextFact(
+        label: "Wingmen affected",
+        value: wingmanSummary.isEmpty ? "—" : wingmanSummary,
+        group: "Where"
+      ),
+    ])
+    return facts
+  }
+
   /// Presents a non-blocking prompt; invokes ``onResolved`` on the main actor when the operator answers.
   static func presentFormationFollowFailure(
     missionRunID: UUID,
@@ -14,25 +51,22 @@ enum MissionRunSquadFollowOperatorPromptBridge {
     taskID: UUID,
     taskName: String,
     failedWingmen: [(assignmentID: UUID, slotName: String)],
+    brainBinding: MissionRunBrainBinding? = nil,
     onResolved: @escaping @MainActor (FleetRecipeResumptionVerb) -> Void
   ) {
     guard inFlightPromptPrimaryIDs.insert(primaryAssignmentID).inserted else { return }
-    let wingmanSummary = failedWingmen.map(\.slotName).joined(separator: ", ")
     let target = OperatorPromptTarget(
       missionRunID: missionRunID,
       missionTaskID: taskID,
       affectedAssignmentID: primaryAssignmentID,
       affectedVehicleID: nil
     )
-    let facts: [OperatorPromptContextFact] = [
-      OperatorPromptContextFact(label: "Task", value: taskName, group: "Where"),
-      OperatorPromptContextFact(label: "Primary", value: primarySlotName, group: "Where"),
-      OperatorPromptContextFact(
-        label: "Wingmen affected",
-        value: wingmanSummary.isEmpty ? "—" : wingmanSummary,
-        group: "Where"
-      ),
-    ]
+    let facts = formationFollowFailureContextFacts(
+      taskName: taskName,
+      primarySlotName: primarySlotName,
+      failedWingmen: failedWingmen,
+      brainBinding: brainBinding
+    )
     let options: [OperatorPromptOption] = [
       OperatorPromptOption(
         id: "retry_formation",

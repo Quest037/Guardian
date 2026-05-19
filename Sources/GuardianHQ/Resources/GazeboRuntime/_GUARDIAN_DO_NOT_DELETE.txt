@@ -1,0 +1,1 @@
+Placeholder so SwiftPM keeps this directory. Run `make gazebo-runtime` to stage Gazebo Harmonic (gz-sim) binaries here.

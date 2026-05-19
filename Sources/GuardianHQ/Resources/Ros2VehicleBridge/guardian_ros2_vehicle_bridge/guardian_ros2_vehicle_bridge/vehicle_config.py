@@ -83,6 +83,10 @@ class VehicleConnectionConfig:
     ros_namespace: str = ""
     autonomy_planner: str = ""
     enabled: bool = True
+    brain_id: str = ""
+    brain_version: int = 0
+    nav2_param_overlay_json: str = ""
+    aerostack2_param_overlay_json: str = ""
 
     def normalized_namespace(self) -> str:
         ns = (self.ros_namespace or "").strip().strip("/")
@@ -96,8 +100,20 @@ class VehicleConnectionConfig:
             return f"/{ns}/{rel}"
         return f"/{rel}"
 
+    def brain_overlay_detail(self) -> dict[str, object]:
+        detail: dict[str, object] = {}
+        if self.brain_id:
+            detail["brain_id"] = self.brain_id
+        if self.brain_version > 0:
+            detail["brain_version"] = self.brain_version
+        if self.nav2_param_overlay_json:
+            detail["nav2_param_overlay_present"] = True
+        if self.aerostack2_param_overlay_json:
+            detail["aerostack2_param_overlay_present"] = True
+        return detail
+
     def to_dict(self) -> dict[str, Any]:
-        return {
+        row: dict[str, Any] = {
             "vehicle_id": self.vehicle_id,
             "stack": self.stack.value,
             "vehicle_class": self.vehicle_class.value,
@@ -105,6 +121,15 @@ class VehicleConnectionConfig:
             "autonomy_planner": self.autonomy_planner,
             "enabled": self.enabled,
         }
+        if self.brain_id:
+            row["brain_id"] = self.brain_id
+        if self.brain_version > 0:
+            row["brain_version"] = self.brain_version
+        if self.nav2_param_overlay_json:
+            row["nav2_param_overlay_json"] = self.nav2_param_overlay_json
+        if self.aerostack2_param_overlay_json:
+            row["aerostack2_param_overlay_json"] = self.aerostack2_param_overlay_json
+        return row
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> VehicleConnectionConfig:
@@ -126,6 +151,10 @@ class VehicleConnectionConfig:
         ros_namespace = str(raw.get("ros_namespace", "") or "")
         autonomy_planner = str(raw.get("autonomy_planner", "") or "")
         enabled = bool(raw.get("enabled", True))
+        brain_id = str(raw.get("brain_id", "") or "").strip()
+        brain_version = int(raw.get("brain_version", 0) or 0)
+        nav2_param_overlay_json = str(raw.get("nav2_param_overlay_json", "") or "")
+        aerostack2_param_overlay_json = str(raw.get("aerostack2_param_overlay_json", "") or "")
         return cls(
             vehicle_id=vehicle_id,
             stack=stack,
@@ -133,6 +162,10 @@ class VehicleConnectionConfig:
             ros_namespace=ros_namespace,
             autonomy_planner=autonomy_planner,
             enabled=enabled,
+            brain_id=brain_id,
+            brain_version=brain_version,
+            nav2_param_overlay_json=nav2_param_overlay_json,
+            aerostack2_param_overlay_json=aerostack2_param_overlay_json,
         )
 
 

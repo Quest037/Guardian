@@ -13,6 +13,8 @@ struct MissionControlLiveTaskTriageProjection: Equatable {
     let autoAckBlockerRows: [MissionRunAutoMissionEndAckSlotRowSnapshot]
     let showManualTriageHintForAutoAck: Bool
     let endProtocolAckSurface: EndProtocolAckSurface
+    /// Run-level brain bindings (task kind + vehicle class) for operator triage context.
+    let brainBindingCaptions: [String]
 
     enum EndProtocolAckSurface: Equatable {
         case none
@@ -45,6 +47,15 @@ struct MissionControlLiveTaskTriageProjection: Equatable {
             }
         }()
 
+        let brainCaptions = run.brainBindings
+            .sorted {
+                if $0.vehicleClassRaw != $1.vehicleClassRaw {
+                    return $0.vehicleClassRaw < $1.vehicleClassRaw
+                }
+                return $0.taskKindRaw < $1.taskKindRaw
+            }
+            .map { GuardianBrainRunUtilities.bindingCaption($0) }
+
         return MissionControlLiveTaskTriageProjection(
             taskID: tid,
             taskState: state,
@@ -52,7 +63,8 @@ struct MissionControlLiveTaskTriageProjection: Equatable {
             showAutoAckSlotBlockers: showAutoAck,
             autoAckBlockerRows: blockers,
             showManualTriageHintForAutoAck: manualHint,
-            endProtocolAckSurface: endSurface
+            endProtocolAckSurface: endSurface,
+            brainBindingCaptions: brainCaptions
         )
     }
 
@@ -96,6 +108,11 @@ struct MissionControlLiveTaskTriageOperatorProtocolStrip: View {
                 .padding(.top, GuardianSpacing.denseGutter)
             if let attempting = projection.taskAttempting {
                 missionLiveTaskAttemptIntentLine(attempting)
+                    .padding(.horizontal, GuardianSpacing.denseGutter)
+            }
+
+            if !projection.brainBindingCaptions.isEmpty {
+                missionLiveBrainBindingsLine(projection.brainBindingCaptions)
                     .padding(.horizontal, GuardianSpacing.denseGutter)
             }
 
@@ -153,6 +170,16 @@ struct MissionControlLiveTaskTriageOperatorProtocolStrip: View {
         case .completed:
             return GuardianSemanticColors.successForeground
         }
+    }
+
+    @ViewBuilder
+    private func missionLiveBrainBindingsLine(_ captions: [String]) -> some View {
+        Text("Brains: \(captions.joined(separator: " · "))")
+            .font(GuardianTypography.font(.denseCaption12Regular))
+            .foregroundStyle(theme.textSecondary)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityLabel("Autonomy brains: \(captions.joined(separator: ", "))")
     }
 
     @ViewBuilder

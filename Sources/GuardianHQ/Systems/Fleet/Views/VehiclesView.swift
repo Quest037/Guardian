@@ -96,6 +96,7 @@ struct VehiclesView: View {
             }
         }
         .animation(GuardianMotion.confirmPresent, value: calibrationSheetContext?.id)
+        .onDisappear { appDrawer.dismiss() }
     }
 
     private struct VehicleCalibrationSheetContext: Identifiable {
@@ -187,6 +188,28 @@ struct VehiclesView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private func presentVehicleConfigurationDrawer(vehicleID: String, model: FleetVehicleModel) {
+        let vehicleClass = model.data.vehicleType
+        appDrawer.present(
+            title: "Vehicle settings",
+            preferredWidth: 360,
+            scrimTapDismisses: true,
+            animation: addSimSidebarSpring
+        ) {
+            VehicleGarageConfigurationDrawer(
+                vehicleID: vehicleID,
+                vehicleClass: vehicleClass,
+                displayShortID: model.displayShortID,
+                onTierChanged: { tier in
+                    fleetLink.setVehicleSizeTier(tier, forVehicleID: vehicleID)
+                },
+                onClose: {
+                    appDrawer.dismiss(animation: addSimSidebarSpring)
+                }
+            )
+        }
+    }
+
     private func presentAddSimulationSidebar() {
         appDrawer.present(
             title: nil,
@@ -233,6 +256,9 @@ struct VehiclesView: View {
                                 fallback: model
                             )
                         },
+                        onConfigure: {
+                            presentVehicleConfigurationDrawer(vehicleID: vehicleID, model: model)
+                        },
                         onStopSim: nil,
                         stopSimDisabledReason: nil,
                         onDismissSim: nil,
@@ -273,6 +299,9 @@ struct VehiclesView: View {
                                 vehicleID: resolvedVehicleID,
                                 fallback: cardModel
                             )
+                        },
+                        onConfigure: {
+                            presentVehicleConfigurationDrawer(vehicleID: resolvedVehicleID, model: cardModel)
                         },
                         onStopSim: {
                             pendingSimStop = PendingSimStop(

@@ -6,11 +6,11 @@ final class GuardianBrainPackBuilderSquadProfileTests: XCTestCase {
     func test_squadProfile_encodes_formation_metadata() throws {
         let profile = GuardianBrainPackBuilder.squadProfile(
             formation: .arrowhead,
-            shape: .tight,
+            spacing: .tight,
             vehicleClass: .ugvWheeled,
             simCount: 4
         )
-        XCTAssertEqual(profile.formationShape, MissionSquadFormationKind.arrowhead.rawValue)
+        XCTAssertEqual(profile.formation, MissionSquadFormationKind.arrowhead.rawValue)
         XCTAssertNotNil(profile.slotSpacingM)
         XCTAssertNotNil(profile.convoyOffsetsJSON)
         XCTAssertTrue(profile.convoyOffsetsJSON?.contains("simCount") == true)
@@ -34,7 +34,7 @@ final class GuardianBrainPackBuilderSquadProfileTests: XCTestCase {
         )
         let profile = GuardianBrainPackBuilder.squadProfile(
             formation: .convoy,
-            shape: .normal,
+            spacing: .normal,
             vehicleClass: .ugvWheeled,
             simCount: 3
         )

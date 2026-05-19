@@ -28,11 +28,15 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var visiblePanes: [SettingsPane] {
+        SettingsPane.visiblePanes(for: appProduct)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 Picker("Section", selection: $selectedPane) {
-                    ForEach(SettingsPane.allCases) { pane in
+                    ForEach(visiblePanes) { pane in
                         Text(pane.rawValue).tag(pane)
                     }
                 }
@@ -57,6 +61,8 @@ struct SettingsView: View {
                     generalPane
                 case .missions:
                     missionsPane
+                case .brains:
+                    brainsPane
                 case .sims:
                     simsPane
                 case .liveDrive:
@@ -71,6 +77,13 @@ struct SettingsView: View {
         .sheet(isPresented: $isLocationPickerPresented) {
             simLocationPickerSheet
         }
+        .onAppear { clampSelectedPaneIfNeeded() }
+        .onChange(of: appProduct) { _ in clampSelectedPaneIfNeeded() }
+    }
+
+    private func clampSelectedPaneIfNeeded() {
+        guard !visiblePanes.contains(selectedPane) else { return }
+        selectedPane = visiblePanes.first ?? .general
     }
 
     private var generalPane: some View {
@@ -172,17 +185,13 @@ struct SettingsView: View {
         }
     }
 
+    private var brainsPane: some View {
+        GuardianBrainCatalogueView()
+    }
+
     private var missionsPane: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GuardianSpacing.md) {
-                if appProduct.includesSidebarSection(.missions) {
-                    GuardianCard(
-                        configuration: settingsGroupCardConfiguration,
-                        header: { settingsGroupCardTitle("Autonomy brains") },
-                        body: { GuardianBrainCatalogueSettingsSection() }
-                    )
-                }
-
                 GuardianCard(
                     configuration: settingsGroupCardConfiguration,
                     header: { settingsGroupCardTitle("Mission Control") },

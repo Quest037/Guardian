@@ -1,11 +1,15 @@
 import SwiftUI
 
-/// World Builder — sub-bar, full-width Gazebo viewport, choose/new/edit in app drawers.
+/// World Builder — sub-bar, full-width Gazebo viewport for **world authoring** (terrain, obstacles, zones).
+/// Uses ``GazeboSessionPurpose/build`` or ``preview`` — **no vehicle proxies**; sized SITL blocks spawn only from
+/// Training / Formation ``.run`` sessions (see ``GazeboService/spawnVehicleProxy``).
 struct WorldBuilderView: View {
     @ObservedObject var fleetLink: FleetLinkService
     @ObservedObject var gazebo: GazeboService
     @StateObject private var builder = WorldBuilderController()
     @StateObject private var viewportCamera = GazeboWebViewportCameraBridge()
+    @StateObject private var viewportZones = GazeboWebViewportZoneBridge()
+    @StateObject private var viewportObstacles = GazeboWebViewportObstacleBridge()
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.guardianAppProduct) private var appProduct
@@ -30,6 +34,8 @@ struct WorldBuilderView: View {
                 toastCenter: toastCenter,
                 productIncludesGazeboWebViewer: appProduct.includesGazeboSimulation
             )
+            pushViewportZoneState()
+            pushViewportObstacleState()
             if builder.hasOpenWorld {
                 Task { await builder.syncEmbeddedViewport() }
             }
@@ -38,6 +44,104 @@ struct WorldBuilderView: View {
             builder.leavePanel()
             appDrawer.dismiss()
         }
+        .onChange(of: builder.draftManifest?.id) { _ in
+            pushViewportZoneState()
+            pushViewportObstacleState()
+        }
+        .onChange(of: builder.openSceneToolPanel) { _ in
+            pushViewportZoneState()
+            pushViewportObstacleState()
+        }
+        .onChange(of: builder.zonePlacementKind) { _ in
+            pushViewportZoneState()
+        }
+        .onChange(of: builder.zoneEditorRevision) { _ in
+            pushViewportZoneState()
+        }
+        .onChange(of: builder.obstacleViewportRevision) { _ in
+            pushViewportObstacleState()
+        }
+        .onChange(of: builder.obstacleSelectedID) { _ in
+            pushViewportObstacleState()
+        }
+        .onChange(of: builder.obstacleDeletingID) { _ in
+            pushViewportObstacleState()
+        }
+        .onChange(of: isViewportCameraLive) { live in
+            if live {
+                pushViewportZoneState()
+                pushViewportObstacleState()
+            }
+        }
+        .guardianConfirmOverlay(item: obstacleDeleteBinding) { candidate in
+            GuardianConfirmDanger(
+                title: "Delete model?",
+                message: "Remove this obstacle from the world?",
+                cancelTitle: "Cancel",
+                confirmTitle: "Delete",
+                onCancel: { builder.pendingObstacleDeleteID = nil },
+                onConfirm: { Task { await builder.confirmDeleteObstacle(id: candidate.id) } }
+            )
+        }
+        .guardianConfirmOverlay(item: zoneDeleteBinding) { kind in
+            GuardianConfirmDanger(
+                title: "Delete zone?",
+                message: "Remove the \(kind.displayName.lowercased()) zone from this world?",
+                cancelTitle: "Cancel",
+                confirmTitle: "Delete",
+                onCancel: { builder.pendingZoneDeleteKind = nil },
+                onConfirm: {
+                    builder.confirmDeleteZone(kind: kind)
+                    pushViewportZoneState()
+                }
+            )
+        }
+        .onChange(of: builder.sessionMode) { mode in
+            if mode != .build {
+                builder.closeSceneToolPanel()
+            }
+        }
+    }
+
+    private func pushViewportZoneState() {
+        let zones = builder.draftManifest.map(WorldBuilderZoneManifestSupport.zones(from:))
+            ?? .empty
+        viewportZones.pushEditorState(
+            placementActive: builder.zonePlacementToolActive,
+            tapToEditEnabled: builder.canEditScene && builder.openSceneToolPanel != .obstacleEditor,
+            placementKind: builder.zonePlacementKind,
+            zones: zones,
+            mapHalfExtentM: builder.activeFloorHalfExtentM
+        )
+    }
+
+    private func pushViewportObstacleState() {
+        let obstacles = builder.obstaclesSnapshot
+        viewportObstacles.pushEditorState(
+            editorActive: builder.openSceneToolPanel == .obstacleEditor,
+            placementActive: builder.obstaclePlacementToolActive,
+            selectedID: builder.obstacleSelectedID,
+            draft: builder.obstaclePlacementDraft,
+            obstacles: obstacles,
+            mapHalfExtentM: builder.activeFloorHalfExtentM,
+            deletingID: builder.obstacleDeletingID
+        )
+    }
+
+    private var obstacleDeleteBinding: Binding<WorldBuilderObstacleDeleteCandidate?> {
+        Binding(
+            get: {
+                builder.pendingObstacleDeleteID.map(WorldBuilderObstacleDeleteCandidate.init(id:))
+            },
+            set: { builder.pendingObstacleDeleteID = $0?.id }
+        )
+    }
+
+    private var zoneDeleteBinding: Binding<WorldBuilderZoneKind?> {
+        Binding(
+            get: { builder.pendingZoneDeleteKind },
+            set: { builder.pendingZoneDeleteKind = $0 }
+        )
     }
 
     // MARK: - Sub-bar
@@ -121,7 +225,8 @@ struct WorldBuilderView: View {
             surface: builder.sessionMode == .build ? .solid : .outline,
             action: { Task { await builder.enterBuildMode() } }
         )
-        .disabled(!gazebo.runtimeAvailable || !builder.hasWorldFile || builder.draftIsReadOnly)
+        .disabled(!gazebo.runtimeAvailable || !builder.hasWorldFile || builder.draftIsReadOnly || !isViewportCameraLive)
+        .help(isViewportCameraLive ? "Build" : "Wait for the map to finish loading")
     }
 
     private var worldLoadedSubBarActions: some View {
@@ -172,21 +277,20 @@ struct WorldBuilderView: View {
     }
 
     private var isViewportCameraLive: Bool {
-        gazebo.embeddedViewport?.worldID == builder.activeGazeboWorldID
-            && gazebo.embeddedViewport?.phase == .live
+        builder.isEmbeddedViewportLive
     }
 
     private var viewportCameraControls: some View {
         HStack(spacing: GuardianSpacing.xs) {
             subBarIconButton(
                 systemImage: "view.3d",
-                accessibilityLabel: "Default view",
+                accessibilityLabel: "Oblique view preset",
                 action: { viewportCamera.trigger(.defaultView) }
             )
             .disabled(!isViewportCameraLive)
             subBarIconButton(
                 systemImage: "view.2d",
-                accessibilityLabel: "Bird's-eye view",
+                accessibilityLabel: "Top-down view preset",
                 action: { viewportCamera.trigger(.birdseye) }
             )
             .disabled(!isViewportCameraLive)
@@ -246,17 +350,19 @@ struct WorldBuilderView: View {
     }
 
     private var buildToolbarRailWidth: CGFloat {
-        GuardianChromeSize.small.controlOuterHeight
+        GuardianChromeSize.small.controlOuterHeight * 1.5
     }
 
     /// Swift spinner until the web viewer is mounted; gzweb HTML overlay handles load after that.
     private var showsEmbeddedViewportSpinner: Bool {
         guard builder.hasOpenWorld else { return false }
-        guard let viewport = gazebo.embeddedViewport,
-              viewport.worldID == builder.activeGazeboWorldID else {
+        guard let worldID = builder.resolvedEmbeddedWorldID,
+              let viewport = gazebo.embeddedViewport,
+              viewport.worldID == worldID else {
             return true
         }
-        return false
+        if case .live = viewport.phase { return false }
+        return true
     }
 
     private var gazeboViewportWithBuildRail: some View {
@@ -269,7 +375,11 @@ struct WorldBuilderView: View {
                     WorldBuilderBuildToolbarRail(
                         theme: theme,
                         railWidth: buildToolbarRailWidth,
-                        canInteract: builder.canEditScene
+                        canInteract: builder.canEditScene,
+                        zoneToolActive: builder.openSceneToolPanel == .zoneEditor,
+                        obstacleToolActive: builder.openSceneToolPanel == .obstacleEditor,
+                        onToggleZoneTool: { builder.toggleZoneEditorPanel() },
+                        onToggleObstacleTool: { builder.toggleObstacleEditorPanel() }
                     )
                     .transition(.move(edge: .trailing))
                 }
@@ -282,21 +392,119 @@ struct WorldBuilderView: View {
                 viewportLoadingOverlay
             }
         }
+        .overlay(alignment: .topLeading) {
+            sceneToolPanelOverlay
+        }
+        .animation(GuardianMotion.drawerSlide, value: builder.openSceneToolPanel)
+    }
+
+    @ViewBuilder
+    private var sceneToolPanelOverlay: some View {
+        if builder.openSceneToolPanel == .obstacleEditor, builder.canEditScene {
+            WorldBuilderObstacleToolBar(
+                record: builder.obstacleEditingBinding(),
+                theme: theme,
+                isEditingPlaced: builder.obstacleSelectedID != nil,
+                obstacleCount: builder.obstaclesSnapshot.count,
+                isSyncInFlight: builder.isObstacleMapRepairInFlight,
+                onRepairMap: {
+                    Task { await builder.repairObstacleMapAlignment() }
+                },
+                onClose: { builder.closeSceneToolPanel() }
+            )
+            .padding(.leading, GuardianSpacing.sm)
+            .padding(.top, GuardianSpacing.sm)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        } else if builder.openSceneToolPanel == .zoneEditor, builder.canEditScene {
+            WorldBuilderSceneToolBar(
+                theme: theme,
+                placementKind: builder.zonePlacementKind,
+                zoneShape: builder.activeZoneShape,
+                zoneRadiusM: builder.activeZoneRadiusM,
+                onSelectPlacementKind: { builder.setZonePlacementKind($0) },
+                onSelectZoneShape: { builder.setActiveZoneShape($0) },
+                onZoneRadiusChange: { radius in
+                    if builder.setActiveZoneRadiusM(radius) {
+                        toastCenter.show("Zone does not fit on the map", style: .error)
+                    }
+                    pushViewportZoneState()
+                },
+                onClose: { builder.closeSceneToolPanel() }
+            )
+            .padding(.leading, GuardianSpacing.sm)
+            .padding(.top, GuardianSpacing.sm)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
     }
 
     private var embeddedViewportStack: some View {
         Group {
             if let viewport = gazebo.embeddedViewport,
-               viewport.worldID == builder.activeGazeboWorldID {
+               let worldID = builder.resolvedEmbeddedWorldID,
+               viewport.worldID == worldID {
                 GazeboWebViewportView(
                     websocketPort: viewport.websocketPort,
                     gazeboWorldName: viewport.gazeboWorldName,
                     phase: viewport.phase,
                     cameraBridge: viewportCamera,
                     cameraCommandTick: viewportCamera.tick,
+                    zoneBridge: viewportZones,
+                    zoneCommandTick: viewportZones.tick,
+                    obstacleBridge: viewportObstacles,
+                    obstacleCommandTick: viewportObstacles.tick,
                     showsCameraDebugHUD: fleetLink.isDebugEnabled,
-                    groundHalfExtentM: builder.activeFloorHalfExtentM
+                    groundHalfExtentM: builder.activeFloorHalfExtentM,
+                    onZonesChanged: { zones, jsZoneFailed in
+                        let swiftFailed = builder.applyZonesFromViewport(zones)
+                        if jsZoneFailed || swiftFailed {
+                            toastCenter.show("Zone does not fit on the map", style: .error)
+                        }
+                        viewportZones.pushZones(builder.zonesSnapshot)
+                    },
+                    onZoneEditRequest: { kind in
+                        builder.openZoneEditorFromViewport(kind: kind)
+                        pushViewportZoneState()
+                    },
+                    onZoneDeleteRequest: { kind in
+                        builder.requestDeleteZone(kind: kind)
+                    },
+                    onObstaclesChanged: { obstacles, selectedID, jsOutOfBounds in
+                        let prior = builder.obstaclesSnapshot
+                        let sameIDs = obstacles.map(\.id) == prior.map(\.id)
+                        if sameIDs {
+                            if obstacles == prior {
+                                builder.selectObstacleFromViewport(id: selectedID)
+                                pushViewportObstacleState()
+                                return
+                            }
+                            let swiftOutOfBounds = builder.applyObstaclesFromViewport(
+                                obstacles,
+                                selectedID: selectedID
+                            )
+                            if jsOutOfBounds || swiftOutOfBounds {
+                                toastCenter.show("Out of bounds", style: .warning)
+                            }
+                            pushViewportObstacleState()
+                            return
+                        }
+                        let swiftOutOfBounds = builder.applyObstaclesFromViewport(
+                            obstacles,
+                            selectedID: selectedID
+                        )
+                        if jsOutOfBounds || swiftOutOfBounds {
+                            toastCenter.show("Out of bounds", style: .warning)
+                        }
+                        pushViewportObstacleState()
+                    },
+                    onObstacleDeleteRequest: { id in
+                        builder.requestDeleteObstacle(id: id)
+                    },
+                    onObstaclePlaceRequest: { x, y in
+                        builder.placeObstacleAt(centerXM: x, centerYM: y)
+                        pushViewportObstacleState()
+                    }
                 )
+                .id(worldID)
             } else {
                 viewportPreparingSurface
             }
@@ -385,65 +593,166 @@ struct WorldBuilderView: View {
 
 // MARK: - Choose drawer
 
+private struct WorldBuilderObstacleDeleteCandidate: Identifiable, Equatable {
+    let id: String
+}
+
+private struct WorldBuilderDeleteEnvironmentCandidate: Identifiable, Equatable {
+    let id: String
+    let displayName: String
+}
+
 private struct WorldBuilderChooseDrawerContent: View {
     @ObservedObject var builder: WorldBuilderController
     let onSelect: (String) -> Void
+
+    @State private var deleteConfirmCandidate: WorldBuilderDeleteEnvironmentCandidate?
 
     @Environment(\.colorScheme) private var colorScheme
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
                 if builder.packages.isEmpty {
                     Text("No environments installed.")
                         .font(GuardianTypography.Scale.body.font())
                         .foregroundStyle(theme.textSecondary)
-                        .padding(GuardianSpacing.md)
                 } else {
                     ForEach(builder.packages) { pkg in
-                        chooseRow(pkg)
-                        if pkg.id != builder.packages.last?.id {
-                            Divider()
-                                .overlay(theme.borderSubtle)
-                        }
+                        WorldBuilderEnvironmentChooseCard(
+                            package: pkg,
+                            isSelected: builder.selectedPackageID == pkg.id,
+                            onOpen: { onSelect(pkg.id) },
+                            onDelete: pkg.source == .bundled
+                                ? nil
+                                : {
+                                    deleteConfirmCandidate = WorldBuilderDeleteEnvironmentCandidate(
+                                        id: pkg.id,
+                                        displayName: pkg.manifest.displayName
+                                    )
+                                }
+                        )
                     }
-                }
-            }
-        }
-    }
-
-    private func chooseRow(_ pkg: TrainingEnvironmentPackage) -> some View {
-        Button {
-            onSelect(pkg.id)
-        } label: {
-            HStack(alignment: .center, spacing: GuardianSpacing.sm) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(pkg.manifest.displayName)
-                        .font(GuardianTypography.Scale.body.font(weight: .medium))
-                        .foregroundStyle(theme.textPrimary)
-                    Text(pkg.source == .bundled ? "Bundled" : "Yours")
-                        .font(GuardianTypography.Scale.caption.font())
-                        .foregroundStyle(theme.textTertiary)
-                    if !pkg.manifest.description.isEmpty {
-                        Text(pkg.manifest.description)
-                            .font(GuardianTypography.Scale.caption.font())
-                            .foregroundStyle(theme.textSecondary)
-                            .lineLimit(2)
-                    }
-                }
-                Spacer(minLength: 0)
-                if builder.selectedPackageID == pkg.id {
-                    Image(systemName: "checkmark")
-                        .font(GuardianTypography.Scale.caption.font(weight: .semibold))
-                        .foregroundStyle(GuardianSemanticColors.infoForeground)
                 }
             }
             .padding(GuardianSpacing.md)
-            .contentShape(Rectangle())
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .buttonStyle(GuardianPointerPlainButtonStyle())
+        .guardianConfirmOverlay(item: $deleteConfirmCandidate) { candidate in
+            GuardianConfirmDanger(
+                title: "Delete world?",
+                message: "Delete “\(candidate.displayName)”? This removes the world package from your library.",
+                cancelTitle: "Cancel",
+                confirmTitle: "Delete",
+                onCancel: { deleteConfirmCandidate = nil },
+                onConfirm: {
+                    let id = candidate.id
+                    deleteConfirmCandidate = nil
+                    _ = builder.deleteUserPackage(id: id)
+                }
+            )
+        }
+    }
+
+}
+
+// MARK: - Choose drawer card
+
+private struct WorldBuilderEnvironmentChooseCard: View {
+    let package: TrainingEnvironmentPackage
+    let isSelected: Bool
+    let onOpen: () -> Void
+    let onDelete: (() -> Void)?
+
+    @Environment(\.colorScheme) private var colorScheme
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
+    private var sceneType: TrainingEnvironmentSceneType {
+        TrainingEnvironmentSceneType.resolved(from: package.manifest.sceneType)
+    }
+
+    private var sourceLabel: String {
+        package.source == .bundled ? "Bundled" : "Yours"
+    }
+
+    var body: some View {
+        GuardianCard(
+            configuration: GuardianCardConfiguration(
+                border: isSelected ? .primary : .subtle,
+                cornerRadius: GuardianCardLayout.cornerRadius,
+                bodyPadding: GuardianSpacing.cardBodyInset
+            ),
+            body: {
+                HStack(alignment: .center, spacing: GuardianSpacing.sm) {
+                    VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+                        Text(package.manifest.displayName)
+                            .font(GuardianTypography.font(.panelSecondaryHeadingSemibold))
+                            .foregroundStyle(theme.textPrimary)
+                            .lineLimit(2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        HStack(spacing: GuardianSpacing.xsTight) {
+                            GuardianBadge(
+                                text: sourceLabel,
+                                accent: .neutral,
+                                paint: .light,
+                                size: .small,
+                                shape: .pill
+                            )
+                            GuardianBadge(
+                                text: sceneType.displayName,
+                                accent: .neutral,
+                                paint: .light,
+                                size: .small,
+                                shape: .pill
+                            )
+                        }
+                    }
+
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(GuardianTypography.font(.subsectionTitleSemibold))
+                            .foregroundStyle(GuardianSemanticColors.infoForeground)
+                            .accessibilityHidden(true)
+                    }
+
+                    if let onDelete {
+                        GuardianThemedButton(
+                            accent: .danger,
+                            surface: .outline,
+                            size: .small,
+                            shape: .cornered,
+                            contentSizing: .squareToolbarCell,
+                            action: onDelete,
+                            label: {
+                                Image(systemName: "trash")
+                                    .font(GuardianTypography.font(.sectionHeadingSemibold))
+                            }
+                        )
+                        .help("Delete world")
+                        .accessibilityLabel("Delete world")
+                        .guardianPointerOnHover()
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        )
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onOpen)
         .guardianPointerOnHover()
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(accessibilitySummary)
+        .accessibilityHint("Opens this world in World Builder")
+    }
+
+    private var accessibilitySummary: String {
+        var parts = [package.manifest.displayName, sourceLabel, sceneType.displayName]
+        if isSelected {
+            parts.append("Selected")
+        }
+        return parts.joined(separator: ", ")
     }
 }
 
@@ -611,12 +920,47 @@ private struct WorldBuilderBuildToolbarRail: View {
     let theme: GuardianThemePalette
     let railWidth: CGFloat
     let canInteract: Bool
+    let zoneToolActive: Bool
+    let obstacleToolActive: Bool
+    let onToggleZoneTool: () -> Void
+    let onToggleObstacleTool: () -> Void
 
     var body: some View {
         VStack(spacing: GuardianSpacing.xs) {
-            toolButton(systemImage: "plus", accessibilityLabel: "Add model")
-            toolButton(systemImage: "arrow.up.and.down.and.arrow.left.and.right", accessibilityLabel: "Move")
-            toolButton(systemImage: "trash", accessibilityLabel: "Delete", accent: .danger)
+            GuardianThemedButton(
+                accent: zoneToolActive ? .primary : .neutral,
+                surface: zoneToolActive ? .solid : .outline,
+                size: .small,
+                shape: .cornered,
+                contentSizing: .squareToolbarCell,
+                action: onToggleZoneTool,
+                label: {
+                    Image(systemName: "mappin.and.ellipse")
+                        .font(GuardianTypography.font(.sectionHeadingSemibold))
+                }
+            )
+            .disabled(!canInteract)
+            .accessibilityLabel("Start and end zones")
+            .help("Add start and end zones on the map")
+            .guardianPointerOnHover()
+
+            GuardianThemedButton(
+                accent: obstacleToolActive ? .primary : .neutral,
+                surface: obstacleToolActive ? .solid : .outline,
+                size: .small,
+                shape: .cornered,
+                contentSizing: .squareToolbarCell,
+                action: onToggleObstacleTool,
+                label: {
+                    Image(systemName: "cube")
+                        .font(GuardianTypography.font(.sectionHeadingSemibold))
+                }
+            )
+            .disabled(!canInteract)
+            .accessibilityLabel("Obstacle models")
+            .help("Place static obstacle models on the map")
+            .guardianPointerOnHover()
+
             Spacer(minLength: 0)
         }
         .padding(.vertical, GuardianSpacing.xs)
@@ -629,27 +973,111 @@ private struct WorldBuilderBuildToolbarRail: View {
                 .frame(width: 1)
         }
     }
+}
 
-    private func toolButton(
-        systemImage: String,
-        accessibilityLabel: String,
-        accent: GuardianThemeAccent = .neutral
-    ) -> some View {
-        GuardianThemedButton(
-            accent: accent,
-            surface: .outline,
-            size: .small,
-            shape: .cornered,
-            contentSizing: .squareToolbarCell,
-            action: {},
-            label: {
-                Image(systemName: systemImage)
-                    .font(GuardianTypography.font(.sectionHeadingSemibold))
+// MARK: - Scene tool bar (viewport overlay)
+
+/// Optional toolbar over the top-right of the Gazebo viewport (opened from the build rail).
+private struct WorldBuilderSceneToolBar: View {
+    let theme: GuardianThemePalette
+    let placementKind: WorldBuilderZoneKind
+    let zoneShape: TrainingEnvironmentZoneShape
+    let zoneRadiusM: Double
+    let onSelectPlacementKind: (WorldBuilderZoneKind) -> Void
+    let onSelectZoneShape: (TrainingEnvironmentZoneShape) -> Void
+    let onZoneRadiusChange: (Double) -> Void
+    let onClose: () -> Void
+
+    private static let radiusRangeM = WorldBuilderZoneState.minRadiusM ... WorldBuilderZoneState.maxRadiusM
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+            HStack(spacing: GuardianSpacing.xs) {
+                Text("Zones")
+                    .font(GuardianTypography.Scale.caption.font(weight: .semibold))
+                    .foregroundStyle(theme.textSecondary)
+                Spacer(minLength: 0)
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(GuardianTypography.Scale.caption.font(weight: .semibold))
+                        .foregroundStyle(theme.textSecondary)
+                }
+                .buttonStyle(GuardianPointerPlainButtonStyle())
+                .accessibilityLabel("Close zone tools")
             }
+
+            sceneToolPicker(
+                title: "Type",
+                selection: placementKind,
+                options: WorldBuilderZoneKind.allCases,
+                label: { $0.displayName },
+                onSelect: onSelectPlacementKind
+            )
+
+            sceneToolPicker(
+                title: "Shape",
+                selection: zoneShape,
+                options: TrainingEnvironmentZoneShape.allCases,
+                label: { $0 == .circle ? "Circle" : "Square" },
+                onSelect: onSelectZoneShape
+            )
+
+            VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
+                HStack {
+                    Text("Radius")
+                        .font(GuardianTypography.Scale.caption.font())
+                        .foregroundStyle(theme.textTertiary)
+                    Spacer(minLength: 0)
+                    Text("\(Int(zoneRadiusM.rounded())) m")
+                        .font(GuardianTypography.Scale.caption.font(weight: .semibold))
+                        .foregroundStyle(theme.textSecondary)
+                        .monospacedDigit()
+                }
+                Slider(
+                    value: Binding(
+                        get: { zoneRadiusM },
+                        set: { onZoneRadiusChange($0) }
+                    ),
+                    in: Self.radiusRangeM,
+                    step: 5
+                )
+            }
+
+            Text("Click map to place. Drag zone to move. Shift+drag pans, drag rotates.")
+                .font(GuardianTypography.Scale.caption.font())
+                .foregroundStyle(theme.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(GuardianSpacing.sm)
+        .frame(width: 200)
+        .background(theme.backgroundRaised, in: RoundedRectangle(cornerRadius: GuardianSpacing.xs, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: GuardianSpacing.xs, style: .continuous)
+                .stroke(theme.borderSubtle, lineWidth: 1)
         )
-        .disabled(!canInteract)
-        .accessibilityLabel(accessibilityLabel)
-        .help(accessibilityLabel)
-        .guardianPointerOnHover()
+    }
+
+    private func sceneToolPicker<T: Hashable>(
+        title: String,
+        selection: T,
+        options: [T],
+        label: @escaping (T) -> String,
+        onSelect: @escaping (T) -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
+            Text(title)
+                .font(GuardianTypography.Scale.caption.font())
+                .foregroundStyle(theme.textTertiary)
+            Picker(title, selection: Binding(
+                get: { selection },
+                set: { onSelect($0) }
+            )) {
+                ForEach(options, id: \.self) { option in
+                    Text(label(option)).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+        }
     }
 }

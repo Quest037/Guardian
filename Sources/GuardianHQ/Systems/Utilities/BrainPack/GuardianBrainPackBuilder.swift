@@ -3,6 +3,7 @@ import Foundation
 /// Training lab snapshot inputs for `planner_hints` on brain export.
 struct GuardianBrainPackTrainingPlannerContext: Equatable, Sendable {
     var vehicleClass: TrainingVehicleClass
+    var vehicleSizeTier: VehicleSizeTier
     var layout: TrainingTaskLayout
     var segments: [TrainingControlSegment]
     var planPathSource: TrainingNav2PlanPathResponse.Source
@@ -15,14 +16,14 @@ struct GuardianBrainPackTrainingPlannerContext: Equatable, Sendable {
 enum GuardianBrainPackBuilder {
     static func squadProfile(
         formation: MissionSquadFormationKind,
-        shape: MissionSquadFormationShape,
+        spacing: MissionSquadFormationSpacing,
         vehicleClass: TrainingVehicleClass,
         simCount: Int
     ) -> GuardianBrainPackSquadProfile {
-        let spacing = MissionSquadConvoySpacingPolicy.resolvedSpacing(
+        let convoySpacing = MissionSquadConvoySpacingPolicy.resolvedSpacing(
             taskPattern: .patrol,
             primaryGranularClass: vehicleClass.fleetVehicleType,
-            shape: shape,
+            spacing: spacing,
             formation: formation
         )
         struct ConvoyExportPayload: Codable {
@@ -34,15 +35,15 @@ enum GuardianBrainPackBuilder {
         }
         let payload = ConvoyExportPayload(
             simCount: simCount,
-            alongTrackMetersPerOrdinal: spacing.alongTrackMetersPerOrdinal,
-            lateralLaneMeters: spacing.lateralLaneMeters,
-            shapeScaleAlong: shape.alongTrackScale,
-            shapeScaleLateral: shape.lateralScale
+            alongTrackMetersPerOrdinal: convoySpacing.alongTrackMetersPerOrdinal,
+            lateralLaneMeters: convoySpacing.lateralLaneMeters,
+            shapeScaleAlong: spacing.alongTrackScale,
+            shapeScaleLateral: spacing.lateralScale
         )
         let convoyJSON = (try? JSONEncoder().encode(payload)).flatMap { String(data: $0, encoding: .utf8) }
         return GuardianBrainPackSquadProfile(
-            formationShape: formation.rawValue,
-            slotSpacingM: spacing.alongTrackMetersPerOrdinal,
+            formation: formation.rawValue,
+            slotSpacingM: convoySpacing.alongTrackMetersPerOrdinal,
             convoyOffsetsJSON: convoyJSON
         )
     }
@@ -51,6 +52,11 @@ enum GuardianBrainPackBuilder {
     static func plannerHints(from context: GuardianBrainPackTrainingPlannerContext) -> GuardianBrainPackPlannerHints? {
         let planner = GuardianAutonomyPlannerRouting.defaultPlannerKind(for: context.vehicleClass.fleetVehicleType)
         let maxSpeed = inferredMaxSpeedMS(from: context.segments)
+        let footprint = VehicleClassSizeCatalogue.footprint(
+            vehicleClass: context.vehicleClass.fleetVehicleType,
+            tier: context.vehicleSizeTier
+        )
+        let footprintFields = footprintPlannerFields(tier: context.vehicleSizeTier, footprint: footprint)
         switch planner {
         case .nav2:
             struct Nav2TrainingOverlay: Codable {
@@ -87,6 +93,10 @@ enum GuardianBrainPackBuilder {
             return GuardianBrainPackPlannerHints(
                 frameId: "map",
                 maxSpeedMS: maxSpeed,
+                sizeTier: footprintFields.sizeTier,
+                widthCm: footprintFields.widthCm,
+                lengthCm: footprintFields.lengthCm,
+                heightCm: footprintFields.heightCm,
                 nav2ParamOverlayJSON: json,
                 aerostack2ParamOverlayJSON: nil
             )
@@ -111,12 +121,32 @@ enum GuardianBrainPackBuilder {
             return GuardianBrainPackPlannerHints(
                 frameId: "map",
                 maxSpeedMS: maxSpeed,
+                sizeTier: footprintFields.sizeTier,
+                widthCm: footprintFields.widthCm,
+                lengthCm: footprintFields.lengthCm,
+                heightCm: footprintFields.heightCm,
                 nav2ParamOverlayJSON: nil,
                 aerostack2ParamOverlayJSON: json
             )
         case .none:
-            return nil
+            return GuardianBrainPackPlannerHints(
+                frameId: nil,
+                maxSpeedMS: maxSpeed,
+                sizeTier: footprintFields.sizeTier,
+                widthCm: footprintFields.widthCm,
+                lengthCm: footprintFields.lengthCm,
+                heightCm: footprintFields.heightCm,
+                nav2ParamOverlayJSON: nil,
+                aerostack2ParamOverlayJSON: nil
+            )
         }
+    }
+
+    private static func footprintPlannerFields(
+        tier: VehicleSizeTier,
+        footprint: VehicleFootprint
+    ) -> (sizeTier: String, widthCm: Int, lengthCm: Int, heightCm: Int) {
+        (tier.rawValue, footprint.widthCm, footprint.lengthCm, footprint.heightCm)
     }
 
     static func inferredMaxSpeedMS(from segments: [TrainingControlSegment]) -> Double {

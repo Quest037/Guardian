@@ -15,27 +15,27 @@ final class GuardianBrainSquadProfileResolutionTests: XCTestCase {
             simCount: 3,
             alongTrackMetersPerOrdinal: 4.2,
             lateralLaneMeters: 0.5,
-            shapeScaleAlong: MissionSquadFormationShape.tight.alongTrackScale,
-            shapeScaleLateral: MissionSquadFormationShape.tight.lateralScale
+            shapeScaleAlong: MissionSquadFormationSpacing.tight.alongTrackScale,
+            shapeScaleLateral: MissionSquadFormationSpacing.tight.lateralScale
         )
         let json = String(data: try JSONEncoder().encode(payload), encoding: .utf8)!
         let profile = GuardianBrainPackSquadProfile(
-            formationShape: MissionSquadFormationKind.arrowhead.rawValue,
+            formation: MissionSquadFormationKind.arrowhead.rawValue,
             slotSpacingM: 4.2,
             convoyOffsetsJSON: json
         )
         let tuning = GuardianBrainSquadProfileResolution.tuning(from: profile)
         XCTAssertEqual(tuning?.formation, .arrowhead)
-        XCTAssertEqual(tuning?.shape, .tight)
-        XCTAssertEqual(tuning?.spacing?.alongTrackMetersPerOrdinal, 4.2)
-        XCTAssertEqual(tuning?.spacing?.lateralLaneMeters, 0.5)
+        XCTAssertEqual(tuning?.formationPackSpacing, .tight)
+        XCTAssertEqual(tuning?.convoySpacing?.alongTrackMetersPerOrdinal, 4.2)
+        XCTAssertEqual(tuning?.convoySpacing?.lateralLaneMeters, 0.5)
     }
 
-    func test_inferredShape_picks_closest_pack_tightness() {
+    func test_inferredPackSpacing_picks_closest_pack_tightness() {
         XCTAssertEqual(
-            GuardianBrainSquadProfileResolution.inferredShape(
-                alongScale: MissionSquadFormationShape.loose.alongTrackScale,
-                lateralScale: MissionSquadFormationShape.loose.lateralScale
+            GuardianBrainSquadProfileResolution.inferredPackSpacing(
+                alongScale: MissionSquadFormationSpacing.loose.alongTrackScale,
+                lateralScale: MissionSquadFormationSpacing.loose.lateralScale
             ),
             .loose
         )

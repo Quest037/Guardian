@@ -10,6 +10,8 @@ struct FleetVehicleGridCard: View {
     let sitlAlive: Bool?
     let sitlExitCode: Int32?
     let onCalibration: (() -> Void)?
+    /// Garage configure drawer (size tier and related vehicle settings).
+    let onConfigure: (() -> Void)?
     let onStopSim: (() -> Void)?
     /// When non-`nil`, the Stop button is disabled and this string is used for `.help` (e.g. live Mission Control run).
     let stopSimDisabledReason: String?
@@ -102,21 +104,38 @@ struct FleetVehicleGridCard: View {
                     .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if let onCalibration {
+            if onConfigure != nil || onCalibration != nil {
                 HStack(spacing: GuardianSpacing.xs) {
-                    GuardianThemedButton(
-                        accent: .neutral,
-                        surface: .outline,
-                        size: .small,
-                        shape: .cornered,
-                        contentSizing: .squareToolbarCell,
-                        action: onCalibration,
-                        label: {
-                            Image(systemName: "waveform.path.ecg.rectangle")
-                                .font(GuardianTypography.font(.sectionHeadingSemibold))
-                        }
-                    )
-                    .help("Open Vehicle Inspector (calibration, preflight, telemetry)")
+                    if let configure = onConfigure {
+                        GuardianThemedButton(
+                            accent: .neutral,
+                            surface: .outline,
+                            size: .small,
+                            shape: .cornered,
+                            contentSizing: .squareToolbarCell,
+                            action: configure,
+                            label: {
+                                Image(systemName: "gearshape")
+                                    .font(GuardianTypography.font(.sectionHeadingSemibold))
+                            }
+                        )
+                        .help("Vehicle settings (size tier, class defaults)")
+                    }
+                    if let onCalibration {
+                        GuardianThemedButton(
+                            accent: .neutral,
+                            surface: .outline,
+                            size: .small,
+                            shape: .cornered,
+                            contentSizing: .squareToolbarCell,
+                            action: onCalibration,
+                            label: {
+                                Image(systemName: "waveform.path.ecg.rectangle")
+                                    .font(GuardianTypography.font(.sectionHeadingSemibold))
+                            }
+                        )
+                        .help("Open Vehicle Inspector (calibration, preflight, telemetry)")
+                    }
                 }
             }
         }
@@ -134,6 +153,21 @@ struct FleetVehicleGridCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: GuardianSpacing.xs) {
+                if let configure = onConfigure {
+                    GuardianThemedButton(
+                        accent: .neutral,
+                        surface: .outline,
+                        size: .small,
+                        shape: .cornered,
+                        contentSizing: .squareToolbarCell,
+                        action: configure,
+                        label: {
+                            Image(systemName: "gearshape")
+                                .font(GuardianTypography.font(.sectionHeadingSemibold))
+                        }
+                    )
+                    .help("Vehicle settings (size tier, class defaults)")
+                }
                 if let onCalibration {
                     GuardianThemedButton(
                         accent: .neutral,

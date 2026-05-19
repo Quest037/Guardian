@@ -36,13 +36,6 @@ enum TrainingVehicleClass: String, CaseIterable, Identifiable, Codable, Sendable
     }
 }
 
-enum TrainingPanelMode: String, CaseIterable, Identifiable, Sendable {
-    case vehicle = "Vehicle"
-    case formation = "Formation"
-
-    var id: String { rawValue }
-}
-
 enum TrainingTaskKind: String, CaseIterable, Identifiable, Codable, Sendable {
     case reverseIntoSlot = "reverseIntoSlot"
     case approachSlotForward = "approachSlotForward"

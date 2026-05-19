@@ -68,15 +68,15 @@ struct MissionRunTaskPolicyOverridesSidebarView: View {
                         .fixedSize(horizontal: false, vertical: true)
                     HStack {
                         Spacer(minLength: 0)
-                        Picker("Shape", selection: squadFormationShapeBinding) {
-                            ForEach(MissionSquadFormationShape.allCases) { shape in
+                        Picker("Spacing", selection: squadFormationSpacingBinding) {
+                            ForEach(MissionSquadFormationSpacing.allCases) { shape in
                                 Text(shape.displayTitle).tag(shape)
                             }
                         }
                         .labelsHidden()
                         .pickerStyle(.menu)
                         .fixedSize()
-                        .accessibilityLabel("Formation shape")
+                        .accessibilityLabel("Formation spacing")
                     }
                     .frame(maxWidth: .infinity, alignment: .trailing)
                 }
@@ -226,11 +226,11 @@ struct MissionRunTaskPolicyOverridesSidebarView: View {
         )
     }
 
-    private var squadFormationShapeBinding: Binding<MissionSquadFormationShape> {
+    private var squadFormationSpacingBinding: Binding<MissionSquadFormationSpacing> {
         Binding(
-            get: { resolvedTask()?.squadFormationShape ?? .normal },
+            get: { resolvedTask()?.squadFormationSpacing ?? .normal },
             set: { newValue in
-                _ = run.updateTaskSquadFormationShape(taskID: taskId, newValue, credential: credential)
+                _ = run.updateTaskSquadFormationSpacing(taskID: taskId, newValue, credential: credential)
                 onChange()
             }
         )
@@ -294,16 +294,16 @@ struct MissionRunAssignmentPolicyOverridesSidebarView: View {
                     Text("Shape")
                         .font(GuardianTypography.font(.disclosureRowTitle))
                         .foregroundStyle(theme.textPrimary)
-                    Text("Primary slot only. Inherit uses the task shape (\(inheritedSquadFormationShapeLabel)).")
+                    Text("Primary slot only. Inherit uses the task spacing (\(inheritedSquadFormationSpacingLabel)).")
                         .font(GuardianTypography.font(.denseFootnoteRegular))
                         .foregroundStyle(theme.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack {
                         Spacer(minLength: 0)
-                        Picker("Shape", selection: primarySquadFormationShapePickerBinding) {
-                            Text("Inherit (\(inheritedSquadFormationShapeLabel))").tag(PrimarySquadFormationShapePickerChoice.inherit)
-                            ForEach(MissionSquadFormationShape.allCases) { shape in
-                                Text(shape.displayTitle).tag(PrimarySquadFormationShapePickerChoice.explicit(shape))
+                        Picker("Spacing", selection: primarySquadFormationSpacingPickerBinding) {
+                            Text("Inherit (\(inheritedSquadFormationSpacingLabel))").tag(PrimarySquadFormationSpacingPickerChoice.inherit)
+                            ForEach(MissionSquadFormationSpacing.allCases) { shape in
+                                Text(shape.displayTitle).tag(PrimarySquadFormationSpacingPickerChoice.explicit(shape))
                             }
                         }
                         .labelsHidden()
@@ -458,34 +458,34 @@ struct MissionRunAssignmentPolicyOverridesSidebarView: View {
         )
     }
 
-    private var inheritedSquadFormationShapeLabel: String {
+    private var inheritedSquadFormationSpacingLabel: String {
         guard let mission = missionSnapshot,
               let assignment = run.assignments.first(where: { $0.id == assignmentId })
-        else { return MissionSquadFormationShape.normal.displayTitle }
-        return MissionRunPolicyResolution.inheritedSquadFormationShapeForPrimarySlot(assignment: assignment, mission: mission)
+        else { return MissionSquadFormationSpacing.normal.displayTitle }
+        return MissionRunPolicyResolution.inheritedSquadFormationSpacingForPrimarySlot(assignment: assignment, mission: mission)
             .displayTitle
     }
 
-    private enum PrimarySquadFormationShapePickerChoice: Hashable {
+    private enum PrimarySquadFormationSpacingPickerChoice: Hashable {
         case inherit
-        case explicit(MissionSquadFormationShape)
+        case explicit(MissionSquadFormationSpacing)
     }
 
-    private var primarySquadFormationShapePickerBinding: Binding<PrimarySquadFormationShapePickerChoice> {
+    private var primarySquadFormationSpacingPickerBinding: Binding<PrimarySquadFormationSpacingPickerChoice> {
         Binding(
             get: {
                 if let override = run.assignments.first(where: { $0.id == assignmentId })?
-                    .policies.squadFormationShapeOverride {
+                    .policies.squadFormationSpacingOverride {
                     return .explicit(override)
                 }
                 return .inherit
             },
             set: { choice in
-                let shape: MissionSquadFormationShape? = switch choice {
+                let shape: MissionSquadFormationSpacing? = switch choice {
                 case .inherit: nil
                 case .explicit(let value): value
                 }
-                _ = run.updateAssignmentSquadFormationShapeOverride(
+                _ = run.updateAssignmentSquadFormationSpacingOverride(
                     assignmentID: assignmentId,
                     shape,
                     credential: credential

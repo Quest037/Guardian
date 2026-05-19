@@ -17,11 +17,13 @@ final class GazeboWebViewportCameraBridge: ObservableObject {
     }
 
     var javaScriptExpression: String {
+        let call: String
         switch action {
         case .defaultView:
-            "window.guardianViewer.resetDefaultView()"
+            call = "resetDefaultView()"
         case .birdseye:
-            "window.guardianViewer.fitBirdseyeView()"
+            call = "fitBirdseyeView()"
         }
+        return "(window.guardianViewer?.sceneReady?.() && window.guardianViewer.\(call)) || false"
     }
 }

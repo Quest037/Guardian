@@ -39,7 +39,7 @@ The **ROS 2 vehicle bridge** (Micro XRCE-DDS Agent + `guardian_ros2_vehicle_brid
 
 | Phase | Who enrolls | uXRCE at PX4 spawn | Notes |
 |-------|-------------|-------------------|--------|
-| **Now (testing)** | Training vehicle sim | yes (`SitlSpawnOwner.trainingVehicle`) | Nav2 path overlay; MAVLink link before bridge start |
+| **Now (testing)** | Training vehicle sim | yes (`SitlSpawnOwner.trainingRoster`) | Nav2 path overlay; MAVLink link before bridge start |
 | **Next** | Formation squad sims, MCR PX4 streams | per-surface policy | Nav2 / Aerostack2 execution, not just map overlay |
 | **Later** | Vehicles garage sims, live hardware | airframe / ops procedure | `registerSimulatedVehicle` / live link + `ensurePx4Ros2Sidecar(forVehicleID:)` |
 

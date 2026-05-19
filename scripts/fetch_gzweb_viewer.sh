@@ -112,6 +112,8 @@ echo "Bundling gzweb + dependencies → dist/gzweb.bundle.mjs …"
 cp "$DIST/gzweb.module.js" "$BUILD/gzweb.module.js"
 # gzweb uses `import * as JSZip`; jszip exports a constructor as default.
 sed -i '' 's/import \* as JSZip from/import JSZip from/' "$BUILD/gzweb.module.js"
+# World Builder zone overlays need unlit materials + circle primitives from the same THREE build.
+printf '\nexport { CircleGeometry, RingGeometry, PlaneGeometry, MeshBasicMaterial, DoubleSide, EdgesGeometry, LineSegments } from "three";\n' >> "$BUILD/gzweb.module.js"
 
 ESBUILD="$(esbuild_bin)"
 (

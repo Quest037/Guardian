@@ -455,8 +455,6 @@ struct RootView: View {
                     missionControlStore: missionControlStore,
                     generalSettings: generalSettingsStore
                 )
-            case .brains:
-                GuardianBrainCatalogueView()
             case .missionControl:
                 MissionControlView(
                     missionStore: missionStore,
@@ -495,7 +493,7 @@ struct RootView: View {
             case .logs:
                 LogsView(fleetLink: fleetLinkService)
             case .training:
-                TrainingPanelView(
+                TrainingLabPanelView(
                     fleetLink: fleetLinkService,
                     sitl: sitlService,
                     missionControl: missionControlStore,

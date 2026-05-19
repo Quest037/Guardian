@@ -30,6 +30,15 @@ final class GazeboService: ObservableObject {
     private var websocketRunners: [UUID: GazeboProcessRunner] = [:]
     private var simSceneTrackers: [UUID: GazeboSimSceneReadinessTracker] = [:]
     private var nextInstanceIndex = 0
+    private var vehicleVisualsBySystemID: [Int: GazeboSpawnedVehicleVisual] = [:]
+
+    private struct GazeboSpawnedVehicleVisual: Equatable {
+        let worldID: UUID
+        let worldName: String
+        let instanceIndex: Int
+        let modelName: String
+        let mavlinkSystemID: Int
+    }
 
     init() {
         GuardianAppQuitCoordinator.shared.noteGazeboServiceCreated(self)
@@ -51,8 +60,102 @@ final class GazeboService: ObservableObject {
         worlds.filter { $0.purpose == purpose && $0.isAlive }
     }
 
+    /// True when the embedded gzweb viewport for this world is connected and ready (not starting or failed).
+    func isEmbeddedViewportLive(worldID: UUID?) -> Bool {
+        guard let worldID, let viewport = embeddedViewport, viewport.worldID == worldID else { return false }
+        if case .live = viewport.phase { return true }
+        return false
+    }
+
     func isWorldAlive(id: UUID) -> Bool {
         worlds.first(where: { $0.id == id })?.isAlive == true
+    }
+
+    func firstAliveRunWorldID() -> UUID? {
+        worlds.first(where: { $0.isAlive && $0.purpose == .run })?.id
+    }
+
+    /// Alive World Builder preview session for the same catalogue id or on-disk world path.
+    func firstAliveBuilderWorldID(environmentID: String?, worldFilePath: String) -> UUID? {
+        let normalizedPath = Self.normalizedWorldFilePath(worldFilePath)
+        return worlds.first { row in
+            guard row.isAlive, row.purpose == .preview || row.purpose == .build else { return false }
+            if let environmentID, let rowEnv = row.environmentID, rowEnv == environmentID {
+                return true
+            }
+            return Self.normalizedWorldFilePath(row.worldPath) == normalizedPath
+        }?.id
+    }
+
+    private static func normalizedWorldFilePath(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+
+    /// Inserts a class-coloured box (or optional custom mesh) for one built-in SITL into a **``.run``** world
+    /// (Training / Formation). World Builder sessions do not call this — they author terrain/obstacles/zones only.
+    @discardableResult
+    func spawnVehicleProxy(
+        worldID: UUID,
+        mavlinkSystemID: Int,
+        params: GazeboVehicleSpawnParams
+    ) async -> Bool {
+        guard let row = worlds.first(where: { $0.id == worldID && $0.isAlive }) else {
+            lastError = "Gazebo world is not running."
+            fleetLink?.appendSimulationLog("Gazebo: vehicle proxy skipped — world is not running.")
+            return false
+        }
+        if vehicleVisualsBySystemID[mavlinkSystemID] != nil {
+            await removeVehicleProxy(mavlinkSystemID: mavlinkSystemID)
+        }
+
+        let footprint = VehicleClassSizeCatalogue.footprint(
+            vehicleClass: params.vehicleClass,
+            tier: params.vehicleSizeTier
+        )
+        let modelBase = GazeboVehicleModelSDFWriter.sanitizeModelName("guardian_veh_sysid_\(mavlinkSystemID)")
+
+        do {
+            let written = try GazeboVehicleModelSDFWriter.writeTemporaryModel(
+                modelName: modelBase,
+                params: params,
+                footprint: footprint
+            )
+            try await GazeboEntityFactoryClient.createModel(
+                worldName: row.gazeboSDFWorldName,
+                instanceIndex: row.instanceIndex,
+                sdfURL: written.sdfURL,
+                modelName: written.modelName,
+                pose: params.pose,
+                footprintHeightM: footprint.metres().heightM
+            )
+            vehicleVisualsBySystemID[mavlinkSystemID] = GazeboSpawnedVehicleVisual(
+                worldID: worldID,
+                worldName: row.gazeboSDFWorldName,
+                instanceIndex: row.instanceIndex,
+                modelName: written.modelName,
+                mavlinkSystemID: mavlinkSystemID
+            )
+            let kind = written.usesCustomMesh ? "mesh" : "box"
+            fleetLink?.appendSimulationLog(
+                "Gazebo: vehicle \(kind) \(written.modelName) — \(params.vehicleClass.classCode) \(params.vehicleSizeTier.displayName) (\(footprint.dimensionsLabelCm))."
+            )
+            return true
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            lastError = message
+            fleetLink?.appendSimulationLog("Gazebo: vehicle proxy spawn failed — \(message)")
+            return false
+        }
+    }
+
+    func removeVehicleProxy(mavlinkSystemID: Int) async {
+        guard let visual = vehicleVisualsBySystemID.removeValue(forKey: mavlinkSystemID) else { return }
+        await GazeboEntityFactoryClient.removeModel(
+            worldName: visual.worldName,
+            instanceIndex: visual.instanceIndex,
+            gazeboModelName: visual.modelName
+        )
+        fleetLink?.appendSimulationLog("Gazebo: removed vehicle proxy \(visual.modelName).")
     }
 
     /// Starts `gz sim` for a world file or catalogue package.
@@ -78,19 +181,9 @@ final class GazeboService: ObservableObject {
             return nil
         }
 
-        if GazeboSessionLaunchPolicy.usesEmbeddedWebViewport(for: purpose) {
-            stopEmbeddedViewportWorlds()
-            try? await Task.sleep(nanoseconds: 400_000_000)
-        }
-
-        let aliveCount = worlds.filter(\.isAlive).count
-        if aliveCount >= GazeboConcurrency.maxConcurrentWorlds {
-            lastError = "At most \(GazeboConcurrency.maxConcurrentWorlds) Gazebo world(s) can run at once on this machine."
-            fleetLink?.appendSimulationLog("Gazebo: concurrent world cap reached (\(GazeboConcurrency.maxConcurrentWorlds)).")
-            return nil
-        }
-
         let resolvedPackage = package ?? environmentID.flatMap { TrainingEnvironmentCatalogue.package(id: $0) }
+        let requestedEnvironmentID = resolvedPackage?.id ?? environmentID
+
         let resolvedWorld: URL?
         if let pkg = resolvedPackage {
             resolvedWorld = pkg.worldFileURL()
@@ -100,6 +193,42 @@ final class GazeboService: ObservableObject {
 
         guard let world = resolvedWorld else {
             lastError = GazeboError.missingWorldFile("world.sdf").errorDescription
+            return nil
+        }
+
+        if GazeboSessionLaunchPolicy.usesEmbeddedWebViewport(for: purpose) {
+            if let existingID = firstAliveRunWorldID(),
+               isEmbeddedViewportLive(worldID: existingID),
+               let existing = worlds.first(where: { $0.id == existingID }) {
+                if requestedEnvironmentID == nil || existing.environmentID == requestedEnvironmentID {
+                    return existingID
+                }
+            }
+            if purpose == .preview || purpose == .build {
+                let builderPath = Self.normalizedWorldFilePath(world.path)
+                if let existingID = firstAliveBuilderWorldID(
+                    environmentID: requestedEnvironmentID,
+                    worldFilePath: builderPath
+                ),
+                   let existing = worlds.first(where: { $0.id == existingID }) {
+                    if !isEmbeddedViewportLive(worldID: existingID) {
+                        await startEmbeddedWebBridge(
+                            worldID: existingID,
+                            instanceIndex: existing.instanceIndex,
+                            gazeboWorldName: existing.gazeboSDFWorldName
+                        )
+                    }
+                    return existingID
+                }
+            }
+            stopEmbeddedViewportWorlds()
+            try? await Task.sleep(nanoseconds: 400_000_000)
+        }
+
+        let aliveCount = worlds.filter(\.isAlive).count
+        if aliveCount >= GazeboConcurrency.maxConcurrentWorlds {
+            lastError = "At most \(GazeboConcurrency.maxConcurrentWorlds) Gazebo world(s) can run at once on this machine."
+            fleetLink?.appendSimulationLog("Gazebo: concurrent world cap reached (\(GazeboConcurrency.maxConcurrentWorlds)).")
             return nil
         }
 
@@ -184,7 +313,7 @@ final class GazeboService: ObservableObject {
         return id
     }
 
-    /// Stops every alive World Builder preview/build sim and its websocket bridge.
+    /// Stops every alive embedded-viewport sim (World Builder preview/build and Training `.run`) and its websocket bridge.
     func stopAllPreviewAndBuildWorlds() {
         let ids = worlds
             .filter { $0.isAlive && GazeboSessionLaunchPolicy.usesEmbeddedWebViewport(for: $0.purpose) }
@@ -207,7 +336,7 @@ final class GazeboService: ObservableObject {
         GuardianGazeboOrphanBlitz.kickoffWhenAllWorldsStopped()
     }
 
-    /// World Builder allows one embedded preview/build sim at a time (shared websocket port + transport partition).
+    /// One embedded sim at a time (shared websocket port + transport partition).
     private func stopEmbeddedViewportWorlds() {
         stopAllPreviewAndBuildWorlds()
     }
@@ -255,6 +384,10 @@ final class GazeboService: ObservableObject {
         runners[worldID] = nil
         simSceneTrackers[worldID] = nil
         stopWebsocketBridge(worldID: worldID)
+        let orphanedSystemIDs = vehicleVisualsBySystemID.filter { $0.value.worldID == worldID }.map(\.key)
+        for systemID in orphanedSystemIDs {
+            vehicleVisualsBySystemID.removeValue(forKey: systemID)
+        }
         guard let idx = worlds.firstIndex(where: { $0.id == worldID }) else { return }
         worlds[idx].isAlive = false
         worlds[idx].lastExitCode = exitCode

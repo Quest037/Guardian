@@ -8,11 +8,16 @@ struct GuardianSimulatorSlotCardView: View {
     @ObservedObject var sitl: SitlService
     let showRetry: Bool
     let retryButtonTitle: String
+    var showPreflightRetry: Bool = false
     let showReplace: Bool
+    var showSquadSettings: Bool = false
+    var showDelete: Bool = true
     let cardActionsLocked: Bool
     let onInspect: (String, FleetVehicleModel?) -> Void
+    var onSquadSettings: (() -> Void)?
     let onRetry: () -> Void
     let onReplace: () -> Void
+    var onDelete: (() -> Void)?
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -98,16 +103,56 @@ struct GuardianSimulatorSlotCardView: View {
                 .help("Open Vehicle Inspector (calibration, preflight, manual control)")
                 .guardianPointerOnHover()
             }
-            if showRetry {
+            if showSquadSettings, let onSquadSettings {
                 GuardianThemedButton(
-                    title: retryButtonTitle,
+                    accent: .neutral,
+                    surface: .outline,
+                    size: .small,
+                    shape: .cornered,
+                    isEnabled: !cardActionsLocked,
+                    contentSizing: .squareToolbarCell,
+                    action: onSquadSettings,
+                    label: {
+                        Image(systemName: "gearshape")
+                            .font(GuardianTypography.font(.sectionHeadingSemibold))
+                    }
+                )
+                .accessibilityLabel("Squad settings")
+                .help("Formation and spacing for this squad")
+                .guardianPointerOnHover()
+            }
+            if showPreflightRetry {
+                GuardianThemedButton(
                     accent: .primary,
                     surface: .outline,
                     size: .small,
                     shape: .cornered,
                     isEnabled: !cardActionsLocked,
-                    action: onRetry
+                    contentSizing: .squareToolbarCell,
+                    action: onRetry,
+                    label: {
+                        Image(systemName: "checkmark.shield")
+                            .font(GuardianTypography.font(.sectionHeadingSemibold))
+                    }
                 )
+                .accessibilityLabel("Retry preflight")
+                .help("Run preflight again on this simulator")
+                .guardianPointerOnHover()
+            } else if showRetry {
+                GuardianThemedButton(
+                    accent: .primary,
+                    surface: .outline,
+                    size: .small,
+                    shape: .cornered,
+                    isEnabled: !cardActionsLocked,
+                    contentSizing: .squareToolbarCell,
+                    action: onRetry,
+                    label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(GuardianTypography.font(.sectionHeadingSemibold))
+                    }
+                )
+                .accessibilityLabel(retryButtonTitle)
                 .help(
                     slot.linkReady
                         ? "Run preflight again on this simulator"
@@ -117,19 +162,42 @@ struct GuardianSimulatorSlotCardView: View {
             }
             if showReplace {
                 GuardianThemedButton(
-                    title: "Replace",
                     accent: .danger,
                     surface: .outline,
                     size: .small,
                     shape: .cornered,
                     isEnabled: !cardActionsLocked,
-                    action: onReplace
+                    contentSizing: .squareToolbarCell,
+                    action: onReplace,
+                    label: {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(GuardianTypography.font(.sectionHeadingSemibold))
+                    }
                 )
+                .accessibilityLabel("Replace")
                 .help(
                     slot.linkReady
                         ? "Stop this simulator and spawn a new one"
                         : "Stop the stuck simulator and spawn a new one"
                 )
+                .guardianPointerOnHover()
+            }
+            if showDelete, let onDelete {
+                GuardianThemedButton(
+                    accent: .danger,
+                    surface: .outline,
+                    size: .small,
+                    shape: .cornered,
+                    isEnabled: !cardActionsLocked,
+                    contentSizing: .squareToolbarCell,
+                    action: onDelete,
+                    label: {
+                        Image(systemName: "trash")
+                            .font(GuardianTypography.font(.sectionHeadingSemibold))
+                    }
+                )
+                .accessibilityLabel("Remove vehicle")
+                .help("Stop this simulator and remove it from the roster")
                 .guardianPointerOnHover()
             }
             Spacer(minLength: 0)

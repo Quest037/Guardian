@@ -8,7 +8,6 @@ enum AppSection: String, CaseIterable, Identifiable {
     case logs = "Logs"
     case missions = "Missions"
     case missionControl = "Mission Control"
-    case brains = "Brains"
     case theme = "Theme"
     case settings = "Settings"
     case plugins = "Plugins"
@@ -31,8 +30,6 @@ enum AppSection: String, CaseIterable, Identifiable {
             return "list.bullet.rectangle.portrait"
         case .missionControl:
             return "slider.horizontal.3"
-        case .brains:
-            return "brain.head.profile"
         case .training:
             return "graduationcap"
         case .worlds:
@@ -60,8 +57,6 @@ enum AppSection: String, CaseIterable, Identifiable {
             return "Server and vehicle log streams."
         case .missionControl:
             return "Operate active missions in real time."
-        case .brains:
-            return "Import and pin autonomy brains for Mission Control runs."
         case .training:
             return "Train movement skills and preview formation spacing on simulators."
         case .worlds:
@@ -79,7 +74,7 @@ enum AppSection: String, CaseIterable, Identifiable {
 extension AppSection {
     /// Upper sidebar scroll area (core destinations + ``GuardianPluginSidebarPlacement/primary`` contributions).
     static var primarySidebarRail: [AppSection] {
-        [.dashboard, .missions, .brains, .missionControl, .devices, .liveDrive, .logs]
+        [.dashboard, .missions, .missionControl, .devices, .liveDrive, .logs]
     }
 
     /// Primary rail entries visible for the current session (simulate-only surfaces appended when enabled).

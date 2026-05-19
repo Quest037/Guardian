@@ -256,4 +256,15 @@ final class FleetUtilities {
 }
 
 @MainActor
-final class FleetVehicleUtilities {}
+final class FleetVehicleUtilities {
+    func resolvedFootprint(vehicleID: String, vehicleClass: FleetVehicleType) -> VehicleFootprint {
+        VehicleClassSizePreferencesStore.shared.resolvedFootprint(
+            vehicleID: vehicleID,
+            vehicleClass: vehicleClass
+        )
+    }
+
+    func gazeboFootprint(vehicleID: String, vehicleClass: FleetVehicleType) -> VehicleGazeboFootprint {
+        VehicleGazeboFootprint.resolve(vehicleID: vehicleID, vehicleClass: vehicleClass)
+    }
+}

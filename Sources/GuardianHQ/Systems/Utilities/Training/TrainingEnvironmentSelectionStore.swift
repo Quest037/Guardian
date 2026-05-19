@@ -34,6 +34,14 @@ enum TrainingEnvironmentSelectionStore {
         return all.byTaskKind[task.rawValue]
     }
 
+    /// Drops any persisted selection that pointed at a removed environment package.
+    static func removeReferences(to environmentID: String, fileURL: URL? = nil) throws {
+        var all = try load(fileURL: fileURL)
+        all.byTaskKind = all.byTaskKind.filter { $0.value != environmentID }
+        all.byTaskKindAndVehicleClass = all.byTaskKindAndVehicleClass.filter { $0.value != environmentID }
+        try save(all, fileURL: fileURL)
+    }
+
     static func setSelectedEnvironmentID(
         _ environmentID: String?,
         task: TrainingTaskKind,

@@ -7,8 +7,9 @@ import SwiftUI
 final class FormationsPlaygroundController: ObservableObject {
     @Published var simCount: Int = 3
     @Published var vehicleClass: FormationsPlaygroundVehicleClass = .ugvWheeled
+    @Published var vehicleSizeTier: VehicleSizeTier = .medium
     @Published var formation: MissionSquadFormationKind = .arrowhead
-    @Published var shape: MissionSquadFormationShape = .tight
+    @Published var spacing: MissionSquadFormationSpacing = .tight
     @Published private(set) var phase: FormationsPlaygroundPhase = .idle
     @Published private(set) var isBusy = false
     @Published private(set) var statusText = "Spawn simulators to preview formation spacing."
@@ -62,6 +63,25 @@ final class FormationsPlaygroundController: ObservableObject {
         formationAnchorLon = spawnDefaults.longitudeDeg
         formationAnchorHeadingDeg = spawnDefaults.headingDeg
         formationAnchorAltM = spawnDefaults.altitudeM
+    }
+
+    /// Ends formation follow / control streams without despawning simulators (Training **Stop**).
+    func stopActiveFormationSession() async {
+        tickTask?.cancel()
+        tickTask = nil
+        if phase == .following {
+            telemetryRecorder.endSession()
+            telemetryTraceSampleCount = telemetryRecorder.samples.count
+        }
+        phase = .idle
+        await stopAllStreams()
+        if slots.isEmpty {
+            statusText = "Spawn simulators to fill the roster."
+        } else if slots.allSatisfy(\.linkReady) {
+            statusText = "\(slots.count) simulator(s) ready."
+        } else {
+            statusText = "Waiting for simulators to link…"
+        }
     }
 
     /// Leaving the Formations tab: stop streamed formation control only (SITLs stay in Vehicles).
@@ -160,10 +180,10 @@ final class FormationsPlaygroundController: ObservableObject {
                 preset: vehicleClass.simulationPreset,
                 platform: simulationPlatform,
                 defaults: defaults,
-                owner: .formationsPlayground
+                owner: .trainingRoster
             )
             let added = sitl.instances.filter {
-                !before.contains($0.id) && $0.spawnOwner == .formationsPlayground
+                !before.contains($0.id) && $0.spawnOwner == .trainingRoster
             }
             for row in added {
                 slots.append(
@@ -221,6 +241,127 @@ final class FormationsPlaygroundController: ObservableObject {
         }
 
         await applyFormationControl(fleetLink: fleetLink)
+    }
+
+    /// Starts one Training lab SITL and returns immediately; link + preflight finish in the background.
+    @discardableResult
+    func spawnTrainingLabSimulator(
+        preset: SimulationVehiclePreset,
+        platform: SimulationPlatform,
+        sizeTier: VehicleSizeTier,
+        gazeboPlacement: GazeboVehiclePlacement?,
+        missionControl: MissionControlStore
+    ) async -> FormationsPlaygroundSlotState? {
+        guard let fleetLink, let sitl else { return nil }
+        guard fleetLink.isSimulateEnabled else {
+            statusText = "Turn on Simulate in the top bar before spawning."
+            return nil
+        }
+
+        let index = slots.count
+        let before = Set(sitl.instances.map(\.id))
+        let defaults = staggeredSpawnDefaults(slotIndex: index)
+        sitl.spawn(
+            preset: preset,
+            platform: platform,
+            defaults: defaults,
+            owner: .trainingRoster,
+            gazeboPlacement: gazeboPlacement
+        )
+        guard let row = sitl.instances.first(where: {
+            !before.contains($0.id) && $0.spawnOwner == .trainingRoster
+        }) else {
+            statusText = sitl.lastError ?? "Spawn failed — check SITL logs."
+            return nil
+        }
+
+        let slot = FormationsPlaygroundSlotState(
+            sitlSessionID: row.id,
+            vehicleID: vehicleID(forStackInstance: row.stackInstanceIndex, fleetLink: fleetLink),
+            linkReady: false,
+            preflightPassed: nil,
+            preflightDetail: nil
+        )
+        slots.append(slot)
+
+        if let vid = slot.vehicleID {
+            fleetLink.setVehicleSizeTier(sizeTier, forVehicleID: vid)
+        }
+
+        if slots.count == 1 {
+            statusText = "Connecting simulator…"
+        } else {
+            statusText = "\(slots.count) simulators — connecting latest…"
+        }
+
+        let slotID = slot.id
+        let sitlSessionID = row.id
+        Task { @MainActor [weak self] in
+            await self?.completeTrainingLabSimulatorStartup(
+                slotID: slotID,
+                sitlSessionID: sitlSessionID,
+                missionControl: missionControl
+            )
+        }
+        return slot
+    }
+
+    /// Link wait, fleet bind, and preflight for a Training lab row (does not block the add-vehicle UI).
+    private func completeTrainingLabSimulatorStartup(
+        slotID: UUID,
+        sitlSessionID: UUID,
+        missionControl: MissionControlStore
+    ) async {
+        guard let fleetLink, let sitl else { return }
+
+        _ = await waitForSlotFleetReady(slotID: slotID, fleetLink: fleetLink)
+        refreshSlotRows(fleetLink: fleetLink)
+
+        if let inst = sitl.instances.first(where: { $0.id == sitlSessionID && $0.isAlive }) {
+            _ = await bindFleetLinkToFormationSimulator(inst: inst, fleetLink: fleetLink, sitl: sitl)
+        }
+
+        refreshSlotRows(fleetLink: fleetLink)
+        guard let vehicleID = slots.first(where: { $0.id == slotID })?.vehicleID else { return }
+
+        let probe = await missionControl.runSingleVehiclePreflightProbe(
+            vehicleID: vehicleID,
+            fleetLink: fleetLink,
+            sitl: sitl,
+            leaveArmed: true,
+            allowDuringLiveMission: true,
+            preflightAuditSource: Self.preflightSource
+        )
+        if let idx = slots.firstIndex(where: { $0.id == slotID }) {
+            slots[idx].preflightPassed = probe.passed
+            slots[idx].preflightDetail = probe.detail
+            slots[idx].linkReady = true
+        }
+        refreshSlotRows(fleetLink: fleetLink)
+        statusText = liveStatusLabel()
+    }
+
+    /// Replaces in-memory slot list when the Training lab roster edits squads (no SITL stop).
+    func replaceSlotsForTrainingLab(_ next: [FormationsPlaygroundSlotState]) {
+        slots = next
+        connectedSimCount = next.filter(\.linkReady).count
+        if next.isEmpty {
+            statusText = "Add vehicles to your training session."
+        } else {
+            statusText = "\(next.count) simulator(s) in roster."
+        }
+    }
+
+    /// Stops one roster row's SITL and removes it from the playground slot list.
+    func removeSlot(id: UUID) async {
+        guard let sitl, let fleetLink, let index = slots.firstIndex(where: { $0.id == id }) else { return }
+        let slot = slots[index]
+        if let vehicleID = slot.vehicleID {
+            await fleetLink.stopFormationFollowStream(vehicleID: vehicleID)
+        }
+        sitl.stop(id: slot.sitlSessionID)
+        slots.remove(at: index)
+        refreshConnectedSimCount(fleetLink: fleetLink)
     }
 
     func applyFormationControl() async {
@@ -325,20 +466,26 @@ final class FormationsPlaygroundController: ObservableObject {
 
     var cardActionsLocked: Bool { isBusy }
 
+    @discardableResult
     func replaceSlot(
         slotID: UUID,
-        missionControl: MissionControlStore
-    ) async {
+        missionControl: MissionControlStore,
+        preset: SimulationVehiclePreset? = nil,
+        platform: SimulationPlatform? = nil,
+        sizeTier: VehicleSizeTier? = nil,
+        gazeboPlacement: GazeboVehiclePlacement? = nil
+    ) async -> FormationsPlaygroundSlotState? {
         guard let fleetLink, let sitl,
               let index = slots.firstIndex(where: { $0.id == slotID })
-        else { return }
+        else { return nil }
         guard fleetLink.isSimulateEnabled else {
             statusText = "Turn on Simulate in the top bar before replacing."
-            return
+            return nil
         }
         let old = slots[index]
         if let vid = old.vehicleID {
             await fleetLink.stopFormationFollowStream(vehicleID: vid)
+            await fleetLink.stopTrainingControlStream(vehicleID: vid)
         }
         if let oldInst = sitl.instances.first(where: { $0.id == old.sitlSessionID }) {
             fleetLink.unregisterSimulatedVehicle(systemID: oldInst.mavlinkSystemID)
@@ -347,21 +494,26 @@ final class FormationsPlaygroundController: ObservableObject {
         await sitl.waitForRecentlyReleasedPortsToSettle()
         slots.remove(at: index)
 
+        let resolvedPreset = preset ?? vehicleClass.simulationPreset
+        let resolvedPlatform = platform ?? simulationPlatform
+        let resolvedTier = sizeTier ?? vehicleSizeTier
+
         statusText = "Replacing simulator (stop + spawn)…"
         isBusy = true
         let before = Set(sitl.instances.map(\.id))
         let defaults = staggeredSpawnDefaults(slotIndex: index)
         sitl.spawn(
-            preset: vehicleClass.simulationPreset,
-            platform: simulationPlatform,
+            preset: resolvedPreset,
+            platform: resolvedPlatform,
             defaults: defaults,
-            owner: .formationsPlayground
+            owner: .trainingRoster,
+            gazeboPlacement: gazeboPlacement
         )
         guard let row = sitl.instances.first(where: {
-            !before.contains($0.id) && $0.spawnOwner == .formationsPlayground
+            !before.contains($0.id) && $0.spawnOwner == .trainingRoster
         }) else {
             statusText = sitl.lastError ?? "Could not spawn replacement simulator."
-            return
+            return nil
         }
         let replacement = FormationsPlaygroundSlotState(
             sitlSessionID: row.id,
@@ -371,6 +523,9 @@ final class FormationsPlaygroundController: ObservableObject {
             preflightDetail: nil
         )
         slots.insert(replacement, at: index)
+        if let vid = replacement.vehicleID {
+            fleetLink.setVehicleSizeTier(resolvedTier, forVehicleID: vid)
+        }
         isBusy = false
 
         if let inst = sitl.instances.first(where: { $0.id == replacement.sitlSessionID && $0.isAlive }) {
@@ -379,7 +534,7 @@ final class FormationsPlaygroundController: ObservableObject {
 
         guard await waitForSlotFleetReady(slotID: replacement.id, fleetLink: fleetLink) else {
             statusText = "Replacement simulator did not reach live telemetry in time."
-            return
+            return slots.first(where: { $0.id == replacement.id })
         }
         refreshSlotRows(fleetLink: fleetLink)
         try? await Task.sleep(nanoseconds: 750_000_000)
@@ -389,6 +544,7 @@ final class FormationsPlaygroundController: ObservableObject {
         if phase == .following, replacement.vehicleID != nil, slots[index].preflightPassed == true {
             await refreshFormationStreams()
         }
+        return slots.first(where: { $0.id == replacement.id })
     }
 
     /// Back-compat alias for preflight-failure replace; same as ``replaceSlot``.
@@ -658,9 +814,9 @@ final class FormationsPlaygroundController: ObservableObject {
         let total = slots.count
         guard total > 0 else { return "Spawn simulators to preview formation spacing." }
         if phase == .following {
-            return "\(ready) of \(total) ready · \(formation.displayTitle) · \(shape.displayTitle) spacing"
+            return "\(ready) of \(total) ready · \(formation.displayTitle) · \(spacing.displayTitle) spacing"
         }
-        return "\(ready) of \(total) preflight passed · \(formation.displayTitle) · \(shape.displayTitle)"
+        return "\(ready) of \(total) preflight passed · \(formation.displayTitle) · \(spacing.displayTitle)"
     }
 
     private func stopPlaygroundSquadTrackedInstancesOnly(sitl: SitlService) {
@@ -672,7 +828,7 @@ final class FormationsPlaygroundController: ObservableObject {
     private func syncSlotsFromRunningSitl(fleetLink: FleetLinkService) {
         guard let sitl else { return }
         let alive = sitl.instances
-            .aliveInstances(owner: .formationsPlayground)
+            .aliveInstances(owner: .trainingRoster)
             .sorted { $0.stackInstanceIndex < $1.stackInstanceIndex }
         guard !alive.isEmpty else {
             slots = slots.filter { row in
@@ -746,13 +902,19 @@ final class FormationsPlaygroundController: ObservableObject {
         )
     }
 
+    private func syncFormationVehicleSizeTiers(fleetLink: FleetLinkService) {
+        for slot in slots {
+            guard let vehicleID = slot.vehicleID else { continue }
+            VehicleClassSizePreferencesStore.shared.setTier(vehicleSizeTier, forVehicleID: vehicleID)
+            fleetLink.setVehicleSizeTier(vehicleSizeTier, forVehicleID: vehicleID)
+        }
+    }
+
     private func refreshSlotRows(fleetLink: FleetLinkService) {
         guard let sitl else { return }
         for index in slots.indices {
             let sessionID = slots[index].sitlSessionID
-            if let row = sitl.instances.first(where: {
-                $0.id == sessionID && $0.spawnOwner == .formationsPlayground
-            }) {
+            if let row = sitl.instances.first(where: { $0.id == sessionID }) {
                 slots[index].vehicleID = vehicleID(
                     forStackInstance: row.stackInstanceIndex,
                     fleetLink: fleetLink
@@ -769,6 +931,7 @@ final class FormationsPlaygroundController: ObservableObject {
             }
         }
         connectedSimCount = slots.filter(\.linkReady).count
+        syncFormationVehicleSizeTiers(fleetLink: fleetLink)
     }
 
     private func waitForAllSlotsFleetReady(fleetLink: FleetLinkService) async -> Bool {
@@ -843,11 +1006,11 @@ final class FormationsPlaygroundController: ObservableObject {
         }
         telemetryRecorder.beginSession(
             formationTitle: formation.displayTitle,
-            shapeTitle: shape.displayTitle,
+            spacingTitle: spacing.displayTitle,
             vehicleClassTitle: vehicleClass.displayTitle
         )
         telemetryTraceSampleCount = 0
-        statusText = "Reforming \(formation.displayTitle) · \(shape.displayTitle) spacing…"
+        statusText = "Reforming \(formation.displayTitle) · \(spacing.displayTitle) spacing…"
         appendFormationLog(
             vehicleLabel: "Squad",
             state: .movingToPosition,
@@ -1135,7 +1298,7 @@ final class FormationsPlaygroundController: ObservableObject {
         return MissionSquadConvoySpacingPolicy.resolvedSpacing(
             taskPattern: .convoy,
             primaryGranularClass: vType,
-            shape: shape,
+            spacing: spacing,
             formation: formation
         )
     }

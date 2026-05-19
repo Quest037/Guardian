@@ -49,7 +49,8 @@ final class MissionControlStore: ObservableObject {
                     MissionRunAssignment(
                         taskId: path.id,
                         rosterDeviceId: device.id,
-                        slotName: device.name
+                        slotName: device.name,
+                        vehicleFootprint: device.resolvedFootprint
                     )
                 )
             }
@@ -59,7 +60,8 @@ final class MissionControlStore: ObservableObject {
                 MissionRunAssignment(
                     taskId: nil,
                     rosterDeviceId: $0.id,
-                    slotName: $0.name
+                    slotName: $0.name,
+                    vehicleFootprint: $0.resolvedFootprint
                 )
             }
         }

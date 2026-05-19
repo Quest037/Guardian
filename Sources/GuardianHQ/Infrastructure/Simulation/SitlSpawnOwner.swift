@@ -3,8 +3,8 @@ import Foundation
 /// Which Guardian surface spawned a built-in SITL process.
 enum SitlSpawnOwner: String, Codable, Equatable, Sendable {
     case vehicles
-    case formationsPlayground
-    case trainingVehicle
+    /// Training lab roster (unified panel — map, squads, teach, formation follow).
+    case trainingRoster
 }
 
 extension Array where Element == SitlRunningInstance {

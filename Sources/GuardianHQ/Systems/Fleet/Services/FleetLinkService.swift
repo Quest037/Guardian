@@ -3558,6 +3558,13 @@ final class FleetLinkService: ObservableObject {
         vehicleType: FleetVehicleType = .unknown,
         initialStatus: VehicleLifecycleStatus
     ) {
+        let resolvedClass = vehicleType
+        let resolvedTier = VehicleClassSizePreferencesStore.shared.resolvedTier(
+            vehicleID: vehicleID,
+            vehicleClass: resolvedClass == .unknown
+                ? (vehicleModelsByVehicleID[vehicleID]?.data.vehicleType ?? .unknown)
+                : resolvedClass
+        )
         if var existing = vehicleModelsByVehicleID[vehicleID] {
             if existing.data.systemID == nil, let systemID {
                 existing.data.systemID = systemID
@@ -3565,6 +3572,7 @@ final class FleetLinkService: ObservableObject {
             if existing.data.vehicleType == .unknown, vehicleType != .unknown {
                 existing.data.vehicleType = vehicleType
             }
+            existing.data.vehicleSizeTier = resolvedTier
             vehicleModelsByVehicleID[vehicleID] = existing
             return
         }
@@ -3572,8 +3580,25 @@ final class FleetLinkService: ObservableObject {
             vehicleID: vehicleID,
             systemID: systemID,
             vehicleType: vehicleType,
+            vehicleSizeTier: resolvedTier,
             initialStatus: initialStatus
         )
+    }
+
+    func resolvedVehicleSizeTier(forVehicleID vehicleID: String) -> VehicleSizeTier? {
+        vehicleModelsByVehicleID[vehicleID]?.data.vehicleSizeTier
+    }
+
+    func resolvedVehicleFootprint(forVehicleID vehicleID: String) -> VehicleFootprint? {
+        guard let model = vehicleModelsByVehicleID[vehicleID] else { return nil }
+        return model.resolvedFootprint
+    }
+
+    func setVehicleSizeTier(_ tier: VehicleSizeTier, forVehicleID vehicleID: String) {
+        VehicleClassSizePreferencesStore.shared.setTier(tier, forVehicleID: vehicleID)
+        guard var model = vehicleModelsByVehicleID[vehicleID] else { return }
+        model.data.vehicleSizeTier = tier
+        vehicleModelsByVehicleID[vehicleID] = model
     }
 
     /// Promotes a previously-`unknown` vehicle type once the airframe is identified (e.g. MAV_TYPE inference,

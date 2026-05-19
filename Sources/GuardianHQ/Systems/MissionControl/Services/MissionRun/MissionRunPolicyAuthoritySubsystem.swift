@@ -79,8 +79,8 @@ enum MissionRunPolicyEditScope: Equatable, Hashable {
     case assignmentGeofenceAugmentation(assignmentID: UUID)
     case taskSquadFormation(taskID: UUID)
     case assignmentSquadFormationOverride(assignmentID: UUID)
-    case taskSquadFormationShape(taskID: UUID)
-    case assignmentSquadFormationShapeOverride(assignmentID: UUID)
+    case taskSquadFormationSpacing(taskID: UUID)
+    case assignmentSquadFormationSpacingOverride(assignmentID: UUID)
 
     var category: MissionRunPolicyEditScopeCategory {
         switch self {
@@ -99,7 +99,7 @@ enum MissionRunPolicyEditScope: Equatable, Hashable {
         case .missionGeofenceAugmentation, .taskGeofenceAugmentation, .assignmentGeofenceAugmentation:
             return .geofencePolicy
         case .taskSquadFormation, .assignmentSquadFormationOverride,
-             .taskSquadFormationShape, .assignmentSquadFormationShapeOverride:
+             .taskSquadFormationSpacing, .assignmentSquadFormationSpacingOverride:
             return .squadFormation
         }
     }

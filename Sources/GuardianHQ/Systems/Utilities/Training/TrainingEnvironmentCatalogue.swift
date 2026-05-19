@@ -73,6 +73,24 @@ enum TrainingEnvironmentCatalogue {
         return TrainingEnvironmentPackage(manifest: manifest, packageRootURL: root, source: .imported)
     }
 
+    /// Deletes a user or imported environment from Application Support (bundled packages cannot be removed).
+    static func deleteUserPackage(environmentID: String) throws {
+        guard let pkg = loadAll().first(where: { $0.id == environmentID }) else {
+            throw TrainingEnvironmentCatalogueError.packageNotFound
+        }
+        guard pkg.source != .bundled else {
+            throw TrainingEnvironmentCatalogueError.cannotDeleteBundled
+        }
+        let root = try TrainingEnvironmentStore.userPackageRoot(environmentID: environmentID)
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: root.path) else {
+            throw TrainingEnvironmentCatalogueError.packageNotFound
+        }
+        try fm.removeItem(at: root)
+        try TrainingEnvironmentSelectionStore.removeReferences(to: environmentID)
+        try TrainingTargetSlotStore.remove(environmentID: environmentID)
+    }
+
     /// Export package directory to a new folder URL (caller provides destination parent).
     static func exportPackage(_ package: TrainingEnvironmentPackage, to destinationRoot: URL) throws {
         let fm = FileManager.default

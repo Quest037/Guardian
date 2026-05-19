@@ -24,6 +24,28 @@ final class GuardianSimulatorSlotRecoveryPolicyTests: XCTestCase {
         XCTAssertTrue(GuardianSimulatorSlotRecoveryPolicy.shouldOfferRetry(slot: slot))
     }
 
+    func test_shouldOfferPreflightRetry_whenLinkedAndPreflightFailed() {
+        let slot = FormationsPlaygroundSlotState(
+            sitlSessionID: UUID(),
+            vehicleID: "sysid:1",
+            linkReady: true,
+            preflightPassed: false,
+            preflightDetail: "GPS fix required."
+        )
+        XCTAssertTrue(GuardianSimulatorSlotRecoveryPolicy.shouldOfferPreflightRetry(slot: slot))
+    }
+
+    func test_shouldNotOfferPreflightRetry_whenPreflightPassed() {
+        let slot = FormationsPlaygroundSlotState(
+            sitlSessionID: UUID(),
+            vehicleID: "sysid:1",
+            linkReady: true,
+            preflightPassed: true,
+            preflightDetail: nil
+        )
+        XCTAssertFalse(GuardianSimulatorSlotRecoveryPolicy.shouldOfferPreflightRetry(slot: slot))
+    }
+
     func test_shouldNotOfferRetry_whenPreflightPassed() {
         let slot = FormationsPlaygroundSlotState(
             sitlSessionID: UUID(),

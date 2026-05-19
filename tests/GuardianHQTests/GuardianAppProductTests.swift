@@ -8,7 +8,6 @@ final class GuardianAppProductTests: XCTestCase {
         XCTAssertTrue(product.includesSidebarSection(.missionControl))
         XCTAssertFalse(product.includesSidebarSection(.training))
         XCTAssertFalse(product.includesSidebarSection(.worlds))
-        XCTAssertTrue(product.includesSidebarSection(.brains))
     }
 
     func test_trainingProduct_excludesMissionPanels_keepsGarageAndTraining() {
@@ -26,7 +25,12 @@ final class GuardianAppProductTests: XCTestCase {
         let rail = product.primarySidebarRail(simulateEnabled: false)
         XCTAssertTrue(rail.contains(.training))
         XCTAssertFalse(rail.contains(.missions))
-        XCTAssertFalse(rail.contains(.brains))
+    }
+
+    func test_missionSettings_includesBrainsPane() {
+        let panes = SettingsPane.visiblePanes(for: .mission)
+        XCTAssertTrue(panes.contains(.brains))
+        XCTAssertFalse(SettingsPane.visiblePanes(for: .training).contains(.brains))
     }
 
     func test_branding_assetsAndSplashCopy() {

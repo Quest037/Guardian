@@ -7,6 +7,11 @@
     html, body { margin: 0; height: 100%; background: #1e1e1e; overflow: hidden; }
     #scene { position: absolute; inset: 0; touch-action: none; cursor: grab; }
     #scene:active { cursor: grabbing; }
+    #scene.placement-mode,
+    #scene.placement-mode:active,
+    #scene.placement-mode canvas {
+      cursor: pointer !important;
+    }
     #scene canvas {
       display: block;
       width: 100%;
@@ -68,11 +73,25 @@
       ? groundHalfParam
       : 500;
 
-    const MAP_DEFAULT_CAMERA = { x: -1355.4, y: -56.11, z: 833.75 };
-    const MAP_DEFAULT_LOOK_AT = { x: 0, y: 0, z: 0 };
+    /** Oblique 3D view direction (unit vector); distance is computed from floor size + viewport FOV. */
+    const MAP_OBLIQUE_LOOK_AT = { x: 0, y: 0, z: 0 };
+    const MAP_OBLIQUE_DIRECTION = (() => {
+      const dx = -1355.4;
+      const dy = -56.11;
+      const dz = 833.75;
+      const len = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+      return { x: dx / len, y: dy / len, z: dz / len };
+    })();
     const MAP_ORBIT_POLAR_MIN = 0.15;
     const MAP_ORBIT_POLAR_MAX = Math.PI / 2 - 0.06;
+    const MAP_FIT_MARGIN = 1.18;
+    const MAP_OBLIQUE_UZ = Math.abs(MAP_OBLIQUE_DIRECTION.z);
+    /** Universal orbit zoom (metres); same on every map size — vehicles share scale, not map half-extent. */
+    const MAP_ORBIT_ZOOM_IN_MAX_M = 250;
+    const MAP_ORBIT_ZOOM_OUT_MAX_M = 3000;
 
+    /** Three.js namespace from gzweb bundle (CircleGeometry / RingGeometry for zone overlays). */
+    let guardianThree = null;
     let viewerSession = null;
     let cameraDebugFrame = 0;
 
@@ -96,40 +115,92 @@
       viewerSession = session;
     }
 
-    function applyMapCameraPolicy(manager) {
-      const scene2 = manager.scene;
+    /** Leaflet-style: distance so square half-extent `halfM` fits viewport (perspective). */
+    function perpendicularFitDistanceM(camera, vpWidth, vpHeight, halfM) {
+      const half = Math.max(halfM, 0.5);
+      const aspect = vpWidth / Math.max(vpHeight, 1);
+      const fovRad = (camera.fov * Math.PI) / 180;
+      const tanHalf = Math.tan(fovRad / 2);
+      const fitH = (half / tanHalf) * MAP_FIT_MARGIN;
+      const fitW = (half / (tanHalf * aspect)) * MAP_FIT_MARGIN;
+      return Math.max(fitH, fitW, 4);
+    }
+
+    /** Center + manifest half-extent; footprint only refines XY center and floor Z. */
+    function mapBaseFrame(manager) {
+      const half = MAP_GROUND_HALF_EXTENT_M;
+      let cx = 0;
+      let cy = 0;
+      let cz = 0;
+      const footprint = manager ? resolveBaseFootprintAABB(manager) : null;
+      if (footprint?.valid) {
+        cx = (footprint.min.x + footprint.max.x) * 0.5;
+        cy = (footprint.min.y + footprint.max.y) * 0.5;
+        cz = footprint.max.z;
+      }
+      return { cx, cy, cz, half };
+    }
+
+    function applyCameraClipPlanes(camera) {
+      camera.far = Math.max(MAP_ORBIT_ZOOM_OUT_MAX_M * 4, 25000);
+      camera.near = 0.5;
+      camera.updateProjectionMatrix();
+    }
+
+    function clampOrbitDistanceM(distanceM) {
+      return Math.min(
+        MAP_ORBIT_ZOOM_OUT_MAX_M,
+        Math.max(MAP_ORBIT_ZOOM_IN_MAX_M, distanceM)
+      );
+    }
+
+    /** Interactive orbit zoom limits (fixed metres); presets use map half-extent separately. */
+    function applyOrbitPolicyInteractive(controls) {
+      controls.enabled = true;
+      controls.enableRotate = true;
+      controls.enablePan = true;
+      controls.enableZoom = true;
+      controls.screenSpacePanning = false;
+      controls.minPolarAngle = MAP_ORBIT_POLAR_MIN;
+      controls.maxPolarAngle = MAP_ORBIT_POLAR_MAX;
+      controls.minDistance = MAP_ORBIT_ZOOM_IN_MAX_M;
+      controls.maxDistance = MAP_ORBIT_ZOOM_OUT_MAX_M;
+    }
+
+    /** One-shot camera preset: move to fitted pose, then leave orbit controls free. */
+    function commitViewportFit(manager, preset) {
+      const scene2 = manager?.scene;
       if (!scene2?.camera || !scene2.controls) return false;
 
       const camera = scene2.camera;
-      camera.far = 25000;
-      camera.near = 0.5;
-      camera.updateProjectionMatrix();
-
       const controls = scene2.controls;
-      controls.target.set(MAP_DEFAULT_LOOK_AT.x, MAP_DEFAULT_LOOK_AT.y, MAP_DEFAULT_LOOK_AT.z);
-      controls.minPolarAngle = MAP_ORBIT_POLAR_MIN;
-      controls.maxPolarAngle = MAP_ORBIT_POLAR_MAX;
-      controls.minDistance = 4;
-      controls.maxDistance = Math.max(1800, MAP_GROUND_HALF_EXTENT_M * 3.2);
-      controls.screenSpacePanning = false;
-      controls.enablePan = true;
-      controls.enableZoom = true;
-      controls.enableRotate = true;
+      const { cx, cy, cz, half } = mapBaseFrame(manager);
+      const { width, height } = viewportSize(scene2);
+      const perp = perpendicularFitDistanceM(camera, width, height, half);
+      applyCameraClipPlanes(camera);
 
-      scene2.defaultCameraPosition.set(
-        MAP_DEFAULT_CAMERA.x, MAP_DEFAULT_CAMERA.y, MAP_DEFAULT_CAMERA.z
-      );
-      scene2.defaultCameraLookAt.set(
-        MAP_DEFAULT_LOOK_AT.x, MAP_DEFAULT_LOOK_AT.y, MAP_DEFAULT_LOOK_AT.z
-      );
+      let fitDistanceM = perp;
+      controls.target.set(cx, cy, cz);
+      if (preset === 'birdseye') {
+        fitDistanceM = clampOrbitDistanceM(perp);
+        camera.position.set(cx, cy, cz + fitDistanceM);
+        camera.up.set(0, 1, 0);
+      } else {
+        const slantRange = clampOrbitDistanceM(perp / Math.max(MAP_OBLIQUE_UZ, 0.2));
+        fitDistanceM = slantRange;
+        const u = MAP_OBLIQUE_DIRECTION;
+        camera.position.set(cx + u.x * slantRange, cy + u.y * slantRange, cz + u.z * slantRange);
+        camera.up.set(0, 0, 1);
+      }
+      camera.lookAt(cx, cy, cz);
+      camera.updateProjectionMatrix();
+      applyOrbitPolicyInteractive(controls);
+      controls.object.position.copy(camera.position);
+      controls.update();
+
+      scene2.defaultCameraPosition.copy(camera.position);
+      scene2.defaultCameraLookAt.set(cx, cy, cz);
       return true;
-    }
-
-    function syncControlsFromCamera(manager) {
-      const scene2 = manager.scene;
-      if (!scene2?.camera || !scene2.controls) return;
-      scene2.controls.object.position.copy(scene2.camera.position);
-      scene2.controls.update();
     }
 
     function viewportSize(scene2) {
@@ -140,45 +211,147 @@
       };
     }
 
-    function birdseyeDistanceForGround(camera, width, height) {
-      const half = MAP_GROUND_HALF_EXTENT_M;
-      const aspect = width / Math.max(height, 1);
-      const fovRad = (camera.fov * Math.PI) / 180;
-      const tanHalf = Math.tan(fovRad / 2);
-      const margin = 1.08;
-      const fitHeight = (half / tanHalf) * margin;
-      const fitWidth = (half / (tanHalf * aspect)) * margin;
-      return Math.max(fitHeight, fitWidth);
+    const BASE_NAME_PATTERN = /floor|ground|field|plane|base/i;
+
+    function emptyAABB() {
+      return { valid: false, min: { x: 0, y: 0, z: 0 }, max: { x: 0, y: 0, z: 0 } };
     }
 
+    function expandAABB(box, x, y, z) {
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return;
+      if (!box.valid) {
+        box.min.x = box.max.x = x;
+        box.min.y = box.max.y = y;
+        box.min.z = box.max.z = z;
+        box.valid = true;
+        return;
+      }
+      box.min.x = Math.min(box.min.x, x);
+      box.min.y = Math.min(box.min.y, y);
+      box.min.z = Math.min(box.min.z, z);
+      box.max.x = Math.max(box.max.x, x);
+      box.max.y = Math.max(box.max.y, y);
+      box.max.z = Math.max(box.max.z, z);
+    }
+
+    function resolveSceneObjectForModel(manager, modelMeta) {
+      const sceneWrapper = manager?.scene;
+      if (!sceneWrapper || !modelMeta) return null;
+      const names = [modelMeta.gz3dName, modelMeta.name].filter((n) => typeof n === 'string' && n.length > 0);
+      for (const name of names) {
+        const obj = sceneWrapper.getByName?.(name) ?? sceneWrapper.scene?.getObjectByName?.(name);
+        if (obj && typeof obj.traverse === 'function') return obj;
+      }
+      return null;
+    }
+
+    function unionAABBFromObject(object, box) {
+      if (!object || typeof object.traverse !== 'function') return;
+      object.updateWorldMatrix?.(true, false);
+      object.traverse((node) => {
+        if (!node.isMesh || !node.geometry) return;
+        const geom = node.geometry;
+        if (!geom.boundingBox) {
+          geom.computeBoundingBox?.();
+        }
+        const local = geom.boundingBox;
+        if (!local || local.isEmpty?.()) return;
+        const m = node.matrixWorld.elements;
+        const corners = [
+          [local.min.x, local.min.y, local.min.z],
+          [local.min.x, local.min.y, local.max.z],
+          [local.min.x, local.max.y, local.min.z],
+          [local.min.x, local.max.y, local.max.z],
+          [local.max.x, local.min.y, local.min.z],
+          [local.max.x, local.min.y, local.max.z],
+          [local.max.x, local.max.y, local.min.z],
+          [local.max.x, local.max.y, local.max.z],
+        ];
+        for (const [lx, ly, lz] of corners) {
+          expandAABB(
+            box,
+            m[0] * lx + m[4] * ly + m[8] * lz + m[12],
+            m[1] * lx + m[5] * ly + m[9] * lz + m[13],
+            m[2] * lx + m[6] * ly + m[10] * lz + m[14]
+          );
+        }
+      });
+    }
+
+    function aabbFootprintArea(box) {
+      if (!box.valid) return 0;
+      const dx = Math.max(box.max.x - box.min.x, 0);
+      const dy = Math.max(box.max.y - box.min.y, 0);
+      return dx * dy;
+    }
+
+    /** Prefer named floor/ground models; otherwise the largest XY footprint in the scene. */
+    function resolveBaseFootprintAABB(manager) {
+      const models = typeof manager.getModels === 'function' ? manager.getModels() : [];
+      const candidates = [];
+      for (const modelMeta of models) {
+        const object3d = resolveSceneObjectForModel(manager, modelMeta);
+        if (!object3d) continue;
+        const box = emptyAABB();
+        unionAABBFromObject(object3d, box);
+        if (!box.valid) continue;
+        candidates.push({
+          box,
+          area: aabbFootprintArea(box),
+          name: modelMeta.name || object3d.name || '',
+        });
+      }
+      if (candidates.length === 0) {
+        const sceneRoot = manager.scene?.scene;
+        if (sceneRoot && typeof sceneRoot.traverse === 'function') {
+          const box = emptyAABB();
+          unionAABBFromObject(sceneRoot, box);
+          if (box.valid) {
+            candidates.push({ box, area: aabbFootprintArea(box), name: '' });
+          }
+        }
+      }
+      if (candidates.length === 0) return null;
+
+      const named = candidates.filter((c) => BASE_NAME_PATTERN.test(c.name));
+      const pool = named.length > 0 ? named : candidates;
+      return pool.reduce((best, c) => (c.area > best.area ? c : best), pool[0]).box;
+    }
+
+    function fitObliqueView(manager) {
+      return commitViewportFit(manager, 'oblique');
+    }
+
+    function fitBirdseyeViewInternal(manager) {
+      return commitViewportFit(manager, 'birdseye');
+    }
+
+    function postZoneMessage(payload) {
+      const handler = window.webkit?.messageHandlers?.guardianZones;
+      if (handler) {
+        handler.postMessage(JSON.stringify(payload));
+      }
+    }
+
+    const zoneEditor = createZoneEditor(() => viewerSession?.manager?.scene, postZoneMessage);
+    const postObstacleMessage = (payload) => {
+      const handler = window.webkit?.messageHandlers?.guardianObstacles;
+      if (handler) handler.postMessage(JSON.stringify(payload));
+    };
+    const obstacleEditor = createObstacleEditor(() => viewerSession?.manager?.scene, postObstacleMessage);
+    let pendingZoneEditorState = null;
+    let pendingObstacleEditorState = null;
+
     window.guardianViewer = {
+      /** Snap to oblique 3D preset (full base visible); orbit stays free afterward. */
       resetDefaultView() {
         const manager = viewerSession?.manager;
-        if (!applyMapCameraPolicy(manager)) return false;
-        manager.resetView();
-        syncControlsFromCamera(manager);
-        return true;
+        return manager ? fitObliqueView(manager) : false;
       },
+      /** Snap to top-down preset (full base visible); orbit stays free afterward. */
       fitBirdseyeView() {
         const manager = viewerSession?.manager;
-        const scene2 = manager?.scene;
-        if (!scene2?.camera || !scene2.controls) return false;
-        if (!applyMapCameraPolicy(manager)) return false;
-        const camera = scene2.camera;
-        const controls = scene2.controls;
-        const { width, height } = viewportSize(scene2);
-        const distance = birdseyeDistanceForGround(camera, width, height);
-        const target = MAP_DEFAULT_LOOK_AT;
-        controls.target.set(target.x, target.y, target.z);
-        camera.position.set(0, 0, distance);
-        camera.up.set(0, 1, 0);
-        camera.lookAt(target.x, target.y, target.z);
-        camera.updateProjectionMatrix();
-        controls.minPolarAngle = 0;
-        controls.maxPolarAngle = 0.08;
-        syncControlsFromCamera(manager);
-        manager.resize();
-        return true;
+        return manager ? fitBirdseyeViewInternal(manager) : false;
       },
       setCameraDebugEnabled(enabled) {
         cameraDebugEnabled = Boolean(enabled);
@@ -189,8 +362,1797 @@
         }
         return true;
       },
+      setZoneEditorState(state) {
+        pendingZoneEditorState = state;
+        return zoneEditor.applyState(state);
+      },
+      setObstacleEditorState(state) {
+        pendingObstacleEditorState = state;
+        return obstacleEditor.applyState(state);
+      },
       sceneReady,
     };
+
+    function createZoneEditor(getScene2, notifySwift) {
+      const ZONE_COLORS = { start: 0x3b82f6, end: 0x22c55e };
+      const ZONE_RADIUS_MIN_M = 20;
+      const ZONE_RADIUS_MAX_M = 80;
+      const FILL_OPACITY = 0.35;
+      const STROKE_OPACITY = 1;
+      const STROKE_WIDTH_M = 4;
+      const CIRCLE_SEGMENTS = 64;
+      const CIRCLE_EDGE_SAMPLES = 16;
+      const SURFACE_LIFT_M = 0.35;
+      const OVERLAY_RENDER_ORDER = 2000;
+      const CENTER_MARKER_RADIUS_M = 2;
+      let three = null;
+      let overlayRoot = null;
+      let installed = false;
+      let editorState = {
+        placementActive: false,
+        tapToEditEnabled: false,
+        placementKind: 'start',
+        mapHalfExtentM: MAP_GROUND_HALF_EXTENT_M,
+        zones: {
+          start: { placed: false, centerXM: 0, centerYM: 0, centerZM: 0, radiusM: 30, shape: 'circle' },
+          end: { placed: false, centerXM: 0, centerYM: 0, centerZM: 0, radiusM: 30, shape: 'circle' },
+        },
+      };
+      let visuals = { start: null, end: null };
+      /** Wait before placing so shift-pan / drag-rotate can cancel the gesture. */
+      const PLACEMENT_WAIT_MS = 300;
+      const PLACEMENT_DRAG_PX = 7;
+      let placementGesture = null;
+      /** Dragging a placed zone (orbit off until release). */
+      let zoneDrag = null;
+      /** Tap on a zone when not in placement mode — opens zone editor in Swift. */
+      let zoneTapGesture = null;
+
+      function findFirstMesh(root) {
+        let found = null;
+        root.traverse((node) => {
+          if (!found && node.isMesh && node.name !== 'grid') found = node;
+        });
+        return found;
+      }
+
+      function refreshThreeGeometryConstructors() {
+        if (!three) return;
+        if (typeof guardianThree?.MeshBasicMaterial === 'function') {
+          three.MeshBasicMaterial = guardianThree.MeshBasicMaterial;
+        }
+        if (typeof guardianThree?.CircleGeometry === 'function') {
+          three.CircleGeometry = guardianThree.CircleGeometry;
+        }
+        if (typeof guardianThree?.RingGeometry === 'function') {
+          three.RingGeometry = guardianThree.RingGeometry;
+        }
+        if (typeof guardianThree?.PlaneGeometry === 'function') {
+          three.PlaneGeometry = guardianThree.PlaneGeometry;
+        }
+      }
+
+      function cacheThree(scene2) {
+        if (three) {
+          refreshThreeGeometryConstructors();
+          return three;
+        }
+        const grid = scene2.grid;
+        const sampleMesh = findFirstMesh(scene2.scene);
+        if (!grid || !sampleMesh) return null;
+        const Vector3 = scene2.camera.position.constructor;
+        const posAttr = sampleMesh.geometry.attributes.position;
+        const LineSegmentsCtor = grid.constructor.name === 'GridHelper'
+          ? Object.getPrototypeOf(grid.constructor.prototype).constructor
+          : grid.constructor;
+        const GroupCtor = Object.getPrototypeOf(scene2.scene.constructor.prototype).constructor;
+        three = {
+          Vector3,
+          BufferGeometry: sampleMesh.geometry.constructor,
+          Float32BufferAttribute: posAttr.constructor,
+          LineBasicMaterial: grid.material.constructor,
+          LineSegments: LineSegmentsCtor,
+          Group: GroupCtor,
+          Mesh: sampleMesh.constructor,
+          MeshBasicMaterial: typeof guardianThree?.MeshBasicMaterial === 'function'
+            ? guardianThree.MeshBasicMaterial
+            : null,
+          DoubleSide: guardianThree?.DoubleSide ?? 2,
+          CircleGeometry: typeof guardianThree?.CircleGeometry === 'function'
+            ? guardianThree.CircleGeometry
+            : null,
+          RingGeometry: typeof guardianThree?.RingGeometry === 'function'
+            ? guardianThree.RingGeometry
+            : null,
+          PlaneGeometry: typeof guardianThree?.PlaneGeometry === 'function'
+            ? guardianThree.PlaneGeometry
+            : null,
+        };
+        return three;
+      }
+
+      function liftSurfacePoint(point) {
+        if (!point) return point;
+        point.z += SURFACE_LIFT_M;
+        return point;
+      }
+
+      function mapHalfM() {
+        const half = Number(editorState.mapHalfExtentM);
+        return Number.isFinite(half) && half > 0 ? half : MAP_GROUND_HALF_EXTENT_M;
+      }
+
+      function clampRadiusM(radiusM) {
+        return Math.max(ZONE_RADIUS_MIN_M, Math.min(ZONE_RADIUS_MAX_M, radiusM));
+      }
+
+      function copyZoneRecord(record) {
+        return {
+          placed: record.placed,
+          centerXM: record.centerXM,
+          centerYM: record.centerYM,
+          centerZM: record.centerZM,
+          radiusM: record.radiusM,
+          shape: record.shape,
+        };
+      }
+
+      /** Map-base-square XY bounds from the scene floor model, or a centred manifest fallback. */
+      function resolveMapBaseSquareBounds(manager, fallbackHalfM) {
+        const footprint = manager ? resolveBaseFootprintAABB(manager) : null;
+        if (footprint?.valid) {
+          return {
+            valid: true,
+            minX: footprint.min.x,
+            maxX: footprint.max.x,
+            minY: footprint.min.y,
+            maxY: footprint.max.y,
+          };
+        }
+        const half = Number.isFinite(fallbackHalfM) && fallbackHalfM > 0
+          ? fallbackHalfM
+          : MAP_GROUND_HALF_EXTENT_M;
+        return { valid: true, minX: -half, maxX: half, minY: -half, maxY: half };
+      }
+
+      function mapBaseBounds() {
+        return resolveMapBaseSquareBounds(attachedManager, mapHalfM());
+      }
+
+      function pointInsideMapBase(x, y, bounds, epsilon = 1e-6) {
+        return x >= bounds.minX - epsilon
+          && x <= bounds.maxX + epsilon
+          && y >= bounds.minY - epsilon
+          && y <= bounds.maxY + epsilon;
+      }
+
+      /** Zone boundary samples: square corners or circle edge points. */
+      function zoneEdgePoints(record) {
+        if (!record.placed) return [];
+        const cx = record.centerXM;
+        const cy = record.centerYM;
+        const r = record.radiusM;
+        if (record.shape === 'square') {
+          return [
+            { x: cx - r, y: cy - r },
+            { x: cx + r, y: cy - r },
+            { x: cx + r, y: cy + r },
+            { x: cx - r, y: cy + r },
+          ];
+        }
+        const points = [];
+        for (let i = 0; i < CIRCLE_EDGE_SAMPLES; i += 1) {
+          const t = (i / CIRCLE_EDGE_SAMPLES) * Math.PI * 2;
+          points.push({ x: cx + Math.cos(t) * r, y: cy + Math.sin(t) * r });
+        }
+        return points;
+      }
+
+      function zoneFitsMapBase(record, bounds) {
+        if (!record.placed || !bounds?.valid) return true;
+        if (!pointInsideMapBase(record.centerXM, record.centerYM, bounds)) return false;
+        for (const p of zoneEdgePoints(record)) {
+          if (!pointInsideMapBase(p.x, p.y, bounds)) return false;
+        }
+        return true;
+      }
+
+      function maxRadiusOnMapBase(record, bounds) {
+        return Math.min(
+          record.centerXM - bounds.minX,
+          bounds.maxX - record.centerXM,
+          record.centerYM - bounds.minY,
+          bounds.maxY - record.centerYM,
+          ZONE_RADIUS_MAX_M
+        );
+      }
+
+      /** Fit zone center and edge samples inside the map-base square (translate, then shrink radius). */
+      function snapZoneToMapBase(record, bounds) {
+        const normalized = normalizeZoneRecord(record);
+        if (!normalized.placed || !bounds?.valid) {
+          return { record: normalized, failed: false };
+        }
+        if (zoneFitsMapBase(normalized, bounds)) {
+          return { record: normalized, failed: false };
+        }
+
+        const samplePoints = (zone) => {
+          const pts = [{ x: zone.centerXM, y: zone.centerYM }];
+          for (const p of zoneEdgePoints(zone)) pts.push(p);
+          return pts;
+        };
+
+        let points = samplePoints(normalized);
+        let dxMin = -Infinity;
+        let dxMax = Infinity;
+        let dyMin = -Infinity;
+        let dyMax = Infinity;
+        for (const p of points) {
+          dxMin = Math.max(dxMin, bounds.minX - p.x);
+          dxMax = Math.min(dxMax, bounds.maxX - p.x);
+          dyMin = Math.max(dyMin, bounds.minY - p.y);
+          dyMax = Math.min(dyMax, bounds.maxY - p.y);
+        }
+        if (dxMin <= dxMax) {
+          normalized.centerXM += Math.min(Math.max(0, dxMin), dxMax);
+        }
+        if (dyMin <= dyMax) {
+          normalized.centerYM += Math.min(Math.max(0, dyMin), dyMax);
+        }
+
+        if (zoneFitsMapBase(normalized, bounds)) {
+          return { record: normalized, failed: false };
+        }
+
+        const maxR = maxRadiusOnMapBase(normalized, bounds);
+        if (maxR < ZONE_RADIUS_MIN_M) {
+          return { record: normalized, failed: true };
+        }
+        if (normalized.radiusM > maxR) {
+          normalized.radiusM = Math.max(ZONE_RADIUS_MIN_M, maxR);
+        }
+        return { record: normalized, failed: !zoneFitsMapBase(normalized, bounds) };
+      }
+
+      function setOrbitEnabled(scene2, enabled) {
+        const controls = scene2?.controls;
+        if (controls) controls.enabled = enabled;
+      }
+
+      function overlayMaterials(T, color) {
+        const BasicMaterial = guardianThree?.MeshBasicMaterial ?? T.MeshBasicMaterial;
+        if (typeof BasicMaterial !== 'function') return null;
+        const side = T.DoubleSide ?? 2;
+        const base = {
+          color,
+          depthTest: false,
+          fog: false,
+          toneMapped: false,
+          side,
+          polygonOffset: true,
+          polygonOffsetFactor: -2,
+          polygonOffsetUnits: -2,
+        };
+        return {
+          fill: new BasicMaterial({
+            ...base,
+            transparent: true,
+            opacity: FILL_OPACITY,
+            depthWrite: true,
+          }),
+          stroke: new BasicMaterial({
+            ...base,
+            transparent: true,
+            opacity: STROKE_OPACITY,
+            depthWrite: false,
+          }),
+        };
+      }
+
+      function setMeshOverlay(mesh, order) {
+        mesh.renderOrder = order;
+        mesh.frustumCulled = false;
+      }
+
+      function buildIndexedMesh(T, positions, indices, material, order) {
+        const geo = new T.BufferGeometry();
+        const pos = positions instanceof Float32Array ? positions : new Float32Array(positions);
+        geo.setAttribute('position', new T.Float32BufferAttribute(pos, 3));
+        if (indices && indices.length > 0) {
+          geo.setIndex(indices);
+        }
+        if (typeof geo.computeBoundingSphere === 'function') {
+          geo.computeBoundingSphere();
+        }
+        const mesh = new T.Mesh(geo, material);
+        setMeshOverlay(mesh, order);
+        return mesh;
+      }
+
+      /** Thick ring stroke on the terrain plane (same quad-strip pattern as squares). */
+      function buildFlatDiscRingStroke(T, cx, cy, planeZ, outerR, innerR, segments, materials) {
+        const ringVerts = [];
+        const ringIdx = [];
+        for (let i = 0; i <= segments; i += 1) {
+          const t = (i / segments) * Math.PI * 2;
+          const cos = Math.cos(t);
+          const sin = Math.sin(t);
+          ringVerts.push(
+            cx + cos * outerR, cy + sin * outerR, planeZ,
+            cx + cos * innerR, cy + sin * innerR, planeZ,
+          );
+        }
+        for (let i = 0; i < segments; i += 1) {
+          const a = i * 2;
+          ringIdx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
+        }
+        return buildIndexedMesh(T, ringVerts, ringIdx, materials.stroke, OVERLAY_RENDER_ORDER + 1);
+      }
+
+      function buildCenterMarker(T, cx, cy, planeZ, materials) {
+        const m = CENTER_MARKER_RADIUS_M;
+        const markerVerts = [
+          cx - m, cy - m, planeZ,
+          cx + m, cy - m, planeZ,
+          cx + m, cy + m, planeZ,
+          cx - m, cy + m, planeZ,
+        ];
+        return buildIndexedMesh(
+          T,
+          markerVerts,
+          [0, 1, 2, 0, 2, 3],
+          materials.stroke,
+          OVERLAY_RENDER_ORDER + 2
+        );
+      }
+
+      function buildFlatCircleMeshes(T, cx, cy, planeZ, radius, materials) {
+        const innerR = Math.max(radius - STROKE_WIDTH_M, 0.01);
+        let fill;
+        let stroke;
+
+        if (T.CircleGeometry && T.RingGeometry) {
+          const fillGeo = new T.CircleGeometry(radius, CIRCLE_SEGMENTS);
+          fill = new T.Mesh(fillGeo, materials.fill);
+          fill.position.set(cx, cy, planeZ);
+          setMeshOverlay(fill, OVERLAY_RENDER_ORDER);
+
+          const ringGeo = new T.RingGeometry(innerR, radius, CIRCLE_SEGMENTS);
+          stroke = new T.Mesh(ringGeo, materials.stroke);
+          stroke.position.set(cx, cy, planeZ);
+          setMeshOverlay(stroke, OVERLAY_RENDER_ORDER + 1);
+        } else {
+          const fillVerts = [cx, cy, planeZ];
+          for (let i = 0; i <= CIRCLE_SEGMENTS; i += 1) {
+            const t = (i / CIRCLE_SEGMENTS) * Math.PI * 2;
+            fillVerts.push(
+              cx + Math.cos(t) * radius,
+              cy + Math.sin(t) * radius,
+              planeZ
+            );
+          }
+          const fillIdx = [];
+          for (let i = 1; i <= CIRCLE_SEGMENTS; i += 1) {
+            fillIdx.push(i, i + 1, 0);
+          }
+          fill = buildIndexedMesh(T, fillVerts, fillIdx, materials.fill, OVERLAY_RENDER_ORDER);
+          stroke = buildFlatDiscRingStroke(
+            T, cx, cy, planeZ, radius, innerR, CIRCLE_SEGMENTS, materials
+          );
+        }
+
+        const marker = buildCenterMarker(T, cx, cy, planeZ, materials);
+        return { fill, stroke, marker };
+      }
+
+      const SQUARE_FILL_SEGMENTS = 8;
+
+      function buildSubdividedSquareFill(T, cx, cy, planeZ, half, material, order) {
+        const segs = SQUARE_FILL_SEGMENTS;
+        const verts = [];
+        const idx = [];
+        for (let j = 0; j <= segs; j += 1) {
+          for (let i = 0; i <= segs; i += 1) {
+            const u = i / segs;
+            const v = j / segs;
+            verts.push(
+              cx - half + (2 * half * u),
+              cy - half + (2 * half * v),
+              planeZ
+            );
+          }
+        }
+        const stride = segs + 1;
+        for (let j = 0; j < segs; j += 1) {
+          for (let i = 0; i < segs; i += 1) {
+            const a = j * stride + i;
+            const b = a + 1;
+            const c = a + stride;
+            const d = c + 1;
+            idx.push(a, b, d, a, d, c);
+          }
+        }
+        return buildIndexedMesh(T, verts, idx, material, order);
+      }
+
+      function buildFlatSquareMeshes(T, cx, cy, planeZ, half, materials) {
+        const o = half;
+        const inner = Math.max(half - STROKE_WIDTH_M, 0.01);
+        let fill;
+        const PlaneGeometry = T.PlaneGeometry ?? guardianThree?.PlaneGeometry;
+        if (typeof PlaneGeometry === 'function') {
+          const side = 2 * half;
+          const fillGeo = new PlaneGeometry(side, side, SQUARE_FILL_SEGMENTS, SQUARE_FILL_SEGMENTS);
+          fill = new T.Mesh(fillGeo, materials.fill);
+          fill.position.set(cx, cy, planeZ);
+          setMeshOverlay(fill, OVERLAY_RENDER_ORDER);
+        } else {
+          fill = buildSubdividedSquareFill(
+            T, cx, cy, planeZ, half, materials.fill, OVERLAY_RENDER_ORDER
+          );
+        }
+
+        const ringVerts = [
+          cx - o, cy - o, planeZ,
+          cx + o, cy - o, planeZ,
+          cx + o, cy + o, planeZ,
+          cx - o, cy + o, planeZ,
+          cx - inner, cy - inner, planeZ,
+          cx + inner, cy - inner, planeZ,
+          cx + inner, cy + inner, planeZ,
+          cx - inner, cy - inner, planeZ,
+        ];
+        const ringIdx = [
+          0, 4, 1, 1, 4, 5,
+          1, 5, 2, 2, 5, 6,
+          2, 6, 3, 3, 6, 7,
+          3, 7, 0, 0, 7, 4,
+        ];
+        const stroke = buildIndexedMesh(T, ringVerts, ringIdx, materials.stroke, OVERLAY_RENDER_ORDER + 1);
+        const marker = buildCenterMarker(T, cx, cy, planeZ, materials);
+        return { fill, stroke, marker };
+      }
+
+      function createGroup(scene2) {
+        const T = cacheThree(scene2);
+        if (!T) return null;
+        return new T.Group();
+      }
+
+      function ensureOverlay(scene2, manager) {
+        const existing = scene2.scene.getObjectByName('guardian_zone_overlay');
+        if (existing) {
+          overlayRoot = existing;
+          return overlayRoot;
+        }
+        const group = createGroup(scene2);
+        if (!group) return null;
+        overlayRoot = group;
+        overlayRoot.name = 'guardian_zone_overlay';
+        overlayRoot.renderOrder = OVERLAY_RENDER_ORDER;
+        scene2.scene.add(overlayRoot);
+        return overlayRoot;
+      }
+
+      function collectTerrainMeshes(root, out, skip) {
+        root.traverse((node) => {
+          if (node === skip || node.parent === skip) return;
+          if (node.name === 'guardian_zone_overlay') return;
+          if (node.name === 'grid') return;
+          if (node.isMesh) out.push(node);
+        });
+      }
+
+      function sampleTerrain(scene2, x, y) {
+        const T = cacheThree(scene2);
+        const origin = new T.Vector3(x, y, 8000);
+        const dir = new T.Vector3(0, 0, -1);
+        scene2.ray.set(origin, dir);
+        const meshes = [];
+        collectTerrainMeshes(scene2.scene, meshes, overlayRoot);
+        const hits = scene2.ray.intersectObjects(meshes, true);
+        if (hits.length > 0) {
+          return liftSurfacePoint(hits[0].point.clone());
+        }
+        return liftSurfacePoint(new T.Vector3(x, y, 0));
+      }
+
+      function pickSurface(scene2, clientX, clientY) {
+        const T = cacheThree(scene2);
+        if (!T) return null;
+        const dom = scene2.getDomElement();
+        const rect = dom.getBoundingClientRect();
+        const ndc = {
+          x: ((clientX - rect.left) / rect.width) * 2 - 1,
+          y: -(((clientY - rect.top) / rect.height) * 2 - 1),
+        };
+        scene2.ray.setFromCamera(ndc, scene2.camera);
+        const meshes = [];
+        collectTerrainMeshes(scene2.scene, meshes, overlayRoot);
+        const hits = scene2.ray.intersectObjects(meshes, true);
+        if (hits.length > 0) return liftSurfacePoint(hits[0].point.clone());
+        const fallback = new T.Vector3();
+        scene2.getRayCastModel({ x: clientX, y: clientY }, fallback);
+        if (Number.isFinite(fallback.x) && Number.isFinite(fallback.y) && Number.isFinite(fallback.z)) {
+          return liftSurfacePoint(fallback);
+        }
+        return sampleTerrain(scene2, 0, 0);
+      }
+
+      function zoneRecord(kind) {
+        return editorState.zones[kind];
+      }
+
+      function notifyZonesChanged(zoneFailed = false) {
+        notifySwift({
+          type: 'zonesChanged',
+          zones: editorState.zones,
+          outOfBounds: Boolean(zoneFailed),
+        });
+      }
+
+      function clearVisual(kind) {
+        const v = visuals[kind];
+        if (!v || !overlayRoot) return;
+        overlayRoot.remove(v.group);
+        visuals[kind] = null;
+      }
+
+      function rebuildVisual(scene2, kind) {
+        if (!ensureOverlay(scene2, attachedManager)) return;
+        const T = cacheThree(scene2);
+        if (!T || !overlayRoot) return;
+        let record = normalizeZoneRecord(zoneRecord(kind));
+        editorState.zones[kind] = record;
+        clearVisual(kind);
+        if (!record.placed) return;
+
+        const color = ZONE_COLORS[kind];
+        const group = createGroup(scene2);
+        if (!group) return;
+        group.name = `guardian_zone_${kind}`;
+        group.renderOrder = OVERLAY_RENDER_ORDER;
+
+        const surface = sampleTerrain(scene2, record.centerXM, record.centerYM);
+        const planeZ = surface.z;
+        record.centerZM = planeZ - SURFACE_LIFT_M;
+        editorState.zones[kind] = record;
+
+        const cx = record.centerXM;
+        const cy = record.centerYM;
+        const materials = overlayMaterials(T, color);
+        if (!materials) return;
+        const meshes = record.shape === 'square'
+          ? buildFlatSquareMeshes(T, cx, cy, planeZ, record.radiusM, materials)
+          : buildFlatCircleMeshes(T, cx, cy, planeZ, record.radiusM, materials);
+
+        group.add(meshes.fill, meshes.stroke, meshes.marker);
+        group.userData.guardianZoneKind = kind;
+        overlayRoot.add(group);
+        visuals[kind] = { group, record };
+        if (typeof scene2.render === 'function') {
+          scene2.render(0);
+        }
+      }
+
+      function rebuildAll(scene2, manager) {
+        ensureOverlay(scene2, manager);
+        rebuildVisual(scene2, 'start');
+        rebuildVisual(scene2, 'end');
+      }
+
+      function setPlacementControls(scene2, active) {
+        const sceneContainer = document.getElementById('scene');
+        const canvas = scene2?.getDomElement?.();
+        if (sceneContainer) {
+          sceneContainer.classList.toggle('placement-mode', active);
+        }
+        if (canvas) {
+          canvas.style.cursor = active ? 'crosshair' : '';
+        }
+        if (!active) {
+          cancelPlacementGesture();
+        }
+      }
+
+      function cancelPlacementGesture() {
+        if (!placementGesture) return;
+        if (placementGesture.timerId) {
+          clearTimeout(placementGesture.timerId);
+        }
+        placementGesture = null;
+      }
+
+      function tryPlaceFromGesture() {
+        const gesture = placementGesture;
+        if (!gesture || gesture.cancelled || gesture.placed) return;
+        if (!editorState.placementActive) {
+          cancelPlacementGesture();
+          return;
+        }
+        gesture.placed = true;
+        const scene2 = getScene2();
+        if (scene2) {
+          placeZoneAt(scene2, gesture.clientX, gesture.clientY);
+        }
+        cancelPlacementGesture();
+      }
+
+      function onPlacementWaitElapsed() {
+        const gesture = placementGesture;
+        if (!gesture || gesture.cancelled || gesture.placed) return;
+        if (gesture.dragged || gesture.shiftHeld) return;
+        tryPlaceFromGesture();
+      }
+
+      function cancelPlacementForShiftOrDrag() {
+        const gesture = placementGesture;
+        if (!gesture || gesture.cancelled || gesture.placed) return;
+        gesture.cancelled = true;
+        if (gesture.timerId) {
+          clearTimeout(gesture.timerId);
+        }
+        placementGesture = null;
+      }
+
+      function onPlacementKeyDown(event) {
+        if (!placementGesture) return;
+        if (event.key === 'Shift' || event.shiftKey) {
+          placementGesture.shiftHeld = true;
+          cancelPlacementForShiftOrDrag();
+        }
+      }
+
+      function beginPlacementGesture(clientX, clientY) {
+        cancelPlacementGesture();
+        placementGesture = {
+          clientX,
+          clientY,
+          cancelled: false,
+          placed: false,
+          dragged: false,
+          shiftHeld: false,
+          timerId: setTimeout(onPlacementWaitElapsed, PLACEMENT_WAIT_MS),
+        };
+      }
+
+      function canvasPos(event, dom) {
+        return { x: event.clientX, y: event.clientY };
+      }
+
+      function screenDistance(scene2, world, clientX, clientY) {
+        const dom = scene2.getDomElement();
+        const rect = dom.getBoundingClientRect();
+        const vector = new (cacheThree(scene2).Vector3)();
+        vector.copy(world);
+        vector.project(scene2.camera);
+        const sx = rect.left + (vector.x * 0.5 + 0.5) * rect.width;
+        const sy = rect.top + (-vector.y * 0.5 + 0.5) * rect.height;
+        const dx = sx - clientX;
+        const dy = sy - clientY;
+        return Math.hypot(dx, dy);
+      }
+
+      function pointerIsOverCanvas(scene2, clientX, clientY) {
+        const dom = scene2.getDomElement();
+        const rect = dom.getBoundingClientRect();
+        return clientX >= rect.left && clientX <= rect.right
+          && clientY >= rect.top && clientY <= rect.bottom;
+      }
+
+      function normalizeZoneRecord(raw) {
+        const shape = raw?.shape === 'square' ? 'square' : 'circle';
+        const radiusM = clampRadiusM(Number(raw?.radiusM) > 0 ? Number(raw.radiusM) : 30);
+        return {
+          placed: Boolean(raw?.placed),
+          centerXM: Number(raw?.centerXM) || 0,
+          centerYM: Number(raw?.centerYM) || 0,
+          centerZM: Number(raw?.centerZM) || 0,
+          radiusM,
+          shape,
+        };
+      }
+
+      function pickZoneKindAt(scene2, clientX, clientY) {
+        const hit = pickSurface(scene2, clientX, clientY);
+        if (!hit) return null;
+        for (const kind of ['end', 'start']) {
+          const record = zoneRecord(kind);
+          if (!record.placed) continue;
+          const dx = hit.x - record.centerXM;
+          const dy = hit.y - record.centerYM;
+          if (record.shape === 'square') {
+            if (Math.abs(dx) <= record.radiusM && Math.abs(dy) <= record.radiusM) return kind;
+          } else if (Math.hypot(dx, dy) <= record.radiusM) {
+            return kind;
+          }
+        }
+        return null;
+      }
+
+      function moveZoneTo(scene2, kind, clientX, clientY) {
+        const hit = pickSurface(scene2, clientX, clientY);
+        if (!hit) return false;
+        const record = normalizeZoneRecord(zoneRecord(kind));
+        record.placed = true;
+        const ox = zoneDrag?.offsetX ?? 0;
+        const oy = zoneDrag?.offsetY ?? 0;
+        record.centerXM = hit.x - ox;
+        record.centerYM = hit.y - oy;
+        record.centerZM = hit.z - SURFACE_LIFT_M;
+        const snapped = snapZoneToMapBase(record, mapBaseBounds());
+        editorState.zones[kind] = snapped.record;
+        if (zoneDrag) {
+          zoneDrag.zoneFailed = snapped.failed;
+        }
+        rebuildVisual(scene2, kind);
+        return true;
+      }
+
+      function placeZoneAt(scene2, clientX, clientY) {
+        ensureOverlay(scene2, attachedManager);
+        const hit = pickSurface(scene2, clientX, clientY);
+        if (!hit) return false;
+        const kind = editorState.placementKind;
+        const prev = normalizeZoneRecord(zoneRecord(kind));
+        const bounds = mapBaseBounds();
+        let record = {
+          placed: true,
+          centerXM: hit.x,
+          centerYM: hit.y,
+          centerZM: hit.z - SURFACE_LIFT_M,
+          radiusM: prev.radiusM,
+          shape: prev.shape,
+        };
+        const snapped = snapZoneToMapBase(record, bounds);
+        editorState.zones[kind] = snapped.record;
+        rebuildVisual(scene2, kind);
+        notifyZonesChanged(snapped.failed);
+        return !snapped.failed;
+      }
+
+      function endZoneDrag(scene2, notify) {
+        if (!zoneDrag) return;
+        const zoneFailed = zoneDrag.zoneFailed;
+        zoneDrag = null;
+        setOrbitEnabled(scene2, true);
+        if (notify) notifyZonesChanged(zoneFailed);
+      }
+
+      function onDomPointerDown(event) {
+        const scene2 = getScene2();
+        if (!scene2 || !pointerIsOverCanvas(scene2, event.clientX, event.clientY)) return;
+        if (event.button !== 0) return;
+        if (event.shiftKey) return;
+
+        const dom = scene2.getDomElement();
+        const hitKind = pickZoneKindAt(scene2, event.clientX, event.clientY);
+        if (hitKind) {
+          cancelPlacementGesture();
+          if (editorState.placementActive) {
+            const grab = pickSurface(scene2, event.clientX, event.clientY);
+            const grabbed = zoneRecord(hitKind);
+            zoneDrag = {
+              kind: hitKind,
+              offsetX: grab ? grab.x - grabbed.centerXM : 0,
+              offsetY: grab ? grab.y - grabbed.centerYM : 0,
+              moved: false,
+              zoneFailed: false,
+            };
+            setOrbitEnabled(scene2, false);
+            dom.setPointerCapture(event.pointerId);
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            return;
+          }
+          if (editorState.tapToEditEnabled) {
+            zoneTapGesture = {
+              kind: hitKind,
+              clientX: event.clientX,
+              clientY: event.clientY,
+              dragged: false,
+            };
+          }
+          return;
+        }
+
+        if (!editorState.placementActive) return;
+        beginPlacementGesture(event.clientX, event.clientY);
+      }
+
+      function onDomPointerMove(event) {
+        const scene2 = getScene2();
+        if (zoneTapGesture) {
+          const moved = Math.hypot(
+            event.clientX - zoneTapGesture.clientX,
+            event.clientY - zoneTapGesture.clientY
+          );
+          if (moved > PLACEMENT_DRAG_PX) {
+            zoneTapGesture.dragged = true;
+          }
+        }
+        if (zoneDrag && scene2) {
+          if (moveZoneTo(scene2, zoneDrag.kind, event.clientX, event.clientY)) {
+            zoneDrag.moved = true;
+          }
+          event.preventDefault();
+          return;
+        }
+
+        const gesture = placementGesture;
+        if (gesture && !gesture.cancelled && !gesture.placed && !gesture.dragged) {
+          const moved = Math.hypot(
+            event.clientX - gesture.clientX,
+            event.clientY - gesture.clientY
+          );
+          if (moved > PLACEMENT_DRAG_PX) {
+            gesture.dragged = true;
+            cancelPlacementForShiftOrDrag();
+          }
+        }
+      }
+
+      function onDomPointerUp(event) {
+        if (event.button !== 0) return;
+        const scene2 = getScene2();
+
+        if (zoneTapGesture) {
+          const tap = zoneTapGesture;
+          zoneTapGesture = null;
+          if (!tap.dragged) {
+            notifySwift({ type: 'zoneEditRequest', kind: tap.kind });
+            event.preventDefault();
+          }
+          return;
+        }
+
+        if (zoneDrag) {
+          const notify = zoneDrag.moved;
+          try {
+            scene2?.getDomElement?.()?.releasePointerCapture?.(event.pointerId);
+          } catch (_) { /* released */ }
+          endZoneDrag(scene2, notify);
+          event.preventDefault();
+          return;
+        }
+
+        const gesture = placementGesture;
+        if (!gesture || gesture.cancelled || gesture.placed) {
+          cancelPlacementGesture();
+          return;
+        }
+        if (gesture.timerId) {
+          clearTimeout(gesture.timerId);
+          gesture.timerId = null;
+        }
+        if (!gesture.dragged && !gesture.shiftHeld) {
+          tryPlaceFromGesture();
+          return;
+        }
+        cancelPlacementGesture();
+      }
+
+      function onContextMenu(event) {
+        if (!editorState.placementActive) return;
+        const scene2 = getScene2();
+        if (!scene2 || !pointerIsOverCanvas(scene2, event.clientX, event.clientY)) return;
+        const hitKind = pickZoneKindAt(scene2, event.clientX, event.clientY);
+        if (!hitKind) return;
+        const record = zoneRecord(hitKind);
+        if (!record.placed) return;
+        event.preventDefault();
+        notifySwift({ type: 'deleteZoneRequest', kind: hitKind });
+      }
+
+      function installPointerHandlers(scene2) {
+        if (installed) return;
+        const dom = scene2.getDomElement();
+        dom.addEventListener('pointerdown', onDomPointerDown, true);
+        dom.addEventListener('pointermove', onDomPointerMove, true);
+        dom.addEventListener('pointerup', onDomPointerUp, true);
+        dom.addEventListener('pointercancel', onDomPointerUp, true);
+        dom.addEventListener('contextmenu', onContextMenu, true);
+        window.addEventListener('keydown', onPlacementKeyDown, true);
+        installed = true;
+      }
+
+      let attachedManager = null;
+
+      return {
+        resetThreeCache() {
+          three = null;
+        },
+        attach(manager) {
+          attachedManager = manager;
+          const scene2 = manager?.scene;
+          if (!scene2) return;
+          ensureOverlay(scene2, manager);
+          installPointerHandlers(scene2);
+        },
+        applyState(state) {
+          if (!state?.zones) return false;
+          const mapHalf = Number(state.mapHalfExtentM) > 0
+            ? Number(state.mapHalfExtentM)
+            : MAP_GROUND_HALF_EXTENT_M;
+          const bounds = resolveMapBaseSquareBounds(attachedManager, mapHalf);
+          editorState = {
+            placementActive: Boolean(state.placementActive),
+            tapToEditEnabled: Boolean(state.tapToEditEnabled),
+            placementKind: state.placementKind === 'end' ? 'end' : 'start',
+            mapHalfExtentM: mapHalf,
+            zones: {
+              start: normalizeZoneRecord(state.zones.start),
+              end: normalizeZoneRecord(state.zones.end),
+            },
+          };
+          for (const kind of ['start', 'end']) {
+            const snapped = snapZoneToMapBase(editorState.zones[kind], bounds);
+            editorState.zones[kind] = snapped.record;
+          }
+          cancelPlacementGesture();
+          zoneDrag = null;
+          zoneTapGesture = null;
+          const scene2 = getScene2();
+          if (!scene2) return false;
+          setPlacementControls(scene2, editorState.placementActive);
+          rebuildAll(scene2, attachedManager);
+          return true;
+        },
+      };
+    }
+
+    function createObstacleEditor(getScene2, notifySwift) {
+      const PLACEMENT_WAIT_MS = 300;
+      const PLACEMENT_ARM_MS = 350;
+      const PLACEMENT_DRAG_PX = 7;
+      const PICK_RADIUS_PX = 22;
+      const GIZMO_RENDER_ORDER = 2100;
+      const SELECTED_OUTLINE_COLOR = 0x39ff14;
+      const SELECTION_OUTLINE_NAME = 'guardian_obstacle_selection_outline';
+      const DELETE_FADE_STEP = 0.05;
+      const DELETE_FADE_INTERVAL_MS = 200;
+      const DELETE_FADE_MIN = 0.05;
+      let editorState = {
+        editorActive: false,
+        placementActive: false,
+        selectedID: null,
+        deletingID: null,
+        draft: {},
+        obstacles: [],
+        mapHalfExtentM: MAP_GROUND_HALF_EXTENT_M,
+      };
+      let placementGesture = null;
+      let placementArmedAt = 0;
+      let obstacleDrag = null;
+      let obstacleDragFrame = 0;
+      let deleteFadeTimer = null;
+      let installed = false;
+
+      function isObstacleDeleting(id) {
+        return Boolean(id) && editorState.deletingID === id;
+      }
+
+      function modelHasDragLock(model) {
+        let node = model;
+        while (node) {
+          if (node.userData?.guardianDragLock) return true;
+          node = node.parent;
+        }
+        return false;
+      }
+
+      function installObstaclePoseGuard(scene2) {
+        if (!scene2 || scene2._guardianPoseGuardInstalled) return;
+        scene2._guardianPoseGuardInstalled = true;
+        const nativeSetPose = scene2.setPose.bind(scene2);
+        scene2.setPose = function guardedSetPose(model, position, orientation) {
+          if (modelHasDragLock(model)) return;
+          return nativeSetPose(model, position, orientation);
+        };
+      }
+
+      function setObstacleDragLock(scene2, id, locked) {
+        const root = id ? findObstacleRoot(scene2, id) : null;
+        if (!root) return;
+        if (!root.userData) root.userData = {};
+        if (locked) root.userData.guardianDragLock = true;
+        else delete root.userData.guardianDragLock;
+      }
+
+      function stopObstacleDragFollowLoop() {
+        if (obstacleDragFrame) cancelAnimationFrame(obstacleDragFrame);
+        obstacleDragFrame = 0;
+      }
+
+      function startObstacleDragFollowLoop(scene2) {
+        stopObstacleDragFollowLoop();
+        const tick = () => {
+          if (!obstacleDrag) return;
+          syncObstacleVisualTransforms(scene2, obstacleDrag.id);
+          rebuildSelectionOutlines(scene2);
+          if (typeof scene2.render === 'function') scene2.render(0);
+          obstacleDragFrame = requestAnimationFrame(tick);
+        };
+        obstacleDragFrame = requestAnimationFrame(tick);
+      }
+
+      function removeObstacleGizmo(scene2) {
+        const existing = scene2?.scene?.getObjectByName?.('guardian_obstacle_gizmo');
+        if (existing?.parent) existing.parent.remove(existing);
+      }
+
+      function mapHalfM() {
+        const half = Number(editorState.mapHalfExtentM);
+        return Number.isFinite(half) && half > 0 ? half : MAP_GROUND_HALF_EXTENT_M;
+      }
+
+      function notifyChanged(outOfBounds = false) {
+        notifySwift({
+          type: 'obstaclesChanged',
+          obstacles: editorState.obstacles,
+          selectedID: editorState.selectedID,
+          outOfBounds: Boolean(outOfBounds),
+        });
+      }
+
+      function verticalExtentsM(obstacle) {
+        const min = 0.01;
+        const kind = obstacle.kind;
+        if (kind === 'cube' && obstacle.cube) {
+          const e = Math.max(Number(obstacle.cube.edgeM) || 2, min);
+          return { dx: e, dy: e, dz: e };
+        }
+        if (kind === 'cuboid' && obstacle.cuboid) {
+          return {
+            dx: Math.max(Number(obstacle.cuboid.lengthM) || 2, min),
+            dy: Math.max(Number(obstacle.cuboid.widthM) || 2, min),
+            dz: Math.max(Number(obstacle.cuboid.heightM) || 2, min),
+          };
+        }
+        if (kind === 'cylinder' && obstacle.cylinder) {
+          const r = Math.max(Number(obstacle.cylinder.radiusM) || 1, min);
+          const h = Math.max(Number(obstacle.cylinder.heightM) || 2, min);
+          return { dx: r * 2, dy: r * 2, dz: h };
+        }
+        if (kind === 'cone' && obstacle.cone) {
+          const r = Math.max(Number(obstacle.cone.radiusM) || 1, min);
+          const h = Math.max(Number(obstacle.cone.heightM) || 2, min);
+          return { dx: r * 2, dy: r * 2, dz: h };
+        }
+        if (kind === 'pyramid' && obstacle.pyramid) {
+          return {
+            dx: Math.max(Number(obstacle.pyramid.baseWidthM) || 2, min),
+            dy: Math.max(Number(obstacle.pyramid.baseDepthM) || 2, min),
+            dz: Math.max(Number(obstacle.pyramid.heightM) || 2, min),
+          };
+        }
+        if (kind === 'toblerone' && obstacle.toblerone) {
+          const w = Math.max(Number(obstacle.toblerone.widthM) || 2, min);
+          const l = Math.max(Number(obstacle.toblerone.lengthM) || 2, min);
+          const triH = w * Math.sqrt(3) / 2;
+          return { dx: w, dy: triH, dz: l };
+        }
+        return { dx: 2, dy: 2, dz: 2 };
+      }
+
+      function orientedExtentsM(obstacle) {
+        let ext = verticalExtentsM(obstacle);
+        const axis = obstacle.axisOrientation === 'horizontal' ? 'horizontal' : 'vertical';
+        if (axis === 'horizontal' && (obstacle.kind === 'cylinder' || obstacle.kind === 'toblerone')) {
+          return { dx: ext.dz, dy: ext.dy, dz: ext.dx };
+        }
+        return ext;
+      }
+
+      function footprintHalfM(obstacle) {
+        const kind = obstacle.kind;
+        const axis = obstacle.axisOrientation === 'horizontal' ? 'horizontal' : 'vertical';
+        let dx = 2;
+        let dy = 2;
+        if (kind === 'cube' && obstacle.cube) {
+          dx = dy = obstacle.cube.edgeM;
+        } else if (kind === 'cuboid' && obstacle.cuboid) {
+          dx = obstacle.cuboid.lengthM;
+          dy = obstacle.cuboid.widthM;
+        } else if (kind === 'cylinder' && obstacle.cylinder) {
+          dx = dy = obstacle.cylinder.radiusM * 2;
+          if (axis === 'horizontal') {
+            dx = obstacle.cylinder.heightM;
+            dy = obstacle.cylinder.radiusM * 2;
+          }
+        } else if (kind === 'cone' && obstacle.cone) {
+          dx = dy = obstacle.cone.radiusM * 2;
+        } else if (kind === 'pyramid' && obstacle.pyramid) {
+          dx = obstacle.pyramid.baseWidthM;
+          dy = obstacle.pyramid.baseDepthM;
+        } else if (kind === 'toblerone' && obstacle.toblerone) {
+          const w = obstacle.toblerone.widthM;
+          const triH = w * Math.sqrt(3) / 2;
+          dx = w;
+          dy = axis === 'horizontal' ? obstacle.toblerone.lengthM : triH;
+          if (axis === 'horizontal') dy = triH;
+        }
+        const yaw = (Number(obstacle.yawDeg) || 0) * Math.PI / 180;
+        const c = Math.abs(Math.cos(yaw));
+        const s = Math.abs(Math.sin(yaw));
+        return {
+          hx: (dx / 2) * c + (dy / 2) * s,
+          hy: (dx / 2) * s + (dy / 2) * c,
+        };
+      }
+
+      function obstacleFootprintPoints(obstacle) {
+        const { hx, hy } = footprintHalfM(obstacle);
+        const cx = obstacle.centerXM;
+        const cy = obstacle.centerYM;
+        const yaw = (Number(obstacle.yawDeg) || 0) * Math.PI / 180;
+        const cos = Math.cos(yaw);
+        const sin = Math.sin(yaw);
+        const corners = [
+          { x: hx, y: hy },
+          { x: hx, y: -hy },
+          { x: -hx, y: -hy },
+          { x: -hx, y: hy },
+        ];
+        return corners.map((corner) => ({
+          x: cx + corner.x * cos - corner.y * sin,
+          y: cy + corner.x * sin + corner.y * cos,
+        }));
+      }
+
+      function obstacleFitsMapBase(obstacle, bounds) {
+        if (!bounds?.valid) return true;
+        if (!pointInsideMapBase(obstacle.centerXM, obstacle.centerYM, bounds)) return false;
+        for (const p of obstacleFootprintPoints(obstacle)) {
+          if (!pointInsideMapBase(p.x, p.y, bounds)) return false;
+        }
+        return true;
+      }
+
+      /** Zone-style snap: translate footprint inside map-base; failed only when it cannot fit. */
+      function snapObstacleToMapBase(obstacle, bounds) {
+        if (!bounds?.valid) return { obstacle, failed: false };
+        if (obstacleFitsMapBase(obstacle, bounds)) {
+          return { obstacle, failed: false };
+        }
+        let points = [{ x: obstacle.centerXM, y: obstacle.centerYM }];
+        for (const p of obstacleFootprintPoints(obstacle)) points.push(p);
+        let dxMin = -Infinity;
+        let dxMax = Infinity;
+        let dyMin = -Infinity;
+        let dyMax = Infinity;
+        for (const p of points) {
+          dxMin = Math.max(dxMin, bounds.minX - p.x);
+          dxMax = Math.min(dxMax, bounds.maxX - p.x);
+          dyMin = Math.max(dyMin, bounds.minY - p.y);
+          dyMax = Math.min(dyMax, bounds.maxY - p.y);
+        }
+        if (dxMin <= dxMax) {
+          obstacle.centerXM += Math.min(Math.max(0, dxMin), dxMax);
+        }
+        if (dyMin <= dyMax) {
+          obstacle.centerYM += Math.min(Math.max(0, dyMin), dyMax);
+        }
+        return { obstacle, failed: !obstacleFitsMapBase(obstacle, bounds) };
+      }
+
+      function setOrbitEnabled(scene2, enabled) {
+        const controls = scene2?.controls;
+        if (controls) controls.enabled = enabled;
+      }
+
+      function pickSurface(scene2, clientX, clientY) {
+        const dom = scene2.getDomElement();
+        const rect = dom.getBoundingClientRect();
+        const ndc = {
+          x: ((clientX - rect.left) / rect.width) * 2 - 1,
+          y: -(((clientY - rect.top) / rect.height) * 2 - 1),
+        };
+        scene2.ray.setFromCamera(ndc, scene2.camera);
+        const meshes = [];
+        scene2.scene.traverse((node) => {
+          if (node.name === 'guardian_obstacle_gizmo' || node.name === 'guardian_zone_overlay' || node.name === 'grid') return;
+          if (node.isMesh) meshes.push(node);
+        });
+        const hits = scene2.ray.intersectObjects(meshes, true);
+        if (hits.length > 0) return hits[0].point.clone();
+        return null;
+      }
+
+      /** Placement click must hit the floor and fit the prototype footprint on the map-base square. */
+      function placementHitOnMapBase(scene2, clientX, clientY) {
+        const hit = pickSurface(scene2, clientX, clientY);
+        if (!hit) return null;
+        const bounds = mapBaseBounds();
+        if (!bounds?.valid) return hit;
+        const candidate = {
+          ...editorState.draft,
+          centerXM: hit.x,
+          centerYM: hit.y,
+        };
+        return obstacleFitsMapBase(candidate, bounds) ? hit : null;
+      }
+
+      function projectToClient(scene2, x, y, z) {
+        const p = new scene2.camera.position.constructor(x, y, z);
+        p.project(scene2.camera);
+        const dom = scene2.getDomElement();
+        const rect = dom.getBoundingClientRect();
+        return {
+          x: rect.left + ((p.x + 1) / 2) * rect.width,
+          y: rect.top + ((-p.y + 1) / 2) * rect.height,
+        };
+      }
+
+      function obstacleIdFromObject(object) {
+        let node = object;
+        while (node) {
+          const name = node.name || '';
+          if (name.startsWith('guardian_obstacle_')) {
+            const suffix = name.slice('guardian_obstacle_'.length);
+            const match = editorState.obstacles.find((o) => {
+              const safe = o.id.toLowerCase().replace(/-/g, '_').replace(/[^a-z0-9_]/g, '');
+              return safe === suffix;
+            });
+            if (match && !isObstacleDeleting(match.id)) return match.id;
+          }
+          node = node.parent;
+        }
+        return null;
+      }
+
+      function pickObstacleIdFromRay(scene2, clientX, clientY) {
+        const dom = scene2.getDomElement();
+        const rect = dom.getBoundingClientRect();
+        const ndc = {
+          x: ((clientX - rect.left) / rect.width) * 2 - 1,
+          y: -(((clientY - rect.top) / rect.height) * 2 - 1),
+        };
+        scene2.ray.setFromCamera(ndc, scene2.camera);
+        const meshes = [];
+        scene2.scene.traverse((node) => {
+          if (!node.isMesh) return;
+          if (node.name === 'guardian_obstacle_gizmo' || node.name === 'guardian_zone_overlay' || node.name === 'grid') return;
+          let ancestor = node;
+          while (ancestor) {
+            const name = ancestor.name || '';
+            if (name.startsWith('guardian_obstacle_')) {
+              meshes.push(node);
+              return;
+            }
+            ancestor = ancestor.parent;
+          }
+        });
+        const hits = meshes.length > 0 ? scene2.ray.intersectObjects(meshes, true) : [];
+        for (const hit of hits) {
+          const id = obstacleIdFromObject(hit.object);
+          if (id) return id;
+        }
+        return null;
+      }
+
+      function pickObstacleId(scene2, clientX, clientY) {
+        const rayHit = pickObstacleIdFromRay(scene2, clientX, clientY);
+        if (rayHit) return rayHit;
+        let best = null;
+        let bestD = PICK_RADIUS_PX;
+        for (const obstacle of editorState.obstacles) {
+          if (isObstacleDeleting(obstacle.id)) continue;
+          const projected = projectToClient(
+            scene2,
+            obstacle.centerXM,
+            obstacle.centerYM,
+            obstacle.centerZM
+          );
+          const d = Math.hypot(projected.x - clientX, projected.y - clientY);
+          if (d < bestD) {
+            bestD = d;
+            best = obstacle.id;
+          }
+        }
+        return best;
+      }
+
+      function findObstacle(id) {
+        return editorState.obstacles.find((o) => o.id === id) ?? null;
+      }
+
+      function obstacleSafeName(id) {
+        return id.toLowerCase().replace(/-/g, '_').replace(/[^a-z0-9_]/g, '');
+      }
+
+      function findObstacleRoot(scene2, id) {
+        if (!scene2 || !id) return null;
+        return scene2.scene.getObjectByName(`guardian_obstacle_${obstacleSafeName(id)}`);
+      }
+
+      function forEachObstacleMaterial(root, fn) {
+        if (!root) return;
+        root.traverse((child) => {
+          if (!child.isMesh || !child.material) return;
+          const mats = Array.isArray(child.material) ? child.material : [child.material];
+          mats.forEach(fn);
+        });
+      }
+
+      function captureOpacityBackup(root) {
+        if (!root || root.userData?.guardianOpacityBackup) return;
+        const backup = [];
+        forEachObstacleMaterial(root, (material) => {
+          backup.push({
+            material,
+            opacity: material.opacity,
+            transparent: material.transparent,
+          });
+        });
+        if (!root.userData) root.userData = {};
+        root.userData.guardianOpacityBackup = backup;
+      }
+
+      function setObstacleRootOpacity(root, opacity) {
+        forEachObstacleMaterial(root, (material) => {
+          material.transparent = opacity < 1;
+          material.opacity = opacity;
+          material.needsUpdate = true;
+        });
+      }
+
+      function restoreObstacleOpacity(root) {
+        if (!root) return;
+        const backup = root.userData?.guardianOpacityBackup;
+        if (!backup) return;
+        for (const entry of backup) {
+          entry.material.opacity = entry.opacity;
+          entry.material.transparent = entry.transparent;
+          entry.material.needsUpdate = true;
+        }
+        delete root.userData.guardianOpacityBackup;
+      }
+
+      function stopDeleteFade(scene2, { restore = false, id = null } = {}) {
+        if (deleteFadeTimer) {
+          clearInterval(deleteFadeTimer);
+          deleteFadeTimer = null;
+        }
+        const fadeID = id ?? editorState.deletingID;
+        if (restore && fadeID && scene2) {
+          const root = findObstacleRoot(scene2, fadeID);
+          if (root) restoreObstacleOpacity(root);
+          if (typeof scene2.render === 'function') scene2.render(0);
+        }
+      }
+
+      function startDeleteFade(scene2, id) {
+        stopDeleteFade(scene2, { restore: false });
+        if (!scene2 || !id) return;
+        const root = findObstacleRoot(scene2, id);
+        if (!root) return;
+        captureOpacityBackup(root);
+        let current = 1;
+        setObstacleRootOpacity(root, current);
+        if (typeof scene2.render === 'function') scene2.render(0);
+        deleteFadeTimer = setInterval(() => {
+          if (editorState.deletingID !== id) {
+            stopDeleteFade(scene2, { restore: true, id });
+            return;
+          }
+          const liveRoot = findObstacleRoot(scene2, id);
+          if (!liveRoot) {
+            stopDeleteFade(scene2, { restore: false, id });
+            return;
+          }
+          current = Math.max(DELETE_FADE_MIN, current - DELETE_FADE_STEP);
+          setObstacleRootOpacity(liveRoot, current);
+          if (typeof scene2.render === 'function') scene2.render(0);
+        }, DELETE_FADE_INTERVAL_MS);
+      }
+
+      /** Live toolbar feedback: move / rotate / scale gzweb models to match manifest obstacles. */
+      function syncObstacleVisualTransforms(scene2, onlyID = null) {
+        if (!scene2?.scene) return;
+        for (const obstacle of editorState.obstacles) {
+          if (onlyID && obstacle.id !== onlyID) continue;
+          const root = findObstacleRoot(scene2, obstacle.id);
+          if (!root) continue;
+          const target = orientedExtentsM(obstacle);
+          const cx = Number(obstacle.centerXM) || 0;
+          const cy = Number(obstacle.centerYM) || 0;
+          const cz = Number(obstacle.centerZM) || 0;
+          const yawRad = (Number(obstacle.yawDeg) || 0) * Math.PI / 180;
+          root.position.set(cx, cy, cz);
+          root.rotation.set(0, 0, yawRad, 'ZYX');
+          const prev = root.userData?.guardianAppliedExtents;
+          if (!prev) {
+            if (!root.userData) root.userData = {};
+            root.userData.guardianAppliedExtents = { dx: target.dx, dy: target.dy, dz: target.dz };
+            continue;
+          }
+          const sx = prev.dx > 0 ? target.dx / prev.dx : 1;
+          const sy = prev.dy > 0 ? target.dy / prev.dy : 1;
+          const sz = prev.dz > 0 ? target.dz / prev.dz : 1;
+          root.scale.set(
+            (Number(root.scale?.x) || 1) * sx,
+            (Number(root.scale?.y) || 1) * sy,
+            (Number(root.scale?.z) || 1) * sz
+          );
+          root.userData.guardianAppliedExtents = { dx: target.dx, dy: target.dy, dz: target.dz };
+        }
+        if (typeof scene2.render === 'function') {
+          scene2.render(0);
+        }
+      }
+
+      /** Drops gzweb scene nodes for obstacles not in the manifest (phantoms / duplicates). */
+      function purgeOrphanObstacleMeshes(scene2) {
+        if (!scene2?.scene) return;
+        const allowed = new Set(
+          editorState.obstacles.map((o) => `guardian_obstacle_${obstacleSafeName(o.id)}`)
+        );
+        const seenAllowed = new Set();
+        const toRemove = [];
+        scene2.scene.traverse((node) => {
+          const name = node.name || '';
+          if (!name.startsWith('guardian_obstacle_')) return;
+          if (name === 'guardian_obstacle_gizmo') return;
+          const parentName = node.parent?.name || '';
+          if (parentName.startsWith('guardian_obstacle_')) return;
+          if (allowed.has(name)) {
+            if (seenAllowed.has(name)) toRemove.push(node);
+            else seenAllowed.add(name);
+            return;
+          }
+          toRemove.push(node);
+        });
+        for (const node of toRemove) {
+          removeSelectionOutlinesFromNode(node);
+          node.parent?.remove(node);
+        }
+        if (toRemove.length > 0 && typeof scene2.render === 'function') {
+          scene2.render(0);
+        }
+      }
+
+      function removeSelectionOutlinesFromNode(node) {
+        const toRemove = [];
+        node.traverse((child) => {
+          if (child.name === SELECTION_OUTLINE_NAME) toRemove.push(child);
+        });
+        for (const child of toRemove) {
+          child.parent?.remove(child);
+          child.geometry?.dispose?.();
+          if (Array.isArray(child.material)) {
+            child.material.forEach((m) => m?.dispose?.());
+          } else {
+            child.material?.dispose?.();
+          }
+        }
+      }
+
+      function clearAllSelectionOutlines(scene2) {
+        if (!scene2) return;
+        for (const obstacle of editorState.obstacles) {
+          const root = findObstacleRoot(scene2, obstacle.id);
+          if (root) removeSelectionOutlinesFromNode(root);
+        }
+      }
+
+      function rebuildSelectionOutlines(scene2) {
+        if (!scene2) return;
+        clearAllSelectionOutlines(scene2);
+        const id = editorState.selectedID;
+        if (!id || !editorState.editorActive || isObstacleDeleting(id)) return;
+        const root = findObstacleRoot(scene2, id);
+        if (!root) return;
+        const EdgesGeometry = guardianThree?.EdgesGeometry;
+        const LineBasicMaterial = guardianThree?.MeshBasicMaterial;
+        const LineSegments = guardianThree?.LineSegments;
+        if (!EdgesGeometry || !LineBasicMaterial || !LineSegments) return;
+        root.traverse((child) => {
+          if (!child.isMesh || !child.geometry) return;
+          if (child.name === SELECTION_OUTLINE_NAME) return;
+          const edges = new EdgesGeometry(child.geometry, 1);
+          const outline = new LineSegments(edges, new LineBasicMaterial({
+            color: SELECTED_OUTLINE_COLOR,
+            depthTest: false,
+            depthWrite: false,
+            fog: false,
+            toneMapped: false,
+          }));
+          outline.name = SELECTION_OUTLINE_NAME;
+          outline.renderOrder = GIZMO_RENDER_ORDER;
+          child.add(outline);
+        });
+        if (typeof scene2.render === 'function') {
+          scene2.render(0);
+        }
+      }
+
+      function setSelectedObstacle(scene2, id, notify = true) {
+        if (id && isObstacleDeleting(id)) return;
+        if (editorState.selectedID === id) return;
+        editorState.selectedID = id;
+        if (scene2) rebuildSelectionOutlines(scene2);
+        if (notify) notifyChanged(false);
+      }
+
+      function placeNewAt(scene2, clientX, clientY) {
+        const hit = placementHitOnMapBase(scene2, clientX, clientY);
+        if (!hit) return;
+        notifySwift({ type: 'placeObstacle', centerXM: hit.x, centerYM: hit.y });
+      }
+
+      function moveSelected(scene2, clientX, clientY) {
+        const dragID = obstacleDrag?.id ?? editorState.selectedID;
+        const selected = dragID ? findObstacle(dragID) : null;
+        if (!selected) return false;
+        const hit = pickSurface(scene2, clientX, clientY);
+        if (!hit) return false;
+        selected.centerXM = hit.x - (obstacleDrag?.offsetX ?? 0);
+        selected.centerYM = hit.y - (obstacleDrag?.offsetY ?? 0);
+        const snapped = snapObstacleToMapBase(selected, mapBaseBounds());
+        if (obstacleDrag) {
+          obstacleDrag.outOfBounds = snapped.failed;
+        }
+        syncObstacleVisualTransforms(scene2, dragID);
+        rebuildSelectionOutlines(scene2);
+        return snapped.failed;
+      }
+
+      function obstacleCenterMovedSinceDragStart(drag) {
+        const obstacle = findObstacle(drag.id);
+        if (!obstacle || !drag.startCenter) return false;
+        const eps = 1e-4;
+        return (
+          Math.abs((Number(obstacle.centerXM) || 0) - drag.startCenter.x) > eps
+          || Math.abs((Number(obstacle.centerYM) || 0) - drag.startCenter.y) > eps
+        );
+      }
+
+      function endObstacleDrag(scene2, event, moved) {
+        if (!obstacleDrag) return;
+        const oob = obstacleDrag.outOfBounds;
+        const id = obstacleDrag.id;
+        const positionChanged = moved || obstacleCenterMovedSinceDragStart(obstacleDrag);
+        stopObstacleDragFollowLoop();
+        obstacleDrag = null;
+        setOrbitEnabled(scene2, true);
+        if (positionChanged) {
+          notifyChanged(oob);
+        } else {
+          setSelectedObstacle(scene2, id, true);
+        }
+        try { scene2?.getDomElement?.()?.releasePointerCapture?.(event.pointerId); } catch (_) {}
+        // Keep pose override briefly so Gazebo dynamic_pose does not snap the model back before the sim updates.
+        let holdFrames = 60;
+        const holdTick = () => {
+          if (!scene2) {
+            setObstacleDragLock(scene2, id, false);
+            return;
+          }
+          syncObstacleVisualTransforms(scene2, id);
+          rebuildSelectionOutlines(scene2);
+          if (typeof scene2.render === 'function') scene2.render(0);
+          if (holdFrames > 0) {
+            holdFrames -= 1;
+            requestAnimationFrame(holdTick);
+          } else {
+            setObstacleDragLock(scene2, id, false);
+          }
+        };
+        requestAnimationFrame(holdTick);
+      }
+
+      function cancelPlacementGesture() {
+        if (!placementGesture) return;
+        if (placementGesture.timerId) clearTimeout(placementGesture.timerId);
+        placementGesture = null;
+      }
+
+      function beginPlacementGesture(clientX, clientY) {
+        cancelPlacementGesture();
+        placementGesture = {
+          clientX,
+          clientY,
+          timerId: null,
+          cancelled: false,
+          placed: false,
+          dragged: false,
+          shiftHeld: false,
+        };
+      }
+
+      function tryPlaceFromGesture() {
+        const gesture = placementGesture;
+        if (!gesture || gesture.cancelled || gesture.placed || gesture.dragged) return;
+        if (Date.now() < placementArmedAt) return;
+        const scene2 = getScene2();
+        if (!scene2 || !editorState.placementActive) return;
+        placeNewAt(scene2, gesture.clientX, gesture.clientY);
+        gesture.placed = true;
+      }
+
+      function beginObstacleDrag(scene2, dom, event, id) {
+        const selected = findObstacle(id);
+        if (!selected) return;
+        const hit = pickSurface(scene2, event.clientX, event.clientY);
+        obstacleDrag = {
+          id,
+          offsetX: hit ? hit.x - selected.centerXM : 0,
+          offsetY: hit ? hit.y - selected.centerYM : 0,
+          moved: false,
+          outOfBounds: false,
+          startCenter: {
+            x: Number(selected.centerXM) || 0,
+            y: Number(selected.centerYM) || 0,
+          },
+        };
+        setSelectedObstacle(scene2, id, false);
+        setObstacleDragLock(scene2, id, true);
+        setOrbitEnabled(scene2, false);
+        syncObstacleVisualTransforms(scene2, id);
+        startObstacleDragFollowLoop(scene2);
+        dom.setPointerCapture(event.pointerId);
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+
+      function onContextMenu(event) {
+        if (!editorState.editorActive) return;
+        const scene2 = getScene2();
+        if (!scene2) return;
+        const id = pickObstacleId(scene2, event.clientX, event.clientY);
+        if (!id || isObstacleDeleting(id)) return;
+        event.preventDefault();
+        notifySwift({ type: 'deleteObstacleRequest', obstacleID: id });
+      }
+
+      function onPointerDown(event) {
+        if (!editorState.editorActive) return;
+        const scene2 = getScene2();
+        if (!scene2) return;
+        if (event.button !== 0 || event.shiftKey) return;
+        const dom = scene2.getDomElement();
+        const rect = dom.getBoundingClientRect();
+        if (
+          event.clientX < rect.left || event.clientX > rect.right
+          || event.clientY < rect.top || event.clientY > rect.bottom
+        ) return;
+
+        const hitId = pickObstacleId(scene2, event.clientX, event.clientY);
+        if (hitId) {
+          cancelPlacementGesture();
+          beginObstacleDrag(scene2, dom, event, hitId);
+          return;
+        }
+
+        cancelPlacementGesture();
+        if (editorState.selectedID) {
+          if (obstacleDrag) {
+            endObstacleDrag(scene2, event, obstacleDrag.moved);
+          }
+          setSelectedObstacle(scene2, null, true);
+          return;
+        }
+        if (editorState.placementActive) {
+          beginPlacementGesture(event.clientX, event.clientY);
+        }
+      }
+
+      function onPointerMove(event) {
+        const scene2 = getScene2();
+        if (obstacleDrag && scene2) {
+          moveSelected(scene2, event.clientX, event.clientY);
+          obstacleDrag.moved = true;
+          event.preventDefault();
+          return;
+        }
+        const gesture = placementGesture;
+        if (gesture && !gesture.cancelled && !gesture.placed && !gesture.dragged) {
+          const moved = Math.hypot(event.clientX - gesture.clientX, event.clientY - gesture.clientY);
+          if (moved > PLACEMENT_DRAG_PX) {
+            gesture.dragged = true;
+            cancelPlacementGesture();
+          }
+        }
+      }
+
+      function onPointerUp(event) {
+        if (event.button !== 0) return;
+        const scene2 = getScene2();
+        if (obstacleDrag) {
+          endObstacleDrag(scene2, event, obstacleDrag.moved);
+          event.preventDefault();
+          return;
+        }
+
+        const placement = placementGesture;
+        if (placement && !placement.cancelled && !placement.placed && !placement.dragged) {
+          tryPlaceFromGesture();
+          cancelPlacementGesture();
+          return;
+        }
+
+        cancelPlacementGesture();
+      }
+
+      function installHandlers(scene2) {
+        if (installed) return;
+        const dom = scene2.getDomElement();
+        dom.addEventListener('pointerdown', onPointerDown, true);
+        dom.addEventListener('pointermove', onPointerMove, true);
+        dom.addEventListener('pointerup', onPointerUp, true);
+        dom.addEventListener('pointercancel', onPointerUp, true);
+        dom.addEventListener('contextmenu', onContextMenu, true);
+        installed = true;
+      }
+
+      return {
+        attach(manager) {
+          const scene2 = manager?.scene;
+          if (!scene2) return;
+          installObstaclePoseGuard(scene2);
+          removeObstacleGizmo(scene2);
+          installHandlers(scene2);
+        },
+        applyState(state) {
+          const prevDeletingID = editorState.deletingID;
+          const prevPlacementActive = editorState.placementActive;
+          const dragID = obstacleDrag?.id;
+          const draggedLive = dragID
+            ? editorState.obstacles.find((o) => o.id === dragID)
+            : null;
+          editorState = {
+            editorActive: Boolean(state?.editorActive),
+            placementActive: Boolean(state?.placementActive),
+            selectedID: state?.selectedID ?? null,
+            deletingID: state?.deletingID ?? null,
+            draft: state?.draft ?? {},
+            obstacles: Array.isArray(state?.obstacles) ? state.obstacles : [],
+            mapHalfExtentM: Number(state?.mapHalfExtentM) > 0
+              ? Number(state.mapHalfExtentM)
+              : MAP_GROUND_HALF_EXTENT_M,
+          };
+          if (draggedLive && dragID) {
+            const incoming = editorState.obstacles.find((o) => o.id === dragID);
+            if (incoming) {
+              incoming.centerXM = draggedLive.centerXM;
+              incoming.centerYM = draggedLive.centerYM;
+              incoming.centerZM = draggedLive.centerZM;
+              incoming.yawDeg = draggedLive.yawDeg;
+            }
+          }
+          if (editorState.placementActive && !prevPlacementActive) {
+            placementArmedAt = Date.now() + PLACEMENT_ARM_MS;
+          }
+          cancelPlacementGesture();
+          const preserveDrag = obstacleDrag;
+          const preserveDragFrame = obstacleDragFrame;
+          obstacleDrag = null;
+          obstacleDragFrame = 0;
+          const scene2 = getScene2();
+          if (scene2) {
+            if (editorState.deletingID && editorState.deletingID !== prevDeletingID) {
+              startDeleteFade(scene2, editorState.deletingID);
+            } else if (!editorState.deletingID && prevDeletingID) {
+              const stillListed = editorState.obstacles.some((o) => o.id === prevDeletingID);
+              stopDeleteFade(scene2, { restore: stillListed, id: prevDeletingID });
+            }
+            purgeOrphanObstacleMeshes(scene2);
+            syncObstacleVisualTransforms(scene2);
+            rebuildSelectionOutlines(scene2);
+          } else if (!editorState.deletingID && prevDeletingID) {
+            stopDeleteFade(null, { restore: false, id: prevDeletingID });
+          }
+          obstacleDrag = preserveDrag;
+          obstacleDragFrame = preserveDragFrame;
+          if (preserveDrag && scene2) {
+            startObstacleDragFollowLoop(scene2);
+          }
+          return true;
+        },
+      };
+    }
 
     function formatCameraDebugLine(manager) {
       const scene2 = manager?.scene;
@@ -209,7 +2171,7 @@
       return (
         `cam pos  x ${p.x.toFixed(2)}  y ${p.y.toFixed(2)}  z ${p.z.toFixed(2)}\n`
         + `target   ${target}${angles}\n`
-        + `DEFAULT  x ${MAP_DEFAULT_CAMERA.x}  y ${MAP_DEFAULT_CAMERA.y}  z ${MAP_DEFAULT_CAMERA.z}`
+        + `OBLIQUE  x ${MAP_OBLIQUE_DIRECTION.x.toFixed(3)}  y ${MAP_OBLIQUE_DIRECTION.y.toFixed(3)}  z ${MAP_OBLIQUE_DIRECTION.z.toFixed(3)}`
       );
     }
 
@@ -240,6 +2202,8 @@
     async function loadSceneManager() {
       try {
         const mod = await import('./dist/gzweb.bundle.mjs');
+        guardianThree = mod;
+        zoneEditor.resetThreeCache();
         const SceneManager = mod.SceneManager ?? mod.default?.SceneManager;
         if (SceneManager) return SceneManager;
         throw new Error('SceneManager not found in bundled gzweb');
@@ -290,9 +2254,7 @@
         setTimeout(() => frameSceneWhenReady(manager, attempt + 1, onReady), 250);
         return;
       }
-      applyMapCameraPolicy(manager);
-      manager.resetView();
-      syncControlsFromCamera(manager);
+      commitViewportFit(manager, 'oblique');
       onReady?.();
     }
 
@@ -300,7 +2262,17 @@
       const wsURL = `ws://127.0.0.1:${port}`;
       const manager = new SceneManager({ elementId: root.id });
       let restoreSend = () => {};
-      const onResize = () => manager.resize();
+      const onResize = () => {
+        manager.resize();
+        const camera = manager.scene?.camera;
+        if (camera) {
+          applyCameraClipPlanes(camera);
+        }
+        const controls = manager.scene?.controls;
+        if (controls) {
+          applyOrbitPolicyInteractive(controls);
+        }
+      };
 
       const NativeWS = window.WebSocket;
       window.WebSocket = function(url, protocols) {
@@ -353,6 +2325,14 @@
             }
             active = await connectOnce(SceneManager);
             bindViewerSession(active);
+            zoneEditor.attach(active.manager);
+            obstacleEditor.attach(active.manager);
+            if (pendingZoneEditorState) {
+              zoneEditor.applyState(pendingZoneEditorState);
+            }
+            if (pendingObstacleEditorState) {
+              obstacleEditor.applyState(pendingObstacleEditorState);
+            }
             return;
           } catch (err) {
             lastError = err;

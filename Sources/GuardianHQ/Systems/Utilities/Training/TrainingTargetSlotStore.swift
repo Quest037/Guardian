@@ -20,6 +20,12 @@ enum TrainingTargetSlotStore {
     try writeAll(slots, fileURL: fileURL)
   }
 
+  static func remove(environmentID: String, fileURL: URL? = nil) throws {
+    var slots = try loadAll(fileURL: fileURL)
+    guard slots.removeValue(forKey: environmentID) != nil else { return }
+    try writeAll(slots, fileURL: fileURL)
+  }
+
   static func loadAll(fileURL: URL? = nil) throws -> [String: TrainingTaskPose] {
     let dir = try directoryURL(fileURL: fileURL)
     if let migrated = try migrateLegacySinglePoseIfNeeded(directory: dir) {

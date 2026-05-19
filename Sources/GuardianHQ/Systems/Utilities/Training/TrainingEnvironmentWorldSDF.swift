@@ -4,6 +4,15 @@ import Foundation
 enum TrainingEnvironmentWorldSDF {
     static let defaultWorldName = "guardian_open_field"
 
+    /// Map-base square depth (m). Top face stays at z = 0; block extends downward.
+    static let openFieldFloorDepthM: Double = 4
+
+    /// Open-field floor plate: top `#ffffff`, bottom `#fbffce` (static box, top face at z = 0).
+    enum OpenFieldFloorColors {
+        static let topDiffuse = "1.000 1.000 1.000"
+        static let bottomDiffuse = "0.984 1.000 0.808"
+    }
+
     /// Reads the `<world name="…">` from a training environment SDF (first world wins).
     static func parseWorldName(from worldURL: URL) -> String? {
         guard let raw = try? String(contentsOf: worldURL, encoding: .utf8) else { return nil }
@@ -20,11 +29,27 @@ enum TrainingEnvironmentWorldSDF {
         return String(xml[range])
     }
 
-    static func writeOpenFieldWorld(to url: URL, floorSideM: Double) throws {
+    static func writeOpenFieldWorld(
+        to url: URL,
+        floorSideM: Double,
+        additionalModelsXML: String = ""
+    ) throws {
         let side = max(1, floorSideM)
-        let sideText = side.truncatingRemainder(dividingBy: 1) == 0
-            ? String(format: "%.0f", side)
-            : String(format: "%.3f", side)
+        let sideText = formatMetres(side)
+        let depth = max(0.1, openFieldFloorDepthM)
+        let depthText = formatMetres(depth)
+        let halfDepth = depth / 2
+        let halfDepthText = formatMetres(halfDepth)
+        let collisionCenterZText = formatMetres(-halfDepth)
+        let bottomVisualCenterZText = formatMetres(-depth + halfDepth / 2)
+        let topVisualCenterZText = formatMetres(-halfDepth / 2)
+        let floorVisuals = openFieldFloorVisualsXML(
+            sideText: sideText,
+            halfDepthText: halfDepthText,
+            bottomVisualCenterZText: bottomVisualCenterZText,
+            topVisualCenterZText: topVisualCenterZText
+        )
+        let extra = additionalModelsXML.isEmpty ? "" : "\n\(additionalModelsXML)"
         let xml = """
         <?xml version="1.0" ?>
         <sdf version="1.9">
@@ -51,32 +76,65 @@ enum TrainingEnvironmentWorldSDF {
 
             <model name="open_field_floor">
               <static>true</static>
-              <pose>0 0 -0.05 0 0 0</pose>
+              <pose>0 0 \(collisionCenterZText) 0 0 0</pose>
               <link name="link">
                 <collision name="collision">
                   <geometry>
                     <box>
-                      <size>\(sideText) \(sideText) 0.1</size>
+                      <size>\(sideText) \(sideText) \(depthText)</size>
                     </box>
                   </geometry>
                 </collision>
-                <visual name="visual">
-                  <geometry>
-                    <box>
-                      <size>\(sideText) \(sideText) 0.1</size>
-                    </box>
-                  </geometry>
-                  <material>
-                    <ambient>1 1 1 1</ambient>
-                    <diffuse>1 1 1 1</diffuse>
-                    <specular>0.05 0.05 0.05 1</specular>
-                  </material>
-                </visual>
+        \(floorVisuals)
               </link>
             </model>
+        \(extra)
           </world>
         </sdf>
         """
         try xml.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// Two half-thickness visuals so the top face is white and the underside is `#fbffce`.
+    static func openFieldFloorVisualsXML(
+        sideText: String,
+        halfDepthText: String,
+        bottomVisualCenterZText: String,
+        topVisualCenterZText: String
+    ) -> String {
+        """
+                <visual name="visual_bottom">
+                  <pose>0 0 \(bottomVisualCenterZText) 0 0 0</pose>
+                  <geometry>
+                    <box>
+                      <size>\(sideText) \(sideText) \(halfDepthText)</size>
+                    </box>
+                  </geometry>
+                  <material>
+                    <ambient>\(OpenFieldFloorColors.bottomDiffuse) 1</ambient>
+                    <diffuse>\(OpenFieldFloorColors.bottomDiffuse) 1</diffuse>
+                    <specular>0.05 0.05 0.05 1</specular>
+                  </material>
+                </visual>
+                <visual name="visual_top">
+                  <pose>0 0 \(topVisualCenterZText) 0 0 0</pose>
+                  <geometry>
+                    <box>
+                      <size>\(sideText) \(sideText) \(halfDepthText)</size>
+                    </box>
+                  </geometry>
+                  <material>
+                    <ambient>\(OpenFieldFloorColors.topDiffuse) 1</ambient>
+                    <diffuse>\(OpenFieldFloorColors.topDiffuse) 1</diffuse>
+                    <specular>0.05 0.05 0.05 1</specular>
+                  </material>
+                </visual>
+        """
+    }
+
+    private static func formatMetres(_ value: Double) -> String {
+        value.truncatingRemainder(dividingBy: 1) == 0
+            ? String(format: "%.0f", value)
+            : String(format: "%.3f", value)
     }
 }

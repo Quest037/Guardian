@@ -6,14 +6,16 @@ final class SitlSpawnOwnerTests: XCTestCase {
         let trainingID = UUID()
         let formationID = UUID()
         let rows: [SitlRunningInstance] = [
-            makeInstance(id: trainingID, owner: .trainingVehicle, alive: true),
-            makeInstance(id: formationID, owner: .formationsPlayground, alive: true),
-            makeInstance(id: UUID(), owner: .trainingVehicle, alive: false),
+            makeInstance(id: trainingID, owner: .trainingRoster, alive: true),
+            makeInstance(id: formationID, owner: .trainingRoster, alive: true),
+            makeInstance(id: UUID(), owner: .trainingRoster, alive: false),
             makeInstance(id: UUID(), owner: .vehicles, alive: true),
         ]
 
-        XCTAssertEqual(rows.aliveInstances(owner: .trainingVehicle).map(\.id), [trainingID])
-        XCTAssertEqual(rows.aliveInstances(owner: .formationsPlayground).map(\.id), [formationID])
+        XCTAssertEqual(
+            rows.aliveInstances(owner: .trainingRoster).map(\.id),
+            [trainingID, formationID]
+        )
         XCTAssertEqual(rows.aliveInstances(owner: .vehicles).count, 1)
     }
 

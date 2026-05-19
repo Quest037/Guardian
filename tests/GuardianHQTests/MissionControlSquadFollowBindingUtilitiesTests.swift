@@ -28,13 +28,13 @@ final class MissionControlSquadFollowBindingUtilitiesTests: XCTestCase {
         XCTAssertTrue(MissionControlSquadFollowBindingUtilities.taskHasWingmen(mission: mission, task: task))
     }
 
-    func test_resolvedSquadFormationShape_primarySlotOverrideWins() {
+    func test_resolvedSquadFormationSpacing_primarySlotOverrideWins() {
         let taskID = UUID()
         let primaryDeviceID = UUID()
         let wingmanDeviceID = UUID()
         let primaryAssignmentID = UUID()
         var task = MissionTask(id: taskID, name: "T", rosterDeviceIds: [primaryDeviceID, wingmanDeviceID])
-        task.squadFormationShape = .normal
+        task.squadFormationSpacing = .normal
         let mission = Mission(
             name: "M",
             description: "",
@@ -57,10 +57,10 @@ final class MissionControlSquadFollowBindingUtilitiesTests: XCTestCase {
             taskId: taskID,
             rosterDeviceId: primaryDeviceID,
             slotName: "P1",
-            policies: MissionRunAssignmentPolicies(squadFormationShapeOverride: .tight)
+            policies: MissionRunAssignmentPolicies(squadFormationSpacingOverride: .tight)
         )
         XCTAssertEqual(
-            MissionRunPolicyResolution.resolvedSquadFormationShape(assignment: assignment, mission: mission),
+            MissionRunPolicyResolution.resolvedSquadFormationSpacing(assignment: assignment, mission: mission),
             .tight
         )
     }

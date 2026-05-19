@@ -36,6 +36,7 @@ final class SitlService: ObservableObject {
     @Published private(set) var lastError: String?
 
     weak var fleetLink: FleetLinkService?
+    weak var gazebo: GazeboService?
 
     private var runners: [UUID: SitlProcessRunner] = [:]
     private var nextSimulationInstance: Int = 0
@@ -50,6 +51,10 @@ final class SitlService: ObservableObject {
 
     func attachFleetLink(_ link: FleetLinkService) {
         fleetLink = link
+    }
+
+    func attachGazebo(_ service: GazeboService) {
+        gazebo = service
     }
 
     private func reconcileFleetLinkVehicleCacheAfterSitlChange() {
@@ -305,7 +310,7 @@ final class SitlService: ObservableObject {
             vehicleType: inst.preset.fleetVehicleType,
             spawnDefaults: spawnDefaults,
             px4SitlInstance: inst.platform == .px4 ? inst.stackInstanceIndex : nil,
-            px4Ros2SidecarDesired: inst.spawnOwner == .trainingVehicle
+            px4Ros2SidecarDesired: inst.spawnOwner == .trainingRoster
         )
         if !ok {
             let detail = lastError ?? link.lastError ?? "Reconnect failed."
@@ -335,7 +340,7 @@ final class SitlService: ObservableObject {
             vehicleType: inst.preset.fleetVehicleType,
             spawnDefaults: defaults,
             px4SitlInstance: inst.platform == .px4 ? inst.stackInstanceIndex : nil,
-            px4Ros2SidecarDesired: inst.spawnOwner == .trainingVehicle
+            px4Ros2SidecarDesired: inst.spawnOwner == .trainingRoster
         )
     }
 
@@ -344,7 +349,8 @@ final class SitlService: ObservableObject {
         preset: SimulationVehiclePreset,
         platform: SimulationPlatform,
         defaults: SimSpawnDefaults,
-        owner: SitlSpawnOwner = .vehicles
+        owner: SitlSpawnOwner = .vehicles,
+        gazeboPlacement: GazeboVehiclePlacement? = nil
     ) {
         lastError = nil
         guard let link = fleetLink, link.isSimulateEnabled else {
@@ -357,9 +363,21 @@ final class SitlService: ObservableObject {
         let platform = SimulationSpawnPolicy.effectivePlatform(for: preset, requested: platform)
         switch platform {
         case .ardupilot:
-            spawnArduPilot(preset: preset, link: link, defaults: defaults, owner: owner)
+            spawnArduPilot(
+                preset: preset,
+                link: link,
+                defaults: defaults,
+                owner: owner,
+                gazeboPlacement: gazeboPlacement
+            )
         case .px4:
-            spawnPX4(preset: preset, link: link, defaults: defaults, owner: owner)
+            spawnPX4(
+                preset: preset,
+                link: link,
+                defaults: defaults,
+                owner: owner,
+                gazeboPlacement: gazeboPlacement
+            )
         }
     }
 
@@ -367,7 +385,8 @@ final class SitlService: ObservableObject {
         preset: SimulationVehiclePreset,
         link: FleetLinkService,
         defaults: SimSpawnDefaults,
-        owner: SitlSpawnOwner
+        owner: SitlSpawnOwner,
+        gazeboPlacement: GazeboVehiclePlacement?
     ) {
         guard let root = SitlLaunchRecipe.ardupilotRootPath() else {
             lastError = SitlError.missingArduPilotRuntime.errorDescription
@@ -446,6 +465,7 @@ final class SitlService: ObservableObject {
             link?.appendSimulationLog(
                 "SITL exited [platform=ArduPilot instance=\(instance) mavlink_port=\(mavsdkIngressPort) mavlink_sysid=\(mavlinkSystemID) session=\(id.uuidString)] code=\(code)"
             )
+            Task { await self.gazebo?.removeVehicleProxy(mavlinkSystemID: mavlinkSystemID) }
             self.reconcileFleetLinkVehicleCacheAfterSitlChange()
         }
 
@@ -473,6 +493,13 @@ final class SitlService: ObservableObject {
             let row = instances.first(where: { $0.id == id })!
             registerFleetLinkForInstance(row, link: link, defaults: defaults)
             scheduleInitialFleetLinkRegistration(sessionID: id, link: link, defaults: defaults)
+            if let gazeboPlacement {
+                scheduleGazeboVehicleVisual(
+                    mavlinkSystemID: mavlinkSystemID,
+                    preset: preset,
+                    placement: gazeboPlacement
+                )
+            }
         } catch {
             lastError = error.localizedDescription
             runner.onLogLine = nil
@@ -484,7 +511,8 @@ final class SitlService: ObservableObject {
         preset: SimulationVehiclePreset,
         link: FleetLinkService,
         defaults: SimSpawnDefaults,
-        owner: SitlSpawnOwner
+        owner: SitlSpawnOwner,
+        gazeboPlacement: GazeboVehiclePlacement?
     ) {
         guard let root = SitlLaunchRecipe.px4SitlRootPath() else {
             lastError = SitlError.missingPx4AutopilotRoot.errorDescription
@@ -518,7 +546,7 @@ final class SitlService: ObservableObject {
                 px4GcsUdpPort: gcsUdpPort,
                 // uXRCE at PX4 boot only when this spawn opts into the ROS sidecar (Training today; Formation / MCR later).
                 // Garage-only spawns stay MAVLink-first until enrolled via ``ensurePx4Ros2Sidecar``.
-                enableRos2UxrcDds: owner == .trainingVehicle,
+                enableRos2UxrcDds: owner == .trainingRoster,
                 microXrceUdpPort: Ros2BridgeRuntime.microXrceUdpPort
             )
         } catch {
@@ -546,6 +574,7 @@ final class SitlService: ObservableObject {
             link?.appendSimulationLog(
                 "SITL exited [platform=PX4 instance=\(instance) mavlink_port=\(mavsdkIngressPort) mavlink_sysid=\(mavlinkSystemID) session=\(id.uuidString)] code=\(code)"
             )
+            Task { await self.gazebo?.removeVehicleProxy(mavlinkSystemID: mavlinkSystemID) }
             self.reconcileFleetLinkVehicleCacheAfterSitlChange()
         }
 
@@ -573,6 +602,13 @@ final class SitlService: ObservableObject {
             let row = instances.first(where: { $0.id == id })!
             registerFleetLinkForInstance(row, link: link, defaults: defaults)
             scheduleInitialFleetLinkRegistration(sessionID: id, link: link, defaults: defaults)
+            if let gazeboPlacement {
+                scheduleGazeboVehicleVisual(
+                    mavlinkSystemID: mavlinkSystemID,
+                    preset: preset,
+                    placement: gazeboPlacement
+                )
+            }
         } catch {
             lastError = error.localizedDescription
             runner.onLogLine = nil
@@ -619,7 +655,7 @@ final class SitlService: ObservableObject {
                 fleetLink: link,
                 vehicleID: vehicleID
             ) {
-                if inst.spawnOwner == .trainingVehicle {
+                if inst.spawnOwner == .trainingRoster {
                     link.ensurePx4Ros2Sidecar(forVehicleID: vehicleID)
                 }
                 return
@@ -691,5 +727,28 @@ final class SitlService: ObservableObject {
                 startedAt: Date()
             )
         )
+    }
+
+    private func scheduleGazeboVehicleVisual(
+        mavlinkSystemID: Int,
+        preset: SimulationVehiclePreset,
+        placement: GazeboVehiclePlacement
+    ) {
+        Task { @MainActor [weak self] in
+            guard let self, let gazebo = self.gazebo else { return }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            let vehicleID = "sysid:\(mavlinkSystemID)"
+            let params = GazeboVehicleSpawnParams(
+                vehicleClass: preset.fleetVehicleType,
+                vehicleID: vehicleID,
+                pose: placement.pose,
+                customMeshURI: placement.customMeshURI
+            )
+            _ = await gazebo.spawnVehicleProxy(
+                worldID: placement.worldID,
+                mavlinkSystemID: mavlinkSystemID,
+                params: params
+            )
+        }
     }
 }

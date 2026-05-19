@@ -51,6 +51,7 @@ final class GuardianBrainRos2SidecarPolicyTests: XCTestCase {
         pack.plannerHints = GuardianBrainPackBuilder.plannerHints(
             from: GuardianBrainPackTrainingPlannerContext(
                 vehicleClass: .ugvWheeled,
+                vehicleSizeTier: .medium,
                 layout: pack.skill.layout,
                 segments: [.forward(0.6, durationS: 2)],
                 planPathSource: .nav2,

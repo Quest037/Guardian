@@ -9563,6 +9563,13 @@ struct MissionRunDetailView: View {
         guard let idx = run.assignments.firstIndex(where: { $0.id == assignmentId }) else { return }
         run.assignments[idx].attachedFleetVehicleToken = vehicle.token.storageKey
         run.assignments[idx].attachedDevice = vehicle.title
+        let assignment = run.assignments[idx]
+        if let vehicleID = resolvedFleetStreamVehicleID(assignment: assignment, fleetLink: fleetLink, sitl: sitl),
+           let bound = fleetLink.resolvedVehicleFootprint(forVehicleID: vehicleID) {
+            run.assignments[idx].vehicleFootprint = bound
+        } else if let rosterDevice = run.template?.rosterDevices.first(where: { $0.id == assignment.rosterDeviceId }) {
+            run.assignments[idx].vehicleFootprint = rosterDevice.resolvedFootprint
+        }
         removeSetupStagingSimDragOverlay(for: assignmentId)
     }
 

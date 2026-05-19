@@ -63,11 +63,12 @@ final class GazeboLaunchRecipeTests: XCTestCase {
         XCTAssertTrue(xml.contains("<port>9010</port>"))
     }
 
-    func test_embeddedViewportPolicy_usesServerOnlyForBuilder() {
+    func test_embeddedViewportPolicy_usesServerOnlyForAllSessionPurposes() {
         XCTAssertTrue(GazeboSessionLaunchPolicy.usesEmbeddedWebViewport(for: .preview))
         XCTAssertTrue(GazeboSessionLaunchPolicy.usesEmbeddedWebViewport(for: .build))
-        XCTAssertFalse(GazeboSessionLaunchPolicy.usesEmbeddedWebViewport(for: .run))
+        XCTAssertTrue(GazeboSessionLaunchPolicy.usesEmbeddedWebViewport(for: .run))
         XCTAssertTrue(GazeboSessionLaunchPolicy.headless(for: .preview))
+        XCTAssertTrue(GazeboSessionLaunchPolicy.headless(for: .run))
     }
 
     func test_websocketLaunchSpec_usesGzLaunchWhenPresent() throws {

@@ -55,7 +55,12 @@ final class TrainingEnvironmentAuthoringTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: url) }
         try TrainingEnvironmentWorldSDF.writeOpenFieldWorld(to: url, floorSideM: 2000)
         let xml = try String(contentsOf: url, encoding: .utf8)
-        XCTAssertTrue(xml.contains("<size>2000 2000 0.1</size>"))
+        XCTAssertTrue(xml.contains("<size>2000 2000 4</size>"))
+        XCTAssertEqual(TrainingEnvironmentWorldSDF.openFieldFloorDepthM, 4, accuracy: 0.001)
+        XCTAssertTrue(xml.contains("visual_top"))
+        XCTAssertTrue(xml.contains("visual_bottom"))
+        XCTAssertTrue(xml.contains(TrainingEnvironmentWorldSDF.OpenFieldFloorColors.topDiffuse))
+        XCTAssertTrue(xml.contains(TrainingEnvironmentWorldSDF.OpenFieldFloorColors.bottomDiffuse))
         XCTAssertEqual(
             TrainingEnvironmentWorldSDF.parseWorldName(fromSDFXML: xml),
             TrainingEnvironmentWorldSDF.defaultWorldName

@@ -29,6 +29,7 @@ public final class GuardianAppSession: ObservableObject {
         sitlService.attachFleetLink(fleetLinkService)
         if product.includesGazeboSimulation {
             gazeboService.attachFleetLink(fleetLinkService)
+            sitlService.attachGazebo(gazeboService)
         }
         GuardianPluginRegistry.shared.bindPreferences(pluginPreferences)
         GuardianPluginBootstrap.ensureRegistered()

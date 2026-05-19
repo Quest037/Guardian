@@ -8,6 +8,7 @@ final class GuardianBrainPackPlannerHintsTests: XCTestCase {
         let hints = GuardianBrainPackBuilder.plannerHints(
             from: GuardianBrainPackTrainingPlannerContext(
                 vehicleClass: .ugvWheeled,
+                vehicleSizeTier: .medium,
                 layout: layout,
                 segments: [.forward(0.6, durationS: 2)],
                 planPathSource: .nav2,
@@ -22,6 +23,10 @@ final class GuardianBrainPackPlannerHintsTests: XCTestCase {
         XCTAssertNotNil(hints?.nav2ParamOverlayJSON)
         XCTAssertTrue(hints?.nav2ParamOverlayJSON?.contains("nav2") == true)
         XCTAssertNil(hints?.aerostack2ParamOverlayJSON)
+        XCTAssertEqual(hints?.sizeTier, VehicleSizeTier.medium.rawValue)
+        XCTAssertEqual(hints?.widthCm, 160)
+        XCTAssertEqual(hints?.lengthCm, 265)
+        XCTAssertEqual(hints?.heightCm, 125)
     }
 
     func test_plannerHints_aerostack2_for_uav() {
@@ -29,6 +34,7 @@ final class GuardianBrainPackPlannerHintsTests: XCTestCase {
         let hints = GuardianBrainPackBuilder.plannerHints(
             from: GuardianBrainPackTrainingPlannerContext(
                 vehicleClass: .uavCopter,
+                vehicleSizeTier: .micro,
                 layout: layout,
                 segments: [.forward(1.2, durationS: 1)],
                 planPathSource: .unavailable,

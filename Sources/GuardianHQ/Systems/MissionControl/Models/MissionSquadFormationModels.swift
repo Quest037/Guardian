@@ -22,7 +22,7 @@ enum MissionSquadFormationKind: String, Codable, CaseIterable, Sendable, Equatab
 }
 
 /// How tightly wingmen pack for any formation kind (convoy / chevron / arrowhead).
-enum MissionSquadFormationShape: String, Codable, CaseIterable, Sendable, Equatable, Identifiable {
+enum MissionSquadFormationSpacing: String, Codable, CaseIterable, Sendable, Equatable, Identifiable {
     case tight
     case normal
     case loose
@@ -87,11 +87,11 @@ enum MissionSquadConvoySpacingPolicy {
         return .genericDefault
     }
 
-    /// Effective spacing for wingman slots (class baseline × operator **Shape** × formation kind).
+    /// Effective spacing for wingman slots (class baseline × operator pack spacing × formation kind).
     static func resolvedSpacing(
         taskPattern: MissionTaskPattern,
         primaryGranularClass: FleetVehicleType?,
-        shape: MissionSquadFormationShape,
+        spacing: MissionSquadFormationSpacing,
         formation: MissionSquadFormationKind
     ) -> MissionSquadConvoySpacing {
         let base = lockedSpacing(taskPattern: taskPattern, primaryGranularClass: primaryGranularClass)
@@ -106,8 +106,8 @@ enum MissionSquadConvoySpacingPolicy {
         case .arrowhead: 0.62
         }
         return MissionSquadConvoySpacing(
-            alongTrackMetersPerOrdinal: base.alongTrackMetersPerOrdinal * shape.alongTrackScale * alongKindScale,
-            lateralLaneMeters: base.lateralLaneMeters * shape.lateralScale * lateralKindScale
+            alongTrackMetersPerOrdinal: base.alongTrackMetersPerOrdinal * spacing.alongTrackScale * alongKindScale,
+            lateralLaneMeters: base.lateralLaneMeters * spacing.lateralScale * lateralKindScale
         )
     }
 

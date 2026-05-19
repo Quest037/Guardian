@@ -88,7 +88,7 @@ public enum GuardianAppProduct: String, Sendable, CaseIterable {
             }
         case .training:
             switch section {
-            case .missions, .missionControl, .liveDrive, .brains:
+            case .missions, .missionControl, .liveDrive:
                 return false
             default:
                 return true

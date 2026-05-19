@@ -3,7 +3,7 @@
 This repo keeps product and AI guardrails in **`.cursor/rules/`**. When editing GuardianHQ (especially SwiftUI):
 
 - **Two macOS apps (Training / Mission):** ``README_FULL.md`` → **Two-app SwiftPM products**; `swift build --product GuardianTraining` / `GuardianMission`; tracker ``AppTrainingMissionSplitToDo.md``. **`GuardianAppProduct`** drives splash, window title, sidebar logo, and which ``AppSection`` rails appear. Training omits Missions / Mission Control / Live Drive **nav** but keeps ``MissionStore`` + ``MissionControlStore`` for MRE/fleet hooks.
-- **Gazebo 3D training worlds:** ``README_FULL.md`` → **Gazebo training simulation**; ``GazeboService`` / ``GazeboLaunchRecipe``; tracker ``TrainingGazeboSimulationToDo.md``. Training + full HQ only (`GuardianAppProduct/includesGazeboSimulation`). Stage runtime with `make gazebo-runtime`.
+- **Gazebo 3D training worlds:** ``README_FULL.md`` → **Gazebo training simulation**; ``GazeboService`` / ``GazeboLaunchRecipe``; tracker ``TrainingGazeboSimulationToDo.md``. **Procedural terrain (World Builder):** ``GazeboTerrainToDo.md``. **Builder scene extensions (water, terrain gen, model groups):** ``BuilderGazeboToDo.md``. Training + full HQ only (`GuardianAppProduct/includesGazeboSimulation`). Stage runtime with `make gazebo-runtime`.
 
 - **Plugin-owned fleet catalogue rows:** ``Sources/GuardianHQ/Plugins/PLUGIN_FLEET_CONTRIBUTIONS.md`` (manifest claims, JSON bodies, bootstrap).
 - **Mission Control floating reserve pool (run envelope):** ``README_FULL.md`` → **Floating reserve pool (Mission Control run)**; deferred automation in ``NEXTVERSION.md`` → **Floating reserve pool — deferred phases** (2026-05-12).

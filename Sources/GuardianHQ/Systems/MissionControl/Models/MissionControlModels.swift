@@ -849,8 +849,8 @@ struct MissionRunAssignmentPolicies: Codable, Equatable {
     var geofenceAugmentation: [MissionGeofence]
     /// When set on a **primary** slot, overrides the parent task’s ``MissionTask/squadFormation``.
     var squadFormationOverride: MissionSquadFormationKind?
-    /// When set on a **primary** slot, overrides the parent task’s ``MissionTask/squadFormationShape``.
-    var squadFormationShapeOverride: MissionSquadFormationShape?
+    /// When set on a **primary** slot, overrides the parent task’s ``MissionTask/squadFormationSpacing``.
+    var squadFormationSpacingOverride: MissionSquadFormationSpacing?
 
     init(
         abortPreferenceChain: [MissionRunAbortTactic]? = nil,
@@ -858,20 +858,20 @@ struct MissionRunAssignmentPolicies: Codable, Equatable {
         reserveSwapPreferenceChain: [MissionRunReserveSwapTactic]? = nil,
         geofenceAugmentation: [MissionGeofence] = [],
         squadFormationOverride: MissionSquadFormationKind? = nil,
-        squadFormationShapeOverride: MissionSquadFormationShape? = nil
+        squadFormationSpacingOverride: MissionSquadFormationSpacing? = nil
     ) {
         self.abortPreferenceChain = abortPreferenceChain
         self.completePreferenceChain = completePreferenceChain
         self.reserveSwapPreferenceChain = reserveSwapPreferenceChain
         self.geofenceAugmentation = geofenceAugmentation
         self.squadFormationOverride = squadFormationOverride
-        self.squadFormationShapeOverride = squadFormationShapeOverride
+        self.squadFormationSpacingOverride = squadFormationSpacingOverride
     }
 
     enum CodingKeys: String, CodingKey {
         case abortPreferenceChain, completePreferenceChain, reserveSwapPreferenceChain, geofenceAugmentation
         case squadFormationOverride
-        case squadFormationShapeOverride
+        case squadFormationSpacingOverride
     }
 
     init(from decoder: Decoder) throws {
@@ -881,7 +881,7 @@ struct MissionRunAssignmentPolicies: Codable, Equatable {
         reserveSwapPreferenceChain = try c.decodeIfPresent([MissionRunReserveSwapTactic].self, forKey: .reserveSwapPreferenceChain)
         geofenceAugmentation = try c.decodeIfPresent([MissionGeofence].self, forKey: .geofenceAugmentation) ?? []
         squadFormationOverride = try c.decodeIfPresent(MissionSquadFormationKind.self, forKey: .squadFormationOverride)
-        squadFormationShapeOverride = try c.decodeIfPresent(MissionSquadFormationShape.self, forKey: .squadFormationShapeOverride)
+        squadFormationSpacingOverride = try c.decodeIfPresent(MissionSquadFormationSpacing.self, forKey: .squadFormationSpacingOverride)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -893,7 +893,7 @@ struct MissionRunAssignmentPolicies: Codable, Equatable {
             try c.encode(geofenceAugmentation, forKey: .geofenceAugmentation)
         }
         try c.encodeIfPresent(squadFormationOverride, forKey: .squadFormationOverride)
-        try c.encodeIfPresent(squadFormationShapeOverride, forKey: .squadFormationShapeOverride)
+        try c.encodeIfPresent(squadFormationSpacingOverride, forKey: .squadFormationSpacingOverride)
     }
 }
 
@@ -1012,26 +1012,26 @@ enum MissionRunPolicyResolution {
     }
 
     /// Effective formation packing tightness: **primary slot override → task** (defaults to normal).
-    static func resolvedSquadFormationShape(assignment: MissionRunAssignment, mission: Mission?) -> MissionSquadFormationShape {
-        if let override = assignment.policies.squadFormationShapeOverride {
+    static func resolvedSquadFormationSpacing(assignment: MissionRunAssignment, mission: Mission?) -> MissionSquadFormationSpacing {
+        if let override = assignment.policies.squadFormationSpacingOverride {
             return override
         }
         if let mission,
            let tid = resolvedTaskId(for: assignment, mission: mission),
            let task = mission.routeMacro.tasks.first(where: { $0.id == tid }) {
-            return task.squadFormationShape
+            return task.squadFormationSpacing
         }
         return .normal
     }
 
     /// Formation shape for a primary slot if its assignment override were cleared.
-    static func inheritedSquadFormationShapeForPrimarySlot(
+    static func inheritedSquadFormationSpacingForPrimarySlot(
         assignment: MissionRunAssignment,
         mission: Mission?
-    ) -> MissionSquadFormationShape {
+    ) -> MissionSquadFormationSpacing {
         var copy = assignment
-        copy.policies.squadFormationShapeOverride = nil
-        return resolvedSquadFormationShape(assignment: copy, mission: mission)
+        copy.policies.squadFormationSpacingOverride = nil
+        return resolvedSquadFormationSpacing(assignment: copy, mission: mission)
     }
 }
 
@@ -1209,6 +1209,8 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
     var policies: MissionRunAssignmentPolicies
     /// Per-slot **commanded** vs **observed** lifecycle (``MissionRunAssignmentSlotStateLanes``). **Omitted** in legacy JSON and when never persisted — use ``effectiveSlotLifecycleLanes``. **Storage:** persisted slot evidence stays on this row (README **Roster slot state storage** — option **(a)** locked); ``MissionRunAssignment/syntheticForReservePool`` leaves this nil.
     var slotLifecycleLanes: MissionRunAssignmentSlotStateLanes?
+    /// Roster template footprint at row creation or last fleet bind (cm triple from size matrix).
+    var vehicleFootprint: VehicleFootprint?
 
     init(
         id: UUID = UUID(),
@@ -1218,7 +1220,8 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         attachedDevice: String = "",
         attachedFleetVehicleToken: String? = nil,
         policies: MissionRunAssignmentPolicies = MissionRunAssignmentPolicies(),
-        slotLifecycleLanes: MissionRunAssignmentSlotStateLanes? = nil
+        slotLifecycleLanes: MissionRunAssignmentSlotStateLanes? = nil,
+        vehicleFootprint: VehicleFootprint? = nil
     ) {
         self.id = id
         self.taskId = taskId
@@ -1228,12 +1231,14 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         self.attachedFleetVehicleToken = attachedFleetVehicleToken
         self.policies = policies
         self.slotLifecycleLanes = slotLifecycleLanes
+        self.vehicleFootprint = vehicleFootprint
     }
 
     enum CodingKeys: String, CodingKey {
         case id, taskId, legacyAssignmentTaskUUID = "pathId", rosterDeviceId, slotName, attachedDevice, attachedFleetVehicleToken
         case policies
         case slotLifecycleLanes
+        case vehicleFootprint
     }
 
     init(from decoder: Decoder) throws {
@@ -1247,6 +1252,7 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         attachedFleetVehicleToken = try c.decodeIfPresent(String.self, forKey: .attachedFleetVehicleToken)
         policies = try c.decodeIfPresent(MissionRunAssignmentPolicies.self, forKey: .policies) ?? MissionRunAssignmentPolicies()
         slotLifecycleLanes = try c.decodeIfPresent(MissionRunAssignmentSlotStateLanes.self, forKey: .slotLifecycleLanes)
+        vehicleFootprint = try c.decodeIfPresent(VehicleFootprint.self, forKey: .vehicleFootprint)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -1262,11 +1268,12 @@ struct MissionRunAssignment: Identifiable, Codable, Equatable {
         let hasReserveSwap = policies.reserveSwapPreferenceChain != nil && !(policies.reserveSwapPreferenceChain?.isEmpty ?? true)
         let hasGeofenceAug = !policies.geofenceAugmentation.isEmpty
         let hasFormationOverride = policies.squadFormationOverride != nil
-        let hasFormationShapeOverride = policies.squadFormationShapeOverride != nil
-        if hasAbort || hasComplete || hasReserveSwap || hasGeofenceAug || hasFormationOverride || hasFormationShapeOverride {
+        let hasFormationSpacingOverride = policies.squadFormationSpacingOverride != nil
+        if hasAbort || hasComplete || hasReserveSwap || hasGeofenceAug || hasFormationOverride || hasFormationSpacingOverride {
             try c.encode(policies, forKey: .policies)
         }
         try c.encodeIfPresent(slotLifecycleLanes, forKey: .slotLifecycleLanes)
+        try c.encodeIfPresent(vehicleFootprint, forKey: .vehicleFootprint)
     }
 
     /// Lanes for runtime / UI: persisted ``slotLifecycleLanes`` when set, otherwise **idle** / **idle** (no slot writers yet).

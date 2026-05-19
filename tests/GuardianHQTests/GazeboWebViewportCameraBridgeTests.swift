@@ -9,9 +9,10 @@ final class GazeboWebViewportCameraBridgeTests: XCTestCase {
 
         bridge.trigger(.defaultView)
         XCTAssertNotEqual(bridge.tick, initial)
-        XCTAssertEqual(bridge.javaScriptExpression, "window.guardianViewer.resetDefaultView()")
+        XCTAssertTrue(bridge.javaScriptExpression.contains("resetDefaultView()"))
+        XCTAssertTrue(bridge.javaScriptExpression.contains("sceneReady"))
 
         bridge.trigger(.birdseye)
-        XCTAssertEqual(bridge.javaScriptExpression, "window.guardianViewer.fitBirdseyeView()")
+        XCTAssertTrue(bridge.javaScriptExpression.contains("fitBirdseyeView()"))
     }
 }

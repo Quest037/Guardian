@@ -20,13 +20,11 @@ enum GazeboSessionLaunchPolicy {
         }
     }
 
-    /// World Builder embedded panel: headless physics server + websocket bridge (not a separate GUI window).
+    /// Headless physics server + websocket bridge for in-app ``GazeboWebViewportView`` (not a separate GUI window).
     static func usesEmbeddedWebViewport(for purpose: GazeboSessionPurpose) -> Bool {
         switch purpose {
-        case .build, .preview:
+        case .build, .preview, .run:
             return true
-        case .run:
-            return false
         }
     }
 

@@ -4,6 +4,7 @@ import Foundation
 enum TrainingEnvironmentStore {
     static let manifestFileName = "manifest.json"
     static let userEnvironmentsFolderName = "environments"
+    static let builderDraftsFolderName = "builder-drafts"
 
     static func userEnvironmentsRootURL() throws -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -54,5 +55,15 @@ enum TrainingEnvironmentStore {
 
     static func userPackageRoot(environmentID: String) throws -> URL {
         try userEnvironmentsRootURL().appendingPathComponent(environmentID, isDirectory: true)
+    }
+
+    /// Staging folder for unsaved World Builder drafts (`manifest.json` + `world.sdf`).
+    static func builderDraftPackageRoot(folderName: String) throws -> URL {
+        let trainingRoot = try userEnvironmentsRootURL().deletingLastPathComponent()
+        let draftsRoot = trainingRoot.appendingPathComponent(builderDraftsFolderName, isDirectory: true)
+        try FileManager.default.createDirectory(at: draftsRoot, withIntermediateDirectories: true)
+        let root = draftsRoot.appendingPathComponent(folderName, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
     }
 }

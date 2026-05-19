@@ -536,6 +536,8 @@ struct FleetVehicleModel: Equatable {
         /// Granular airframe classification — drives ``displayShortID``. Set at SIM spawn time from the preset;
         /// `unknown` for live MAVLink links until MAV_TYPE inference is wired (then surfaces as `VEH:N`).
         var vehicleType: FleetVehicleType
+        /// Size band for spatial consumers (Gazebo blocks, map glyphs). Default **medium** for the vehicle class.
+        var vehicleSizeTier: VehicleSizeTier
         var telemetry: FleetHubVehicleTelemetry?
         var lastError: String?
     }
@@ -581,15 +583,18 @@ struct FleetVehicleModel: Equatable {
         vehicleID: String,
         systemID: Int? = nil,
         vehicleType: FleetVehicleType = .unknown,
+        vehicleSizeTier: VehicleSizeTier? = nil,
         initialStatus: VehicleLifecycleStatus = .init(stage: .starting)
     ) {
         let emptyOperational = FleetVehicleOperationalModel(hub: nil, lifecycleStatus: initialStatus)
         let hex = Self.defaultMapColorHex(forVehicleID: vehicleID)
+        let tier = vehicleSizeTier ?? VehicleClassSizeCatalogue.defaultTier(for: vehicleType)
         self.data = DataState(
             vehicleID: vehicleID,
             mapColorHex: hex,
             systemID: systemID,
             vehicleType: vehicleType,
+            vehicleSizeTier: tier,
             telemetry: nil,
             lastError: nil
         )
@@ -600,6 +605,13 @@ struct FleetVehicleModel: Equatable {
             calibration: .empty
         )
         self.functions = Functions()
+    }
+
+    var resolvedFootprint: VehicleFootprint {
+        VehicleClassSizeCatalogue.footprint(
+            vehicleClass: data.vehicleType,
+            tier: data.vehicleSizeTier
+        )
     }
 
     /// Canonical short identifier shown across logs (`[UAV-C:1]`), vehicle cards, headers, and roster picker rows.

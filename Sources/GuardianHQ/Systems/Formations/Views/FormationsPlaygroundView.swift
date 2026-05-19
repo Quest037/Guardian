@@ -1,79 +1,81 @@
 import AppKit
 import SwiftUI
 
-private enum FormationsSidePanelTab: String, CaseIterable, Identifiable {
-    case controls = "Controls"
-    case sims = "Sims"
-    case logs = "Logs"
-
-    var id: String { rawValue }
-}
-
-private enum TrainingSidePanelTab: String, CaseIterable, Identifiable {
-    case controls = "Controls"
-    case logs = "Logs"
-    case skill = "Skill"
-
-    var id: String { rawValue }
-}
-
-/// Simulate panel: **Vehicle** mode (skill training, default) and **Formation** mode (spacing sandbox).
-struct TrainingPanelView: View {
+/// Unified Training lab: idle side rail (shared panel views) · running full-width viewport + drawers.
+struct TrainingLabPanelView: View {
     @ObservedObject var fleetLink: FleetLinkService
     @ObservedObject var sitl: SitlService
     @ObservedObject var missionControl: MissionControlStore
     @ObservedObject var generalSettings: GeneralSettingsStore
     @ObservedObject var gazebo: GazeboService
     var requiresGazeboRunWorld: Bool = false
-    @StateObject private var playground = FormationsPlaygroundController()
-    @StateObject private var training = TrainingPanelController()
+    @StateObject private var lab = TrainingLabController()
+    @StateObject private var roster = TrainingLabRosterController()
+    @StateObject private var viewportCamera = GazeboWebViewportCameraBridge()
+    @StateObject private var viewportZones = GazeboWebViewportZoneBridge()
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.guardianAppProduct) private var appProduct
     @EnvironmentObject private var toastCenter: ToastCenter
     @EnvironmentObject private var applicationLifecycle: GuardianApplicationLifecycle
+    @EnvironmentObject private var appDrawer: AppDrawer
 
-    @State private var panelMode: TrainingPanelMode = .vehicle
-    @State private var sidePanelTab: FormationsSidePanelTab = .controls
-    @State private var trainingSidePanelTab: TrainingSidePanelTab = .controls
+    @State private var idleRailTab: TrainingLabPanelTab = .map
     @State private var calibrationContext: FormationsCalibrationContext?
-    @State private var showTelemetryTrace = false
+    @State private var addVehicleSimulationPlatform: SimulationPlatform = .ardupilot
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
-    private var formationControlsLocked: Bool {
-        playground.isBusy || playground.phase != .idle
+    private var usesFormationMapLayout: Bool {
+        roster.usesMultiVehicleFormation
     }
 
-    private var vehicleControlsLocked: Bool {
-        training.isBusy
-            || training.phase == .teaching
-            || training.phase == .spawning
-            || training.phase == .connecting
-            || training.phase == .preflight
+    private var isSessionRunning: Bool {
+        lab.teaching.phase == .teaching || lab.formation.phase == .following
     }
 
-    /// Target-slot map edit toggle is off-limits while a teaching run is active (or spawn/preflight is busy).
-    private var trainingTargetSlotMapEditLocked: Bool {
-        vehicleControlsLocked || training.phase == .teaching
+    private var mapIsSelected: Bool {
+        lab.teaching.selectedEnvironment != nil
+    }
+
+    /// Vehicles rail may spawn only after the map viewport is ready (Gazebo `.live`, or 2D map when selected).
+    private var mapIsReadyForVehicles: Bool {
+        guard mapIsSelected else { return false }
+        if lab.teaching.usesGazeboTrainingViewport {
+            return isTrainingViewportCameraLive
+        }
+        return true
+    }
+
+    private var labControlsLocked: Bool {
+        isSessionRunning
     }
 
     var body: some View {
         ZStack {
-            GeometryReader { geo in
-                let mapWidth = geo.size.width * 0.7
-                HStack(spacing: 0) {
-                    trainingMainColumn
-                        .frame(width: mapWidth, height: geo.size.height, alignment: .top)
+            VStack(spacing: 0) {
+                trainingLabSubBar
+                GeometryReader { geo in
+                    if isSessionRunning {
+                        trainingMainColumn
+                            .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
+                    } else {
+                        let mapWidth = geo.size.width * TrainingLabLayout.viewportWidthFraction
+                        HStack(spacing: 0) {
+                            trainingMainColumn
+                                .frame(width: mapWidth, height: geo.size.height, alignment: .top)
 
-                    Rectangle()
-                        .fill(theme.borderSubtle)
-                        .frame(width: 1)
-                        .frame(height: geo.size.height)
+                            Rectangle()
+                                .fill(theme.borderSubtle)
+                                .frame(width: 1)
+                                .frame(height: geo.size.height)
 
-                    sidePanel
-                        .frame(width: geo.size.width - mapWidth - 1, height: geo.size.height, alignment: .top)
+                            trainingLabSideRail
+                                .frame(width: geo.size.width - mapWidth - 1, height: geo.size.height, alignment: .top)
+                        }
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(theme.backgroundBase)
@@ -95,17 +97,30 @@ struct TrainingPanelView: View {
             }
         }
         .animation(GuardianMotion.confirmPresent, value: calibrationContext?.id)
+        .background { trainingLabKeyboardShortcutButtons }
+        .modifier(TrainingLabEscapeStopModifier(
+            isEnabled: isSessionRunning,
+            drawerPresented: appDrawer.presented != nil,
+            onStop: stopSessionAndReset
+        ))
         .onAppear {
-            training.clampVehicleClassToTrainingPanelOptions()
-            attachControllersForCurrentMode()
+            lab.teaching.clampVehicleClassToTrainingPanelOptions()
+            attachBothControllers()
             refreshActiveMap()
+            Task { await ensureTrainingGazeboWorldLoadedIfNeeded() }
         }
         .onDisappear {
-            training.leavePanel()
-            playground.leavePanel()
+            appDrawer.dismiss()
+            lab.teaching.leavePanel()
+            lab.formation.leavePanel()
+        }
+        .onChange(of: isSessionRunning) { running in
+            if running {
+                appDrawer.dismiss()
+            }
         }
         .onChange(of: generalSettings.simSpawnDefaults) { defaults in
-            training.attach(
+            lab.attach(
                 fleetLink: fleetLink,
                 sitl: sitl,
                 spawnDefaults: defaults,
@@ -114,104 +129,150 @@ struct TrainingPanelView: View {
                 requiresGazeboRunWorld: requiresGazeboRunWorld,
                 toastCenter: toastCenter
             )
-            training.spawnDefaultsDidChange()
-            playground.attach(
-                fleetLink: fleetLink,
-                sitl: sitl,
-                spawnDefaults: defaults,
-                simulationPlatform: generalSettings.defaultSimulationPlatform
-            )
-            if panelMode == .vehicle {
-                refreshTrainingMap()
-            } else {
-                refreshMapHome()
-            }
+            lab.teaching.spawnDefaultsDidChange()
+            refreshActiveMap()
         }
         .onChange(of: generalSettings.defaultSimulationPlatform) { platform in
-            playground.attach(
+            lab.attach(
                 fleetLink: fleetLink,
                 sitl: sitl,
                 spawnDefaults: generalSettings.simSpawnDefaults,
+                simulationPlatform: platform,
+                gazebo: gazebo,
+                requiresGazeboRunWorld: requiresGazeboRunWorld,
+                toastCenter: toastCenter
+            )
+            roster.attach(
+                lab: lab,
+                fleetLink: fleetLink,
+                missionControl: missionControl,
                 simulationPlatform: platform
             )
         }
-        .onChange(of: playground.formation) { _ in
-            guard panelMode == .formation else { return }
-            playground.formationSettingsDidChange(fleetLink: fleetLink)
-            if playground.isSlotGroupMapEditEnabled {
+        .onChange(of: lab.formation.formation) { _ in
+            guard usesFormationMapLayout else { return }
+            lab.formation.formationSettingsDidChange(fleetLink: fleetLink)
+            if lab.formation.isSlotGroupMapEditEnabled {
                 syncFormationSlotMapEditChrome()
             } else {
                 syncMapContent()
             }
         }
-        .onChange(of: playground.shape) { _ in
-            guard panelMode == .formation else { return }
-            playground.formationSettingsDidChange(fleetLink: fleetLink)
-            if playground.isSlotGroupMapEditEnabled {
+        .onChange(of: lab.formation.spacing) { _ in
+            guard usesFormationMapLayout else { return }
+            lab.formation.formationSettingsDidChange(fleetLink: fleetLink)
+            if lab.formation.isSlotGroupMapEditEnabled {
                 syncFormationSlotMapEditChrome()
             } else {
                 syncMapContent()
             }
         }
-        .onChange(of: training.taskKind) { _ in
-            guard panelMode == .vehicle else { return }
-            training.taskKindDidChange()
-            training.trainingTaskOrVehicleDidChange()
-            training.loadPromotedSkill()
+        .onChange(of: lab.teaching.taskKind) { _ in
+            lab.teaching.taskKindDidChange()
+            lab.teaching.trainingTaskOrVehicleDidChange()
+            lab.teaching.loadPromotedSkill()
         }
-        .onChange(of: training.targetSlot) { _ in
-            guard panelMode == .vehicle else { return }
-            training.scheduleNav2PlanPathRefresh()
+        .onChange(of: lab.teaching.targetSlot) { _ in
+            lab.teaching.scheduleNav2PlanPathRefresh()
             refreshTrainingMap()
         }
-        .onChange(of: training.nav2PlannedPath) { _ in
-            guard panelMode == .vehicle else { return }
+        .onChange(of: lab.teaching.nav2PlannedPath) { _ in
             refreshTrainingMap()
         }
-        .onChange(of: training.selectedEnvironmentID) { _ in
-            training.environmentSelectionDidChange()
+        .onChange(of: lab.teaching.selectedEnvironmentID) { _ in
+            lab.teaching.environmentSelectionDidChange()
+            pushTrainingViewportZones()
         }
-        .onChange(of: training.vehicleClass) { _ in
-            training.trainingTaskOrVehicleDidChange()
-            guard panelMode == .vehicle else { return }
-            training.scheduleNav2PlanPathRefresh()
+        .onChange(of: isTrainingViewportCameraLive) { live in
+            if live { pushTrainingViewportZones() }
+        }
+        .onChange(of: lab.teaching.vehicleClass) { _ in
+            lab.teaching.trainingTaskOrVehicleDidChange()
+            lab.teaching.scheduleNav2PlanPathRefresh()
         }
         .onChange(of: fleetLink.nav2TrainingStackReady) { _ in
-            guard panelMode == .vehicle else { return }
-            training.scheduleNav2PlanPathRefresh()
+            lab.teaching.scheduleNav2PlanPathRefresh()
         }
-        .onChange(of: training.isTargetSlotMapEditEnabled) { _ in
-            guard panelMode == .vehicle else { return }
+        .onChange(of: lab.teaching.isTargetSlotMapEditEnabled) { _ in
             refreshTrainingMap()
         }
         .onReceive(fleetLink.$hubFleetTelemetryTick) { _ in
             guard applicationLifecycle.isApplicationActive else { return }
-            if panelMode == .vehicle {
-                training.refreshSimulatorSlot(fleetLink: fleetLink)
-                syncTrainingMapMarkers()
-            } else {
-                playground.refreshConnectedSimCount(fleetLink: fleetLink)
+            roster.refreshSlotStatesFromFleet()
+            if usesFormationMapLayout {
+                lab.formation.refreshConnectedSimCount(fleetLink: fleetLink)
                 syncMapMarkers()
+            } else {
+                lab.teaching.refreshSimulatorSlot(fleetLink: fleetLink)
+                syncTrainingMapMarkers()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .guardianApplicationDidBecomeActive)) { _ in
-            if panelMode == .vehicle {
-                training.refreshSimulatorSlot(fleetLink: fleetLink)
-                refreshTrainingMap()
-            } else {
-                playground.refreshConnectedSimCount(fleetLink: fleetLink)
+            if usesFormationMapLayout {
+                lab.formation.refreshConnectedSimCount(fleetLink: fleetLink)
                 refreshActiveMap()
-            }
-        }
-        .onChange(of: sidePanelTab) { tab in
-            if tab == .sims {
-                playground.refreshConnectedSimCount(fleetLink: fleetLink)
+            } else {
+                lab.teaching.refreshSimulatorSlot(fleetLink: fleetLink)
+                refreshTrainingMap()
             }
         }
     }
 
-    private func attachControllersForCurrentMode() {
-        training.attach(
+    /// Restores the embedded `.run` world when a map is already selected (e.g. returning to the tab).
+    private func ensureTrainingGazeboWorldLoadedIfNeeded() async {
+        guard let envID = lab.teaching.selectedEnvironmentID, mapIsSelected, lab.teaching.usesGazeboTrainingViewport else { return }
+        lab.teaching.reconcileActiveGazeboRunWorldIfNeeded()
+        if let worldID = lab.teaching.activeGazeboWorldID, gazebo.isWorldAlive(id: worldID) { return }
+        await lab.teaching.selectEnvironmentAndLoadGazeboWorld(environmentID: envID)
+        pushTrainingViewportZones()
+    }
+
+    private func pushTrainingViewportZones() {
+        guard let manifest = lab.teaching.selectedEnvironment?.manifest else {
+            viewportZones.syncFromManifest(nil)
+            return
+        }
+        viewportZones.pushEditorState(
+            placementActive: false,
+            tapToEditEnabled: false,
+            placementKind: .start,
+            zones: WorldBuilderZoneManifestSupport.zones(from: manifest),
+            mapHalfExtentM: trainingGroundHalfExtentM
+        )
+    }
+
+    private func presentAddVehicleDrawer(wingmanToSquadID: UUID? = nil) {
+        guard mapIsReadyForVehicles else {
+            toastCenter.show("Wait for the map to finish loading.", style: .info, duration: 2.5)
+            return
+        }
+        addVehicleSimulationPlatform = generalSettings.defaultSimulationPlatform
+        appDrawer.present(title: nil, preferredWidth: 352) {
+            TrainingLabAddVehicleDrawerContent(
+                roster: roster,
+                fleetLink: fleetLink,
+                simulationPlatform: $addVehicleSimulationPlatform,
+                vehicleClassForTier: lab.teaching.vehicleClass.fleetVehicleType,
+                controlsLocked: labControlsLocked,
+                wingmanToSquadID: wingmanToSquadID,
+                onAdded: { appDrawer.dismiss() }
+            )
+        }
+    }
+
+    private func presentSquadSettingsDrawer(squadID: UUID, squadIndex: Int) {
+        appDrawer.present(title: nil, preferredWidth: 360) {
+            TrainingLabSquadSettingsDrawerContent(
+                roster: roster,
+                squadID: squadID,
+                squadIndex: squadIndex,
+                controlsLocked: labControlsLocked
+            )
+        }
+    }
+
+    private func attachBothControllers() {
+        lab.attach(
             fleetLink: fleetLink,
             sitl: sitl,
             spawnDefaults: generalSettings.simSpawnDefaults,
@@ -220,47 +281,29 @@ struct TrainingPanelView: View {
             requiresGazeboRunWorld: requiresGazeboRunWorld,
             toastCenter: toastCenter
         )
-        playground.attach(
+        roster.attach(
+            lab: lab,
             fleetLink: fleetLink,
-            sitl: sitl,
-            spawnDefaults: generalSettings.simSpawnDefaults,
+            missionControl: missionControl,
             simulationPlatform: generalSettings.defaultSimulationPlatform
         )
-        if panelMode == .vehicle {
-            playground.leavePanel()
-            training.syncFromFleetOnAppear(fleetLink: fleetLink)
-            training.loadPromotedSkill()
-            training.scheduleNav2PlanPathRefresh()
-            refreshTrainingMap()
-        } else {
-            training.leavePanel()
-            playground.syncFromFleetOnAppear(fleetLink: fleetLink)
-        }
-    }
-
-    private func handlePanelModeChange(_ mode: TrainingPanelMode) {
-        switch mode {
-        case .vehicle:
-            playground.leavePanel()
-            training.syncFromFleetOnAppear(fleetLink: fleetLink)
-            training.loadPromotedSkill()
-        case .formation:
-            training.leavePanel()
-            playground.syncFromFleetOnAppear(fleetLink: fleetLink)
-            GuardianGazeboWebViewerPolicy.showOfflineToastIfNeeded(
-                productIncludesGazebo: appProduct.includesGazeboSimulation,
-                toastCenter: toastCenter
-            )
-        }
+        lab.teaching.syncFromFleetOnAppear(fleetLink: fleetLink)
+        lab.teaching.loadPromotedSkill()
+        lab.teaching.scheduleNav2PlanPathRefresh()
+        lab.formation.syncFromFleetOnAppear(fleetLink: fleetLink)
+        GuardianGazeboWebViewerPolicy.showOfflineToastIfNeeded(
+            productIncludesGazebo: appProduct.includesGazeboSimulation,
+            toastCenter: toastCenter
+        )
         refreshActiveMap()
     }
 
     private func refreshActiveMap() {
-        if panelMode == .vehicle {
-            refreshTrainingMap()
-        } else {
+        if usesFormationMapLayout {
             refreshMapHome()
             fitMapToPlayground()
+        } else {
+            refreshTrainingMap()
         }
     }
 
@@ -274,50 +317,147 @@ struct TrainingPanelView: View {
 
     @ViewBuilder
     private var trainingMainColumn: some View {
-        if panelMode == .vehicle, training.usesGazeboTrainingViewport {
-            trainingGazeboViewport
+        if lab.teaching.usesGazeboTrainingViewport {
+            trainingEmbeddedViewportColumn
         } else {
             mapColumn
         }
     }
 
-    private var trainingGazeboViewport: some View {
-        VStack(alignment: .leading, spacing: GuardianSpacing.md) {
-            Text("Gazebo simulation")
-                .font(GuardianTypography.font(.sectionHeadingSemibold))
-                .foregroundStyle(theme.textPrimary)
-            Text(
-                gazebo.runtimeAvailable
-                    ? "The training world runs in the Gazebo simulator window. An embedded 3D view will replace this panel in a later release."
-                    : "Gazebo is not available in this build. Run make gazebo-runtime after installing Gazebo Harmonic, then rebuild."
-            )
-            .font(GuardianTypography.Scale.body.font())
-            .foregroundStyle(theme.textSecondary)
-            .fixedSize(horizontal: false, vertical: true)
+    // MARK: - Embedded Gazebo viewport (Training `.run`)
 
-            if let env = training.selectedEnvironment {
-                Text(env.manifest.displayName)
-                    .font(GuardianTypography.Scale.caption.font(weight: .medium))
-                    .foregroundStyle(theme.textPrimary)
+    private var trainingGroundHalfExtentM: Double {
+        guard let pkg = lab.teaching.selectedEnvironment else { return 500 }
+        return TrainingEnvironmentFloorSize.resolved(from: pkg.manifest.floorSize).floorSideM / 2
+    }
+
+    private var isTrainingViewportCameraLive: Bool {
+        guard let viewport = gazebo.embeddedViewport else { return false }
+        return gazebo.isEmbeddedViewportLive(worldID: viewport.worldID)
+    }
+
+    private var trainingEmbeddedViewport: GazeboEmbeddedViewportState? {
+        guard let viewport = gazebo.embeddedViewport,
+              gazebo.isEmbeddedViewportLive(worldID: viewport.worldID)
+                || viewport.worldID == lab.teaching.activeGazeboWorldID
+        else { return nil }
+        return viewport
+    }
+
+    private var showsTrainingEmbeddedViewportSpinner: Bool {
+        guard mapIsSelected else { return false }
+        guard let viewport = gazebo.embeddedViewport else {
+            return lab.teaching.activeGazeboWorldID != nil || lab.teaching.gazeboWorldStatusText != nil
+        }
+        return !gazebo.isEmbeddedViewportLive(worldID: viewport.worldID)
+    }
+
+    private var trainingEmbeddedViewportColumn: some View {
+        Group {
+            if !mapIsSelected {
+                trainingEmptyViewportPrompt
+            } else if !gazebo.runtimeAvailable {
+                trainingRuntimeMissingViewport
+                    .padding(GuardianSpacing.lg)
+            } else {
+                trainingEmbeddedViewportStack
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var trainingEmbeddedViewportStack: some View {
+        ZStack {
+            Group {
+                if let viewport = trainingEmbeddedViewport {
+                    GazeboWebViewportView(
+                        websocketPort: viewport.websocketPort,
+                        gazeboWorldName: viewport.gazeboWorldName,
+                        phase: viewport.phase,
+                        cameraBridge: viewportCamera,
+                        cameraCommandTick: viewportCamera.tick,
+                        zoneBridge: viewportZones,
+                        zoneCommandTick: viewportZones.tick,
+                        showsCameraDebugHUD: fleetLink.isDebugEnabled,
+                        groundHalfExtentM: trainingGroundHalfExtentM
+                    )
+                    .id(viewport.worldID)
+                } else {
+                    Color.black
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if showsTrainingEmbeddedViewportSpinner {
+                trainingViewportLoadingOverlay
             }
 
-            if let gazeboStatus = training.gazeboWorldStatusText {
-                Text(gazeboStatus)
-                    .font(GuardianTypography.Scale.caption.font())
-                    .foregroundStyle(theme.textTertiary)
+            if let err = gazebo.lastError,
+               lab.teaching.activeGazeboWorldID == nil,
+               !showsTrainingEmbeddedViewportSpinner {
+                trainingViewportErrorOverlay(err)
             }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
+    }
 
-            if let err = gazebo.lastError, training.activeGazeboWorldID == nil, training.simulatorSlot != nil {
-                Text(err)
-                    .font(GuardianTypography.Scale.caption.font())
-                    .foregroundStyle(GuardianSemanticColors.dangerForeground)
+    private var trainingViewportLoadingOverlay: some View {
+        ZStack {
+            theme.backgroundRaised.opacity(0.92)
+            VStack(spacing: GuardianSpacing.md) {
+                ProgressView()
+                    .controlSize(.regular)
+                Text(lab.teaching.gazeboWorldStatusText ?? "Loading scene…")
+                    .font(GuardianTypography.Scale.body.font())
+                    .foregroundStyle(theme.textSecondary)
+                    .multilineTextAlignment(.center)
             }
+            .padding(GuardianSpacing.lg)
+        }
+    }
 
+    private func trainingViewportErrorOverlay(_ message: String) -> some View {
+        VStack {
+            Spacer()
+            Text(message)
+                .font(GuardianTypography.Scale.caption.font())
+                .foregroundStyle(GuardianSemanticColors.dangerForeground)
+                .multilineTextAlignment(.center)
+                .padding(GuardianSpacing.lg)
             Spacer()
         }
-        .padding(GuardianSpacing.lg)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(theme.backgroundRaised)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.backgroundRaised.opacity(0.88))
+    }
+
+    private var trainingRuntimeMissingViewport: some View {
+        VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
+            Text("Gazebo is not available")
+                .font(GuardianTypography.font(.sectionHeadingSemibold))
+                .foregroundStyle(theme.textPrimary)
+            Text("Run make gazebo-runtime after installing Gazebo Harmonic, then rebuild.")
+                .font(GuardianTypography.Scale.body.font())
+                .foregroundStyle(theme.textSecondary)
+        }
+    }
+
+    private var trainingEmptyViewportPrompt: some View {
+        GuardianEmptyState(
+            systemImage: "map",
+            title: "No map selected",
+            detail: "Choose a built training map from the Map tab. The world loads here when selected.",
+            primaryTitle: nil,
+            primaryAction: nil,
+            secondaryTitle: "Open Map",
+            secondaryAction: {
+                if isSessionRunning {
+                    presentTrainingLabDrawer(.map)
+                } else {
+                    idleRailTab = .map
+                }
+            }
+        )
     }
 
     private var mapColumn: some View {
@@ -325,29 +465,29 @@ struct TrainingPanelView: View {
             model: mapModel,
             toolbar: GuardianMapToolbarOptions(
                 mapResetAction: { model in
-                    if panelMode == .vehicle {
-                        fitTrainingMap(mapModel: model)
-                    } else {
+                    if usesFormationMapLayout {
                         fitMapToPlayground(mapModel: model)
+                    } else {
+                        fitTrainingMap(mapModel: model)
                     }
                 }
             ),
             onFormationSlotGroupCenterMoved: { lat, lon in
-                if panelMode == .vehicle {
-                    training.moveTargetSlotCenter(latitudeDeg: lat, longitudeDeg: lon)
-                    syncTrainingTargetSlotMapEdit()
-                } else {
-                    playground.previewFormationSlotGroupCenter(lat: lat, lon: lon)
+                if usesFormationMapLayout {
+                    lab.formation.previewFormationSlotGroupCenter(lat: lat, lon: lon)
                     syncFormationSlotMapEditChrome()
+                } else {
+                    lab.teaching.moveTargetSlotCenter(latitudeDeg: lat, longitudeDeg: lon)
+                    syncTrainingTargetSlotMapEdit()
                 }
             },
             onFormationSlotGroupHeadingMoved: { headingDeg in
-                if panelMode == .vehicle {
-                    training.setTargetSlotHeading(headingDeg: headingDeg)
-                    syncTrainingTargetSlotMapEdit()
-                } else {
-                    playground.previewFormationSlotGroupHeading(headingDeg: headingDeg)
+                if usesFormationMapLayout {
+                    lab.formation.previewFormationSlotGroupHeading(headingDeg: headingDeg)
                     syncFormationSlotMapEditChrome()
+                } else {
+                    lab.teaching.setTargetSlotHeading(headingDeg: headingDeg)
+                    syncTrainingTargetSlotMapEdit()
                 }
             }
         )
@@ -355,47 +495,27 @@ struct TrainingPanelView: View {
         .clipped()
     }
 
-    private var sidePanel: some View {
+    private var trainingLabSideRail: some View {
         VStack(spacing: 0) {
-            panelModePicker
-                .padding(.horizontal, GuardianSpacing.md)
-                .padding(.top, GuardianSpacing.sm)
-                .padding(.bottom, GuardianSpacing.xsTight)
-
-            if panelMode == .vehicle {
-                vehicleSidePanelToolbar
-            } else {
-                sidePanelToolbar
+            Picker("Panel", selection: $idleRailTab) {
+                ForEach(TrainingLabPanelTab.allCases) { tab in
+                    Text(tab.rawValue).tag(tab)
+                }
             }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, GuardianSpacing.md)
+            .padding(.top, GuardianSpacing.sm)
+            .padding(.bottom, GuardianSpacing.xsTight)
 
             Rectangle()
                 .fill(theme.borderSubtle)
                 .frame(height: 1)
 
-            Group {
-                if panelMode == .vehicle {
-                    switch trainingSidePanelTab {
-                    case .controls:
-                        vehicleControlsTab
-                    case .logs:
-                        vehicleLogsTab
-                    case .skill:
-                        vehicleSkillTab
-                    }
-                } else {
-                    switch sidePanelTab {
-                    case .controls:
-                        controlsTab
-                    case .sims:
-                        simsTab
-                    case .logs:
-                        logsTab
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            trainingLabPanelContent(for: idleRailTab)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
-            if panelMode == .vehicle, fleetLink.isDebugEnabled {
+            if !usesFormationMapLayout, fleetLink.isDebugEnabled {
                 trainingPathOverlayDebugRail
             }
         }
@@ -411,7 +531,7 @@ struct TrainingPanelView: View {
                 Text("debug")
                     .font(GuardianTypography.font(.denseCaption10Regular))
                     .foregroundStyle(theme.textTertiary)
-                Text(training.trainingPathOverlayDebugLine)
+                Text(lab.teaching.trainingPathOverlayDebugLine)
                     .font(GuardianTypography.font(.denseCaption12Medium))
                     .foregroundStyle(theme.textSecondary)
                     .textSelection(.enabled)
@@ -421,376 +541,304 @@ struct TrainingPanelView: View {
             .padding(.vertical, GuardianSpacing.sm)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(training.trainingPathOverlayDebugLine)
+        .accessibilityLabel(lab.teaching.trainingPathOverlayDebugLine)
     }
 
-    private var panelModePicker: some View {
-        Picker("Panel mode", selection: $panelMode) {
-            ForEach(TrainingPanelMode.allCases) { mode in
-                Text(mode.rawValue).tag(mode)
-            }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .onChange(of: panelMode) { mode in
-            handlePanelModeChange(mode)
-        }
-    }
+    // MARK: - Training lab sub-bar & drawers
 
-    private var sidePanelToolbar: some View {
-        HStack(spacing: GuardianSpacing.sm) {
-            HStack(spacing: GuardianSpacing.sm) {
-                Picker("Panel", selection: $sidePanelTab) {
-                    ForEach(FormationsSidePanelTab.allCases) { tab in
-                        Text(tab.rawValue).tag(tab)
-                    }
+    private var trainingLabSubBar: some View {
+        HStack(alignment: .center, spacing: GuardianSpacing.sm) {
+            HStack(alignment: .center, spacing: GuardianSpacing.xs) {
+                Text(lab.teaching.selectedEnvironment?.manifest.displayName ?? "No map selected")
+                    .font(GuardianTypography.font(.sectionHeadingSemibold))
+                    .foregroundStyle(mapIsSelected ? theme.textPrimary : theme.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 220, alignment: .leading)
+
+                if mapIsSelected, lab.teaching.usesGazeboTrainingViewport {
+                    trainingViewportCameraControls
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
             }
             .fixedSize(horizontal: true, vertical: false)
 
+            if roster.squads.count > 1 {
+                TrainingLabLearningSquadPicker(
+                    roster: roster,
+                    controlsLocked: labControlsLocked
+                )
+            }
+
             Spacer(minLength: GuardianSpacing.sm)
 
-            if !playground.slots.isEmpty {
-                GuardianThemedButton(
-                    accent: .primary,
-                    surface: .solid,
-                    size: .small,
-                    shape: .cornered,
-                    isEnabled: !playground.isBusy,
-                    contentSizing: .squareToolbarCell,
-                    action: {
-                        Task {
-                            sidePanelTab = .logs
-                            await playground.applyFormationControl()
-                            syncMapContent()
-                        }
-                    },
-                    label: {
-                        Image(systemName: "arrow.clockwise")
-                            .font(GuardianTypography.font(.sectionHeadingSemibold))
-                    }
-                )
-                .help("Reform squad")
-                .guardianPointerOnHover()
-            }
-            GuardianThemedButton(
-                accent: .primary,
-                surface: .solid,
-                size: .small,
-                shape: .cornered,
-                isEnabled: !playground.isBusy && fleetLink.isSimulateEnabled,
-                contentSizing: .squareToolbarCell,
-                action: {
-                    Task {
-                        await playground.spawnPlaygroundSims(missionControl: missionControl)
-                        syncMapMarkers()
-                        fitMapToPlayground()
-                        if !playground.slots.isEmpty {
-                            sidePanelTab = .sims
-                        }
-                    }
-                },
-                label: {
-                    Image(systemName: playground.isBusy ? "hourglass" : "wand.and.stars")
-                        .font(GuardianTypography.font(.sectionHeadingSemibold))
-                }
-            )
-            .help(spawnButtonHelp)
-            .guardianPointerOnHover()
-            if !playground.slots.isEmpty {
-                GuardianThemedButton(
-                    accent: .danger,
-                    surface: .outline,
-                    size: .small,
-                    shape: .cornered,
-                    isEnabled: !playground.isBusy,
-                    contentSizing: .squareToolbarCell,
-                    action: {
-                        playground.stopPlaygroundSquad()
-                        syncMapMarkers()
-                    },
-                    label: {
-                        Image(systemName: "trash")
-                            .font(GuardianTypography.font(.sectionHeadingSemibold))
-                    }
-                )
-                .help("Stop squad")
-                .guardianPointerOnHover()
+            if isSessionRunning {
+                trainingLabDrawerTriggers
+            } else {
+                trainingLabRunButton
             }
         }
         .padding(.horizontal, GuardianSpacing.md)
         .padding(.vertical, GuardianSpacing.sm)
+        .background(theme.backgroundRaised)
     }
 
-    private var spawnButtonHelp: String {
-        if playground.isBusy { return "Working…" }
-        if playground.phase == .following { return "Respawn squad" }
-        return "Spawn simulators"
+    private var trainingViewportCameraControls: some View {
+        HStack(spacing: GuardianSpacing.xs) {
+            subBarIconButton(
+                systemImage: "view.3d",
+                accessibilityLabel: "Oblique view preset",
+                isEnabled: isTrainingViewportCameraLive,
+                action: { viewportCamera.trigger(.defaultView) }
+            )
+            subBarIconButton(
+                systemImage: "view.2d",
+                accessibilityLabel: "Top-down view preset",
+                isEnabled: isTrainingViewportCameraLive,
+                action: { viewportCamera.trigger(.birdseye) }
+            )
+        }
     }
 
-    private var controlsTab: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: GuardianSpacing.sectionStack) {
-                if !fleetLink.isSimulateEnabled {
-                    Text("Turn on Simulate in the top bar to spawn vehicles.")
-                        .font(GuardianTypography.font(.denseFootnoteRegular))
-                        .foregroundStyle(theme.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+    private var trainingLabRunButton: some View {
+        GuardianPrimaryProminentButton(title: "Run") {
+            startSession()
+        }
+        .disabled(!canStartSession)
+        .keyboardShortcut(TrainingLabKeyboardShortcuts.run)
+    }
 
-                Text(playground.statusText)
-                    .font(GuardianTypography.font(.denseFootnoteRegular))
-                    .foregroundStyle(
-                        playground.phase == .following ? theme.textSecondary : theme.textTertiary
-                    )
-                    .fixedSize(horizontal: false, vertical: true)
-
-                formationControl(
-                    title: "Vehicle class",
-                    help: "SITL type for every simulator in the squad."
-                ) {
-                    Picker("Vehicle class", selection: $playground.vehicleClass) {
-                        ForEach(FormationsPlaygroundVehicleClass.allCases) { kind in
-                            Text(kind.displayTitle).tag(kind)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .fixedSize()
-                    .disabled(formationControlsLocked)
-                }
-
-                formationControl(
-                    title: "Simulators",
-                    help: "One primary plus wingmen (1–10)."
-                ) {
-                    HStack(spacing: GuardianSpacing.sm) {
-                        Text("\(playground.simCount)")
-                            .font(GuardianTypography.font(.subsectionTitleSemibold))
-                            .foregroundStyle(theme.textPrimary)
-                            .monospacedDigit()
-                            .frame(minWidth: 28, alignment: .trailing)
-                        Stepper(
-                            "Simulator count",
-                            value: $playground.simCount,
-                            in: 1...10,
-                            step: 1
-                        )
-                        .labelsHidden()
-                        .disabled(formationControlsLocked)
-                    }
-                }
-
-                formationControl(
-                    title: "Formation",
-                    help: "Convoy, chevron, or arrowhead. Change while following to re-stream slots."
-                ) {
-                    Picker("Formation", selection: $playground.formation) {
-                        ForEach(MissionSquadFormationKind.allCases) { kind in
-                            Text(kind.displayTitle).tag(kind)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .fixedSize()
-                    .disabled(playground.isBusy)
-                }
-
-                formationControl(
-                    title: "Spacing",
-                    help: "Tight, normal, or loose pack for every formation."
-                ) {
-                    Picker("Spacing", selection: $playground.shape) {
-                        ForEach(MissionSquadFormationShape.allCases) { value in
-                            Text(value.displayTitle).tag(value)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .fixedSize()
-                    .disabled(playground.isBusy)
-                }
-
-                formationControl(
-                    title: "Adjust slots on map",
-                    help: "Gold outlines are a preview — drag the diamond or circle handle to move and rotate them. Red slots stay on the live formation until you turn this off, then simulators move to the preview."
-                ) {
-                    Toggle(
-                        isOn: Binding(
-                            get: { playground.isSlotGroupMapEditEnabled },
-                            set: { enabled in
-                                Task {
-                                    await playground.setSlotGroupMapEditEnabled(
-                                        enabled,
-                                        fleetLink: fleetLink
-                                    )
-                                    if enabled {
-                                        syncFormationSlotMapEditChrome()
-                                    } else {
-                                        syncMapContent()
-                                    }
-                                }
-                            }
-                        )
-                    ) {
-                        EmptyView()
-                    }
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .accessibilityLabel("Adjust slots on map")
-                    .disabled(playground.isBusy || playground.slots.isEmpty)
-                }
-
-                Text(
-                    "Spawns the same SITLs as Vehicles (they stay when you leave this tab). Preflight requires live telemetry, then streamed OFFBOARD/GUIDED setpoints move the squad into formation — not teleport."
+    private var trainingLabDrawerTriggers: some View {
+        HStack(spacing: GuardianSpacing.xs) {
+            ForEach(TrainingLabPanelTab.allCases) { tab in
+                subBarIconButton(
+                    systemImage: tab.systemImage,
+                    accessibilityLabel: tab.rawValue,
+                    isEnabled: tab != .vehicles || mapIsReadyForVehicles,
+                    action: { presentTrainingLabDrawer(tab) }
                 )
+                .help(trainingLabDrawerTabHelp(tab))
+            }
+            subBarIconButton(
+                systemImage: "stop.fill",
+                accessibilityLabel: "Stop",
+                accent: .danger,
+                surface: .outline,
+                action: { stopSessionAndReset() }
+            )
+            .help("Stop session (Escape)")
+        }
+    }
+
+    @ViewBuilder
+    private func trainingLabPanelContent(for tab: TrainingLabPanelTab) -> some View {
+        switch tab {
+        case .map:
+            TrainingLabMapPanelContent(
+                training: lab.teaching,
+                packages: lab.teaching.availableEnvironments,
+                controlsLocked: labControlsLocked,
+                onSelectEnvironmentID: { id in
+                    Task {
+                        await lab.teaching.selectEnvironmentAndLoadGazeboWorld(environmentID: id)
+                        pushTrainingViewportZones()
+                        refreshActiveMap()
+                    }
+                }
+            )
+        case .vehicles:
+            if mapIsSelected {
+                TrainingLabVehiclesPanelContent(
+                    roster: roster,
+                    playground: lab.formation,
+                    fleetLink: fleetLink,
+                    sitl: sitl,
+                    missionControl: missionControl,
+                    mapReadyForVehicles: mapIsReadyForVehicles,
+                    controlsLocked: labControlsLocked,
+                    onPresentAddVehicle: { presentAddVehicleDrawer() },
+                    onPresentSquadSettings: { squadID, squadIndex in
+                        presentSquadSettingsDrawer(squadID: squadID, squadIndex: squadIndex)
+                    },
+                    onOpenCalibration: { vehicleID, fallback in
+                        calibrationContext = FormationsCalibrationContext(
+                            vehicleID: vehicleID,
+                            fallback: fallback
+                        )
+                    }
+                )
+            } else {
+                trainingLabGateEmptyState(
+                    message: "Select a map before configuring vehicles."
+                )
+            }
+        case .training:
+            trainingLabPanel
+        case .logs:
+            logsLabPanel
+        }
+    }
+
+    private func trainingLabDrawerTabHelp(_ tab: TrainingLabPanelTab) -> String {
+        guard tab == .vehicles else { return tab.rawValue }
+        if !mapIsSelected { return "Choose a training map first." }
+        if !mapIsReadyForVehicles { return "Wait for the map to finish loading." }
+        return tab.rawValue
+    }
+
+    private var trainingLabKeyboardShortcutButtons: some View {
+        Group {
+            if isSessionRunning {
+                ForEach(TrainingLabPanelTab.allCases) { tab in
+                    Button(tab.drawerTitle) {
+                        presentTrainingLabDrawer(tab)
+                    }
+                    .keyboardShortcut(TrainingLabKeyboardShortcuts.panelTab(tab))
+                    .frame(width: 0, height: 0)
+                    .opacity(0)
+                    .accessibilityHidden(true)
+                }
+            } else {
+                ForEach(TrainingLabPanelTab.allCases) { tab in
+                    Button(tab.rawValue) {
+                        selectIdleRailTab(tab)
+                    }
+                    .keyboardShortcut(TrainingLabKeyboardShortcuts.panelTab(tab))
+                    .frame(width: 0, height: 0)
+                    .opacity(0)
+                    .accessibilityHidden(true)
+                }
+            }
+        }
+    }
+
+    private func selectIdleRailTab(_ tab: TrainingLabPanelTab) {
+        if tab == .vehicles, !mapIsSelected {
+            toastCenter.show("Choose a training map first.", style: .info, duration: 2.5)
+            return
+        }
+        if tab == .vehicles, !mapIsReadyForVehicles {
+            toastCenter.show("Wait for the map to finish loading.", style: .info, duration: 2.5)
+            return
+        }
+        idleRailTab = tab
+    }
+
+    private func presentTrainingLabDrawer(_ tab: TrainingLabPanelTab) {
+        if tab == .vehicles, !mapIsSelected {
+            toastCenter.show("Choose a training map first.", style: .info, duration: 2.5)
+            return
+        }
+        if tab == .vehicles, !mapIsReadyForVehicles {
+            toastCenter.show("Wait for the map to finish loading.", style: .info, duration: 2.5)
+            return
+        }
+        appDrawer.present(title: tab.drawerTitle, preferredWidth: TrainingLabLayout.runningDrawerWidth) {
+            trainingLabPanelContent(for: tab)
+        }
+    }
+
+    private func subBarIconButton(
+        systemImage: String,
+        accessibilityLabel: String,
+        accent: GuardianThemeAccent = .neutral,
+        surface: GuardianChromeSurface = .outline,
+        isEnabled: Bool = true,
+        action: @escaping () -> Void
+    ) -> some View {
+        GuardianThemedButton(
+            accent: accent,
+            surface: surface,
+            size: .small,
+            shape: .cornered,
+            isEnabled: isEnabled,
+            contentSizing: .squareToolbarCell,
+            action: action,
+            label: {
+                Image(systemName: systemImage)
+                    .font(GuardianTypography.font(.sectionHeadingSemibold))
+            }
+        )
+        .accessibilityLabel(accessibilityLabel)
+        .guardianPointerOnHover()
+    }
+
+    private func trainingLabGateEmptyState(message: String) -> some View {
+        ScrollView {
+            Text(message)
                 .font(GuardianTypography.font(.denseFootnoteRegular))
                 .foregroundStyle(theme.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
+                .padding(GuardianSpacing.md)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var canStartSession: Bool {
+        guard mapIsSelected else { return false }
+        let slots = roster.allSlotStates
+        guard !slots.isEmpty else { return false }
+        return slots.allSatisfy(\.linkReady) && slots.allSatisfy { $0.preflightPassed == true }
+    }
+
+    private func startSession() {
+        guard canStartSession else { return }
+        roster.syncTrainingFromLearningSquad()
+        if roster.learningSquadUsesFormation {
+            Task {
+                idleRailTab = .logs
+                lab.applyFormationPolicyForRun(from: roster)
+                await lab.applyFormationControl()
+                syncMapContent()
             }
-            .padding(.horizontal, GuardianSpacing.md)
-            .padding(.vertical, GuardianSpacing.cardBodyInset)
+        } else {
+            lab.teaching.startAutonomousTeaching()
+            idleRailTab = .logs
+        }
+    }
+
+    private func stopSessionAndReset() {
+        lab.teaching.cancelTeaching()
+        Task {
+            await lab.stopActiveFormationSession()
+        }
+    }
+
+    private var trainingLabPanel: some View {
+        Color.clear
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var logsLabPanel: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: GuardianSpacing.sectionStack) {
+                if !lab.teaching.logLines.isEmpty {
+                    Text("Teaching")
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
+                        .foregroundStyle(theme.textPrimary)
+                    ForEach(lab.teaching.logLines) { line in
+                        Text(line.message)
+                            .font(GuardianTypography.font(.denseFootnoteRegular))
+                            .foregroundStyle(theme.textSecondary)
+                            .textSelection(.enabled)
+                    }
+                }
+                if !lab.formation.logLines.isEmpty {
+                    Text("Formation")
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
+                        .foregroundStyle(theme.textPrimary)
+                        .padding(.top, lab.teaching.logLines.isEmpty ? 0 : GuardianSpacing.sm)
+                    ForEach(lab.formation.logLines) { line in
+                        formationLogRow(line)
+                    }
+                }
+                if lab.teaching.logLines.isEmpty && lab.formation.logLines.isEmpty {
+                    Text("Logs appear here during spawn, teaching, and formation runs.")
+                        .font(GuardianTypography.font(.denseFootnoteRegular))
+                        .foregroundStyle(theme.textTertiary)
+                }
+            }
+            .padding(GuardianSpacing.md)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-    }
-
-    private var logsTab: some View {
-        VStack(spacing: 0) {
-            logsTabHeader
-            ScrollView {
-                VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
-                    if playground.logLines.isEmpty {
-                        Text("Formation follow logs appear here after you apply or reform. Each simulator reports position, slot distance, and stuck recovery.")
-                            .font(GuardianTypography.font(.denseFootnoteRegular))
-                            .foregroundStyle(theme.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } else {
-                        ForEach(playground.logLines) { line in
-                            formationLogRow(line)
-                        }
-                    }
-                }
-                .padding(.horizontal, GuardianSpacing.md)
-                .padding(.vertical, GuardianSpacing.cardBodyInset)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .textSelection(.enabled)
-            }
-            telemetryTraceSection
-        }
-    }
-
-    private var telemetryTraceSection: some View {
-        VStack(spacing: 0) {
-            Rectangle()
-                .fill(theme.borderSubtle)
-                .frame(height: 1)
-
-            Button {
-                withAnimation(GuardianMotion.confirmPresent) {
-                    showTelemetryTrace.toggle()
-                }
-            } label: {
-                HStack(spacing: GuardianSpacing.xs) {
-                    Image(systemName: showTelemetryTrace ? "chevron.down" : "chevron.right")
-                        .font(GuardianTypography.font(.denseCaption10Regular))
-                        .foregroundStyle(theme.textTertiary)
-                    Text("Telemetry trace")
-                        .font(GuardianTypography.font(.denseCaption12Medium))
-                        .foregroundStyle(theme.textSecondary)
-                    Text("debug")
-                        .font(GuardianTypography.font(.denseCaption10Regular))
-                        .foregroundStyle(theme.textTertiary)
-                    Spacer(minLength: GuardianSpacing.xs)
-                    if playground.hasTelemetryTrace {
-                        Text("\(playground.telemetryTraceSampleCount)")
-                            .font(GuardianTypography.font(.telemetryMono10Semibold))
-                            .foregroundStyle(theme.textTertiary)
-                    }
-                }
-                .padding(.horizontal, GuardianSpacing.md)
-                .padding(.vertical, GuardianSpacing.sm)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(GuardianPointerPlainButtonStyle())
-            .guardianPointerOnHover()
-            .help("Position and heading changes vs formation slots — for MRE tuning analysis")
-
-            if showTelemetryTrace {
-                VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
-                    HStack(spacing: GuardianSpacing.sm) {
-                        Text("Records start pose, movement, slot target, and primary heading each tick something changes.")
-                            .font(GuardianTypography.font(.denseFootnoteRegular))
-                            .foregroundStyle(theme.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: 0)
-                        GuardianNeutralBorderedButton(
-                            systemImage: "doc.on.doc",
-                            help: "Copy telemetry trace (plain text + JSONL)",
-                            action: { copyTelemetryTraceToPasteboard() }
-                        )
-                        .disabled(!playground.hasTelemetryTrace)
-                        .guardianPointerOnHover()
-                    }
-
-                    if playground.hasTelemetryTrace {
-                        ScrollView {
-                            Text(playground.telemetryTraceClipboardExport())
-                                .font(GuardianTypography.font(.telemetryMono10Semibold))
-                                .foregroundStyle(theme.textSecondary)
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .frame(maxHeight: 160)
-                    } else {
-                        Text("Apply or reform formation to start recording. Samples appear when position, heading, slot, or movement changes.")
-                            .font(GuardianTypography.font(.denseFootnoteRegular))
-                            .foregroundStyle(theme.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .padding(.horizontal, GuardianSpacing.md)
-                .padding(.bottom, GuardianSpacing.cardBodyInset)
-            }
-        }
-    }
-
-    private func copyTelemetryTraceToPasteboard() {
-        let text = playground.telemetryTraceClipboardExport()
-        guard !text.isEmpty else { return }
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(text, forType: .string)
-        toastCenter.show("Telemetry trace copied", style: .success, duration: 2)
-    }
-
-    private var logsTabHeader: some View {
-        HStack(spacing: GuardianSpacing.sm) {
-            Text("Formation logs")
-                .font(GuardianTypography.font(.sectionHeadingSemibold))
-                .foregroundStyle(theme.textPrimary)
-            Spacer(minLength: GuardianSpacing.xs)
-            GuardianNeutralBorderedButton(
-                systemImage: "doc.on.doc",
-                help: "Copy all formation log lines to the clipboard",
-                action: { copyFormationLogsToPasteboard() }
-            )
-            .disabled(playground.logLines.isEmpty)
-            .guardianPointerOnHover()
-        }
-        .padding(.horizontal, GuardianSpacing.md)
-        .padding(.top, GuardianSpacing.cardBodyInset)
-        .padding(.bottom, GuardianSpacing.xs)
-    }
-
-    private func copyFormationLogsToPasteboard() {
-        let text = FormationsPlaygroundLogExport.plainText(from: playground.logLines)
-        guard !text.isEmpty else { return }
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(text, forType: .string)
-        toastCenter.show("Formation logs copied", style: .success, duration: 2)
     }
 
     private func formationLogRow(_ line: FormationsPlaygroundLogLine) -> some View {
@@ -824,85 +872,6 @@ struct TrainingPanelView: View {
         .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
-    private var simsTab: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: GuardianSpacing.sectionStack) {
-                if playground.slots.isEmpty {
-                    Text("No simulators in the squad yet. Spawn from Controls.")
-                        .font(GuardianTypography.font(.denseFootnoteRegular))
-                        .foregroundStyle(theme.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    ForEach(Array(playground.slots.enumerated()), id: \.element.id) { index, slot in
-                        simSlotCard(index: index, slot: slot)
-                    }
-                }
-            }
-            .padding(.horizontal, GuardianSpacing.md)
-            .padding(.vertical, GuardianSpacing.cardBodyInset)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private func simSlotCard(index: Int, slot: FormationsPlaygroundSlotState) -> some View {
-        GuardianSimulatorSlotCardView(
-            title: index == 0 ? "Primary" : "Wingman \(index)",
-            slot: slot,
-            fleetLink: fleetLink,
-            sitl: sitl,
-            showRetry: playground.shouldOfferSimulatorRetry(slot: slot),
-            retryButtonTitle: playground.retryButtonTitle(for: slot),
-            showReplace: playground.canReplaceSlot(slot),
-            cardActionsLocked: playground.cardActionsLocked,
-            onInspect: { vehicleID, fallback in
-                calibrationContext = FormationsCalibrationContext(
-                    vehicleID: vehicleID,
-                    fallback: fallback
-                )
-            },
-            onRetry: {
-                Task { @MainActor in
-                    await playground.retrySimulatorConnection(
-                        slotID: slot.id,
-                        missionControl: missionControl
-                    )
-                    syncMapContent()
-                }
-            },
-            onReplace: {
-                Task { @MainActor in
-                    await playground.replaceSlot(
-                        slotID: slot.id,
-                        missionControl: missionControl
-                    )
-                    syncMapContent()
-                }
-            }
-        )
-    }
-
-    @ViewBuilder
-    private func formationControl<Content: View>(
-        title: String,
-        help: String,
-        @ViewBuilder control: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
-            Text(title)
-                .font(GuardianTypography.font(.disclosureRowTitle))
-                .foregroundStyle(theme.textPrimary)
-            Text(help)
-                .font(GuardianTypography.font(.denseFootnoteRegular))
-                .foregroundStyle(theme.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                Spacer(minLength: 0)
-                control()
-            }
-            .frame(maxWidth: .infinity, alignment: .trailing)
-        }
-    }
-
     private func refreshMapHome() {
         let defaults = generalSettings.simSpawnDefaults
         let home = RouteHome(
@@ -916,36 +885,36 @@ struct TrainingPanelView: View {
         var geometry = GuardianRouteMapGeometry.empty
         geometry.home = home
         geometry.preserveView = true
-        geometry.formationSlotGroupMapEdit = playground.buildFormationSlotGroupMapEdit(fleetLink: fleetLink)
+        geometry.formationSlotGroupMapEdit = lab.formation.buildFormationSlotGroupMapEdit(fleetLink: fleetLink)
         mapModel.applyMapContent(
             routeGeometry: geometry,
-            vehicleMarkers: playground.buildAllMapMarkers(fleetLink: fleetLink)
+            vehicleMarkers: lab.formation.buildAllMapMarkers(fleetLink: fleetLink)
         )
     }
 
     private func syncMapContent() {
-        playground.refreshConnectedSimCount(fleetLink: fleetLink)
+        lab.formation.refreshConnectedSimCount(fleetLink: fleetLink)
         var geometry = mapModel.routeGeometry
-        geometry.formationSlotGroupMapEdit = playground.buildFormationSlotGroupMapEdit(fleetLink: fleetLink)
+        geometry.formationSlotGroupMapEdit = lab.formation.buildFormationSlotGroupMapEdit(fleetLink: fleetLink)
         mapModel.applyMapContent(
             routeGeometry: geometry,
-            vehicleMarkers: playground.buildAllMapMarkers(fleetLink: fleetLink)
+            vehicleMarkers: lab.formation.buildAllMapMarkers(fleetLink: fleetLink)
         )
     }
 
     private func syncMapMarkers() {
-        playground.refreshConnectedSimCount(fleetLink: fleetLink)
-        mapModel.applyVehicleMarkersOnly(playground.buildAllMapMarkers(fleetLink: fleetLink))
+        lab.formation.refreshConnectedSimCount(fleetLink: fleetLink)
+        mapModel.applyVehicleMarkersOnly(lab.formation.buildAllMapMarkers(fleetLink: fleetLink))
     }
 
     /// Full map publish for slot-edit chrome (handles + clones). Avoid during an active drag — rebuilds Leaflet handles.
     private func syncFormationSlotMapEditChrome() {
-        playground.refreshConnectedSimCount(fleetLink: fleetLink)
+        lab.formation.refreshConnectedSimCount(fleetLink: fleetLink)
         var geometry = mapModel.routeGeometry
-        geometry.formationSlotGroupMapEdit = playground.buildFormationSlotGroupMapEdit(fleetLink: fleetLink)
+        geometry.formationSlotGroupMapEdit = lab.formation.buildFormationSlotGroupMapEdit(fleetLink: fleetLink)
         mapModel.applyMapContent(
             routeGeometry: geometry,
-            vehicleMarkers: playground.buildAllMapMarkers(fleetLink: fleetLink)
+            vehicleMarkers: lab.formation.buildAllMapMarkers(fleetLink: fleetLink)
         )
     }
 
@@ -953,374 +922,13 @@ struct TrainingPanelView: View {
         syncMapContent()
         let model = mapModel ?? self.mapModel
         model.fitToVisible(
-            points: playground.formationMapFitPoints(fleetLink: fleetLink),
+            points: lab.formation.formationMapFitPoints(fleetLink: fleetLink),
             style: .formationContent
         )
     }
 
-    // MARK: - Vehicle mode (skill training)
-
-    private var vehicleSidePanelToolbar: some View {
-        HStack(spacing: GuardianSpacing.sm) {
-            Picker("Panel", selection: $trainingSidePanelTab) {
-                ForEach(TrainingSidePanelTab.allCases) { tab in
-                    Text(tab.rawValue).tag(tab)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize(horizontal: true, vertical: false)
-
-            Spacer(minLength: GuardianSpacing.sm)
-
-            if training.vehicleID != nil {
-                GuardianThemedButton(
-                    accent: .primary,
-                    surface: .solid,
-                    size: .small,
-                    shape: .cornered,
-                    isEnabled: !training.cardActionsLocked,
-                    contentSizing: .squareToolbarCell,
-                    action: {
-                        Task { await training.resetEpisode() }
-                    },
-                    label: {
-                        Image(systemName: "arrow.counterclockwise")
-                            .font(GuardianTypography.font(.sectionHeadingSemibold))
-                    }
-                )
-                .help("Reset to task start pose")
-                .guardianPointerOnHover()
-            }
-            GuardianThemedButton(
-                accent: .primary,
-                surface: .solid,
-                size: .small,
-                shape: .cornered,
-                isEnabled: !training.cardActionsLocked && fleetLink.isSimulateEnabled,
-                contentSizing: .squareToolbarCell,
-                action: {
-                    Task { @MainActor in
-                        await training.spawnTrainingSim(missionControl: missionControl)
-                        refreshTrainingMap()
-                    }
-                },
-                label: {
-                    Image(systemName: training.cardActionsLocked ? "hourglass" : "wand.and.stars")
-                        .font(GuardianTypography.font(.sectionHeadingSemibold))
-                }
-            )
-            .help(vehicleSpawnButtonHelp)
-            .guardianPointerOnHover()
-
-            if training.vehicleID != nil {
-                GuardianThemedButton(
-                    accent: .danger,
-                    surface: .outline,
-                    size: .small,
-                    shape: .cornered,
-                    isEnabled: !training.cardActionsLocked,
-                    contentSizing: .squareToolbarCell,
-                    action: {
-                        Task { @MainActor in
-                            await training.stopSimulator()
-                            refreshTrainingMap()
-                        }
-                    },
-                    label: {
-                        Image(systemName: "trash")
-                            .font(GuardianTypography.font(.sectionHeadingSemibold))
-                    }
-                )
-                .help("Stop simulator")
-                .guardianPointerOnHover()
-            }
-        }
-        .padding(.horizontal, GuardianSpacing.md)
-        .padding(.vertical, GuardianSpacing.sm)
-    }
-
-    private var vehicleSpawnButtonHelp: String {
-        if !fleetLink.isSimulateEnabled {
-            return "Turn on Simulate in the top bar before spawning."
-        }
-        if training.vehicleID != nil {
-            return "Respawn training simulator"
-        }
-        return "Spawn training simulator"
-    }
-
-    private var vehicleControlsTab: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: GuardianSpacing.sectionStack) {
-                if !fleetLink.isSimulateEnabled {
-                    Text("Turn on Simulate in the top bar to train on simulators.")
-                        .font(GuardianTypography.font(.denseFootnoteRegular))
-                        .foregroundStyle(theme.textSecondary)
-                }
-
-                Text(training.statusText)
-                    .font(GuardianTypography.font(.denseFootnoteRegular))
-                    .foregroundStyle(theme.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                if let slot = training.simulatorSlot {
-                    GuardianSimulatorSlotCardView(
-                        title: "Training vehicle",
-                        slot: slot,
-                        fleetLink: fleetLink,
-                        sitl: sitl,
-                        showRetry: training.shouldOfferSimulatorRetry(slot: slot),
-                        retryButtonTitle: training.retryButtonTitle(for: slot),
-                        showReplace: training.canReplaceSlot(slot),
-                        cardActionsLocked: training.cardActionsLocked,
-                        onInspect: { vehicleID, fallback in
-                            calibrationContext = FormationsCalibrationContext(
-                                vehicleID: vehicleID,
-                                fallback: fallback
-                            )
-                        },
-                        onRetry: {
-                            Task { @MainActor in
-                                await training.retrySimulatorConnection(missionControl: missionControl)
-                                refreshTrainingMap()
-                            }
-                        },
-                        onReplace: {
-                            Task { @MainActor in
-                                await training.replaceSimulator(missionControl: missionControl)
-                                refreshTrainingMap()
-                            }
-                        }
-                    )
-                }
-
-                trainingRow(title: "Vehicle class", help: "SITL type for training.") {
-                    Picker("Vehicle class", selection: $training.vehicleClass) {
-                        ForEach(TrainingVehicleClass.trainingPanelSelectableCases) { kind in
-                            Text(kind.displayTitle).tag(kind)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .disabled(vehicleControlsLocked)
-                }
-
-                trainingRow(title: "Task", help: training.taskKind.summary) {
-                    Picker("Task", selection: $training.taskKind) {
-                        ForEach(TrainingTaskKind.allCases) { task in
-                            Text(task.displayTitle).tag(task)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .disabled(vehicleControlsLocked)
-                }
-
-                trainingRow(
-                    title: "Environment",
-                    help: training.selectedEnvironment?.manifest.description
-                        ?? "Gazebo world package for training spawn."
-                ) {
-                    if training.availableEnvironments.isEmpty {
-                        Text("No environments installed.")
-                            .font(GuardianTypography.font(.denseFootnoteRegular))
-                            .foregroundStyle(theme.textSecondary)
-                    } else {
-                        Picker("Environment", selection: $training.selectedEnvironmentID) {
-                            ForEach(training.availableEnvironments, id: \.id) { env in
-                                Text(env.manifest.displayName).tag(env.id)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                        .disabled(vehicleControlsLocked)
-                    }
-                }
-
-                if !training.usesGazeboTrainingViewport {
-                    trainingRow(
-                        title: "Adjust target slot on map",
-                        help: "Drag the gold diamond to move the slot. Drag the handle on the circle to set heading. Changing the task does not move the slot."
-                    ) {
-                        Toggle(
-                            isOn: Binding(
-                                get: { training.isTargetSlotMapEditEnabled },
-                                set: { enabled in
-                                    training.setTargetSlotMapEditEnabled(enabled)
-                                    if enabled {
-                                        syncTrainingTargetSlotMapEdit()
-                                    } else {
-                                        refreshTrainingMap()
-                                    }
-                                }
-                            )
-                        ) {
-                            EmptyView()
-                        }
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .accessibilityLabel("Adjust target slot on map")
-                        .disabled(trainingTargetSlotMapEditLocked)
-                    }
-                }
-
-                vehicleForbiddenControlsSection
-            }
-            .padding(10)
-        }
-    }
-
-    private var vehicleForbiddenControlsSection: some View {
-        let supported = Array(
-            Utilities.training.supportedAxes(vehicleType: training.vehicleClass.fleetVehicleType)
-        ).sorted { $0.displayTitle < $1.displayTitle }
-        return VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
-            Text("Forbidden controls")
-                .font(GuardianTypography.font(.disclosureRowTitle))
-                .foregroundStyle(theme.textPrimary)
-            Text("Turn on a control to forbid it during autonomous teaching. All controls are allowed until you mark one forbidden.")
-                .font(GuardianTypography.font(.denseFootnoteRegular))
-                .foregroundStyle(theme.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-            ForEach(supported, id: \.self) { axis in
-                Toggle(
-                    axis.displayTitle,
-                    isOn: Binding(
-                        get: { training.forbiddenAxes.contains(axis) },
-                        set: { on in
-                            if on {
-                                training.forbiddenAxes.insert(axis)
-                            } else {
-                                training.forbiddenAxes.remove(axis)
-                            }
-                        }
-                    )
-                )
-                .disabled(vehicleControlsLocked)
-            }
-        }
-    }
-
-    private var vehicleLogsTab: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: GuardianSpacing.xs) {
-                if training.logLines.isEmpty {
-                    Text("Teaching logs appear here.")
-                        .font(GuardianTypography.font(.denseFootnoteRegular))
-                        .foregroundStyle(theme.textTertiary)
-                } else {
-                    ForEach(training.logLines) { line in
-                        Text(line.message)
-                            .font(GuardianTypography.font(.denseFootnoteRegular))
-                            .foregroundStyle(theme.textSecondary)
-                            .textSelection(.enabled)
-                    }
-                }
-            }
-            .padding(10)
-        }
-    }
-
-    private var vehicleSkillTab: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: GuardianSpacing.md) {
-                if let skill = training.promotedSkill {
-                    Text("Promoted skill")
-                        .font(GuardianTypography.font(.subsectionTitleSemibold))
-                    Text(skill.summary)
-                        .font(GuardianTypography.font(.denseFootnoteRegular))
-                        .foregroundStyle(theme.textSecondary)
-                    Text(
-                        String(
-                            format: "Score: %.1f m, heading %.0f°",
-                            skill.score.positionErrorM,
-                            skill.score.headingErrorDeg
-                        )
-                    )
-                    .font(GuardianTypography.font(.denseFootnoteRegular))
-                    .foregroundStyle(theme.textTertiary)
-                    Text("\(skill.segments.count) segments")
-                        .font(GuardianTypography.font(.denseFootnoteRegular))
-                    ForEach(Array(skill.segments.enumerated()), id: \.offset) { index, segment in
-                        Text(vehicleSegmentDescription(segment, index: index))
-                            .font(GuardianTypography.font(.denseFootnoteRegular))
-                            .foregroundStyle(theme.textSecondary)
-                    }
-
-                    Toggle("Auto-export brain pack on promote", isOn: $training.autoExportBrainOnPromote)
-                        .font(GuardianTypography.font(.denseFootnoteRegular))
-                        .foregroundStyle(theme.textSecondary)
-
-                    if training.promotedSkill != nil {
-                        if panelMode == .formation {
-                            Text("Formation rehearsal metadata (shape, spacing, sim count) is included in the brain pack squad profile.")
-                                .font(GuardianTypography.font(.denseFootnoteRegular))
-                                .foregroundStyle(theme.textTertiary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        if training.exportPlannerHintsSnapshot() != nil {
-                            Text("Nav2 or Aerostack2 lab overlays (path source, layout, environment) are included in planner hints.")
-                                .font(GuardianTypography.font(.denseFootnoteRegular))
-                                .foregroundStyle(theme.textTertiary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
-                        GuardianPrimaryProminentButton(title: "Export brain pack…") {
-                            training.exportPromotedBrainPack(squadProfile: brainExportSquadProfile())
-                        }
-                        if training.lastExportedBrainId != nil {
-                            GuardianThemedButton(
-                                title: "Export new version…",
-                                accent: .primary,
-                                surface: .outline
-                            ) {
-                                training.exportPromotedBrainPackNewVersion(squadProfile: brainExportSquadProfile())
-                            }
-                        }
-                    }
-                    .padding(.top, GuardianSpacing.sm)
-                } else {
-                    Text("No promoted skill for this task and vehicle class yet. Run autonomous teaching.")
-                        .font(GuardianTypography.font(.denseFootnoteRegular))
-                        .foregroundStyle(theme.textTertiary)
-                }
-            }
-            .padding(10)
-        }
-        .onAppear { training.loadPromotedSkill() }
-    }
-
-    @ViewBuilder
-    private func trainingRow<Content: View>(
-        title: String,
-        help: String,
-        @ViewBuilder control: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
-            Text(title)
-                .font(GuardianTypography.font(.disclosureRowTitle))
-                .foregroundStyle(theme.textPrimary)
-            Text(help)
-                .font(GuardianTypography.font(.denseFootnoteRegular))
-                .foregroundStyle(theme.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-            control()
-        }
-    }
-
-    private func vehicleSegmentDescription(_ segment: TrainingControlSegment, index: Int) -> String {
-        var parts: [String] = []
-        if abs(segment.bodyForwardMS) > 0.02 { parts.append(String(format: "fwd %.2f m/s", segment.bodyForwardMS)) }
-        if abs(segment.bodyRightMS) > 0.02 { parts.append(String(format: "right %.2f m/s", segment.bodyRightMS)) }
-        if abs(segment.yawspeedDegS) > 0.5 { parts.append(String(format: "yaw %.0f°/s", segment.yawspeedDegS)) }
-        if parts.isEmpty { parts.append("hold") }
-        return "\(index + 1). \(parts.joined(separator: ", ")) · \(String(format: "%.1f", segment.durationS)) s"
-    }
-
     private func refreshTrainingMap() {
+        guard !lab.teaching.usesGazeboTrainingViewport else { return }
         let defaults = generalSettings.simSpawnDefaults
         let home = RouteHome(
             coord: RouteCoordinate(lat: defaults.latitudeDeg, lon: defaults.longitudeDeg),
@@ -1333,9 +941,9 @@ struct TrainingPanelView: View {
         var geometry = GuardianRouteMapGeometry.empty
         geometry.home = home
         geometry.preserveView = true
-        geometry.formationSlotGroupMapEdit = training.buildTargetSlotMapEdit()
-        if training.nav2PlannedPath.count >= 2 {
-            geometry.debugOverlayPolylines = [training.nav2PlannedPath]
+        geometry.formationSlotGroupMapEdit = lab.teaching.buildTargetSlotMapEdit()
+        if lab.teaching.nav2PlannedPath.count >= 2 {
+            geometry.debugOverlayPolylines = [lab.teaching.nav2PlannedPath]
         }
         mapModel.applyMapContent(routeGeometry: geometry, vehicleMarkers: buildTrainingMapMarkers())
         fitTrainingMap()
@@ -1344,9 +952,9 @@ struct TrainingPanelView: View {
     private func syncTrainingTargetSlotMapEdit() {
         var geometry = mapModel.routeGeometry
         geometry.preserveView = true
-        geometry.formationSlotGroupMapEdit = training.buildTargetSlotMapEdit()
-        if training.nav2PlannedPath.count >= 2 {
-            geometry.debugOverlayPolylines = [training.nav2PlannedPath]
+        geometry.formationSlotGroupMapEdit = lab.teaching.buildTargetSlotMapEdit()
+        if lab.teaching.nav2PlannedPath.count >= 2 {
+            geometry.debugOverlayPolylines = [lab.teaching.nav2PlannedPath]
         } else {
             geometry.debugOverlayPolylines = []
         }
@@ -1361,7 +969,7 @@ struct TrainingPanelView: View {
     }
 
     private func buildTrainingMapMarkers() -> [MapVehicleMarker] {
-        guard let layout = training.taskLayout else { return [] }
+        guard let layout = lab.teaching.taskLayout else { return [] }
         var markers: [MapVehicleMarker] = [
             MapVehicleMarker(
                 id: "training:start",
@@ -1392,12 +1000,12 @@ struct TrainingPanelView: View {
                 accessibilityTitle: "Target slot — yellow edge is heading"
             ),
         ]
-        if let vid = training.vehicleID,
+        if let vid = lab.teaching.vehicleID,
            let hub = fleetLink.hubTelemetry(forVehicleID: vid),
            let lat = hub.latitudeDeg,
            let lon = hub.longitudeDeg {
             let vType = fleetLink.vehicleModel(forVehicleID: vid)?.data.vehicleType
-                ?? training.vehicleClass.fleetVehicleType
+                ?? lab.teaching.vehicleClass.fleetVehicleType
             markers.append(
                 MapVehicleMarker(
                     id: vid,
@@ -1418,12 +1026,12 @@ struct TrainingPanelView: View {
     }
 
     private func fitTrainingMap(mapModel: GuardianMapModel? = nil) {
-        guard let layout = training.taskLayout else { return }
+        guard let layout = lab.teaching.taskLayout else { return }
         var points: [(Double, Double)] = [
             (layout.start.latitudeDeg, layout.start.longitudeDeg),
             (layout.goal.latitudeDeg, layout.goal.longitudeDeg),
         ]
-        if let vid = training.vehicleID,
+        if let vid = lab.teaching.vehicleID,
            let hub = fleetLink.hubTelemetry(forVehicleID: vid),
            let lat = hub.latitudeDeg,
            let lon = hub.longitudeDeg {
@@ -1433,18 +1041,23 @@ struct TrainingPanelView: View {
         model.fitToVisible(points: points, style: .formationContent)
     }
 
-    private func brainExportSquadProfile() -> GuardianBrainPackSquadProfile? {
-        guard panelMode == .formation else { return nil }
-        let vehicleClass: TrainingVehicleClass = switch playground.vehicleClass {
-        case .uavCopter: .uavCopter
-        case .ugvWheeled: .ugvWheeled
-        case .ugvTracked: .ugvTracked
+}
+
+private struct TrainingLabEscapeStopModifier: ViewModifier {
+    let isEnabled: Bool
+    let drawerPresented: Bool
+    let onStop: () -> Void
+
+    func body(content: Content) -> some View {
+        if #available(macOS 14.0, *) {
+            content
+                .onKeyPress(.escape) {
+                    guard isEnabled, !drawerPresented else { return .ignored }
+                    onStop()
+                    return .handled
+                }
+        } else {
+            content
         }
-        return GuardianBrainPackBuilder.squadProfile(
-            formation: playground.formation,
-            shape: playground.shape,
-            vehicleClass: vehicleClass,
-            simCount: playground.simCount
-        )
     }
 }

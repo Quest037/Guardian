@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Mission app: import, pin, and manage Guardian Brain Packs (`.guardianbrain`).
+/// Mission / HQ: import, pin, and manage Guardian Brain Packs (`.guardianbrain`) from Settings → Brains.
 struct GuardianBrainCatalogueView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var entries: [GuardianBrainCatalogueEntry] = []
@@ -18,7 +18,7 @@ struct GuardianBrainCatalogueView: View {
                     .foregroundStyle(theme.textPrimary)
 
                 Text(
-                    "Import packs exported from Guardian Training. Pin a default brain per task kind and vehicle class; new Mission Control runs copy those bindings into the run envelope."
+                    "Import Guardian brain versions to control how the system manages vehicles and squads in missions."
                 )
                 .font(GuardianTypography.font(.denseFootnoteRegular))
                 .foregroundStyle(theme.textTertiary)

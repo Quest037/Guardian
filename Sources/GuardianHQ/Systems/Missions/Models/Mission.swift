@@ -40,6 +40,8 @@ struct RosterDevice: Identifiable, Codable, Equatable {
     var behaviorRoleID: String
     var slot: MissionRosterSlotRole
     var vehicleClass: FleetVehicleType
+    /// Footprint band from `Resources/vehicle_size_matrix.md` (default **medium** when omitted in JSON).
+    var vehicleSizeTier: VehicleSizeTier
     /// When ``slot`` is ``wingman`` or ``reserve``, optional primary on this task to follow; if nil, MRE may infer.
     var leaderRosterDeviceId: UUID?
 
@@ -49,6 +51,7 @@ struct RosterDevice: Identifiable, Codable, Equatable {
         behaviorRoleID: String,
         slot: MissionRosterSlotRole = .primary,
         vehicleClass: FleetVehicleType = .unknown,
+        vehicleSizeTier: VehicleSizeTier? = nil,
         leaderRosterDeviceId: UUID? = nil
     ) {
         self.id = id
@@ -56,6 +59,7 @@ struct RosterDevice: Identifiable, Codable, Equatable {
         self.behaviorRoleID = behaviorRoleID.isEmpty ? RosterRole.none.rawValue : behaviorRoleID
         self.slot = slot
         self.vehicleClass = vehicleClass
+        self.vehicleSizeTier = vehicleSizeTier ?? VehicleClassSizeCatalogue.defaultTier(for: vehicleClass)
         self.leaderRosterDeviceId = leaderRosterDeviceId
     }
 
@@ -66,6 +70,7 @@ struct RosterDevice: Identifiable, Codable, Equatable {
         role: RosterRole = .none,
         slot: MissionRosterSlotRole = .primary,
         vehicleClass: FleetVehicleType = .unknown,
+        vehicleSizeTier: VehicleSizeTier? = nil,
         leaderRosterDeviceId: UUID? = nil
     ) {
         self.init(
@@ -74,12 +79,17 @@ struct RosterDevice: Identifiable, Codable, Equatable {
             behaviorRoleID: role.rawValue,
             slot: slot,
             vehicleClass: vehicleClass,
+            vehicleSizeTier: vehicleSizeTier,
             leaderRosterDeviceId: leaderRosterDeviceId
         )
     }
 
+    var resolvedFootprint: VehicleFootprint {
+        VehicleClassSizeCatalogue.footprint(vehicleClass: vehicleClass, tier: vehicleSizeTier)
+    }
+
     enum CodingKeys: String, CodingKey {
-        case id, name, role, slot, vehicleClass, leaderRosterDeviceId
+        case id, name, role, slot, vehicleClass, vehicleSizeTier, leaderRosterDeviceId
         case legacyWingmanPrimaryRosterDeviceId = "wingmanPrimaryRosterDeviceId"
         case legacyCharacter = "character"
         case legacySlotRole = "slotRole"
@@ -116,6 +126,8 @@ struct RosterDevice: Identifiable, Codable, Equatable {
             slot = .primary
         }
         vehicleClass = try c.decodeIfPresent(FleetVehicleType.self, forKey: .vehicleClass) ?? .unknown
+        vehicleSizeTier = try c.decodeIfPresent(VehicleSizeTier.self, forKey: .vehicleSizeTier)
+            ?? VehicleClassSizeCatalogue.defaultTier(for: vehicleClass)
         leaderRosterDeviceId = try c.decodeIfPresent(UUID.self, forKey: .leaderRosterDeviceId)
             ?? (try c.decodeIfPresent(UUID.self, forKey: .legacyWingmanPrimaryRosterDeviceId))
         _ = try? c.decodeIfPresent(String.self, forKey: .positionHint)
@@ -128,6 +140,7 @@ struct RosterDevice: Identifiable, Codable, Equatable {
         try c.encode(behaviorRoleID, forKey: .role)
         try c.encode(slot, forKey: .slot)
         try c.encode(vehicleClass, forKey: .vehicleClass)
+        try c.encode(vehicleSizeTier, forKey: .vehicleSizeTier)
         try c.encodeIfPresent(leaderRosterDeviceId, forKey: .leaderRosterDeviceId)
     }
 }
@@ -629,7 +642,7 @@ struct MissionTask: Identifiable, Codable, Equatable {
     /// Wingman slot geometry when this task has a squad (convoy / chevron / arrowhead).
     var squadFormation: MissionSquadFormationKind
     /// How tightly wingmen pack for the chosen formation (tight / normal / loose).
-    var squadFormationShape: MissionSquadFormationShape
+    var squadFormationSpacing: MissionSquadFormationSpacing
     /// First-wave spacing between primary squads (see ``MissionTaskStaggerTrigger``).
     var staggerTrigger: MissionTaskStaggerTrigger
     /// Fixed interval between primaries when ``staggerTrigger`` is ``fixedInterval``.
@@ -664,7 +677,7 @@ struct MissionTask: Identifiable, Codable, Equatable {
         case abortPreferenceChainOverride, completePreferenceChainOverride, reserveSwapPreferenceChainOverride
         case geofences
         case squadFormation
-        case squadFormationShape
+        case squadFormationSpacing
     }
 
     /// Effective start deferral duration for execution (seconds).
@@ -704,7 +717,7 @@ struct MissionTask: Identifiable, Codable, Equatable {
         betweenCycles: MissionTaskBetweenCyclesAction = .returnToLaunch,
         pattern: MissionTaskPattern = .patrol,
         squadFormation: MissionSquadFormationKind = .convoy,
-        squadFormationShape: MissionSquadFormationShape = .normal,
+        squadFormationSpacing: MissionSquadFormationSpacing = .normal,
         staggerTrigger: MissionTaskStaggerTrigger = .pathEstimate,
         staggerIntervalValue: Double = 20,
         staggerIntervalUnit: DelayUnit = .secs,
@@ -729,7 +742,7 @@ struct MissionTask: Identifiable, Codable, Equatable {
         self.betweenCycles = betweenCycles
         self.pattern = pattern
         self.squadFormation = squadFormation
-        self.squadFormationShape = squadFormationShape
+        self.squadFormationSpacing = squadFormationSpacing
         self.staggerTrigger = staggerTrigger
         self.staggerIntervalValue = staggerIntervalValue
         self.staggerIntervalUnit = staggerIntervalUnit
@@ -787,7 +800,7 @@ struct MissionTask: Identifiable, Codable, Equatable {
 
         pattern = try c.decodeIfPresent(MissionTaskPattern.self, forKey: .pattern) ?? .patrol
         squadFormation = try c.decodeIfPresent(MissionSquadFormationKind.self, forKey: .squadFormation) ?? .convoy
-        squadFormationShape = try c.decodeIfPresent(MissionSquadFormationShape.self, forKey: .squadFormationShape) ?? .normal
+        squadFormationSpacing = try c.decodeIfPresent(MissionSquadFormationSpacing.self, forKey: .squadFormationSpacing) ?? .normal
 
         staggerTrigger = try c.decodeIfPresent(MissionTaskStaggerTrigger.self, forKey: .staggerTrigger) ?? .pathEstimate
         if let iv = try c.decodeIfPresent(Double.self, forKey: .staggerIntervalValue),
@@ -870,8 +883,8 @@ struct MissionTask: Identifiable, Codable, Equatable {
         if squadFormation != .convoy {
             try c.encode(squadFormation, forKey: .squadFormation)
         }
-        if squadFormationShape != .normal {
-            try c.encode(squadFormationShape, forKey: .squadFormationShape)
+        if squadFormationSpacing != .normal {
+            try c.encode(squadFormationSpacing, forKey: .squadFormationSpacing)
         }
         try c.encode(staggerTrigger, forKey: .staggerTrigger)
         try c.encode(staggerIntervalValue, forKey: .staggerIntervalValue)

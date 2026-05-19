@@ -5,6 +5,7 @@ import SwiftUI
 @MainActor
 final class TrainingPanelController: ObservableObject {
     @Published var vehicleClass: TrainingVehicleClass = .ugvWheeled
+    @Published var vehicleSizeTier: VehicleSizeTier = .medium
     @Published var taskKind: TrainingTaskKind = .reverseIntoSlot
     @Published var forbiddenAxes: Set<TrainingControlAxis> = []
     @Published private(set) var phase: TrainingPanelPhase = .idle
@@ -32,7 +33,8 @@ final class TrainingPanelController: ObservableObject {
     @Published var targetSlot: TrainingTaskPose = TrainingTaskLayoutFactory.defaultTargetSlot(spawn: .default)
     @Published var isTargetSlotMapEditEnabled = false
     @Published private(set) var availableEnvironments: [TrainingEnvironmentPackage] = []
-    @Published var selectedEnvironmentID: String = TrainingEnvironmentManifest.defaultBundledID
+    /// `nil` until the operator picks a map in the Training lab (no bundled default).
+    @Published var selectedEnvironmentID: String?
     @Published private(set) var activeGazeboWorldID: UUID?
     @Published private(set) var gazeboWorldStatusText: String?
 
@@ -74,35 +76,48 @@ final class TrainingPanelController: ObservableObject {
         )
         restoreTargetSlotFromPersistence()
         reloadEnvironmentCatalogue()
-        restoreEnvironmentSelectionFromPersistence()
+        selectedEnvironmentID = nil
         refreshTaskLayout()
     }
 
     var selectedEnvironment: TrainingEnvironmentPackage? {
-        availableEnvironments.first { $0.id == selectedEnvironmentID }
+        guard let selectedEnvironmentID else { return nil }
+        return availableEnvironments.first { $0.id == selectedEnvironmentID }
             ?? TrainingEnvironmentCatalogue.package(id: selectedEnvironmentID)
     }
 
     func reloadEnvironmentCatalogue() {
         availableEnvironments = TrainingEnvironmentCatalogue.loadAll()
-        if !availableEnvironments.contains(where: { $0.id == selectedEnvironmentID }),
-           let first = availableEnvironments.first {
-            selectedEnvironmentID = first.id
+        clampSelectedEnvironmentToSelectableMaps()
+    }
+
+    private func clampSelectedEnvironmentToSelectableMaps() {
+        guard let id = selectedEnvironmentID else { return }
+        let stillListed = availableEnvironments.contains(where: { $0.id == id })
+        let selectable = availableEnvironments.first(where: { $0.id == id })?.hasConfiguredStartAndEndZones == true
+            || TrainingEnvironmentCatalogue.package(id: id)?.manifest.hasConfiguredStartAndEndZones == true
+        if !stillListed || !selectable {
+            selectedEnvironmentID = nil
+            stopTrainingGazeboRunWorld()
         }
+    }
+
+    func isEnvironmentSelectableForTrainingLab(environmentID: String) -> Bool {
+        if let pkg = availableEnvironments.first(where: { $0.id == environmentID }) {
+            return pkg.hasConfiguredStartAndEndZones
+        }
+        return TrainingEnvironmentCatalogue.package(id: environmentID)?.hasConfiguredStartAndEndZones == true
     }
 
     func restoreEnvironmentSelectionFromPersistence() {
         if let saved = try? TrainingEnvironmentSelectionStore.selectedEnvironmentID(
             task: taskKind,
             vehicleClass: vehicleClass
-        ), TrainingEnvironmentCatalogue.package(id: saved) != nil {
+        ),
+            isEnvironmentSelectableForTrainingLab(environmentID: saved) {
             selectedEnvironmentID = saved
-            return
-        }
-        if availableEnvironments.contains(where: { $0.id == TrainingEnvironmentManifest.defaultBundledID }) {
-            selectedEnvironmentID = TrainingEnvironmentManifest.defaultBundledID
-        } else if let first = availableEnvironments.first {
-            selectedEnvironmentID = first.id
+        } else {
+            selectedEnvironmentID = nil
         }
     }
 
@@ -116,8 +131,43 @@ final class TrainingPanelController: ObservableObject {
 
     func environmentSelectionDidChange() {
         persistEnvironmentSelection()
+        if selectedEnvironmentID == nil {
+            stopTrainingGazeboRunWorld()
+        }
         restoreTargetSlotForSelectedEnvironment()
         refreshTaskLayout()
+    }
+
+    /// Map panel (rail or drawer): persist selection and start `.run` Gazebo world when required.
+    func selectEnvironmentAndLoadGazeboWorld(environmentID: String) async {
+        guard isEnvironmentSelectableForTrainingLab(environmentID: environmentID) else {
+            toastCenter?.show(
+                "This map is not fully built yet. Add start and end zones in World Builder.",
+                style: .info,
+                duration: 3
+            )
+            return
+        }
+
+        if selectedEnvironmentID == environmentID {
+            reconcileActiveGazeboRunWorldIfNeeded()
+            if !requiresGazeboRunWorld || isGazeboRunWorldReadyForVehicleSpawn {
+                return
+            }
+        }
+
+        let priorID = selectedEnvironmentID
+        if let priorID, priorID != environmentID {
+            resetMap()
+        }
+        selectedEnvironmentID = environmentID
+        environmentSelectionDidChange()
+        guard requiresGazeboRunWorld else { return }
+        _ = await startTrainingGazeboRunWorldIfNeeded()
+    }
+
+    /// Idle map change hook — reset vehicles in Gazebo, episode state, etc. (extended in later passes).
+    func resetMap() {
     }
 
     func trainingTaskOrVehicleDidChange() {
@@ -130,7 +180,10 @@ final class TrainingPanelController: ObservableObject {
     }
 
     private func restoreTargetSlotForSelectedEnvironment() {
-        let envID = selectedEnvironmentID
+        guard let envID = selectedEnvironmentID else {
+            targetSlot = TrainingTaskLayoutFactory.defaultTargetSlot(spawn: spawnDefaults)
+            return
+        }
         if let saved = try? TrainingTargetSlotStore.load(environmentID: envID) {
             targetSlot = saved
             return
@@ -173,7 +226,8 @@ final class TrainingPanelController: ObservableObject {
     }
 
     private func persistTargetSlot() {
-        try? TrainingTargetSlotStore.save(targetSlot, environmentID: selectedEnvironmentID)
+        guard let envID = selectedEnvironmentID else { return }
+        try? TrainingTargetSlotStore.save(targetSlot, environmentID: envID)
     }
 
     func syncFromFleetOnAppear(fleetLink: FleetLinkService) {
@@ -222,7 +276,7 @@ final class TrainingPanelController: ObservableObject {
         guard let sitl, var slot = simulatorSlot else { return }
         let sessionID = slot.sitlSessionID
         guard let row = sitl.instances.first(where: {
-            $0.id == sessionID && $0.spawnOwner == .trainingVehicle
+            $0.id == sessionID && $0.spawnOwner == .trainingRoster
         }) else {
             if slot.linkReady || slot.vehicleID != nil {
                 slot.linkReady = false
@@ -420,6 +474,7 @@ final class TrainingPanelController: ObservableObject {
         return GuardianBrainPackBuilder.plannerHints(
             from: GuardianBrainPackTrainingPlannerContext(
                 vehicleClass: vehicleClass,
+                vehicleSizeTier: vehicleSizeTier,
                 layout: layout,
                 segments: skill.segments,
                 planPathSource: nav2PlanPathSource,
@@ -625,7 +680,7 @@ final class TrainingPanelController: ObservableObject {
 
         isBusy = true
         phase = .spawning
-        guard await startTrainingGazeboRunWorldIfNeeded() else {
+        guard await ensureGazeboRunWorldIfAlive() else {
             endSpawnShellBusyState()
             phase = .idle
             return
@@ -648,10 +703,11 @@ final class TrainingPanelController: ObservableObject {
             preset: vehicleClass.simulationPreset,
             platform: simulationPlatform,
             defaults: spawnDefaults,
-            owner: .trainingVehicle
+            owner: .trainingRoster,
+            gazeboPlacement: trainingGazeboPlacement()
         )
         guard let row = sitl.instances.first(where: {
-            !before.contains($0.id) && $0.spawnOwner == .trainingVehicle
+            !before.contains($0.id) && $0.spawnOwner == .trainingRoster
         }) else {
             endSpawnShellBusyState()
             clearSimulatorTracking()
@@ -691,7 +747,7 @@ final class TrainingPanelController: ObservableObject {
         phase = .spawning
         statusText = "Spawning training simulator…"
 
-        guard await startTrainingGazeboRunWorldIfNeeded() else {
+        guard await ensureGazeboRunWorldIfAlive() else {
             endSpawnShellBusyState()
             phase = .idle
             return
@@ -703,10 +759,11 @@ final class TrainingPanelController: ObservableObject {
             preset: vehicleClass.simulationPreset,
             platform: simulationPlatform,
             defaults: spawnDefaults,
-            owner: .trainingVehicle
+            owner: .trainingRoster,
+            gazeboPlacement: trainingGazeboPlacement()
         )
         guard let row = sitl.instances.first(where: {
-            !before.contains($0.id) && $0.spawnOwner == .trainingVehicle
+            !before.contains($0.id) && $0.spawnOwner == .trainingRoster
         }) else {
             stopTrainingGazeboRunWorld()
             endSpawnShellBusyState()
@@ -885,7 +942,7 @@ final class TrainingPanelController: ObservableObject {
     private func trainingSessionInstance(id: UUID?, sitl: SitlService) -> SitlRunningInstance? {
         guard let id else { return nil }
         return sitl.instances.first {
-            $0.id == id && $0.spawnOwner == .trainingVehicle
+            $0.id == id && $0.spawnOwner == .trainingRoster
         }
     }
 
@@ -905,6 +962,8 @@ final class TrainingPanelController: ObservableObject {
         freshSpawn: Bool = false
     ) {
         let vid = resolvedVehicleID(for: inst, fleetLink: fleetLink)
+        VehicleClassSizePreferencesStore.shared.setTier(vehicleSizeTier, forVehicleID: vid)
+        fleetLink.setVehicleSizeTier(vehicleSizeTier, forVehicleID: vid)
         var preflightPassed = prior?.sitlSessionID == inst.id ? prior?.preflightPassed : nil
         var preflightDetail = prior?.sitlSessionID == inst.id ? prior?.preflightDetail : nil
         if preflightPassed == nil,
@@ -933,8 +992,87 @@ final class TrainingPanelController: ObservableObject {
         try? TrainingSimulatorSessionStore.save(inst.id)
     }
 
+    /// Reuses an already-running `.run` world when the embedded viewport is live but this controller lost `activeGazeboWorldID`.
+    func reconcileActiveGazeboRunWorldIfNeeded() {
+        guard requiresGazeboRunWorld, let gazebo else { return }
+        if let worldID = activeGazeboWorldID,
+           gazebo.isEmbeddedViewportLive(worldID: worldID) || gazebo.isWorldAlive(id: worldID) {
+            return
+        }
+        if let viewport = gazebo.embeddedViewport,
+           gazebo.isEmbeddedViewportLive(worldID: viewport.worldID) {
+            activeGazeboWorldID = viewport.worldID
+            return
+        }
+        if let runID = gazebo.firstAliveRunWorldID() {
+            activeGazeboWorldID = runID
+        }
+    }
+
+    /// True when the Training lab map is loaded enough to spawn vehicles (never starts or restarts Gazebo here).
+    var isGazeboRunWorldReadyForVehicleSpawn: Bool {
+        guard requiresGazeboRunWorld else { return true }
+        reconcileActiveGazeboRunWorldIfNeeded()
+        guard let gazebo else { return false }
+        if let worldID = activeGazeboWorldID,
+           gazebo.isEmbeddedViewportLive(worldID: worldID) || gazebo.isWorldAlive(id: worldID) {
+            return true
+        }
+        if let viewport = gazebo.embeddedViewport,
+           gazebo.isEmbeddedViewportLive(worldID: viewport.worldID) {
+            activeGazeboWorldID = viewport.worldID
+            return true
+        }
+        return false
+    }
+
+    /// Vehicle spawn gate only — map load is ``selectEnvironmentAndLoadGazeboWorld`` / ``startTrainingGazeboRunWorldIfNeeded``.
     @discardableResult
-    private func startTrainingGazeboRunWorldIfNeeded() async -> Bool {
+    func ensureGazeboRunWorldIfAlive() async -> Bool {
+        guard requiresGazeboRunWorld else { return true }
+        if isGazeboRunWorldReadyForVehicleSpawn { return true }
+        statusText = "Wait for the training map to finish loading before adding vehicles."
+        return false
+    }
+
+    func trainingGazeboPlacementForSpawn() -> GazeboVehiclePlacement? {
+        trainingGazeboPlacement()
+    }
+
+    /// Adopts a roster row as the single-vehicle teaching target (one primary, no wingmen).
+    func adoptRosterPrimarySlot(_ slot: FormationsPlaygroundSlotState) {
+        applySlot(slot)
+        if let vid = slot.vehicleID {
+            vehicleID = vid
+        }
+    }
+
+    /// Push the designated learning squad's task and vehicle class into the teaching controller.
+    func applyLearningSquadContext(
+        taskKind: TrainingTaskKind,
+        vehicleClass: TrainingVehicleClass,
+        vehicleSizeTier: VehicleSizeTier,
+        primarySlot: FormationsPlaygroundSlotState?
+    ) {
+        self.taskKind = taskKind
+        forbiddenAxes = taskKind.defaultForbiddenAxes
+        self.vehicleClass = vehicleClass
+        self.vehicleSizeTier = vehicleSizeTier
+        clampVehicleClassToTrainingPanelOptions()
+        taskKindDidChange()
+        if let primarySlot {
+            adoptRosterPrimarySlot(primarySlot)
+        } else {
+            clearRosterPrimarySlot()
+        }
+    }
+
+    func clearRosterPrimarySlot() {
+        clearSimulatorTracking()
+    }
+
+    @discardableResult
+    private func startTrainingGazeboRunWorldIfNeeded(restartExisting: Bool = true) async -> Bool {
         guard requiresGazeboRunWorld else { return true }
         guard GuardianGazeboWebViewerPolicy.guardOnlineOrShowToast(
             productIncludesGazebo: true,
@@ -953,7 +1091,11 @@ final class TrainingPanelController: ObservableObject {
             return false
         }
 
-        stopTrainingGazeboRunWorld()
+        if restartExisting {
+            stopTrainingGazeboRunWorld()
+        } else if let worldID = activeGazeboWorldID, gazebo.isWorldAlive(id: worldID) {
+            return true
+        }
         gazeboWorldStatusText = nil
         statusText = "Starting Gazebo world (\(pkg.manifest.displayName))…"
         let plan = TrainingGazeboRunOrchestrator.spawnPlan(for: pkg)
@@ -967,6 +1109,14 @@ final class TrainingPanelController: ObservableObject {
         gazeboWorldStatusText = "Gazebo: \(pkg.manifest.displayName) (\(plan.purpose.rawValue))"
         try? await Task.sleep(nanoseconds: 1_500_000_000)
         return true
+    }
+
+    private func trainingGazeboPlacement() -> GazeboVehiclePlacement? {
+        guard requiresGazeboRunWorld,
+              let worldID = activeGazeboWorldID,
+              let pkg = selectedEnvironment
+        else { return nil }
+        return GazeboVehiclePlacement(worldID: worldID, pose: pkg.manifest.defaultSpawn)
     }
 
     private func stopTrainingGazeboRunWorld() {

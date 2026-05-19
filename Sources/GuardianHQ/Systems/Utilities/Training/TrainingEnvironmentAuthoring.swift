@@ -90,6 +90,9 @@ enum TrainingEnvironmentAuthoring {
         }
         try validateAnchor(manifest.defaultSpawn, label: "Start")
         try validateAnchor(manifest.defaultGoal, label: "Goal")
+        guard manifest.obstacles.count <= TrainingEnvironmentObstacleRecord.maxCount else {
+            throw TrainingEnvironmentAuthoringError.tooManyObstacles(TrainingEnvironmentObstacleRecord.maxCount)
+        }
     }
 
     static func validateForSave(manifest: TrainingEnvironmentManifest, packageRoot: URL) throws {
@@ -117,6 +120,7 @@ enum TrainingEnvironmentAuthoringError: LocalizedError, Equatable {
     case invalidYaw(label: String)
     case bundledReadOnly
     case missingTemplateWorld
+    case tooManyObstacles(Int)
 
     var errorDescription: String? {
         switch self {
@@ -134,6 +138,8 @@ enum TrainingEnvironmentAuthoringError: LocalizedError, Equatable {
             return "Bundled environments cannot be edited. Duplicate as a new world to customize."
         case .missingTemplateWorld:
             return "No template world file is available to create a new environment."
+        case .tooManyObstacles(let max):
+            return "This world has more than \(max) obstacles. Remove some before saving."
         }
     }
 }

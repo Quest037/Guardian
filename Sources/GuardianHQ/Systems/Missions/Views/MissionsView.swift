@@ -893,6 +893,7 @@ private struct MissionWorkspaceView: View {
                                 set: { v in
                                     var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
                                     d.vehicleClass = v
+                                    d.vehicleSizeTier = VehicleClassSizeCatalogue.defaultTier(for: v)
                                     taskRosterDrafts[taskId] = d
                                 }
                             )
@@ -905,6 +906,21 @@ private struct MissionWorkspaceView: View {
                         .controlSize(.small)
                         .frame(minWidth: 100, idealWidth: 120, maxWidth: 160, alignment: .leading)
                         .layoutPriority(1)
+
+                        if (taskRosterDrafts[taskId]?.vehicleClass ?? .unknown).showsMissionRosterSizeTierPicker {
+                            VehicleSizeTierField(
+                                vehicleClass: taskRosterDrafts[taskId]?.vehicleClass ?? .ugvWheeled,
+                                tier: Binding(
+                                    get: { taskRosterDrafts[taskId]?.vehicleSizeTier ?? .medium },
+                                    set: { v in
+                                        var d = taskRosterDrafts[taskId] ?? TaskRosterDraft()
+                                        d.vehicleSizeTier = v
+                                        taskRosterDrafts[taskId] = d
+                                    }
+                                )
+                            )
+                            .layoutPriority(1)
+                        }
 
                         HStack(spacing: GuardianSpacing.xxs) {
                             Picker(
@@ -3627,6 +3643,7 @@ private struct MissionWorkspaceView: View {
             behaviorRoleID: fields.behaviorRoleID,
             slot: fields.slot,
             vehicleClass: fields.vehicleClass,
+            vehicleSizeTier: fields.vehicleSizeTier,
             leaderRosterDeviceId: leaderId
         )
         draft.rosterDevices.append(device)
@@ -3906,6 +3923,7 @@ private struct MissionWorkspaceView: View {
         var behaviorRoleID: String = RosterRole.none.rawValue
         var slot: MissionRosterSlotRole = .primary
         var vehicleClass: FleetVehicleType = .unknown
+        var vehicleSizeTier: VehicleSizeTier = .medium
         var leaderRosterDeviceId: UUID?
     }
 }
@@ -3958,6 +3976,17 @@ private struct MissionRosterDeviceSettingsSidebar: View {
                         .labelsHidden()
                         .pickerStyle(.menu)
                         .fixedSize()
+                        .onChange(of: device.vehicleClass) { newClass in
+                            device.vehicleSizeTier = VehicleClassSizeCatalogue.defaultTier(for: newClass)
+                        }
+                    }
+                    if device.vehicleClass.showsMissionRosterSizeTierPicker {
+                        rosterDeviceFieldRow(label: "Size tier") {
+                            VehicleSizeTierField(
+                                vehicleClass: device.vehicleClass,
+                                tier: $device.vehicleSizeTier
+                            )
+                        }
                     }
                     rosterDeviceFieldRow(label: "Role") {
                         Picker("", selection: $device.behaviorRoleID) {

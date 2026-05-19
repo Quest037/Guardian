@@ -17,17 +17,11 @@ Goal: add a **size tier** (and concrete **footprint dimensions**) to each granul
 | `usv` | USV |
 | `uuv` | UUV |
 
-**v1 pilot UI:** **UGV-W** and **UGV-T** first; catalogue loads **all** classes from the matrix for brain export and future surfaces.
+**v1 pilot UI:** **UGV-W** and **UGV-T** first on **mission roster**; catalogue loads **all** classes for brain export, training, formation, and garage.
 
-**Example catalogue values (midpoints from matrix, W × L × H cm):**
+**Consumers (in order):** brain pack / MRE OFFBOARD → Gazebo vehicle proxies (Training / Formation **`.run`** only) → Leaflet / Cesium → ROS / Nav2 (optional). All use the same three integers.
 
-| Class | Tier | widthCm | lengthCm | heightCm |
-| --- | --- | ---: | ---: | ---: |
-| UGV-W | medium | 160 | 265 | 125 |
-| UGV-T | xlarge | 385 | 775 | 290 |
-| UAV-C | micro | 12 | 12 | 6 |
-
-**Consumers (in order):** brain pack / MRE OFFBOARD → Gazebo → Leaflet / Cesium → ROS / Nav2 (optional). All use the same three integers.
+**Gazebo split (product lock):** Both surfaces use Harmonic, but **World Builder** (``.build`` / ``.preview``) is **world authoring only** — terrain, obstacles, start/goal zones — **no vehicles** in the Builder viewport. **Training** and **Formation** load a built environment in a **``.run``** session and spawn **vehicle proxy blocks** (``GazeboService/spawnVehicleProxy``) sized from the catalogue. Do not add vehicle spawn or footprint-driven vehicle meshes to World Builder.
 
 **Out of scope:** reserve swap tier matching; changing class codes; per-tier min/max in app models; auto-classify from measured assets (matrix classification rule is later).
 
@@ -35,53 +29,18 @@ Goal: add a **size tier** (and concrete **footprint dimensions**) to each granul
 
 ---
 
-## Product lock (decide before Phase 1 ships)
+## Product lock
 
-- [ ] **Size is orthogonal to class** — `FleetVehicleType` + `VehicleSizeTier` + `VehicleFootprint`.
-- [ ] **Fixed tier vocabulary** — `micro` … `xxlarge`; catalogue rows derived **only** from `vehicle_size_matrix.md`.
-- [ ] **Canonical storage = three integers, cm, W × L × H** — `widthCm`, `lengthCm`, `heightCm` only (no min/max fields in Swift, JSON, or brain pack). Values = **round or floor midpoint** `(min + max) / 2` per matrix cell at codegen time; document rounding rule in ingest (recommend **nearest integer cm**).
-- [ ] **Default tier = medium** — unset picks → **medium** for that class.
-- [ ] **One Codable shape** — tier + footprint cm; no legacy decode.
-- [ ] **Reserve swap / pool** — no tier policy; size is for **brain + spatial consumers** only.
-- [ ] **Matrix axis semantics** — ingest respects matrix notes (rotor span, wingspan, hull length, etc.) when reading source tables; stored triple is still W×L×H midpoints.
+Shipped in code + `README_FULL.md`. Default tier **medium**; nearest-integer cm midpoints at codegen; no min/max in runtime models. Mission roster tier picker on **UGV-W** / **UGV-T**; training + formation tier on all selectable classes.
 
 ---
 
-## Phase 0 — Model & catalogue
+## Phase 3 — Gazebo vehicle proxies (Training / Formation `.run` only)
 
-- [ ] **Ingest / codegen** — parse `Resources/vehicle_size_matrix.md` CSV block → emit `VehicleClassSizeCatalogue` with midpoint `widthCm` / `lengthCm` / `heightCm`; tests fail if matrix changes without regenerating.
-- [ ] **`VehicleSizeTier`** — seven cases, matrix Size Bands order.
-- [ ] **`VehicleFootprint`** — `widthCm`, `lengthCm`, `heightCm`; `Equatable`, `Codable`, `Sendable`.
-- [ ] **`VehicleClassSizeCatalogue`** — all `FleetVehicleType` × seven tiers; `footprint(vehicleClass:tier:)`, `defaultTier(for:)` → `.medium`, `footprintMetres(...)`.
-- [ ] **Bundle** — generated catalogue (and/or matrix snapshot) in SwiftPM resources for shipped apps.
-- [ ] **Tests** — pin midpoints for UGV-W medium (160, 265, 125), UAV-C micro (12, 12, 6), UGV-T xlarge (385, 775, 290); monotonic max axis across tiers per class; unknown class → conservative fallback triple.
+- [ ] **Training `.run` spawn** — sized proxy blocks + terrain clearance / slope checks using footprint cm (tier from Training controls).
+- [ ] **Multi-vehicle `.run`** — squad spacing from largest participant max axis.
 
----
-
-## Phase 1 — Authoring & settings UI
-
-- [ ] **Mission roster** — `vehicleSizeTier`; tier picker + single footprint hint (e.g. `160 × 265 × 125 cm`); default **medium**.
-- [ ] **Training panel** — class + tier; default **medium**; hint from catalogue triple.
-- [ ] **Formation playground** — tier on slots for spacing.
-- [ ] **Fleet garage** — optional tier when spawn knows it.
-- [ ] **General settings** — optional default tier per class (**medium**).
-
----
-
-## Phase 2 — Persistence & run envelope
-
-- [ ] **`RosterDevice` encode/decode** — `vehicleSizeTier`; absent → **medium**.
-- [ ] **Run truth** — `VehicleFootprint` cm copied at bind time.
-- [ ] **Brain pack export** — tier + `widthCm` / `lengthCm` / `heightCm` in metadata / `planner_hints` (no ranges).
-
----
-
-## Phase 3 — Gazebo & SITL spawn
-
-- [ ] **Spawn policy** — catalogue cm → world metres.
-- [ ] **SDF / templates** — scale from `(class, tier)` triple.
-- [ ] **World Builder** — show W×L×H cm; clearance warning v1.
-- [ ] **Multi-vehicle worlds** — squad spacing from largest participant max axis.
+*(World Builder may later show a **reference** W×L×H hint when placing zones/obstacles — not a Gazebo vehicle; out of scope until needed.)*
 
 ---
 
@@ -112,8 +71,7 @@ Goal: add a **size tier** (and concrete **footprint dimensions**) to each granul
 
 ## Phase 7 — Docs, hygiene, smoke
 
-- [ ] **`README_FULL.md`** — matrix as SoT, midpoint-at-ingest rule, single cm triple, medium default.
-- [ ] **Theme strings** — Micro … XXLarge + `W×L×H cm` hint.
+- [ ] **Theme strings** — Micro … XXLarge + `W×L×H cm` hint in Theme catalogue.
 - [ ] **Manual smoke** — brain pack matches catalogue; UGV-W micro vs xxlarge visibly different.
 - [ ] **Trim this file** — per `todo-list-hygiene.mdc`.
 
@@ -139,6 +97,7 @@ Goal: add a **size tier** (and concrete **footprint dimensions**) to each granul
 | **Size matrix (SoT)** | `Resources/vehicle_size_matrix.md` |
 | Granular class enum | `FleetVehicleModel.swift` |
 | Roster template | `Mission.swift` (`RosterDevice`) |
+| Tier picker UI | `VehicleSizeTierField.swift` |
 | Training picker | `TrainingTaskModels.swift` |
 | Brain export | `GuardianBrainPack` / `README_FULL.md` |
 | Map glyphs | `GuardianMapVehicleGlyphKind.swift`, `OSMMapView` |

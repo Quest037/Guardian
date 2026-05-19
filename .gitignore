@@ -35,6 +35,7 @@ Sources/GuardianHQ/Resources/GazeboRuntime/.guardian_gz_source_rev
 
 # GazeboWeb viewer bundle (make gzweb-viewer) — track dist/ + HTML only.
 Sources/GuardianHQ/Resources/GazeboWeb/.build/
+Sources/GuardianHQ/Resources/GazeboWeb/.build-three-shim/
 
 # ROS 2 merged runtime (install/ + MicroXRCEAgent — make ros2-runtime).
 Sources/GuardianHQ/Resources/Ros2Runtime/overlay/

@@ -48,6 +48,7 @@ struct ThemeCatalogContent: View {
                 modalShellSection
                 confirmDialogsSection
                 overlayScrimAndAppDrawerSection
+                trainingLabCatalogSection
                 windowChromeStackSection
                 guardianCardCatalogSection
                 semanticColorsSection
@@ -447,6 +448,49 @@ struct ThemeCatalogContent: View {
             }
             .guardianInsetCard()
             ThemeAPICaption("AppDrawer · AppDrawerChrome · GuardianThemePalette/overlayScrim")
+        }
+    }
+
+    // MARK: - Training lab
+
+    private var trainingLabCatalogSection: some View {
+        VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
+            GuardianPanelSectionTitle(title: "Training lab (unified panel)")
+            VStack(alignment: .leading, spacing: GuardianSpacing.cardBodyInset) {
+                Text(
+                    "Idle layout: Gazebo viewport uses ``TrainingLabLayout/viewportWidthFraction`` (~70%) with a trailing rail for Map · Vehicles · Training · Logs. "
+                        + "While a session runs, the rail hides and the same panels open in ``AppDrawer`` at ``TrainingLabLayout/runningDrawerWidth``. "
+                        + "Use ``TrainingLabController`` (teaching + formation) and ``TrainingLabRosterController`` — not parallel Vehicle/Formation tabs."
+                )
+                .font(GuardianTypography.font(.denseCaption12Regular))
+                .foregroundStyle(theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+                ThemeCatalogSubheading("Sub-bar (idle)")
+                ThemeTrainingLabSubBarReplica()
+                    .frame(maxWidth: .infinity)
+
+                ThemeCatalogSubheading("Keyboard (shipping)")
+                VStack(alignment: .leading, spacing: GuardianSpacing.xsTight) {
+                    ForEach(TrainingLabKeyboardShortcuts.catalogSummaryLines, id: \.self) { line in
+                        Text(line)
+                            .font(GuardianTypography.font(.denseFootnoteRegular))
+                            .foregroundStyle(theme.textSecondary)
+                    }
+                }
+
+                Text(
+                    "Return maps to **Run** only when idle and the roster is link-ready. **Stop** has no Return binding (danger-style control); use Escape while running if no drawer is open. Drawers still dismiss with Escape via ``AppDrawer``."
+                )
+                .font(GuardianTypography.font(.denseCaption12Regular))
+                .foregroundStyle(theme.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            .guardianInsetCard()
+
+            ThemeAPICaption(
+                "TrainingLabPanelView · TrainingLabLayout · TrainingLabPanelTab · TrainingLabKeyboardShortcuts · TrainingLabController · AppDrawer"
+            )
         }
     }
 
@@ -2110,6 +2154,63 @@ struct ThemeCatalogContent: View {
             .guardianInsetCard()
             ThemeAPICaption("FleetLiveSimBadge · MissionRunStatusBadge")
         }
+    }
+}
+
+// MARK: - Training lab sub-bar replica
+
+/// Static replica of ``TrainingLabPanelView`` idle sub-bar chrome (map title + camera presets + Run).
+private struct ThemeTrainingLabSubBarReplica: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: GuardianSpacing.sm) {
+            HStack(spacing: GuardianSpacing.xs) {
+                Text("Sample training map")
+                    .font(GuardianTypography.font(.sectionHeadingSemibold))
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                GuardianThemedButton(
+                    accent: .neutral,
+                    surface: .outline,
+                    size: .small,
+                    shape: .cornered,
+                    contentSizing: .squareToolbarCell,
+                    action: {},
+                    label: {
+                        Image(systemName: "view.3d")
+                            .font(GuardianTypography.font(.sectionHeadingSemibold))
+                    }
+                )
+                GuardianThemedButton(
+                    accent: .neutral,
+                    surface: .outline,
+                    size: .small,
+                    shape: .cornered,
+                    contentSizing: .squareToolbarCell,
+                    action: {},
+                    label: {
+                        Image(systemName: "view.2d")
+                            .font(GuardianTypography.font(.sectionHeadingSemibold))
+                    }
+                )
+            }
+            .fixedSize(horizontal: true, vertical: false)
+
+            Spacer(minLength: GuardianSpacing.sm)
+
+            GuardianPrimaryProminentButton(title: "Run") {}
+        }
+        .padding(.horizontal, GuardianSpacing.md)
+        .padding(.vertical, GuardianSpacing.sm)
+        .background(theme.backgroundRaised)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(theme.borderSubtle, lineWidth: 1)
+        )
     }
 }
 

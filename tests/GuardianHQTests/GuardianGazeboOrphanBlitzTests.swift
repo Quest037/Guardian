@@ -11,6 +11,8 @@ final class GuardianGazeboOrphanBlitzTests: XCTestCase {
         XCTAssertTrue(joined.contains("gz sim server"))
         XCTAssertTrue(joined.contains("gz-launch"))
         XCTAssertTrue(joined.contains("libgz-launch-websocket-server"))
+        XCTAssertTrue(joined.contains("gz-launch"))
+        XCTAssertTrue(joined.contains("libgz-launch-websocket-server"))
     }
 
     func test_pgrepPatterns_includeResolvedRuntimeRubyPathWhenBundled() {

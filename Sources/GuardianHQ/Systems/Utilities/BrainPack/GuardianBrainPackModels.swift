@@ -34,19 +34,28 @@ struct GuardianBrainPackSkill: Codable, Equatable, Sendable {
 struct GuardianBrainPackPlannerHints: Codable, Equatable, Sendable {
     var frameId: String?
     var maxSpeedMS: Double?
+    var sizeTier: String?
+    var widthCm: Int?
+    var lengthCm: Int?
+    var heightCm: Int?
     var nav2ParamOverlayJSON: String?
     var aerostack2ParamOverlayJSON: String?
 
     enum CodingKeys: String, CodingKey {
         case frameId = "frame_id"
         case maxSpeedMS = "max_speed_m_s"
+        case sizeTier = "size_tier"
+        case widthCm = "width_cm"
+        case lengthCm = "length_cm"
+        case heightCm = "height_cm"
         case nav2ParamOverlayJSON = "nav2_param_overlay_json"
         case aerostack2ParamOverlayJSON = "aerostack2_param_overlay_json"
     }
 }
 
 struct GuardianBrainPackSquadProfile: Codable, Equatable, Sendable {
-    var formationShape: String?
+    /// ``MissionSquadFormationKind`` raw value (convoy, chevron, …).
+    var formation: String?
     var slotSpacingM: Double?
     var convoyOffsetsJSON: String?
 }

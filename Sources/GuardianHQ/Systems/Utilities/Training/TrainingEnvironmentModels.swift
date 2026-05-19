@@ -32,6 +32,16 @@ struct TrainingEnvironmentManifest: Codable, Equatable, Sendable {
     var sceneType: String
     var defaultSpawn: TrainingEnvironmentPose
     var defaultGoal: TrainingEnvironmentPose
+    /// Start zone disc/square radius (m) when ``startZoneConfigured``.
+    var startZoneRadiusM: Double
+    /// End zone radius (m) when ``endZoneConfigured``.
+    var endZoneRadiusM: Double
+    var startZoneShape: String
+    var endZoneShape: String
+    var startZoneConfigured: Bool
+    var endZoneConfigured: Bool
+    /// Static obstacle instances (max 100); authored in World Builder.
+    var obstacles: [TrainingEnvironmentObstacleRecord]
 
     init(
         formatVersion: Int = supportedFormatVersion,
@@ -43,7 +53,14 @@ struct TrainingEnvironmentManifest: Codable, Equatable, Sendable {
         floorSize: String = TrainingEnvironmentFloorSize.small.rawValue,
         sceneType: String = TrainingEnvironmentSceneType.flat.rawValue,
         defaultSpawn: TrainingEnvironmentPose,
-        defaultGoal: TrainingEnvironmentPose
+        defaultGoal: TrainingEnvironmentPose,
+        startZoneRadiusM: Double = WorldBuilderZoneManifestSupport.defaultRadiusM,
+        endZoneRadiusM: Double = WorldBuilderZoneManifestSupport.defaultRadiusM,
+        startZoneShape: String = TrainingEnvironmentZoneShape.circle.rawValue,
+        endZoneShape: String = TrainingEnvironmentZoneShape.circle.rawValue,
+        startZoneConfigured: Bool = false,
+        endZoneConfigured: Bool = false,
+        obstacles: [TrainingEnvironmentObstacleRecord] = []
     ) {
         self.formatVersion = formatVersion
         self.id = id
@@ -55,10 +72,21 @@ struct TrainingEnvironmentManifest: Codable, Equatable, Sendable {
         self.sceneType = sceneType
         self.defaultSpawn = defaultSpawn
         self.defaultGoal = defaultGoal
+        self.startZoneRadiusM = startZoneRadiusM
+        self.endZoneRadiusM = endZoneRadiusM
+        self.startZoneShape = startZoneShape
+        self.endZoneShape = endZoneShape
+        self.startZoneConfigured = startZoneConfigured
+        self.endZoneConfigured = endZoneConfigured
+        self.obstacles = obstacles
     }
 
     enum CodingKeys: String, CodingKey {
-        case formatVersion, id, displayName, description, worldFile, tags, floorSize, sceneType, defaultSpawn, defaultGoal
+        case formatVersion, id, displayName, description, worldFile, tags, floorSize, sceneType
+        case defaultSpawn, defaultGoal
+        case startZoneRadiusM, endZoneRadiusM, startZoneShape, endZoneShape
+        case startZoneConfigured, endZoneConfigured
+        case obstacles
     }
 
     init(from decoder: Decoder) throws {
@@ -76,6 +104,17 @@ struct TrainingEnvironmentManifest: Codable, Equatable, Sendable {
             ?? TrainingEnvironmentSceneType.flat.rawValue
         defaultSpawn = try c.decode(TrainingEnvironmentPose.self, forKey: .defaultSpawn)
         defaultGoal = try c.decode(TrainingEnvironmentPose.self, forKey: .defaultGoal)
+        startZoneRadiusM = try c.decodeIfPresent(Double.self, forKey: .startZoneRadiusM)
+            ?? WorldBuilderZoneManifestSupport.defaultRadiusM
+        endZoneRadiusM = try c.decodeIfPresent(Double.self, forKey: .endZoneRadiusM)
+            ?? WorldBuilderZoneManifestSupport.defaultRadiusM
+        startZoneShape = try c.decodeIfPresent(String.self, forKey: .startZoneShape)
+            ?? TrainingEnvironmentZoneShape.circle.rawValue
+        endZoneShape = try c.decodeIfPresent(String.self, forKey: .endZoneShape)
+            ?? TrainingEnvironmentZoneShape.circle.rawValue
+        startZoneConfigured = try c.decodeIfPresent(Bool.self, forKey: .startZoneConfigured) ?? false
+        endZoneConfigured = try c.decodeIfPresent(Bool.self, forKey: .endZoneConfigured) ?? false
+        obstacles = try c.decodeIfPresent([TrainingEnvironmentObstacleRecord].self, forKey: .obstacles) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -90,6 +129,18 @@ struct TrainingEnvironmentManifest: Codable, Equatable, Sendable {
         try c.encode(sceneType, forKey: .sceneType)
         try c.encode(defaultSpawn, forKey: .defaultSpawn)
         try c.encode(defaultGoal, forKey: .defaultGoal)
+        try c.encode(startZoneRadiusM, forKey: .startZoneRadiusM)
+        try c.encode(endZoneRadiusM, forKey: .endZoneRadiusM)
+        try c.encode(startZoneShape, forKey: .startZoneShape)
+        try c.encode(endZoneShape, forKey: .endZoneShape)
+        try c.encode(startZoneConfigured, forKey: .startZoneConfigured)
+        try c.encode(endZoneConfigured, forKey: .endZoneConfigured)
+        try c.encode(obstacles, forKey: .obstacles)
+    }
+
+    /// Training lab and Gazebo run require placed start and end zones (World Builder).
+    var hasConfiguredStartAndEndZones: Bool {
+        startZoneConfigured && endZoneConfigured
     }
 }
 
@@ -102,6 +153,24 @@ struct TrainingEnvironmentPackage: Identifiable, Equatable, Sendable {
 
     func worldFileURL() -> URL {
         packageRootURL.appendingPathComponent(manifest.worldFile, isDirectory: false)
+    }
+
+    var hasConfiguredStartAndEndZones: Bool {
+        manifest.hasConfiguredStartAndEndZones
+    }
+}
+
+enum TrainingEnvironmentCatalogueError: LocalizedError, Equatable {
+    case packageNotFound
+    case cannotDeleteBundled
+
+    var errorDescription: String? {
+        switch self {
+        case .packageNotFound:
+            return "That world is not in your library."
+        case .cannotDeleteBundled:
+            return "Bundled worlds cannot be deleted."
+        }
     }
 }
 

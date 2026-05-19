@@ -61,7 +61,7 @@ struct FormationsPlaygroundTelemetrySessionInfo: Equatable, Sendable {
     let sessionID: UUID
     let startedAt: Date
     let formationTitle: String
-    let shapeTitle: String
+    let spacingTitle: String
     let vehicleClassTitle: String
 }
 
@@ -88,7 +88,7 @@ struct FormationsPlaygroundTelemetryTraceRecorder: Sendable {
 
     mutating func beginSession(
         formationTitle: String,
-        shapeTitle: String,
+        spacingTitle: String,
         vehicleClassTitle: String,
         startedAt: Date = Date()
     ) {
@@ -97,7 +97,7 @@ struct FormationsPlaygroundTelemetryTraceRecorder: Sendable {
             sessionID: UUID(),
             startedAt: startedAt,
             formationTitle: formationTitle,
-            shapeTitle: shapeTitle,
+            spacingTitle: spacingTitle,
             vehicleClassTitle: vehicleClassTitle
         )
     }
@@ -176,7 +176,7 @@ struct FormationsPlaygroundTelemetryTraceRecorder: Sendable {
             "session_id: \(session.sessionID.uuidString)",
             "started: \(formatter.string(from: session.startedAt))",
             "formation: \(session.formationTitle)",
-            "spacing: \(session.shapeTitle)",
+            "spacing: \(session.spacingTitle)",
             "vehicle_class: \(session.vehicleClassTitle)",
             "sample_count: \(samples.count)",
             "",
@@ -230,7 +230,7 @@ struct FormationsPlaygroundTelemetryTraceRecorder: Sendable {
                 sessionID: session.sessionID,
                 startedAt: session.startedAt,
                 formation: session.formationTitle,
-                shape: session.shapeTitle,
+                spacing: session.spacingTitle,
                 vehicleClass: session.vehicleClassTitle
             )
         ), let s = String(data: header, encoding: .utf8) {
@@ -478,7 +478,7 @@ private struct FormationsPlaygroundTelemetryJSONHeader: Encodable {
     let sessionID: UUID
     let startedAt: Date
     let formation: String
-    let shape: String
+    let spacing: String
     let vehicleClass: String
 
     enum CodingKeys: String, CodingKey {
@@ -486,7 +486,7 @@ private struct FormationsPlaygroundTelemetryJSONHeader: Encodable {
         case sessionID = "session_id"
         case startedAt = "started_at"
         case formation
-        case shape
+        case spacing
         case vehicleClass = "vehicle_class"
     }
 }

@@ -192,7 +192,7 @@ final class MissionRunSquadFollowSubsystem {
             primaryAssignmentID: squad.primaryAssignment.id,
             mission: environment?.template
         )
-        let shape = resolvedSquadFormationShape(
+        let shape = resolvedSquadFormationSpacing(
             primaryAssignmentID: squad.primaryAssignment.id,
             mission: environment?.template
         )
@@ -201,7 +201,7 @@ final class MissionRunSquadFollowSubsystem {
             task: task,
             primaryGranularClass: squad.primaryRosterDevice.vehicleClass,
             formation: formation,
-            shape: shape,
+            spacing: shape,
             mission: environment?.template
         )
         return bindings.enumerated().map { ordinal, binding in
@@ -1778,20 +1778,20 @@ final class MissionRunSquadFollowSubsystem {
         return MissionRunPolicyResolution.resolvedSquadFormation(assignment: assignment, mission: mission)
     }
 
-    private func resolvedSquadFormationShape(
+    private func resolvedSquadFormationSpacing(
         primaryAssignmentID: UUID,
         mission: Mission?
-    ) -> MissionSquadFormationShape {
+    ) -> MissionSquadFormationSpacing {
         guard let environment,
               let mission,
               let assignment = environment.assignments.first(where: { $0.id == primaryAssignmentID })
         else { return .normal }
-        if assignment.policies.squadFormationShapeOverride == nil,
+        if assignment.policies.squadFormationSpacingOverride == nil,
            let brain = brainSquadTuning(primaryAssignmentID: primaryAssignmentID, mission: mission),
-           let shape = brain.shape {
+           let shape = brain.formationPackSpacing {
             return shape
         }
-        return MissionRunPolicyResolution.resolvedSquadFormationShape(assignment: assignment, mission: mission)
+        return MissionRunPolicyResolution.resolvedSquadFormationSpacing(assignment: assignment, mission: mission)
     }
 
     private func resolvedSquadConvoySpacing(
@@ -1799,17 +1799,17 @@ final class MissionRunSquadFollowSubsystem {
         task: MissionTask,
         primaryGranularClass: FleetVehicleType?,
         formation: MissionSquadFormationKind,
-        shape: MissionSquadFormationShape,
+        spacing: MissionSquadFormationSpacing,
         mission: Mission?
     ) -> MissionSquadConvoySpacing {
         if let brain = brainSquadTuning(primaryAssignmentID: primaryAssignmentID, mission: mission),
-           let spacing = brain.spacing {
-            return spacing
+           let convoySpacing = brain.convoySpacing {
+            return convoySpacing
         }
         return MissionSquadConvoySpacingPolicy.resolvedSpacing(
             taskPattern: task.pattern,
             primaryGranularClass: primaryGranularClass,
-            shape: shape,
+            spacing: spacing,
             formation: formation
         )
     }
@@ -1856,13 +1856,13 @@ final class MissionRunSquadFollowSubsystem {
             return nil
         }()
         let formation = resolvedSquadFormation(primaryAssignmentID: primaryAssignmentID, mission: mission)
-        let shape = resolvedSquadFormationShape(primaryAssignmentID: primaryAssignmentID, mission: mission)
+        let shape = resolvedSquadFormationSpacing(primaryAssignmentID: primaryAssignmentID, mission: mission)
         let spacing = resolvedSquadConvoySpacing(
             primaryAssignmentID: primaryAssignmentID,
             task: task,
             primaryGranularClass: primaryDevice?.vehicleClass ?? wingmanClass,
             formation: formation,
-            shape: shape,
+            spacing: shape,
             mission: mission
         )
         var ordinal = 0

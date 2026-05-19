@@ -27,8 +27,8 @@ final class GuardianBrainPinDefaultsStoreTests: XCTestCase {
         XCTAssertEqual(bindings[0].taskKindRaw, TrainingTaskKind.reverseIntoSlot.rawValue)
     }
 
-    func test_missionProduct_includesBrainsSection() {
-        XCTAssertTrue(GuardianAppProduct.mission.includesSidebarSection(.brains))
-        XCTAssertFalse(GuardianAppProduct.training.includesSidebarSection(.brains))
+    func test_missionProduct_includesBrainsSettingsPane() {
+        XCTAssertTrue(SettingsPane.visiblePanes(for: .mission).contains(.brains))
+        XCTAssertFalse(SettingsPane.visiblePanes(for: .training).contains(.brains))
     }
 }

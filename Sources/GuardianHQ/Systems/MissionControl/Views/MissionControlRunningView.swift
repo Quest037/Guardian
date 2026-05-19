@@ -150,6 +150,8 @@ struct MissionLiveVehicleHealthCard: View {
     let slotTitle: String
     /// Same text as roster slot subtitle (`roleType` · position hint, or "—").
     let rosterSubtitle: String
+    /// When true, ``rosterSubtitle`` uses ``FleetVehicleOperationalModel/lifecycleStatus`` semantic color (e.g. two-word telemetry status).
+    var rosterSubtitleUsesLifecycleSemanticColor: Bool = false
     /// Imported brain label for this vehicle class (`displayName · vN`), when bound on the run.
     var brainBindingCaption: String? = nil
     /// Canonical short stream label with brackets (e.g. `[UAV-C:1]`); `—` when unresolved.
@@ -184,6 +186,14 @@ struct MissionLiveVehicleHealthCard: View {
 
     private var cardFill: Color { theme.backgroundElevated }
     private var cardStrokeNeutral: Color { theme.borderSubtle }
+
+    private var rosterSubtitleForeground: Color {
+        if rosterSubtitleUsesLifecycleSemanticColor,
+           let lifecycle = vehicleModel.lifecycleStatus {
+            return lifecycle.color.uiColor
+        }
+        return theme.textSecondary
+    }
 
     private var showCompactBattery: Bool {
         MissionLiveVehicleHealthCardReservePoolPickerPolicy.showCompactBattery(vehicleModel: vehicleModel)
@@ -260,7 +270,7 @@ struct MissionLiveVehicleHealthCard: View {
                     VStack(alignment: .leading, spacing: 0) {
                         Text(rosterSubtitle)
                             .font(GuardianTypography.font(.denseCaption10Regular))
-                            .foregroundStyle(theme.textSecondary)
+                            .foregroundStyle(rosterSubtitleForeground)
                             .lineLimit(1)
                             .truncationMode(.tail)
                         if let brainBindingCaption {

@@ -8,10 +8,24 @@ final class TrainingLabRosterStoreTests: XCTestCase {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let file = dir.appendingPathComponent("roster.json")
 
+        var primary = TrainingLabRosterEntry(vehicleClass: .ugvWheeled, vehicleSizeTier: .medium)
+        primary.slotState = FormationsPlaygroundSlotState(
+            sitlSessionID: UUID(),
+            vehicleID: "training-primary",
+            linkReady: true,
+            preflightPassed: true
+        )
+        var wingman = TrainingLabRosterEntry(vehicleClass: .ugvWheeled, vehicleSizeTier: .small)
+        wingman.slotState = FormationsPlaygroundSlotState(
+            sitlSessionID: UUID(),
+            vehicleID: "training-wing",
+            linkReady: true,
+            preflightPassed: true
+        )
         let squads = [
             TrainingLabSquad(
-                primary: TrainingLabRosterEntry(vehicleClass: .ugvWheeled, vehicleSizeTier: .medium),
-                wingmen: [TrainingLabRosterEntry(vehicleClass: .ugvWheeled, vehicleSizeTier: .small)],
+                primary: primary,
+                wingmen: [wingman],
                 formationPolicy: TrainingLabSquadFormationPolicy(
                     startFormation: .chevron,
                     startSpacing: .loose,

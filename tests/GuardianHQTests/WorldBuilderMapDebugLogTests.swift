@@ -21,6 +21,43 @@ final class WorldBuilderMapDebugLogTests: XCTestCase {
         XCTAssertTrue(line.contains("swiftRejected=false"))
     }
 
+    func test_formationSlotLine_includesPrefixAndDetail() {
+        let line = WorldBuilderMapDebugLog.formationSlotLine("swift push", detail: "linkedSquads=1")
+        XCTAssertTrue(line.hasPrefix(WorldBuilderMapDebugLog.formationSlotPrefix))
+        XCTAssertTrue(line.contains("swift push"))
+        XCTAssertTrue(line.contains("linkedSquads=1"))
+    }
+
+    func test_formationSlotPushSummary_listsZonesAndSquads() {
+        var zones = WorldBuilderZonesSnapshot.empty
+        zones.start = WorldBuilderZoneState(
+            placed: true,
+            centerXM: -10,
+            centerYM: 0,
+            centerZM: 0,
+            radiusM: 25,
+            shape: .square
+        )
+        zones.end = WorldBuilderZoneState(
+            placed: true,
+            centerXM: 10,
+            centerYM: 0,
+            centerZM: 0,
+            radiusM: 25,
+            shape: .square
+        )
+        let summary = WorldBuilderMapDebugLog.formationSlotPushSummary(
+            linkedSquadCount: 1,
+            zones: zones,
+            squadBriefs: ["Alpha vehicles=1 startSlots=1 endSlots=1"],
+            editSquadID: UUID(),
+            mapHalfExtentM: 50
+        )
+        XCTAssertTrue(summary.contains("linkedSquads=1"))
+        XCTAssertTrue(summary.contains("start placed"))
+        XCTAssertTrue(summary.contains("Alpha vehicles=1"))
+    }
+
     func test_zoneSnapshotSummary_includesCenterZMRadiusAndFloor() {
         let zones = WorldBuilderZonesSnapshot(
             start: WorldBuilderZoneState(

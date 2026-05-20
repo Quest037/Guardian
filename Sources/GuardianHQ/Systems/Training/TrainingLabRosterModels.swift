@@ -21,22 +21,28 @@ enum TrainingLabSquadCallsign {
 struct TrainingLabRosterEntry: Identifiable, Equatable, Sendable {
     let id: UUID
     var slotState: FormationsPlaygroundSlotState?
+    /// Fleet vehicle id saved for restore until ``slotState`` reconnects.
+    var restoredLinkVehicleID: String?
     var vehicleClass: TrainingVehicleClass
     var vehicleSizeTier: VehicleSizeTier
 
     init(
         id: UUID = UUID(),
         slotState: FormationsPlaygroundSlotState? = nil,
+        restoredLinkVehicleID: String? = nil,
         vehicleClass: TrainingVehicleClass = .ugvWheeled,
         vehicleSizeTier: VehicleSizeTier = .medium
     ) {
         self.id = id
         self.slotState = slotState
+        self.restoredLinkVehicleID = restoredLinkVehicleID
         self.vehicleClass = vehicleClass
         self.vehicleSizeTier = vehicleSizeTier
     }
 
-    var vehicleID: String? { slotState?.vehicleID }
+    var vehicleID: String? { slotState?.vehicleID ?? restoredLinkVehicleID }
+
+    var hasLinkedSimulator: Bool { slotState != nil }
     var playgroundSlotID: UUID? { slotState?.id }
 }
 
@@ -80,6 +86,10 @@ struct TrainingLabSquad: Identifiable, Equatable, Sendable {
     var isSingleVehicle: Bool { wingmen.isEmpty }
 
     var vehicleCount: Int { allEntries.count }
+
+    var hasLinkedSimulator: Bool {
+        allEntries.contains(where: \.hasLinkedSimulator)
+    }
 }
 
 /// Drag payload token (`entryUUID|squadUUID|role`).

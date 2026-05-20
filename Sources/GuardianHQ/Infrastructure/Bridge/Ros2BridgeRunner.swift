@@ -25,7 +25,7 @@ final class Ros2BridgeRunner {
         let setup = launchPlan.setupScriptPath
         var script = """
         set -euo pipefail
-        source "\(setup)"
+        \(Ros2BridgeLocator.bashRosDiscoveryExportsForScripts)source "\(setup)"
         export GUARDIAN_ROS2_BRIDGE_CONFIG="\(configFilePath)"
         """
 
@@ -39,7 +39,7 @@ final class Ros2BridgeRunner {
         } else if launchPlan.usesBundledMergedInstall {
             script += """
 
-            export GUARDIAN_NAV2_LAUNCH_DISABLED=1
+            \(Ros2BridgeLocator.bashRosDiscoveryExportsForScripts)export GUARDIAN_NAV2_LAUNCH_DISABLED=1
             exec ros2 run guardian_ros2_vehicle_bridge guardian_ros2_vehicle_bridge --config "\(configFilePath)"
             """
         } else {

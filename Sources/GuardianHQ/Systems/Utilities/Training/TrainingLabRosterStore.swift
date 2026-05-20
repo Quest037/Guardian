@@ -7,6 +7,8 @@ enum TrainingLabRosterStore {
     struct PersistedEntry: Codable, Equatable, Sendable {
         var vehicleClass: TrainingVehicleClass
         var vehicleSizeTier: VehicleSizeTier
+        /// Live simulator row; omitted in older snapshots (those squads are not restored).
+        var vehicleID: String?
     }
 
     struct PersistedSquad: Codable, Equatable, Sendable {
@@ -67,44 +69,60 @@ enum TrainingLabRosterStore {
     }
 
     static func snapshot(from squads: [TrainingLabSquad], learningSquadID: UUID?) -> Snapshot {
-        Snapshot(
-            squads: squads.map { squad in
-                PersistedSquad(
-                    id: squad.id,
-                    primary: PersistedEntry(
-                        vehicleClass: squad.primary.vehicleClass,
-                        vehicleSizeTier: squad.primary.vehicleSizeTier
-                    ),
-                    wingmen: squad.wingmen.map {
-                        PersistedEntry(vehicleClass: $0.vehicleClass, vehicleSizeTier: $0.vehicleSizeTier)
-                    },
-                    taskKind: squad.taskKind,
-                    formationPolicy: squad.formationPolicy,
-                    startZoneAnchor: squad.startZoneAnchor,
-                    endZoneAnchor: squad.endZoneAnchor
-                )
-            },
-            learningSquadID: learningSquadID
-        )
+        let persistedSquads: [PersistedSquad] = squads.compactMap { squad in
+            guard let primary = persistedEntry(from: squad.primary) else { return nil }
+            let wingmen = squad.wingmen.compactMap { persistedEntry(from: $0) }
+            return PersistedSquad(
+                id: squad.id,
+                primary: primary,
+                wingmen: wingmen,
+                taskKind: squad.taskKind,
+                formationPolicy: squad.formationPolicy,
+                startZoneAnchor: squad.startZoneAnchor,
+                endZoneAnchor: squad.endZoneAnchor
+            )
+        }
+        let clampedLearningID: UUID? = {
+            guard let learningSquadID, persistedSquads.contains(where: { $0.id == learningSquadID }) else {
+                return persistedSquads.first?.id
+            }
+            return learningSquadID
+        }()
+        return Snapshot(squads: persistedSquads, learningSquadID: clampedLearningID)
     }
 
     static func squads(from snapshot: Snapshot) -> [TrainingLabSquad] {
-        snapshot.squads.map { row in
-            TrainingLabSquad(
+        snapshot.squads.compactMap { row in
+            guard let primary = rosterEntry(from: row.primary) else { return nil }
+            let wingmen = row.wingmen.compactMap { rosterEntry(from: $0) }
+            return TrainingLabSquad(
                 id: row.id,
-                primary: TrainingLabRosterEntry(
-                    vehicleClass: row.primary.vehicleClass,
-                    vehicleSizeTier: row.primary.vehicleSizeTier
-                ),
-                wingmen: row.wingmen.map {
-                    TrainingLabRosterEntry(vehicleClass: $0.vehicleClass, vehicleSizeTier: $0.vehicleSizeTier)
-                },
+                primary: primary,
+                wingmen: wingmen,
                 taskKind: row.taskKind,
                 formationPolicy: row.formationPolicy,
                 startZoneAnchor: row.startZoneAnchor,
                 endZoneAnchor: row.endZoneAnchor
             )
         }
+    }
+
+    private static func persistedEntry(from entry: TrainingLabRosterEntry) -> PersistedEntry? {
+        guard let vehicleID = entry.vehicleID else { return nil }
+        return PersistedEntry(
+            vehicleClass: entry.vehicleClass,
+            vehicleSizeTier: entry.vehicleSizeTier,
+            vehicleID: vehicleID
+        )
+    }
+
+    private static func rosterEntry(from persisted: PersistedEntry) -> TrainingLabRosterEntry? {
+        guard let vehicleID = persisted.vehicleID, !vehicleID.isEmpty else { return nil }
+        return TrainingLabRosterEntry(
+            restoredLinkVehicleID: vehicleID,
+            vehicleClass: persisted.vehicleClass,
+            vehicleSizeTier: persisted.vehicleSizeTier
+        )
     }
 
     static func defaultFileURL() throws -> URL {

@@ -32,6 +32,39 @@ enum WorldBuilderMapDebugLog {
     /// Prefix for start/end zone overlay height / fit tracing (gzweb ↔ Swift).
     static let zoneOverlayPrefix = "zone overlay"
 
+    /// Prefix for Training lab squad formation slot overlays (Swift push ↔ gzweb).
+    static let formationSlotPrefix = "formation slots"
+
+    static func formationSlotLine(_ step: String, detail: String? = nil) -> String {
+        if let detail, !detail.isEmpty {
+            return "\(formationSlotPrefix): \(step) — \(detail)"
+        }
+        return "\(formationSlotPrefix): \(step)"
+    }
+
+    /// Summary for a formation-slot viewport push (linked squads, zone placement, mesh counts).
+    static func formationSlotPushSummary(
+        linkedSquadCount: Int,
+        zones: WorldBuilderZonesSnapshot,
+        squadBriefs: [String],
+        editSquadID: UUID?,
+        mapHalfExtentM: Double
+    ) -> String {
+        var parts: [String] = [
+            String(format: "linkedSquads=%d halfExtent=%.1fm", linkedSquadCount, mapHalfExtentM),
+            zoneSnapshotSummary(zones: zones),
+        ]
+        if let editSquadID {
+            parts.append("editSquad=\(editSquadID.uuidString.prefix(8))…")
+        } else {
+            parts.append("editSquad=nil")
+        }
+        if !squadBriefs.isEmpty {
+            parts.append(squadBriefs.joined(separator: ", "))
+        }
+        return parts.joined(separator: "; ")
+    }
+
     static func zoneOverlayLine(_ step: String, detail: String? = nil) -> String {
         if let detail, !detail.isEmpty {
             return "\(zoneOverlayPrefix): \(step) — \(detail)"

@@ -86,9 +86,9 @@ enum TrainingLabFormationSlotGeometry {
                 wingmanOrdinal: index == 0 ? nil : index - 1,
                 spacing: convoySpacing
             )
-            let center = enuOffset(
-                anchorXM: anchor.centerXM,
-                anchorYM: anchor.centerYM,
+            let center = MissionSquadFormationGeometry.enuMetersFromBodyOffset(
+                originXM: anchor.centerXM,
+                originYM: anchor.centerYM,
                 headingDeg: anchor.headingDeg,
                 forwardM: offset.forwardM,
                 rightM: offset.rightM
@@ -135,9 +135,9 @@ enum TrainingLabFormationSlotGeometry {
                 wingmanOrdinal: slot.slotIndex - 1,
                 spacing: spacing
             )
-            let center = enuOffset(
-                anchorXM: anchor.centerXM,
-                anchorYM: anchor.centerYM,
+            let center = MissionSquadFormationGeometry.enuMetersFromBodyOffset(
+                originXM: anchor.centerXM,
+                originYM: anchor.centerYM,
                 headingDeg: anchor.headingDeg,
                 forwardM: offset.forwardM,
                 rightM: offset.rightM
@@ -188,6 +188,17 @@ enum TrainingLabFormationSlotGeometry {
         return pointInsideZone(x: anchor.centerXM, y: anchor.centerYM, zone: zone)
     }
 
+    /// Operator-visible fit — every vehicle footprint must lie inside the zone (matches map slot outlines).
+    static func groupFitsZoneFromSlots(_ slots: [Slot], zone: WorldBuilderZoneState) -> Bool {
+        guard zone.placed, !slots.isEmpty else { return false }
+        for slot in slots {
+            if !slotFitsZone(slot, zone: zone) {
+                return false
+            }
+        }
+        return true
+    }
+
     static func slotFitsZone(_ slot: Slot, zone: WorldBuilderZoneState) -> Bool {
         guard zone.placed else { return false }
         for corner in orientedFootprintCorners(slot: slot) {
@@ -213,11 +224,32 @@ enum TrainingLabFormationSlotGeometry {
         zone: WorldBuilderZoneState,
         mapHalfExtentM: Double
     ) {
+        clampAnchor(&anchor, circleRadiusM: circleRadiusM, zone: zone, mapHalfExtentM: mapHalfExtentM, snapToZoneCenterWhenOutOfBounds: true)
+    }
+
+    /// Map drag commits — keep operator placement; do not yank the group back to zone centre.
+    static func clampAnchorFromMapDrag(
+        _ anchor: inout TrainingLabZoneFormationAnchor,
+        circleRadiusM: Double,
+        zone: WorldBuilderZoneState,
+        mapHalfExtentM: Double
+    ) {
+        clampAnchor(&anchor, circleRadiusM: circleRadiusM, zone: zone, mapHalfExtentM: mapHalfExtentM, snapToZoneCenterWhenOutOfBounds: false)
+    }
+
+    private static func clampAnchor(
+        _ anchor: inout TrainingLabZoneFormationAnchor,
+        circleRadiusM: Double,
+        zone: WorldBuilderZoneState,
+        mapHalfExtentM: Double,
+        snapToZoneCenterWhenOutOfBounds: Bool
+    ) {
         guard zone.placed else { return }
         let floor = mapFloor(halfExtentM: mapHalfExtentM)
         anchor.centerXM = min(max(anchor.centerXM, floor.minXM + circleRadiusM), floor.maxXM - circleRadiusM)
         anchor.centerYM = min(max(anchor.centerYM, floor.minYM + circleRadiusM), floor.maxYM - circleRadiusM)
-        if !groupFitsZone(anchor: anchor, circleRadiusM: circleRadiusM, zone: zone) {
+        if snapToZoneCenterWhenOutOfBounds,
+           !groupFitsZone(anchor: anchor, circleRadiusM: circleRadiusM, zone: zone) {
             anchor.centerXM = zone.centerXM
             anchor.centerYM = zone.centerYM
         }
@@ -239,21 +271,6 @@ enum TrainingLabFormationSlotGeometry {
             )
         }
         return MissionSquadFormationGeometry.BodyOffsetMeters(forwardM: 0, rightM: 0)
-    }
-
-    private static func enuOffset(
-        anchorXM: Double,
-        anchorYM: Double,
-        headingDeg: Double,
-        forwardM: Double,
-        rightM: Double
-    ) -> (x: Double, y: Double) {
-        let h = headingDeg * .pi / 180
-        let sinH = sin(h)
-        let cosH = cos(h)
-        let eastM = forwardM * sinH + rightM * cosH
-        let northM = forwardM * cosH - rightM * sinH
-        return (anchorXM + eastM, anchorYM + northM)
     }
 
     private static func overlapRadiusM(widthM: Double, lengthM: Double) -> Double {

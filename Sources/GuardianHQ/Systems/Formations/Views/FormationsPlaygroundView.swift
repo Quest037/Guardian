@@ -25,7 +25,6 @@ struct TrainingLabPanelView: View {
     @State private var idleRailTab: TrainingLabPanelTab = .map
     @State private var calibrationContext: FormationsCalibrationContext?
     @State private var addVehicleSimulationPlatform: SimulationPlatform = .ardupilot
-
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
     private var usesFormationMapLayout: Bool {
@@ -191,12 +190,19 @@ struct TrainingLabPanelView: View {
             if live {
                 pushTrainingViewportZones()
                 pushTrainingViewportObstacles()
+                pushTrainingViewportFormationSlots()
             }
         }
-        .onReceive(roster.objectWillChange) { _ in
+        .onChange(of: roster.squads) { _ in
+            pushTrainingViewportFormationSlots()
+        }
+        .onChange(of: roster.formationViewportTick) { _ in
             pushTrainingViewportFormationSlots()
         }
         .onChange(of: roster.learningSquadID) { _ in
+            pushTrainingViewportFormationSlots()
+        }
+        .onChange(of: roster.mapSelectedSquadID) { _ in
             pushTrainingViewportFormationSlots()
         }
         .onChange(of: lab.teaching.vehicleClass) { _ in
@@ -294,8 +300,36 @@ struct TrainingLabPanelView: View {
         )
     }
 
+    private func rotateTrainingFormationHeading(
+        squadID: UUID,
+        phase: TrainingLabFormationSlotGeometry.ZonePhase,
+        deltaDeg: Double
+    ) {
+        guard let manifest = lab.teaching.selectedEnvironment?.manifest else { return }
+        let zones = WorldBuilderZoneManifestSupport.zones(from: manifest)
+        let snapped = roster.rotateZoneFormationHeading(
+            squadID: squadID,
+            phase: phase,
+            deltaDeg: deltaDeg,
+            zones: zones,
+            mapHalfExtentM: trainingGroundHalfExtentM
+        )
+        pushTrainingViewportFormationSlots(zones: zones)
+        if snapped {
+            toastCenter.show(
+                "Formation moved to the nearest clear spot in the zone.",
+                style: .warning,
+                duration: 2.5
+            )
+        }
+    }
+
     private func pushTrainingViewportFormationSlots(zones: WorldBuilderZonesSnapshot? = nil) {
         guard mapIsSelected, lab.teaching.usesGazeboTrainingViewport else {
+            lab.teaching.logMapFormationSlots(
+                "swift push skipped",
+                detail: "mapSelected=\(mapIsSelected) gazeboViewport=\(lab.teaching.usesGazeboTrainingViewport)"
+            )
             viewportFormationSlots.clear()
             return
         }
@@ -305,17 +339,33 @@ struct TrainingLabPanelView: View {
         } else if let manifest = lab.teaching.selectedEnvironment?.manifest {
             resolvedZones = WorldBuilderZoneManifestSupport.zones(from: manifest)
         } else {
+            lab.teaching.logMapFormationSlots("swift push skipped", detail: "no manifest")
             viewportFormationSlots.clear()
             return
         }
         roster.ensureZoneFormationAnchors(zones: resolvedZones)
-        let editID = roster.learningSquadID ?? roster.squads.first?.id
+        let editID = roster.mapSelectedSquadID
+        let formationRows = roster.squads.enumerated().compactMap { index, squad -> (squadIndex: Int, squad: TrainingLabSquad)? in
+            squad.vehicleCount > 0 ? (index, squad) : nil
+        }
         viewportFormationSlots.push(
-            squads: roster.squads,
+            squadRows: formationRows,
             editSquadID: editID,
             zones: resolvedZones,
             mapHalfExtentM: trainingGroundHalfExtentM
         )
+        if formationRows.isEmpty, !roster.squads.isEmpty {
+            lab.teaching.logMapFormationSlots(
+                "swift push warning",
+                detail: "roster has \(roster.squads.count) squad(s) but none with vehicles"
+            )
+        }
+        if !resolvedZones.start.placed || !resolvedZones.end.placed {
+            lab.teaching.logMapFormationSlots(
+                "swift push warning",
+                detail: "zones not both placed — gzweb will not build start/end slot groups"
+            )
+        }
     }
 
     private func presentAddVehicleDrawer(wingmanToSquadID: UUID? = nil) {
@@ -369,6 +419,7 @@ struct TrainingLabPanelView: View {
         lab.teaching.loadPromotedSkill()
         lab.teaching.scheduleNav2PlanPathRefresh()
         lab.formation.syncFromFleetOnAppear(fleetLink: fleetLink)
+        roster.refreshSlotStatesFromFleet()
         GuardianGazeboWebViewerPolicy.showOfflineToastIfNeeded(
             productIncludesGazebo: appProduct.includesGazeboSimulation,
             toastCenter: toastCenter
@@ -471,10 +522,10 @@ struct TrainingLabPanelView: View {
                         showsCameraDebugHUD: fleetLink.isDebugEnabled,
                         groundHalfExtentM: trainingGroundHalfExtentM,
                         orbitMinDistanceM: trainingOrbitMinDistanceM,
-                        onFormationSlotGroupMoved: { squadID, phase, centerXM, centerYM, headingDeg in
+                        onFormationSlotGroupMoved: { squadID, phase, centerXM, centerYM, headingDeg, _ in
                             guard let manifest = lab.teaching.selectedEnvironment?.manifest else { return }
                             let zones = WorldBuilderZoneManifestSupport.zones(from: manifest)
-                            roster.updateZoneFormationAnchor(
+                            let snapped = roster.updateZoneFormationAnchor(
                                 squadID: squadID,
                                 phase: phase,
                                 centerXM: centerXM,
@@ -484,6 +535,23 @@ struct TrainingLabPanelView: View {
                                 mapHalfExtentM: trainingGroundHalfExtentM
                             )
                             pushTrainingViewportFormationSlots(zones: zones)
+                            if snapped {
+                                toastCenter.show(
+                                    "Formation moved to the nearest clear spot in the zone.",
+                                    style: .warning,
+                                    duration: 2.5
+                                )
+                            }
+                        },
+                        onFormationSlotSelected: { squadID in
+                            if let squadID {
+                                roster.selectMapSquad(squadID)
+                            } else {
+                                roster.clearMapSquadSelection()
+                            }
+                        },
+                        onFormationSlotDebug: { line in
+                            lab.teaching.logMapFormationSlotGzweb(line)
                         }
                     )
                     .id(viewport.worldID)
@@ -519,6 +587,7 @@ struct TrainingLabPanelView: View {
             lab.teaching.noteEmbeddedViewport(viewport)
             if case .live = viewport?.phase {
                 pushTrainingViewportObstacles()
+                pushTrainingViewportFormationSlots()
             }
         }
         .onChange(of: fleetLink.isDebugEnabled) { enabled in
@@ -689,7 +758,7 @@ struct TrainingLabPanelView: View {
             }
             .fixedSize(horizontal: true, vertical: false)
 
-            if roster.squads.count > 1 {
+            if roster.showLearningSquadPicker {
                 TrainingLabLearningSquadPicker(
                     roster: roster,
                     controlsLocked: labControlsLocked
@@ -780,9 +849,13 @@ struct TrainingLabPanelView: View {
                     fleetLink: fleetLink,
                     sitl: sitl,
                     missionControl: missionControl,
+                    zones: lab.teaching.selectedEnvironment.map {
+                        WorldBuilderZoneManifestSupport.zones(from: $0.manifest)
+                    } ?? .empty,
                     mapReadyForVehicles: mapIsReadyForVehicles,
                     controlsLocked: labControlsLocked,
                     onPresentAddVehicle: { presentAddVehicleDrawer() },
+                    onPresentAddWingman: { squadID in presentAddVehicleDrawer(wingmanToSquadID: squadID) },
                     onPresentSquadSettings: { squadID, squadIndex in
                         presentSquadSettingsDrawer(squadID: squadID, squadIndex: squadIndex)
                     },
@@ -790,6 +863,13 @@ struct TrainingLabPanelView: View {
                         calibrationContext = FormationsCalibrationContext(
                             vehicleID: vehicleID,
                             fallback: fallback
+                        )
+                    },
+                    onRotateFormation: { squadID, phase, deltaDeg in
+                        rotateTrainingFormationHeading(
+                            squadID: squadID,
+                            phase: phase,
+                            deltaDeg: deltaDeg
                         )
                     }
                 )

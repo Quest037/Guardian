@@ -47,7 +47,7 @@ enum TrainingLabFormationSlotStaging {
             let zone = phase == .start ? zones.start : zones.end
             var phaseSlots: [TrainingLabFormationSlotGeometry.Slot] = []
             for (squadIndex, squad) in squads.enumerated() {
-                let anchor = resolvedAnchor(squad: squad, phase: phase, zone: zone)
+                let anchor = resolvedAnchor(squad: squad, squadIndex: squadIndex, phase: phase, zone: zone)
                 let layout = TrainingLabFormationSlotGeometry.groupLayout(
                     squad: squad,
                     squadIndex: squadIndex,
@@ -98,14 +98,15 @@ enum TrainingLabFormationSlotStaging {
 
     private static func resolvedAnchor(
         squad: TrainingLabSquad,
+        squadIndex: Int,
         phase: TrainingLabFormationSlotGeometry.ZonePhase,
         zone: WorldBuilderZoneState
     ) -> TrainingLabZoneFormationAnchor {
         switch phase {
         case .start:
-            return squad.startZoneAnchor ?? .seeded(in: zone)
+            return squad.startZoneAnchor ?? .defaultForSquadIndex(squadIndex, in: zone)
         case .end:
-            return squad.endZoneAnchor ?? .seeded(in: zone)
+            return squad.endZoneAnchor ?? .defaultForSquadIndex(squadIndex, in: zone)
         }
     }
 }

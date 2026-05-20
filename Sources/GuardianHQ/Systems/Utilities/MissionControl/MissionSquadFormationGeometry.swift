@@ -137,6 +137,24 @@ enum MissionSquadFormationGeometry {
         return (row, remaining, countInRow)
     }
 
+    // MARK: - ENU metres (training floor / Gazebo map)
+
+    /// Body-frame offset to map ENU metres (X east, Y north) — same convention as ``offsetCoordinate``.
+    static func enuMetersFromBodyOffset(
+        originXM: Double,
+        originYM: Double,
+        headingDeg: Double,
+        forwardM: Double,
+        rightM: Double
+    ) -> (x: Double, y: Double) {
+        let h = headingDeg * .pi / 180
+        let sinH = sin(h)
+        let cosH = cos(h)
+        let eastM = forwardM * sinH + rightM * cosH
+        let northM = forwardM * cosH - rightM * sinH
+        return (originXM + eastM, originYM + northM)
+    }
+
     // MARK: - Geo helpers
 
     static func offsetCoordinate(

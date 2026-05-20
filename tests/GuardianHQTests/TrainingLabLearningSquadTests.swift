@@ -6,9 +6,21 @@ final class TrainingLabLearningSquadTests: XCTestCase {
     func test_clamp_defaults_to_alpha_when_unset() {
         let alpha = UUID()
         let beta = UUID()
+        var alphaPrimary = TrainingLabRosterEntry(vehicleClass: .ugvWheeled)
+        alphaPrimary.slotState = FormationsPlaygroundSlotState(
+            sitlSessionID: UUID(),
+            vehicleID: "a",
+            linkReady: true
+        )
+        var betaPrimary = TrainingLabRosterEntry(vehicleClass: .ugvTracked)
+        betaPrimary.slotState = FormationsPlaygroundSlotState(
+            sitlSessionID: UUID(),
+            vehicleID: "b",
+            linkReady: true
+        )
         let squads = [
-            TrainingLabSquad(id: alpha, primary: TrainingLabRosterEntry(vehicleClass: .ugvWheeled)),
-            TrainingLabSquad(id: beta, primary: TrainingLabRosterEntry(vehicleClass: .ugvTracked)),
+            TrainingLabSquad(id: alpha, primary: alphaPrimary),
+            TrainingLabSquad(id: beta, primary: betaPrimary),
         ]
         XCTAssertEqual(
             TrainingLabLearningSquadSelection.clampedLearningSquadID(current: nil, squads: squads),
@@ -16,10 +28,35 @@ final class TrainingLabLearningSquadTests: XCTestCase {
         )
     }
 
+    func test_clamp_skips_unlinked_squads() {
+        let ghost = UUID()
+        let alpha = UUID()
+        var alphaPrimary = TrainingLabRosterEntry(vehicleClass: .ugvWheeled)
+        alphaPrimary.slotState = FormationsPlaygroundSlotState(
+            sitlSessionID: UUID(),
+            vehicleID: "linked",
+            linkReady: true
+        )
+        let squads = [
+            TrainingLabSquad(id: ghost, primary: TrainingLabRosterEntry(vehicleClass: .ugvTracked)),
+            TrainingLabSquad(id: alpha, primary: alphaPrimary),
+        ]
+        XCTAssertEqual(
+            TrainingLabLearningSquadSelection.clampedLearningSquadID(current: ghost, squads: squads),
+            alpha
+        )
+    }
+
     func test_clamp_after_removed_squad_falls_back_to_alpha() {
         let alpha = UUID()
         let beta = UUID()
-        let squads = [TrainingLabSquad(id: alpha, primary: TrainingLabRosterEntry(vehicleClass: .ugvWheeled))]
+        var alphaPrimary = TrainingLabRosterEntry(vehicleClass: .ugvWheeled)
+        alphaPrimary.slotState = FormationsPlaygroundSlotState(
+            sitlSessionID: UUID(),
+            vehicleID: "a",
+            linkReady: true
+        )
+        let squads = [TrainingLabSquad(id: alpha, primary: alphaPrimary)]
         XCTAssertEqual(
             TrainingLabLearningSquadSelection.clampedLearningSquadID(current: beta, squads: squads),
             alpha
@@ -46,14 +83,28 @@ final class TrainingLabLearningSquadTests: XCTestCase {
         let file = dir.appendingPathComponent("roster.json")
 
         let beta = UUID()
+        var alphaPrimary = TrainingLabRosterEntry(vehicleClass: .ugvWheeled)
+        alphaPrimary.slotState = FormationsPlaygroundSlotState(
+            sitlSessionID: UUID(),
+            vehicleID: "training-alpha",
+            linkReady: true,
+            preflightPassed: true
+        )
+        var betaPrimary = TrainingLabRosterEntry(vehicleClass: .ugvTracked)
+        betaPrimary.slotState = FormationsPlaygroundSlotState(
+            sitlSessionID: UUID(),
+            vehicleID: "training-beta",
+            linkReady: true,
+            preflightPassed: true
+        )
         let squads = [
             TrainingLabSquad(
-                primary: TrainingLabRosterEntry(vehicleClass: .ugvWheeled),
+                primary: alphaPrimary,
                 taskKind: .approachSlotForward
             ),
             TrainingLabSquad(
                 id: beta,
-                primary: TrainingLabRosterEntry(vehicleClass: .ugvTracked),
+                primary: betaPrimary,
                 taskKind: .alignHeadingAtSlot
             ),
         ]
@@ -64,7 +115,10 @@ final class TrainingLabLearningSquadTests: XCTestCase {
         let loaded = try TrainingLabRosterStore.load(fileURL: file)
         XCTAssertEqual(loaded.learningSquadID, beta)
         let restored = TrainingLabRosterStore.squads(from: loaded)
+        XCTAssertEqual(restored.count, 2)
         XCTAssertEqual(restored[0].taskKind, .approachSlotForward)
+        XCTAssertEqual(restored[0].primary.restoredLinkVehicleID, "training-alpha")
         XCTAssertEqual(restored[1].taskKind, .alignHeadingAtSlot)
+        XCTAssertEqual(restored[1].primary.restoredLinkVehicleID, "training-beta")
     }
 }

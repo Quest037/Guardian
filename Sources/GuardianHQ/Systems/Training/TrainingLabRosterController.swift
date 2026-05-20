@@ -7,7 +7,11 @@ final class TrainingLabRosterController: ObservableObject {
     @Published private(set) var squads: [TrainingLabSquad] = []
     /// Squad whose skill task is in focus for teach / promote (defaults to Alpha / first squad).
     @Published var learningSquadID: UUID?
+    /// Squad selected on the training map for formation edit (blue outline + drag).
+    @Published var mapSelectedSquadID: UUID?
     @Published private(set) var isBusy = false
+    /// Bumps when squad roster links or zone anchors change so the Gazebo viewport refreshes formation slots.
+    @Published private(set) var formationViewportTick = UUID()
 
     private weak var training: TrainingPanelController?
     private weak var playground: FormationsPlaygroundController?
@@ -47,6 +51,24 @@ final class TrainingLabRosterController: ObservableObject {
         squads.flatMap { $0.allEntries.compactMap(\.slotState) }
     }
 
+    /// Squads with at least one linked simulator (excludes persisted shells awaiting reconnect).
+    var squadsWithLinkedSimulators: [TrainingLabSquad] {
+        squads.filter(\.hasLinkedSimulator)
+    }
+
+    var canAddAnotherSquad: Bool {
+        squads.count < TrainingLabRosterLimits.maxSquads
+    }
+
+    func canAddWingman(to squadID: UUID) -> Bool {
+        guard let squad = squad(id: squadID) else { return false }
+        return squad.vehicleCount < TrainingLabRosterLimits.maxVehiclesPerSquad
+    }
+
+    var showLearningSquadPicker: Bool {
+        squadsWithLinkedSimulators.count > 1
+    }
+
     func attach(
         lab: TrainingLabController,
         fleetLink: FleetLinkService,
@@ -66,9 +88,7 @@ final class TrainingLabRosterController: ObservableObject {
         guard let snapshot = try? TrainingLabRosterStore.load() else { return }
         squads = TrainingLabRosterStore.squads(from: snapshot)
         learningSquadID = snapshot.learningSquadID
-        clampLearningSquadSelection()
-        syncPlaygroundSlots()
-        syncTrainingFromLearningSquad()
+        reconcileRosterLinksAfterRestore()
     }
 
     func persistRoster() {
@@ -81,6 +101,38 @@ final class TrainingLabRosterController: ObservableObject {
         learningSquadID = id
         syncTrainingFromLearningSquad()
         persistRoster()
+    }
+
+    /// Map + Vehicles rail card selection for formation edit (independent of learning squad).
+    func selectMapSquad(_ squadID: UUID) {
+        guard squads.contains(where: { $0.id == squadID }) else { return }
+        mapSelectedSquadID = squadID
+        markFormationViewportDirty()
+    }
+
+    /// Toggle map selection for a squad (MCS-style blue outline on primary slots).
+    func toggleMapSquadSelection(_ squadID: UUID) {
+        guard squads.contains(where: { $0.id == squadID }) else { return }
+        if mapSelectedSquadID == squadID {
+            mapSelectedSquadID = nil
+        } else {
+            selectMapSquad(squadID)
+        }
+    }
+
+    func clearMapSquadSelection() {
+        guard mapSelectedSquadID != nil else { return }
+        mapSelectedSquadID = nil
+        markFormationViewportDirty()
+    }
+
+    private func pruneMapSelectionIfSquadRemoved() {
+        guard let id = mapSelectedSquadID else { return }
+        guard squads.contains(where: { $0.id == id }) else {
+            mapSelectedSquadID = nil
+            markFormationViewportDirty()
+            return
+        }
     }
 
     func updateTaskKind(squadID: UUID, taskKind: TrainingTaskKind) {
@@ -99,31 +151,56 @@ final class TrainingLabRosterController: ObservableObject {
         )
     }
 
-    func refreshSlotStatesFromFleet() {
-        guard let fleetLink, let playground else { return }
+    func refreshSlotStatesFromFleet(stripFailedLinks: Bool = true) {
+        guard let playground else { return }
         for squadIndex in squads.indices {
-            refreshEntry(&squads[squadIndex].primary, fleetLink: fleetLink, playground: playground)
+            refreshEntry(&squads[squadIndex].primary, playground: playground)
             for wingIndex in squads[squadIndex].wingmen.indices {
-                refreshEntry(&squads[squadIndex].wingmen[wingIndex], fleetLink: fleetLink, playground: playground)
+                refreshEntry(&squads[squadIndex].wingmen[wingIndex], playground: playground)
             }
         }
+        if stripFailedLinks {
+            stripUnlinkedEntries()
+        }
+        compactEmptySquads()
+        clampLearningSquadSelection()
         syncPlaygroundSlots()
         syncTrainingFromLearningSquad()
     }
 
     private func refreshEntry(
         _ entry: inout TrainingLabRosterEntry,
-        fleetLink: FleetLinkService,
         playground: FormationsPlaygroundController
     ) {
         guard let vehicleID = entry.vehicleID else { return }
         if let match = playground.slots.first(where: { $0.vehicleID == vehicleID }) {
             entry.slotState = match
+            entry.restoredLinkVehicleID = nil
         }
+    }
+
+    /// Drops persisted shells that did not reconnect to a live training SITL row.
+    private func reconcileRosterLinksAfterRestore() {
+        refreshSlotStatesFromFleet(stripFailedLinks: false)
+        clampLearningSquadSelection()
+        syncPlaygroundSlots()
+        syncTrainingFromLearningSquad()
+    }
+
+    private func stripUnlinkedEntries() {
+        for index in squads.indices {
+            squads[index].wingmen.removeAll { !$0.hasLinkedSimulator }
+        }
+        squads.removeAll { !$0.hasLinkedSimulator }
     }
 
     func syncPlaygroundSlots() {
         playground?.replaceSlotsForTrainingLab(allSlotStates)
+        markFormationViewportDirty()
+    }
+
+    func markFormationViewportDirty() {
+        formationViewportTick = UUID()
     }
 
     func syncTrainingFromLearningSquad() {
@@ -169,10 +246,26 @@ final class TrainingLabRosterController: ObservableObject {
 
         var linked = entry
         linked.slotState = slot
+        linked.restoredLinkVehicleID = nil
 
         if let squadID, let squadIndex = squads.firstIndex(where: { $0.id == squadID }) {
+            guard squads[squadIndex].vehicleCount < TrainingLabRosterLimits.maxVehiclesPerSquad else {
+                training.showOperatorToast(
+                    "This squad is full (\(TrainingLabRosterLimits.maxVehiclesPerSquad) vehicles max).",
+                    style: .warning
+                )
+                return
+            }
             squads[squadIndex].wingmen.append(linked)
+            squads[squadIndex] = squads[squadIndex]
         } else {
+            guard squads.count < TrainingLabRosterLimits.maxSquads else {
+                training.showOperatorToast(
+                    "Squad limit reached (\(TrainingLabRosterLimits.maxSquads) squads max).",
+                    style: .warning
+                )
+                return
+            }
             squads.append(TrainingLabSquad(primary: linked))
             if learningSquadID == nil {
                 learningSquadID = squads.last?.id
@@ -182,6 +275,7 @@ final class TrainingLabRosterController: ObservableObject {
         syncPlaygroundSlots()
         syncTrainingFromLearningSquad()
         persistRoster()
+        markFormationViewportDirty()
     }
 
     func addPrimaryVehicle(
@@ -236,9 +330,17 @@ final class TrainingLabRosterController: ObservableObject {
         syncPlaygroundSlots()
         syncTrainingFromLearningSquad()
         persistRoster()
+        markFormationViewportDirty()
     }
 
     func absorbPrimaryIntoSquad(draggedEntryID: UUID, targetSquadID: UUID) {
+        guard canAddWingman(to: targetSquadID) else {
+            training?.showOperatorToast(
+                "This squad is full (\(TrainingLabRosterLimits.maxVehiclesPerSquad) vehicles max).",
+                style: .warning
+            )
+            return
+        }
         guard TrainingLabRosterEditing.absorbPrimaryIntoSquad(
             squads: &squads,
             draggedEntryID: draggedEntryID,
@@ -249,10 +351,18 @@ final class TrainingLabRosterController: ObservableObject {
         syncPlaygroundSlots()
         syncTrainingFromLearningSquad()
         persistRoster()
+        markFormationViewportDirty()
     }
 
     /// Moves a wingman onto another squad (drop on that squad's primary or any wingman card).
     func moveWingmanToSquad(entryID: UUID, targetSquadID: UUID) {
+        guard canAddWingman(to: targetSquadID) else {
+            training?.showOperatorToast(
+                "This squad is full (\(TrainingLabRosterLimits.maxVehiclesPerSquad) vehicles max).",
+                style: .warning
+            )
+            return
+        }
         guard TrainingLabRosterEditing.moveWingmanToSquad(
             squads: &squads,
             entryID: entryID,
@@ -261,6 +371,7 @@ final class TrainingLabRosterController: ObservableObject {
         syncPlaygroundSlots()
         syncTrainingFromLearningSquad()
         persistRoster()
+        markFormationViewportDirty()
     }
 
     /// Re-runs preflight on a linked simulator row (Training lab cards).
@@ -274,6 +385,13 @@ final class TrainingLabRosterController: ObservableObject {
     }
 
     func promoteWingmanToNewSquad(entryID: UUID) {
+        guard squads.count < TrainingLabRosterLimits.maxSquads else {
+            training?.showOperatorToast(
+                "Squad limit reached (\(TrainingLabRosterLimits.maxSquads) squads max).",
+                style: .warning
+            )
+            return
+        }
         guard let source = entryLocation(entryID: entryID), !source.isPrimary else { return }
         let wingman = squads[source.squadIndex].wingmen.remove(at: source.wingIndex)
         squads.append(TrainingLabSquad(primary: wingman))
@@ -281,6 +399,7 @@ final class TrainingLabRosterController: ObservableObject {
         syncPlaygroundSlots()
         syncTrainingFromLearningSquad()
         persistRoster()
+        markFormationViewportDirty()
     }
 
     func squadIndex(for squadID: UUID) -> Int? {
@@ -291,28 +410,53 @@ final class TrainingLabRosterController: ObservableObject {
         squads.first(where: { $0.id == id })
     }
 
+    private func anchorClusteredAtZoneCenter(
+        _ anchor: TrainingLabZoneFormationAnchor?,
+        zone: WorldBuilderZoneState
+    ) -> Bool {
+        guard let anchor, zone.placed else { return false }
+        let epsilonM = 0.75
+        return abs(anchor.centerXM - zone.centerXM) < epsilonM
+            && abs(anchor.centerYM - zone.centerYM) < epsilonM
+    }
+
     func updateFormationPolicy(squadID: UUID, policy: TrainingLabSquadFormationPolicy) {
         guard let index = squads.firstIndex(where: { $0.id == squadID }) else { return }
         squads[index].formationPolicy = policy
         persistRoster()
+        markFormationViewportDirty()
     }
 
-    /// Seeds missing start/end anchors at zone centres when zones are placed.
+    /// Seeds missing start/end anchors; respreads squads still parked on the zone centre (legacy bundles).
     func ensureZoneFormationAnchors(zones: WorldBuilderZonesSnapshot) {
         var changed = false
-        for index in squads.indices {
-            if squads[index].startZoneAnchor == nil, zones.start.placed {
-                squads[index].startZoneAnchor = .seeded(in: zones.start)
-                changed = true
+        for index in squads.indices where squads[index].vehicleCount > 0 {
+            if zones.start.placed {
+                if squads[index].startZoneAnchor == nil {
+                    squads[index].startZoneAnchor = .defaultForSquadIndex(index, in: zones.start)
+                    changed = true
+                } else if index > 0, anchorClusteredAtZoneCenter(squads[index].startZoneAnchor, zone: zones.start) {
+                    squads[index].startZoneAnchor = .defaultForSquadIndex(index, in: zones.start)
+                    changed = true
+                }
             }
-            if squads[index].endZoneAnchor == nil, zones.end.placed {
-                squads[index].endZoneAnchor = .seeded(in: zones.end)
-                changed = true
+            if zones.end.placed {
+                if squads[index].endZoneAnchor == nil {
+                    squads[index].endZoneAnchor = .defaultForSquadIndex(index, in: zones.end)
+                    changed = true
+                } else if index > 0, anchorClusteredAtZoneCenter(squads[index].endZoneAnchor, zone: zones.end) {
+                    squads[index].endZoneAnchor = .defaultForSquadIndex(index, in: zones.end)
+                    changed = true
+                }
             }
         }
-        if changed { persistRoster() }
+        if changed {
+            persistRoster()
+            markFormationViewportDirty()
+        }
     }
 
+    @discardableResult
     func updateZoneFormationAnchor(
         squadID: UUID,
         phase: TrainingLabFormationSlotGeometry.ZonePhase,
@@ -321,34 +465,71 @@ final class TrainingLabRosterController: ObservableObject {
         headingDeg: Double,
         zones: WorldBuilderZonesSnapshot,
         mapHalfExtentM: Double
-    ) {
-        guard let index = squads.firstIndex(where: { $0.id == squadID }) else { return }
+    ) -> Bool {
+        guard let index = squads.firstIndex(where: { $0.id == squadID }) else { return false }
         let zone = phase == .start ? zones.start : zones.end
-        guard zone.placed else { return }
-        var anchor = TrainingLabZoneFormationAnchor(
+        guard zone.placed else { return false }
+        let proposed = TrainingLabZoneFormationAnchor(
             centerXM: centerXM,
             centerYM: centerYM,
             headingDeg: headingDeg
         )
-        let layout = TrainingLabFormationSlotGeometry.groupLayout(
+        let prior: TrainingLabZoneFormationAnchor? = switch phase {
+        case .start: squads[index].startZoneAnchor
+        case .end: squads[index].endZoneAnchor
+        }
+        let resolved = TrainingLabFormationSlotPlacement.resolveAnchorAfterMapDrag(
+            proposed: proposed,
+            prior: prior,
             squad: squads[index],
             squadIndex: index,
             phase: phase,
-            anchor: anchor
-        )
-        TrainingLabFormationSlotGeometry.clampAnchor(
-            &anchor,
-            circleRadiusM: layout.circleRadiusM,
-            zone: zone,
+            squads: squads,
+            zones: zones,
             mapHalfExtentM: mapHalfExtentM
         )
         switch phase {
         case .start:
-            squads[index].startZoneAnchor = anchor
+            squads[index].startZoneAnchor = resolved.anchor
         case .end:
-            squads[index].endZoneAnchor = anchor
+            squads[index].endZoneAnchor = resolved.anchor
         }
         persistRoster()
+        return resolved.adjustedFromDrop
+    }
+
+    @discardableResult
+    func rotateZoneFormationHeading(
+        squadID: UUID,
+        phase: TrainingLabFormationSlotGeometry.ZonePhase,
+        deltaDeg: Double,
+        zones: WorldBuilderZonesSnapshot,
+        mapHalfExtentM: Double
+    ) -> Bool {
+        guard let index = squads.firstIndex(where: { $0.id == squadID }) else { return false }
+        let zone = phase == .start ? zones.start : zones.end
+        guard zone.placed else { return false }
+        var anchor: TrainingLabZoneFormationAnchor = switch phase {
+        case .start:
+            squads[index].startZoneAnchor ?? .defaultForSquadIndex(index, in: zone)
+        case .end:
+            squads[index].endZoneAnchor ?? .defaultForSquadIndex(index, in: zone)
+        }
+        var heading = anchor.headingDeg + deltaDeg
+        while heading < 0 { heading += 360 }
+        while heading >= 360 { heading -= 360 }
+        anchor.headingDeg = heading
+        let snapped = updateZoneFormationAnchor(
+            squadID: squadID,
+            phase: phase,
+            centerXM: anchor.centerXM,
+            centerYM: anchor.centerYM,
+            headingDeg: anchor.headingDeg,
+            zones: zones,
+            mapHalfExtentM: mapHalfExtentM
+        )
+        markFormationViewportDirty()
+        return snapped
     }
 
     /// Stops the simulator and removes one roster row; promotes a wingman if the primary is removed.
@@ -376,6 +557,7 @@ final class TrainingLabRosterController: ObservableObject {
         syncPlaygroundSlots()
         syncTrainingFromLearningSquad()
         persistRoster()
+        markFormationViewportDirty()
     }
 
     func entryLocation(entryID: UUID) -> (squadIndex: Int, squad: TrainingLabSquad, isPrimary: Bool, wingIndex: Int, entry: TrainingLabRosterEntry)? {
@@ -393,6 +575,7 @@ final class TrainingLabRosterController: ObservableObject {
     private func setEntrySlot(entryID: UUID, slot: FormationsPlaygroundSlotState) {
         guard var location = entryLocation(entryID: entryID) else { return }
         location.entry.slotState = slot
+        location.entry.restoredLinkVehicleID = nil
         if location.isPrimary {
             squads[location.squadIndex].primary = location.entry
         } else {
@@ -401,12 +584,14 @@ final class TrainingLabRosterController: ObservableObject {
     }
 
     private func compactEmptySquads() {
-        squads.removeAll { $0.allEntries.allSatisfy { $0.slotState == nil } }
+        squads.removeAll { $0.allEntries.allSatisfy { $0.vehicleID == nil } }
+        pruneMapSelectionIfSquadRemoved()
     }
 
     func clearRoster() {
         squads = []
         learningSquadID = nil
+        mapSelectedSquadID = nil
         syncPlaygroundSlots()
         syncTrainingFromLearningSquad()
         persistRoster()

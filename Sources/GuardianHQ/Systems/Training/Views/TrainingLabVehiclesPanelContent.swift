@@ -8,11 +8,19 @@ struct TrainingLabVehiclesPanelContent: View {
     @ObservedObject var fleetLink: FleetLinkService
     @ObservedObject var sitl: SitlService
     let missionControl: MissionControlStore
+    let zones: WorldBuilderZonesSnapshot
     let mapReadyForVehicles: Bool
     let controlsLocked: Bool
     let onPresentAddVehicle: () -> Void
+    let onPresentAddWingman: (_ squadID: UUID) -> Void
     let onPresentSquadSettings: (_ squadID: UUID, _ squadIndex: Int) -> Void
     let onOpenCalibration: (String, FleetVehicleModel?) -> Void
+    /// Degrees to add to formation heading in one zone (e.g. ±90).
+    let onRotateFormation: (
+        _ squadID: UUID,
+        _ phase: TrainingLabFormationSlotGeometry.ZonePhase,
+        _ deltaDeg: Double
+    ) -> Void
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var retryingEntryIDs: Set<UUID> = []
@@ -21,7 +29,7 @@ struct TrainingLabVehiclesPanelContent: View {
 
     var body: some View {
         Group {
-            if roster.squads.isEmpty {
+            if roster.allSlotStates.isEmpty {
                 emptyState
             } else {
                 rosterScroll
@@ -64,7 +72,7 @@ struct TrainingLabVehiclesPanelContent: View {
     private var rosterScroll: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GuardianSpacing.sectionStack) {
-                if mapReadyForVehicles {
+                if mapReadyForVehicles, roster.canAddAnotherSquad {
                     HStack {
                         Spacer(minLength: 0)
                         GuardianPrimaryProminentButton(title: "Add vehicle") {
@@ -75,7 +83,9 @@ struct TrainingLabVehiclesPanelContent: View {
                 }
 
                 ForEach(Array(roster.squads.enumerated()), id: \.element.id) { squadIndex, squad in
-                    squadSection(squadIndex: squadIndex, squad: squad)
+                    if squad.hasLinkedSimulator {
+                        squadSection(squadIndex: squadIndex, squad: squad)
+                    }
                 }
 
                 newPrimaryDropZone
@@ -134,10 +144,85 @@ struct TrainingLabVehiclesPanelContent: View {
                     }
                 }
             }
+
+            if mapReadyForVehicles, roster.canAddWingman(to: squad.id) {
+                HStack {
+                    Spacer(minLength: 0)
+                    GuardianThemedButton(
+                        title: "Add wingman",
+                        accent: .primary,
+                        surface: .outline,
+                        size: .small,
+                        action: { onPresentAddWingman(squad.id) }
+                    )
+                    .disabled(controlsLocked || roster.isBusy)
+                }
+            }
+
+            if roster.mapSelectedSquadID == squad.id {
+                formationRotateControls(squadID: squad.id)
+            }
         }
     }
 
+    @ViewBuilder
+    private func formationRotateControls(squadID: UUID) -> some View {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+            if zones.start.placed {
+                formationRotateRow(
+                    squadID: squadID,
+                    phase: .start,
+                    label: "Start zone facing"
+                )
+            }
+            if zones.end.placed {
+                formationRotateRow(
+                    squadID: squadID,
+                    phase: .end,
+                    label: "End zone facing"
+                )
+            }
+        }
+    }
+
+    private func formationRotateRow(
+        squadID: UUID,
+        phase: TrainingLabFormationSlotGeometry.ZonePhase,
+        label: String
+    ) -> some View {
+        HStack(spacing: GuardianSpacing.sm) {
+            Text(label)
+                .font(GuardianTypography.font(.denseCaption10Regular))
+                .foregroundStyle(theme.textSecondary)
+            Spacer(minLength: GuardianSpacing.xs)
+            GuardianThemedButton(
+                title: "Rotate left",
+                accent: .primary,
+                surface: .outline,
+                size: .small,
+                action: { onRotateFormation(squadID, phase, -90) }
+            )
+            .disabled(controlsLocked || roster.isBusy)
+            GuardianThemedButton(
+                title: "Rotate right",
+                accent: .primary,
+                surface: .outline,
+                size: .small,
+                action: { onRotateFormation(squadID, phase, 90) }
+            )
+            .disabled(controlsLocked || roster.isBusy)
+        }
+        .help("Turn this squad’s formation in the \(phase == .start ? "start" : "end") zone. Drag the gold handle on that zone’s map marker for fine control.")
+    }
+
+    @ViewBuilder
     private var newPrimaryDropZone: some View {
+        if roster.canAddAnotherSquad {
+            newPrimaryDropZoneContent
+        }
+    }
+
+    private var newPrimaryDropZoneContent: some View {
         RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous)
             .strokeBorder(theme.borderSubtle, style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
             .frame(maxWidth: .infinity)
@@ -206,6 +291,22 @@ struct TrainingLabVehiclesPanelContent: View {
                 }
             }
         )
+        .overlay {
+            if isPrimary, roster.mapSelectedSquadID == squadID {
+                RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous)
+                    .strokeBorder(GuardianSemanticColors.infoForeground.opacity(0.55), lineWidth: 2)
+                    .allowsHitTesting(false)
+            }
+        }
+        .contentShape(RoundedRectangle(cornerRadius: GuardianCardLayout.cornerRadius, style: .continuous))
+        .onTapGesture {
+            guard isPrimary else { return }
+            if roster.mapSelectedSquadID == squadID {
+                roster.clearMapSquadSelection()
+            } else {
+                roster.selectMapSquad(squadID)
+            }
+        }
         .onDrag {
             let payload: TrainingLabVehicleDragPayload = isPrimary
                 ? .primary(entryID: entry.id, squadID: squadID)

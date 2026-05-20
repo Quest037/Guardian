@@ -40,6 +40,10 @@ final class TrainingPanelController: ObservableObject {
     /// Timestamped gzweb / embedded viewport lines for the Training map debug overlay (Debug toggle only).
     @Published private(set) var mapDebugLines: [String] = []
 
+    /// Suppress duplicate formation-slot lines during gzweb bridge retry storms.
+    private var formationSlotLogDedupeKey: String?
+    private var formationSlotLogDedupeAt = Date.distantPast
+
     private weak var fleetLink: FleetLinkService?
     private weak var sitl: SitlService?
     private weak var gazebo: GazeboService?
@@ -1008,6 +1012,10 @@ final class TrainingPanelController: ObservableObject {
         try? TrainingSimulatorSessionStore.save(inst.id)
     }
 
+    func showOperatorToast(_ message: String, style: ToastStyle = .warning) {
+        toastCenter?.show(message, style: style, duration: 2.5)
+    }
+
     func logMap(_ message: String) {
         mapDebugLines.append(WorldBuilderMapDebugLog.formattedLine(message))
         if mapDebugLines.count > WorldBuilderMapDebugLog.maxLines {
@@ -1015,7 +1023,32 @@ final class TrainingPanelController: ObservableObject {
         }
     }
 
+    func logMapFormationSlots(_ step: String, detail: String? = nil) {
+        let dedupeKey = detail.map { "\(step)|\($0)" } ?? step
+        guard shouldAppendFormationSlotLog(dedupeKey: dedupeKey) else { return }
+        logMap(WorldBuilderMapDebugLog.formationSlotLine(step, detail: detail))
+    }
+
+    /// gzweb posts fully formatted `formation slots: …` lines — dedupe without re-prefixing.
+    func logMapFormationSlotGzweb(_ message: String) {
+        guard shouldAppendFormationSlotLog(dedupeKey: message) else { return }
+        logMap(message)
+    }
+
+    private func shouldAppendFormationSlotLog(dedupeKey: String) -> Bool {
+        let now = Date()
+        if dedupeKey == formationSlotLogDedupeKey,
+           now.timeIntervalSince(formationSlotLogDedupeAt) < 2.5 {
+            return false
+        }
+        formationSlotLogDedupeKey = dedupeKey
+        formationSlotLogDedupeAt = now
+        return true
+    }
+
     func clearMapDebugLog() {
+        formationSlotLogDedupeKey = nil
+        formationSlotLogDedupeAt = .distantPast
         mapDebugLines.removeAll(keepingCapacity: true)
     }
 

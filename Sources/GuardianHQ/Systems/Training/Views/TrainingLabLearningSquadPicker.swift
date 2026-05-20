@@ -26,8 +26,10 @@ struct TrainingLabLearningSquadPicker: View {
 
             Picker("Learning squad", selection: selection) {
                 ForEach(Array(roster.squads.enumerated()), id: \.element.id) { squadIndex, squad in
-                    Text(TrainingLabSquadCallsign.primaryLabel(squadIndex: squadIndex))
-                        .tag(squad.id)
+                    if squad.hasLinkedSimulator {
+                        Text(TrainingLabSquadCallsign.primaryLabel(squadIndex: squadIndex))
+                            .tag(squad.id)
+                    }
                 }
             }
             .labelsHidden()

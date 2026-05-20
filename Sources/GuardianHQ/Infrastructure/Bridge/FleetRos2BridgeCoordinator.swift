@@ -326,7 +326,13 @@ final class FleetRos2BridgeCoordinator {
                 onLogLine?("ROS 2 bridge error: \(message)")
             }
         case "ros2_nav2_training_stack":
-            // Swift ``FleetNav2StackRunner`` owns launch; ignore duplicate bridge poll events unless runner is idle.
+            // Swift ``FleetNav2StackRunner`` owns operator status — bridge poll must not reset timeout/error to "starting".
+            guard FleetNav2TrainingStackStatusPolicy.applyBridgeStdoutStatusToUI else {
+                if let status = event.trainingStackStatus {
+                    onLogLine?("Nav2 training stack (bridge poll, UI ignored): \(status)")
+                }
+                return
+            }
             guard !nav2StackRunner.isLaunchProcessRunning else { return }
             if let status = event.trainingStackStatus {
                 onLogLine?("Nav2 training stack (bridge): \(status)")

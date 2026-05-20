@@ -97,11 +97,21 @@ final class FleetNav2StackRunner {
                 continue
             }
 
-            let ready = await waitForPlannerService(launchPlan: launchPlan, timeoutSeconds: Self.readyTimeoutSeconds)
-            if ready {
+            let waitOutcome = await waitForPlannerService(launchPlan: launchPlan, timeoutSeconds: Self.readyTimeoutSeconds)
+            if waitOutcome == .ready {
                 onStatus?("ready", nil)
                 onLogLine?("Fleet Nav2: planner service ready.")
                 return
+            }
+
+            if waitOutcome == .launchExited {
+                let errTail = await captureLaunchStderrTailAfterTerminate(maxBytes: 4096)
+                let detail = errTail.isEmpty ? "nav2_launch_exited" : String(errTail.prefix(240))
+                onStatus?("error", detail)
+                onLogLine?("Fleet Nav2: launch process exited before planner was ready. \(detail)")
+                guard desiredActive, !Task.isCancelled, attempt < Self.maxAttempts else { return }
+                try? await Task.sleep(nanoseconds: UInt64(Self.retryDelaySeconds * 1_000_000_000))
+                continue
             }
 
             let errTail = await captureLaunchStderrTailAfterTerminate(maxBytes: 4096)
@@ -122,7 +132,7 @@ final class FleetNav2StackRunner {
         let setup = launchPlan.setupScriptPath
         let script = """
         set -euo pipefail
-        source "\(setup)"
+        \(Ros2BridgeLocator.bashRosDiscoveryExportsForScripts)source "\(setup)"
         exec ros2 launch guardian_ros2_vehicle_bridge nav2_training.launch.py
         """
         let proc = Process()
@@ -201,15 +211,32 @@ final class FleetNav2StackRunner {
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func waitForPlannerService(launchPlan: Ros2BridgeLocator.LaunchPlan, timeoutSeconds: TimeInterval) async -> Bool {
+    private enum PlannerWaitOutcome: Equatable {
+        case ready
+        case timeout
+        case launchExited
+    }
+
+    private func waitForPlannerService(
+        launchPlan: Ros2BridgeLocator.LaunchPlan,
+        timeoutSeconds: TimeInterval
+    ) async -> PlannerWaitOutcome {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         while Date() < deadline, !Task.isCancelled, desiredActive {
+            if launchProcessHasExited {
+                return .launchExited
+            }
             if await probePlannerServiceReady(launchPlan: launchPlan) {
-                return true
+                return .ready
             }
             try? await Task.sleep(nanoseconds: 400_000_000)
         }
-        return false
+        return .timeout
+    }
+
+    private var launchProcessHasExited: Bool {
+        guard let proc = launchProcess else { return false }
+        return !proc.isRunning
     }
 
     private func probePlannerServiceReady(launchPlan: Ros2BridgeLocator.LaunchPlan) async -> Bool {
@@ -221,7 +248,7 @@ final class FleetNav2StackRunner {
     private nonisolated static func plannerServiceIsAvailable(setupScriptPath: String) -> Bool {
         let script = """
         set -euo pipefail
-        source "\(setupScriptPath)"
+        \(Ros2BridgeLocator.bashRosDiscoveryExportsForScripts)source "\(setupScriptPath)"
         ros2 service list
         """
         let proc = Process()

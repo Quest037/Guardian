@@ -4,25 +4,25 @@ import Foundation
 @MainActor
 final class GazeboWebViewportFormationSlotsBridge: ObservableObject {
     @Published private(set) var tick = UUID()
-    @Published private(set) var squads: [TrainingLabSquad] = []
+    @Published private(set) var squadRows: [(squadIndex: Int, squad: TrainingLabSquad)] = []
     @Published var editSquadID: UUID?
     @Published var zones: WorldBuilderZonesSnapshot = .empty
     @Published var mapHalfExtentM: Double = 500
 
     func clear() {
-        squads = []
+        squadRows = []
         editSquadID = nil
         zones = .empty
         tick = UUID()
     }
 
     func push(
-        squads: [TrainingLabSquad],
+        squadRows: [(squadIndex: Int, squad: TrainingLabSquad)],
         editSquadID: UUID?,
         zones: WorldBuilderZonesSnapshot,
         mapHalfExtentM: Double
     ) {
-        self.squads = squads
+        self.squadRows = squadRows
         self.editSquadID = editSquadID
         self.zones = zones
         self.mapHalfExtentM = mapHalfExtentM
@@ -34,12 +34,23 @@ final class GazeboWebViewportFormationSlotsBridge: ObservableObject {
             mapHalfExtentM: mapHalfExtentM,
             zones: zones,
             editSquadID: editSquadID?.uuidString,
-            squads: squads.enumerated().map { index, squad in
-                FormationSlotsJSSquad.make(squad: squad, squadIndex: index, zones: zones)
+            squads: squadRows.map { row in
+                FormationSlotsJSSquad.make(squad: row.squad, squadIndex: row.squadIndex, zones: zones)
             }
         )
         guard let data = try? JSONEncoder().encode(payload) else {
-            return "window.guardianViewer?.setFormationSlotEditorState?.({})"
+            return """
+            (function () {
+              const handler = window.webkit?.messageHandlers?.guardianFormationSlots;
+              if (handler) {
+                handler.postMessage(JSON.stringify({
+                  type: 'formationSlotDebug',
+                  message: 'formation slots: encode — Swift JSONEncoder failed on formation slot payload'
+                }));
+              }
+              return false;
+            })()
+            """
         }
         let b64 = data.base64EncodedString()
         return """
@@ -83,7 +94,7 @@ private struct FormationSlotsJSSquad: Encodable {
                     squadIndex: squadIndex,
                     phase: .start,
                     zone: zones.start,
-                    anchor: squad.startZoneAnchor ?? .seeded(in: zones.start)
+                    anchor: squad.startZoneAnchor ?? .defaultForSquadIndex(squadIndex, in: zones.start)
                 )
                 : nil,
             end: zones.end.placed
@@ -92,7 +103,7 @@ private struct FormationSlotsJSSquad: Encodable {
                     squadIndex: squadIndex,
                     phase: .end,
                     zone: zones.end,
-                    anchor: squad.endZoneAnchor ?? .seeded(in: zones.end)
+                    anchor: squad.endZoneAnchor ?? .defaultForSquadIndex(squadIndex, in: zones.end)
                 )
                 : nil
         )

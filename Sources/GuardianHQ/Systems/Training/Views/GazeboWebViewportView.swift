@@ -30,7 +30,9 @@ struct GazeboWebViewportView: View {
     var onObstacleDeleteRequest: ((String) -> Void)?
     var onObstaclePlaceRequest: ((Double, Double) -> Void)?
     var onObstaclePlaceDebug: ((String) -> Void)?
-    var onFormationSlotGroupMoved: ((UUID, TrainingLabFormationSlotGeometry.ZonePhase, Double, Double, Double) -> Void)?
+    var onFormationSlotGroupMoved: ((UUID, TrainingLabFormationSlotGeometry.ZonePhase, Double, Double, Double, Bool) -> Void)?
+    var onFormationSlotSelected: ((UUID?) -> Void)?
+    var onFormationSlotDebug: ((String) -> Void)?
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -59,7 +61,9 @@ struct GazeboWebViewportView: View {
                 onObstacleDeleteRequest: onObstacleDeleteRequest,
                 onObstaclePlaceRequest: onObstaclePlaceRequest,
                 onObstaclePlaceDebug: onObstaclePlaceDebug,
-                onFormationSlotGroupMoved: onFormationSlotGroupMoved
+                onFormationSlotGroupMoved: onFormationSlotGroupMoved,
+                onFormationSlotSelected: onFormationSlotSelected,
+                onFormationSlotDebug: onFormationSlotDebug
             )
 
             if case .failed(let message) = phase {
@@ -102,7 +106,9 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
     let onObstacleDeleteRequest: ((String) -> Void)?
     let onObstaclePlaceRequest: ((Double, Double) -> Void)?
     let onObstaclePlaceDebug: ((String) -> Void)?
-    let onFormationSlotGroupMoved: ((UUID, TrainingLabFormationSlotGeometry.ZonePhase, Double, Double, Double) -> Void)?
+    let onFormationSlotGroupMoved: ((UUID, TrainingLabFormationSlotGeometry.ZonePhase, Double, Double, Double, Bool) -> Void)?
+    let onFormationSlotSelected: ((UUID?) -> Void)?
+    let onFormationSlotDebug: ((String) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -113,7 +119,9 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
             onObstacleDeleteRequest: onObstacleDeleteRequest,
             onObstaclePlaceRequest: onObstaclePlaceRequest,
             onObstaclePlaceDebug: onObstaclePlaceDebug,
-            onFormationSlotGroupMoved: onFormationSlotGroupMoved
+            onFormationSlotGroupMoved: onFormationSlotGroupMoved,
+            onFormationSlotSelected: onFormationSlotSelected,
+            onFormationSlotDebug: onFormationSlotDebug
         )
     }
 
@@ -198,7 +206,7 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
     ) {
         let expression = bridge.javaScriptExpression
         webView.evaluateJavaScript(expression) { result, error in
-            if error == nil, let ok = result as? Bool, ok { return }
+            if error == nil, Self.javaScriptBool(result) { return }
             guard attempt < 48 else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
                 dispatchFormationSlotsState(on: webView, bridge: bridge, attempt: attempt + 1)
@@ -349,7 +357,9 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
         private let onObstacleDeleteRequest: ((String) -> Void)?
         private let onObstaclePlaceRequest: ((Double, Double) -> Void)?
         private let onObstaclePlaceDebug: ((String) -> Void)?
-        private let onFormationSlotGroupMoved: ((UUID, TrainingLabFormationSlotGeometry.ZonePhase, Double, Double, Double) -> Void)?
+        private let onFormationSlotGroupMoved: ((UUID, TrainingLabFormationSlotGeometry.ZonePhase, Double, Double, Double, Bool) -> Void)?
+        private let onFormationSlotSelected: ((UUID?) -> Void)?
+        private let onFormationSlotDebug: ((String) -> Void)?
 
         init(
             onZonesChanged: ((WorldBuilderZonesSnapshot, Bool) -> Void)?,
@@ -359,7 +369,9 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
             onObstacleDeleteRequest: ((String) -> Void)?,
             onObstaclePlaceRequest: ((Double, Double) -> Void)?,
             onObstaclePlaceDebug: ((String) -> Void)? = nil,
-            onFormationSlotGroupMoved: ((UUID, TrainingLabFormationSlotGeometry.ZonePhase, Double, Double, Double) -> Void)? = nil
+            onFormationSlotGroupMoved: ((UUID, TrainingLabFormationSlotGeometry.ZonePhase, Double, Double, Double, Bool) -> Void)? = nil,
+            onFormationSlotSelected: ((UUID?) -> Void)? = nil,
+            onFormationSlotDebug: ((String) -> Void)? = nil
         ) {
             self.onZonesChanged = onZonesChanged
             self.onZoneEditRequest = onZoneEditRequest
@@ -369,6 +381,8 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
             self.onObstaclePlaceRequest = onObstaclePlaceRequest
             self.onObstaclePlaceDebug = onObstaclePlaceDebug
             self.onFormationSlotGroupMoved = onFormationSlotGroupMoved
+            self.onFormationSlotSelected = onFormationSlotSelected
+            self.onFormationSlotDebug = onFormationSlotDebug
         }
 
         func userContentController(
@@ -411,7 +425,20 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
                               let centerYM = envelope.centerYM,
                               let headingDeg = envelope.headingDeg
                         else { return }
-                        onFormationSlotGroupMoved?(squadID, phase, centerXM, centerYM, headingDeg)
+                        onFormationSlotGroupMoved?(
+                            squadID,
+                            phase,
+                            centerXM,
+                            centerYM,
+                            headingDeg,
+                            envelope.outOfBounds ?? false
+                        )
+                    case "formationSlotSelected":
+                        onFormationSlotSelected?(envelope.squadUUID)
+                    case "formationSlotDebug":
+                        if let message = envelope.message {
+                            onFormationSlotDebug?(message)
+                        }
                     default:
                         break
                     }

@@ -99,7 +99,7 @@ class Nav2TrainingStack:
                     self._ready = True
                 emit({"type": "ros2_nav2_training_stack", "status": "ready"})
                 return
-            emit({"type": "ros2_nav2_training_stack", "status": "starting"})
+            # Swift ``FleetNav2StackRunner`` owns operator-facing "starting" / timeout — do not emit "starting" here.
             deadline = time.monotonic() + _ready_timeout_s()
             while time.monotonic() < deadline:
                 with self._state_lock:

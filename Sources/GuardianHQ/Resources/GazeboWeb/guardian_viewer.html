@@ -133,8 +133,14 @@
       const len = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
       return { x: dx / len, y: dy / len, z: dz / len };
     })();
-    const MAP_ORBIT_POLAR_MIN = 0.15;
-    const MAP_ORBIT_POLAR_MAX = Math.PI / 2 - 0.06;
+    /** Oblique orbit: stay above the map plane (radians from vertical toward horizon). */
+    const MAP_ORBIT_POLAR_MIN = 0.12;
+    const MAP_ORBIT_POLAR_MAX = Math.PI / 2 - 0.22;
+    /** World +Z (ENU): camera must stay this many metres above the orbit target. */
+    const MAP_ORBIT_MIN_HEIGHT_ABOVE_TARGET_M = 1.5;
+    /** Minimum elevation angle above the horizontal plane through the target (degrees). */
+    const MAP_ORBIT_MIN_ELEVATION_DEG = 10;
+    const MAP_ORBIT_MIN_ELEVATION_RAD = (MAP_ORBIT_MIN_ELEVATION_DEG * Math.PI) / 180;
     const MAP_FIT_MARGIN = 1.18;
     const MAP_OBLIQUE_UZ = Math.abs(MAP_OBLIQUE_DIRECTION.z);
     /** Orbit zoom-out cap (metres). Closest approach is `MAP_ORBIT_MIN_DISTANCE_M` (`orbitMinDistance` query). */
@@ -201,6 +207,35 @@
       return Math.min(MAP_ORBIT_ZOOM_OUT_MAX_M, Math.max(4, distanceM));
     }
 
+    /**
+     * Keep the camera in the +Z hemisphere (above the walkable top). Orbit polar caps alone
+     * can still skim under thin maps when `camera.up` is Z-aligned.
+     */
+    function clampCameraAboveMapHorizon(scene2) {
+      const camera = scene2?.camera;
+      const controls = scene2?.controls;
+      if (!camera || !controls) return false;
+
+      const tx = controls.target.x;
+      const ty = controls.target.y;
+      const tz = controls.target.z;
+      const dx = camera.position.x - tx;
+      const dy = camera.position.y - ty;
+      let dz = camera.position.z - tz;
+      const horizontal = Math.hypot(dx, dy);
+      const minDz = Math.max(
+        MAP_ORBIT_MIN_HEIGHT_ABOVE_TARGET_M,
+        horizontal * Math.tan(MAP_ORBIT_MIN_ELEVATION_RAD)
+      );
+      if (dz >= minDz - 1e-4) return false;
+
+      camera.position.set(tx + dx, ty + dy, tz + minDz);
+      if (controls.object) controls.object.position.copy(camera.position);
+      controls.update();
+      if (typeof scene2.render === 'function') scene2.render(0);
+      return true;
+    }
+
     /** Interactive orbit limits (`minDistance` = closest the camera may orbit to the target). */
     function applyOrbitPolicyInteractive(controls) {
       controls.enabled = true;
@@ -212,6 +247,13 @@
       controls.maxPolarAngle = MAP_ORBIT_POLAR_MAX;
       controls.minDistance = MAP_ORBIT_MIN_DISTANCE_M;
       controls.maxDistance = MAP_ORBIT_ZOOM_OUT_MAX_M;
+      if (!controls.__guardianOrbitHorizonClamp) {
+        controls.__guardianOrbitHorizonClamp = true;
+        controls.addEventListener('change', () => {
+          const scene2 = viewerSession?.manager?.scene;
+          if (scene2) clampCameraAboveMapHorizon(scene2);
+        });
+      }
     }
 
     /** One-shot camera preset: move to fitted pose, then leave orbit controls free. */
@@ -244,6 +286,7 @@
       applyOrbitPolicyInteractive(controls);
       controls.object.position.copy(camera.position);
       controls.update();
+      clampCameraAboveMapHorizon(scene2);
 
       scene2.defaultCameraPosition.copy(camera.position);
       scene2.defaultCameraLookAt.set(cx, cy, cz);
@@ -678,7 +721,10 @@
       },
       setFormationSlotEditorState(state) {
         pendingFormationSlotState = state;
-        return formationSlotEditor.applyState(state);
+        const ok = formationSlotEditor.applyState(state);
+        const manager = viewerSession?.manager;
+        if (manager) formationSlotEditor.attach(manager);
+        return ok;
       },
       setObstacleEditorState(state) {
         pendingObstacleEditorState = state;
@@ -801,6 +847,79 @@
 
     function resetOverlayThreeCache() {
       overlayThreeCache = null;
+    }
+
+    function resolveGuardianThreeRoot() {
+      const g = guardianThree;
+      if (!g) return null;
+      return g.THREE ?? g.default?.THREE ?? g;
+    }
+
+    /** Mesh helpers for formation slots (and other overlays) with gzweb bundle + cache fallback. */
+    function overlayMeshPrimitives(scene2) {
+      let T = cacheThree(scene2);
+      if (!T) return null;
+      const root = resolveGuardianThreeRoot();
+      let BoxGeometry = T.BoxGeometry ?? root?.BoxGeometry;
+      let SphereGeometry = T.SphereGeometry ?? root?.SphereGeometry;
+      if (
+        (typeof BoxGeometry !== 'function' || typeof SphereGeometry !== 'function')
+        && guardianThree
+      ) {
+        resetOverlayThreeCache();
+        T = cacheThree(scene2);
+        const root2 = resolveGuardianThreeRoot();
+        BoxGeometry = T?.BoxGeometry ?? root2?.BoxGeometry;
+        SphereGeometry = T?.SphereGeometry ?? root2?.SphereGeometry;
+      }
+      const Mesh = T.Mesh ?? root?.Mesh;
+      const MeshBasicMaterial = T.MeshBasicMaterial ?? root?.MeshBasicMaterial;
+      const Group = T.Group ?? root?.Group;
+      const Float32BufferAttribute = T.Float32BufferAttribute;
+      const BufferGeometry = T.BufferGeometry;
+      if (typeof Mesh !== 'function' || typeof MeshBasicMaterial !== 'function' || !T) {
+        return null;
+      }
+      return {
+        T,
+        Mesh,
+        MeshBasicMaterial,
+        Group,
+        BoxGeometry: typeof BoxGeometry === 'function' ? BoxGeometry : null,
+        SphereGeometry: typeof SphereGeometry === 'function' ? SphereGeometry : null,
+        Float32BufferAttribute,
+        BufferGeometry,
+      };
+    }
+
+    function buildSharedIndexedMesh(T, positions, indices, material, order) {
+      const geo = new T.BufferGeometry();
+      const pos = positions instanceof Float32Array ? positions : new Float32Array(positions);
+      geo.setAttribute('position', new T.Float32BufferAttribute(pos, 3));
+      if (indices && indices.length > 0) {
+        geo.setIndex(indices);
+      }
+      if (typeof geo.computeBoundingSphere === 'function') {
+        geo.computeBoundingSphere();
+      }
+      const mesh = new T.Mesh(geo, material);
+      mesh.renderOrder = order;
+      mesh.frustumCulled = false;
+      return mesh;
+    }
+
+    let formationSlotLogDedupe = { key: '', at: 0 };
+
+    function postFormationSlotDebug(step, detail) {
+      const message = detail
+        ? `formation slots: ${step} — ${detail}`
+        : `formation slots: ${step}`;
+      const now = Date.now();
+      if (formationSlotLogDedupe.key === message && now - formationSlotLogDedupe.at < 2500) {
+        return;
+      }
+      formationSlotLogDedupe = { key: message, at: now };
+      postFormationMessage({ type: 'formationSlotDebug', message });
     }
 
     /** gzweb `scene2.ray` is a THREE.Raycaster; world origin/direction are on `.ray`. */
@@ -1407,14 +1526,17 @@
         root.traverse((node) => {
           if (node === skip || node.parent === skip) return;
           if (node.name === 'guardian_zone_overlay') return;
+          if (node.name === 'guardian_formation_slots_overlay') return;
           if (node.name === 'guardian_map_dimensions') return;
           if (node.name === 'guardian_obstacle_readonly_overlay') return;
           if (node.name === 'grid') return;
           let ancestor = node;
           while (ancestor) {
             const name = ancestor.name || '';
-            if (name === 'guardian_zone_overlay' || name === 'guardian_map_dimensions'
-              || name === 'guardian_obstacle_readonly_overlay' || name.startsWith('guardian_zone_')) return;
+            if (name === 'guardian_zone_overlay' || name === 'guardian_formation_slots_overlay'
+              || name === 'guardian_map_dimensions'
+              || name === 'guardian_obstacle_readonly_overlay' || name.startsWith('guardian_zone_')
+              || name.startsWith('guardian_formation_squad_')) return;
             ancestor = ancestor.parent;
           }
           if (node.isMesh) out.push(node);
@@ -1961,12 +2083,17 @@
     }
 
     function createFormationSlotEditor(getScene2, notifySwift) {
-      const SLOT_LIFT_M = typeof MAP_SURFACE_LIFT_M === 'number' ? MAP_SURFACE_LIFT_M : 0.0035;
-      const SLOT_HEIGHT_M = 0.4;
-      const HANDLE_RADIUS_M = 1.8;
-      const HANDLE_Z = 6200;
+      const ZONE_OVERLAY_LIFT_M = typeof MAP_SURFACE_LIFT_M === 'number' ? MAP_SURFACE_LIFT_M : 0.0035;
+      /** Hollow slot outline sits this far above the zone fill (metres). */
+      const FORMATION_SLOT_ABOVE_ZONE_M = 0.01;
+      const SLOT_SIZE_M = 1;
       const OVERLAY_ORDER = 2050;
-      const HEADING_EDGE_COLOR = 0xffffff;
+      const FORMATION_PICK_RADIUS_PX = 28;
+      const FORMATION_HEADING_PICK_RADIUS_PX = 26;
+      /** High-contrast ring on blue zone fill when a squad is selected. */
+      const FORMATION_SELECTED_RING_COLOR = 0xffffff;
+      /** Draggable rim handle — faces where the primary points (convoy astern is behind). */
+      const FORMATION_HEADING_HANDLE_COLOR = 0xfbbf24;
 
       let editorState = {
         mapHalfExtentM: MAP_GROUND_HALF_EXTENT_M,
@@ -1979,17 +2106,163 @@
       };
       let overlayRoot = null;
       let attachedManager = null;
-      let squadGroups = {};
-      let handleMeshes = [];
+      let lastPaintLogKey = '';
       let formationDrag = null;
-      let domListenersAttached = false;
+      let formationHeadingDrag = null;
+      let formationPointerDom = null;
+      let formationPendingToggleID = null;
+      /** Background click (terrain / zone / obstacle) — deselect on pointerup without stealing orbit drag. */
+      let formationOrbitClick = null;
+      const FORMATION_ORBIT_CLICK_DRAG_PX = 7;
 
-      function pickMapXY(scene2, clientX, clientY) {
-        return intersectMapBasePlaneXY(scene2, clientX, clientY);
+      function isGuardianMapChromeNode(node) {
+        let p = node;
+        while (p) {
+          const name = p.name || '';
+          if (name === 'guardian_zone_overlay' || name === 'guardian_formation_slots_overlay'
+            || name === 'guardian_map_dimensions' || name === 'guardian_obstacle_readonly_overlay'
+            || name === 'grid') return true;
+          if (name.startsWith('guardian_zone_') || name.startsWith('guardian_formation_squad_')) {
+            return true;
+          }
+          p = p.parent;
+        }
+        return false;
       }
 
-      function setOrbitEnabled(scene2, enabled) {
-        if (scene2?.controls) scene2.controls.enabled = enabled;
+      function pickObstacleMeshAt(scene2, clientX, clientY) {
+        const dom = scene2?.getDomElement?.();
+        if (!dom) return false;
+        scene2.ray.setFromCamera(clientToNDC(dom, clientX, clientY), scene2.camera);
+        const meshes = [];
+        scene2.scene.traverse((node) => {
+          if (!node.isMesh || isGuardianMapChromeNode(node)) return;
+          const name = node.name || '';
+          if (name.startsWith('guardian_obstacle_')) {
+            meshes.push(node);
+            return;
+          }
+          let parent = node.parent;
+          while (parent) {
+            if (parent.name === 'guardian_obstacle_readonly_overlay') {
+              meshes.push(node);
+              return;
+            }
+            parent = parent.parent;
+          }
+        });
+        return scene2.ray.intersectObjects(meshes, true).length > 0;
+      }
+
+      function formationHeadingRimXY(group) {
+        const r = Math.max(4, Number(group.circleRadiusM) || 8);
+        const h = (Number(group.headingDeg) || 0) * Math.PI / 180;
+        return {
+          x: (Number(group.centerXM) || 0) + r * Math.sin(h),
+          y: (Number(group.centerYM) || 0) + r * Math.cos(h),
+        };
+      }
+
+      function headingDegFromMapPoint(anchorXM, anchorYM, x, y) {
+        const dx = x - anchorXM;
+        const dy = y - anchorYM;
+        let deg = Math.atan2(dx, dy) * (180 / Math.PI);
+        if (deg < 0) deg += 360;
+        return deg;
+      }
+
+      function cloneFormationSlotSnapshots(slots) {
+        return (slots || []).map((slot) => ({
+          centerXM: Number(slot.centerXM) || 0,
+          centerYM: Number(slot.centerYM) || 0,
+          headingDeg: Number(slot.headingDeg) || 0,
+        }));
+      }
+
+      function applyGroupHeadingFromSnapshots(group, snapshots, anchorXM, anchorYM, headingDeg) {
+        const base = Number(group.headingDeg) || 0;
+        const delta = ((headingDeg - base) * Math.PI) / 180;
+        const sinD = Math.sin(delta);
+        const cosD = Math.cos(delta);
+        group.headingDeg = headingDeg;
+        for (let i = 0; i < (group.slots || []).length; i += 1) {
+          const slot = group.slots[i];
+          const snap = snapshots[i];
+          if (!slot || !snap) continue;
+          const dx = snap.centerXM - anchorXM;
+          const dy = snap.centerYM - anchorYM;
+          slot.centerXM = anchorXM + dx * cosD - dy * sinD;
+          slot.centerYM = anchorYM + dx * sinD + dy * cosD;
+          slot.headingDeg = headingDeg;
+        }
+      }
+
+      function pickFormationHeadingRim(scene2, clientX, clientY, onlySquadID) {
+        const selectedID = String(onlySquadID || editorState.editSquadID || '');
+        if (!selectedID) return null;
+        let best = null;
+        let bestD = FORMATION_HEADING_PICK_RADIUS_PX;
+        for (const squad of editorState.squads || []) {
+          if (String(squad.id) !== selectedID) continue;
+          for (const phase of ['start', 'end']) {
+            const group = squadPhaseGroup(squad, phase);
+            if (!group?.slots?.length) continue;
+            const rim = formationHeadingRimXY(group);
+            const planeZ = slotPlaneZ(phase);
+            const projected = projectSlotToClient(scene2, { centerXM: rim.x, centerYM: rim.y }, planeZ);
+            if (!projected) continue;
+            const d = Math.hypot(projected.x - clientX, projected.y - clientY);
+            if (d < bestD) {
+              bestD = d;
+              best = { squadID: String(squad.id), phase };
+            }
+          }
+        }
+        return best;
+      }
+
+      function buildHeadingHandleMesh(T, cx, cy, planeZ) {
+        return buildSlotFootprintOutline(
+          T,
+          cx,
+          cy,
+          planeZ + 0.012,
+          '#fbbf24',
+          0,
+          0.45,
+          0.45,
+          false
+        );
+      }
+
+      /** Classify pointer target so zone / obstacle / terrain keep gzweb orbit; only formation consumes. */
+      function classifyMapPointerTarget(scene2, clientX, clientY) {
+        const selectedID = String(editorState.editSquadID || '');
+        if (selectedID) {
+          const headingHit = pickFormationHeadingRim(scene2, clientX, clientY, selectedID);
+          if (headingHit) return { kind: 'formationHeading', headingHit };
+        }
+        const formationHit = pickFormationPrimary(scene2, clientX, clientY);
+        if (formationHit) return { kind: 'formation', formationHit };
+        const surface = pickMapSurface(scene2, clientX, clientY);
+        if (!surface) return { kind: 'orbit' };
+        const zones = editorState.zones || {};
+        for (const zoneKind of ['end', 'start']) {
+          const record = zones[zoneKind];
+          if (!record?.placed) continue;
+          const dx = surface.x - Number(record.centerXM);
+          const dy = surface.y - Number(record.centerYM);
+          const r = Number(record.radiusM) || 0;
+          if (record.shape === 'square') {
+            if (Math.abs(dx) <= r && Math.abs(dy) <= r) {
+              return { kind: 'zone', zoneKind };
+            }
+          } else if (Math.hypot(dx, dy) <= r) {
+            return { kind: 'zone', zoneKind };
+          }
+        }
+        if (pickObstacleMeshAt(scene2, clientX, clientY)) return { kind: 'obstacle' };
+        return { kind: 'orbit' };
       }
 
       function parseColor(hex) {
@@ -1997,25 +2270,13 @@
         return parseInt(h, 16) || 0xf59e0b;
       }
 
-      function slotRotationZ(headingDeg) {
-        return ((90 - Number(headingDeg) || 0) * Math.PI) / 180;
-      }
-
-      function rimXY(centerXM, centerYM, headingDeg, radiusM) {
-        const h = (Number(headingDeg) || 0) * Math.PI / 180;
-        const r = Math.max(3, Number(radiusM) || 6);
-        return {
-          x: centerXM + Math.sin(h) * r,
-          y: centerYM + Math.cos(h) * r,
-        };
-      }
-
-      function bearingDeg(cx, cy, x, y) {
-        const dx = x - cx;
-        const dy = y - cy;
-        let deg = (Math.atan2(dx, dy) * 180) / Math.PI;
-        if (deg < 0) deg += 360;
-        return deg;
+      function slotPlaneZ(phase) {
+        const key = phase === 'end' ? 'end' : 'start';
+        const zone = editorState.zones?.[key];
+        if (zone?.placed) {
+          return Number(zone.centerZM) + ZONE_OVERLAY_LIFT_M + FORMATION_SLOT_ABOVE_ZONE_M;
+        }
+        return MAP_BASE_TOP_ZM + ZONE_OVERLAY_LIFT_M + FORMATION_SLOT_ABOVE_ZONE_M;
       }
 
       function ensureOverlay(scene2) {
@@ -2046,222 +2307,632 @@
             }
           });
         }
-        squadGroups = {};
-        handleMeshes = [];
       }
 
-      function buildSlotMeshes(T, group, slot, color, planeZ) {
-        const rotZ = slotRotationZ(slot.headingDeg);
-        const len = Math.max(0.8, Number(slot.lengthM) || 2);
-        const wid = Math.max(0.6, Number(slot.widthM) || 1.5);
-        const bodyGeo = new T.BoxGeometry(len, wid, SLOT_HEIGHT_M);
-        const bodyMat = new T.MeshBasicMaterial({
-          color: parseColor(color),
-          transparent: true,
-          opacity: 0.52,
-          depthWrite: false,
-        });
-        const body = new T.Mesh(bodyGeo, bodyMat);
-        body.position.set(slot.centerXM, slot.centerYM, planeZ + SLOT_HEIGHT_M * 0.5);
-        body.rotation.z = rotZ;
-        body.renderOrder = OVERLAY_ORDER + 2;
-        group.add(body);
-
-        const edgeLen = Math.max(0.15, len * 0.12);
-        const edgeGeo = new T.BoxGeometry(edgeLen, wid * 1.05, SLOT_HEIGHT_M * 1.02);
-        const edgeMat = new T.MeshBasicMaterial({
-          color: HEADING_EDGE_COLOR,
-          transparent: true,
-          opacity: 0.95,
-          depthWrite: false,
-        });
-        const edge = new T.Mesh(edgeGeo, edgeMat);
-        edge.position.set(len * 0.5 - edgeLen * 0.5, 0, 0);
-        edge.renderOrder = OVERLAY_ORDER + 3;
-        body.add(edge);
-      }
-
-      function buildHandleMeshes(T, scene2, squadId, phase, groupData, color) {
-        if (String(squadId) !== String(editorState.editSquadID)) return;
-        const planeZ = MAP_BASE_TOP_ZM + SLOT_LIFT_M;
-        const phases = [
-          { key: 'start', data: groupData.start },
-          { key: 'end', data: groupData.end },
-        ];
-        for (const { key, data } of phases) {
-          if (!data) continue;
-          const ctrGeo = new T.SphereGeometry(HANDLE_RADIUS_M, 12, 12);
-          const ctrMat = new T.MeshBasicMaterial({ color: parseColor(color), opacity: 0.9, transparent: true });
-          const ctr = new T.Mesh(ctrGeo, ctrMat);
-          ctr.position.set(data.centerXM, data.centerYM, planeZ + 0.5);
-          ctr.renderOrder = HANDLE_Z;
-          ctr.userData = { role: 'center', squadId, phase: key };
-          overlayRoot.add(ctr);
-          handleMeshes.push(ctr);
-
-          const rim = rimXY(data.centerXM, data.centerYM, data.headingDeg, data.circleRadiusM);
-          const rimGeo = new T.SphereGeometry(HANDLE_RADIUS_M * 0.85, 10, 10);
-          const rimMat = new T.MeshBasicMaterial({ color: 0xfbbf24, opacity: 0.95, transparent: true });
-          const rimMesh = new T.Mesh(rimGeo, rimMat);
-          rimMesh.position.set(rim.x, rim.y, planeZ + 0.55);
-          rimMesh.renderOrder = HANDLE_Z;
-          rimMesh.userData = { role: 'rim', squadId, phase: key };
-          overlayRoot.add(rimMesh);
-          handleMeshes.push(rimMesh);
-        }
-      }
-
-      function rebuildAll(scene2) {
-        const T = cacheThree(scene2);
-        if (!T?.Group || !ensureOverlay(scene2)) return;
-        clearOverlay();
-        const squads = editorState.squads || [];
-        if (!squads.length) {
-          if (typeof scene2.render === 'function') scene2.render(0);
-          return;
-        }
-        if (!T.BoxGeometry || !T.SphereGeometry) return;
-        const planeZ = MAP_BASE_TOP_ZM + SLOT_LIFT_M;
-        for (const squad of squads) {
-          const g = new T.Group();
-          g.name = `guardian_formation_squad_${squad.id}`;
-          if (squad.start?.slots) {
-            for (const slot of squad.start.slots) {
-              buildSlotMeshes(T, g, slot, squad.colorHex, planeZ);
-            }
-          }
-          if (squad.end?.slots) {
-            for (const slot of squad.end.slots) {
-              buildSlotMeshes(T, g, slot, squad.colorHex, planeZ);
-            }
-          }
-          overlayRoot.add(g);
-          squadGroups[squad.id] = g;
-          buildHandleMeshes(T, scene2, squad.id, null, squad, squad.colorHex);
-        }
-        if (typeof scene2.render === 'function') scene2.render(0);
-      }
-
-      function pickHandle(scene2, clientX, clientY) {
-        if (!scene2?.ray || !handleMeshes.length) return null;
-        const dom = scene2.getDomElement();
-        const rect = dom.getBoundingClientRect();
-        const ndc = {
-          x: ((clientX - rect.left) / rect.width) * 2 - 1,
-          y: -(((clientY - rect.top) / rect.height) * 2 - 1),
+      /**
+       * Oriented vehicle footprint outline (length along heading, width lateral).
+       * Indexed mesh ring — same technique as zone square strokes.
+       */
+      function buildSlotFootprintOutline(T, cx, cy, planeZ, colorHex, headingDeg, halfLengthM, halfWidthM, selected) {
+        const BasicMaterial = guardianThree?.MeshBasicMaterial ?? T.MeshBasicMaterial;
+        if (typeof BasicMaterial !== 'function') return null;
+        const halfL = Math.max(SLOT_SIZE_M * 0.5, Number(halfLengthM) || SLOT_SIZE_M * 0.5);
+        const halfW = Math.max(SLOT_SIZE_M * 0.5, Number(halfWidthM) || SLOT_SIZE_M * 0.5);
+        const strokeW = Math.max(0.12, Math.min(0.4, Math.min(halfL, halfW) * (selected ? 0.28 : 0.22)));
+        const innerL = Math.max(halfL - strokeW, halfL * 0.35);
+        const innerW = Math.max(halfW - strokeW, halfW * 0.35);
+        const h = (Number(headingDeg) || 0) * Math.PI / 180;
+        const sinH = Math.sin(h);
+        const cosH = Math.cos(h);
+        const localXY = (forwardM, rightM) => {
+          const east = forwardM * sinH + rightM * cosH;
+          const north = forwardM * cosH - rightM * sinH;
+          return [east, north];
         };
-        scene2.ray.setFromCamera(ndc, scene2.camera);
-        const hits = scene2.ray.intersectObjects(handleMeshes, false);
-        return hits.length ? hits[0].object : null;
+        const outer = [
+          [halfL, halfW],
+          [halfL, -halfW],
+          [-halfL, -halfW],
+          [-halfL, halfW],
+        ].map(([fx, fy]) => localXY(fx, fy));
+        const inn = [
+          [innerL, innerW],
+          [innerL, -innerW],
+          [-innerL, -innerW],
+          [-innerL, innerW],
+        ].map(([fx, fy]) => localXY(fx, fy));
+        const ringVerts = [];
+        for (let i = 0; i < 4; i += 1) {
+          ringVerts.push(outer[i][0], outer[i][1], 0);
+        }
+        for (let i = 0; i < 4; i += 1) {
+          ringVerts.push(inn[i][0], inn[i][1], 0);
+        }
+        const ringIdx = [
+          0, 4, 1, 1, 4, 5,
+          1, 5, 2, 2, 5, 6,
+          2, 6, 3, 3, 6, 7,
+          3, 7, 0, 0, 7, 4,
+        ];
+        const mat = new BasicMaterial({
+          color: selected ? FORMATION_SELECTED_RING_COLOR : parseColor(colorHex),
+          transparent: true,
+          opacity: selected ? 1 : 0.98,
+          depthTest: true,
+          depthWrite: false,
+          fog: false,
+          toneMapped: false,
+          side: T.DoubleSide ?? 2,
+          polygonOffset: true,
+          polygonOffsetFactor: -3,
+          polygonOffsetUnits: -3,
+        });
+        const mesh = buildSharedIndexedMesh(T, ringVerts, ringIdx, mat, OVERLAY_ORDER + 2);
+        if (mesh) {
+          mesh.position.set(Number(cx) || 0, Number(cy) || 0, planeZ);
+          mesh.frustumCulled = false;
+        }
+        return mesh;
       }
 
-      function squadById(id) {
-        return (editorState.squads || []).find((s) => String(s.id) === String(id));
+      function findSquad(squadID) {
+        const id = String(squadID || '');
+        return (editorState.squads || []).find((s) => String(s.id) === id) ?? null;
       }
 
-      function postGroupMoved(squadId, phase, centerXM, centerYM, headingDeg) {
+      function squadPhaseGroup(squad, phase) {
+        return phase === 'end' ? squad.end : squad.start;
+      }
+
+      function moveGroupAnchor(group, newXM, newYM) {
+        const dx = newXM - Number(group.centerXM);
+        const dy = newYM - Number(group.centerYM);
+        group.centerXM = newXM;
+        group.centerYM = newYM;
+        for (const slot of group.slots || []) {
+          slot.centerXM = Number(slot.centerXM) + dx;
+          slot.centerYM = Number(slot.centerYM) + dy;
+        }
+      }
+
+      function pointInsideZone(x, y, zone, epsilon = 1e-6) {
+        if (!zone?.placed) return false;
+        const cx = Number(zone.centerXM) || 0;
+        const cy = Number(zone.centerYM) || 0;
+        const rad = Number(zone.radiusM) || 0;
+        if (zone.shape === 'square') {
+          return Math.abs(x - cx) <= rad + epsilon && Math.abs(y - cy) <= rad + epsilon;
+        }
+        const dx = x - cx;
+        const dy = y - cy;
+        return Math.hypot(dx, dy) <= rad + epsilon;
+      }
+
+      function orientedFootprintCorners(slot) {
+        const halfL = (Number(slot.lengthM) || SLOT_SIZE_M) * 0.5;
+        const halfW = (Number(slot.widthM) || SLOT_SIZE_M) * 0.5;
+        const h = (Number(slot.headingDeg) || 0) * Math.PI / 180;
+        const sinH = Math.sin(h);
+        const cosH = Math.cos(h);
+        const cx = Number(slot.centerXM) || 0;
+        const cy = Number(slot.centerYM) || 0;
+        const local = [
+          [halfL, halfW],
+          [halfL, -halfW],
+          [-halfL, -halfW],
+          [-halfL, halfW],
+        ];
+        return local.map(([fx, fy]) => {
+          const east = fx * sinH + fy * cosH;
+          const north = fx * cosH - fy * sinH;
+          return { x: cx + east, y: cy + north };
+        });
+      }
+
+      function slotFootprintFitsZone(slot, zone) {
+        return orientedFootprintCorners(slot).every((c) => pointInsideZone(c.x, c.y, zone));
+      }
+
+      /** Matches Swift ``TrainingLabFormationSlotGeometry/groupFitsZoneFromSlots`` (vehicle outlines, not centre circle). */
+      function groupFitsZone(group, zone) {
+        if (!zone?.placed || !group?.slots?.length) return false;
+        return group.slots.every((slot) => slotFootprintFitsZone(slot, zone));
+      }
+
+      function disposeFormationGroup(group) {
+        if (!group) return;
+        group.traverse?.((node) => {
+          if (node.geometry) node.geometry.dispose?.();
+          if (node.material) {
+            if (Array.isArray(node.material)) node.material.forEach((m) => m.dispose?.());
+            else node.material.dispose?.();
+          }
+        });
+      }
+
+      function collectFormationTerrainMeshes(root, out) {
+        root.traverse((node) => {
+          const name = node.name || '';
+          if (name === 'guardian_zone_overlay' || name === 'guardian_formation_slots_overlay'
+            || name === 'guardian_map_dimensions' || name === 'grid') return;
+          let ancestor = node;
+          while (ancestor) {
+            const an = ancestor.name || '';
+            if (an === 'guardian_zone_overlay' || an === 'guardian_formation_slots_overlay'
+              || an.startsWith('guardian_formation_squad_') || an.startsWith('guardian_zone_')) return;
+            ancestor = ancestor.parent;
+          }
+          if (node.isMesh) out.push(node);
+        });
+      }
+
+      function pickMapSurface(scene2, clientX, clientY) {
+        const T = cacheThree(scene2);
+        const dom = scene2?.getDomElement?.();
+        if (!T || !dom) return null;
+        scene2.ray.setFromCamera(clientToNDC(dom, clientX, clientY), scene2.camera);
+        const meshes = [];
+        collectFormationTerrainMeshes(scene2.scene, meshes);
+        const hits = scene2.ray.intersectObjects(meshes, true);
+        if (hits.length > 0) {
+          let top = hits[0].point;
+          for (let i = 1; i < hits.length; i += 1) {
+            if (hits[i].point.z > top.z) top = hits[i].point;
+          }
+          return { x: top.x, y: top.y, z: top.z };
+        }
+        const arm = sceneRayWorldLine(scene2);
+        if (!arm) return null;
+        const denom = arm.direction.z;
+        if (Math.abs(denom) < 1e-9) return null;
+        const t = (MAP_BASE_TOP_ZM - arm.origin.z) / denom;
+        if (t < 0) return null;
+        return {
+          x: arm.origin.x + arm.direction.x * t,
+          y: arm.origin.y + arm.direction.y * t,
+          z: MAP_BASE_TOP_ZM,
+        };
+      }
+
+      function projectSlotToClient(scene2, slot, planeZ) {
+        const dom = scene2?.getDomElement?.();
+        const cam = scene2?.camera;
+        if (!dom || !cam) return null;
+        const v = new (scene2.camera.position.constructor)(
+          Number(slot.centerXM) || 0,
+          Number(slot.centerYM) || 0,
+          planeZ
+        );
+        v.project(cam);
+        const rect = dom.getBoundingClientRect();
+        return {
+          x: rect.left + (v.x * 0.5 + 0.5) * rect.width,
+          y: rect.top + (-v.y * 0.5 + 0.5) * rect.height,
+        };
+      }
+
+      function pickFormationPrimary(scene2, clientX, clientY, onlySquadID = null) {
+        let best = null;
+        let bestD = FORMATION_PICK_RADIUS_PX;
+        const only = onlySquadID ? String(onlySquadID) : null;
+        for (const squad of editorState.squads || []) {
+          if (only && String(squad.id) !== only) continue;
+          for (const phase of ['start', 'end']) {
+            const group = squadPhaseGroup(squad, phase);
+            if (!group?.slots?.length) continue;
+            const planeZ = slotPlaneZ(phase);
+            for (const slot of group.slots) {
+              if (!slot.isPrimary && Number(slot.index) !== 0) continue;
+              const projected = projectSlotToClient(scene2, slot, planeZ);
+              if (!projected) continue;
+              const d = Math.hypot(projected.x - clientX, projected.y - clientY);
+              if (d < bestD) {
+                bestD = d;
+                best = { squadID: String(squad.id), phase };
+              }
+            }
+          }
+        }
+        return best;
+      }
+
+      function setOrbitEnabled(scene2, enabled) {
+        const controls = scene2?.controls;
+        if (controls) controls.enabled = enabled;
+      }
+
+      function notifyFormationSelected(squadID) {
+        notifySwift({
+          type: 'formationSlotSelected',
+          squadID: squadID ? String(squadID) : null,
+        });
+      }
+
+      function notifyFormationMoved(squad, phase) {
+        const group = squadPhaseGroup(squad, phase);
+        if (!group) return;
         notifySwift({
           type: 'formationSlotGroupMoved',
+          squadID: String(squad.id),
           kind: phase,
-          squadID: String(squadId),
-          centerXM,
-          centerYM,
-          headingDeg,
+          centerXM: Number(group.centerXM) || 0,
+          centerYM: Number(group.centerYM) || 0,
+          headingDeg: Number(group.headingDeg) || 0,
         });
       }
 
-      function onPointerDown(event) {
-        const scene2 = getScene2();
-        if (!scene2 || event.button !== 0 || event.shiftKey) return;
-        const handle = pickHandle(scene2, event.clientX, event.clientY);
-        if (!handle?.userData?.role) return;
-        const squad = squadById(handle.userData.squadId);
-        const phase = handle.userData.phase;
-        const data = phase === 'start' ? squad?.start : squad?.end;
-        if (!data) return;
-        formationDrag = {
-          role: handle.userData.role,
-          squadId: handle.userData.squadId,
-          phase,
-          centerXM: data.centerXM,
-          centerYM: data.centerYM,
-          headingDeg: data.headingDeg,
-          circleRadiusM: data.circleRadiusM,
-          offsetX: 0,
-          offsetY: 0,
-        };
-        if (formationDrag.role === 'center') {
-          const hit = pickMapXY(scene2, event.clientX, event.clientY);
-          if (hit) {
-            formationDrag.offsetX = hit.x - data.centerXM;
-            formationDrag.offsetY = hit.y - data.centerYM;
+      function addSlotsForPhase(T, squadGroup, squad, phaseKey, phaseData) {
+        if (!phaseData?.slots?.length) return 0;
+        const planeZ = slotPlaneZ(phaseKey);
+        const selectedSquad = String(editorState.editSquadID || '') === String(squad.id);
+        let count = 0;
+        for (const slot of phaseData.slots) {
+          const halfLengthM = (Number(slot.lengthM) || SLOT_SIZE_M) * 0.5;
+          const halfWidthM = (Number(slot.widthM) || SLOT_SIZE_M) * 0.5;
+          const marker = buildSlotFootprintOutline(
+            T,
+            Number(slot.centerXM) || 0,
+            Number(slot.centerYM) || 0,
+            planeZ,
+            squad.colorHex,
+            Number(slot.headingDeg) || 0,
+            halfLengthM,
+            halfWidthM,
+            selectedSquad
+          );
+          if (marker) {
+            const isPrimary = Boolean(slot.isPrimary) || Number(slot.index) === 0;
+            marker.userData.guardianFormationSlot = {
+              squadId: String(squad.id),
+              phase: phaseKey,
+              isPrimary,
+            };
+            squadGroup.add(marker);
+            count += 1;
           }
         }
+        if (selectedSquad && phaseData.slots.length) {
+          const rim = formationHeadingRimXY(phaseData);
+          const handle = buildHeadingHandleMesh(T, rim.x, rim.y, planeZ);
+          if (handle) {
+            handle.userData.guardianFormationHeadingHandle = {
+              squadId: String(squad.id),
+              phase: phaseKey,
+            };
+            squadGroup.add(handle);
+            count += 1;
+          }
+        }
+        return count;
+      }
+
+      function repaintFormationSquad(scene2, squad) {
+        const T = cacheThree(scene2);
+        if (!T || !ensureOverlay(scene2) || !squad) return 0;
+        const name = `guardian_formation_squad_${squad.id}`;
+        const existing = overlayRoot?.children?.find((c) => c.name === name);
+        if (existing) {
+          overlayRoot.remove(existing);
+          disposeFormationGroup(existing);
+        }
+        const g = new T.Group();
+        g.name = name;
+        let count = 0;
+        count += addSlotsForPhase(T, g, squad, 'start', squad.start);
+        count += addSlotsForPhase(T, g, squad, 'end', squad.end);
+        overlayRoot.add(g);
+        return count;
+      }
+
+      function paintFormationSlots(scene2, attempt = 0) {
+        const squads = editorState.squads || [];
+        if (!squads.length) {
+          clearOverlay();
+          if (typeof scene2?.render === 'function') scene2.render(0);
+          return;
+        }
+        const T = cacheThree(scene2);
+        if (!T || !ensureOverlay(scene2)) {
+          if (attempt < 40) {
+            setTimeout(() => {
+              const s2 = getScene2();
+              if (s2) paintFormationSlots(s2, attempt + 1);
+            }, 100);
+          } else {
+            postFormationSlotDebug('paint', 'overlay constructors not ready after retries');
+          }
+          return;
+        }
+        clearOverlay();
+        let slotCount = 0;
+        for (const squad of squads) {
+          slotCount += repaintFormationSquad(scene2, squad);
+        }
+        if (typeof scene2.render === 'function') scene2.render(0);
+        const logKey = `${squads.length}:${slotCount}`;
+        if (slotCount > 0 && logKey !== lastPaintLogKey) {
+          lastPaintLogKey = logKey;
+          postFormationSlotDebug('paint', `squads=${squads.length} slots=${slotCount} (footprint rings)`);
+        }
+      }
+
+      function beginFormationDrag(scene2, dom, event, hit) {
+        const selectedID = String(editorState.editSquadID || '');
+        if (!selectedID || String(hit.squadID) !== selectedID) return;
+        const squad = findSquad(hit.squadID);
+        const group = squad ? squadPhaseGroup(squad, hit.phase) : null;
+        if (!squad || !group) return;
+        const surface = pickMapSurface(scene2, event.clientX, event.clientY);
+        formationDrag = {
+          squadID: hit.squadID,
+          phase: hit.phase,
+          offsetX: surface ? surface.x - Number(group.centerXM) : 0,
+          offsetY: surface ? surface.y - Number(group.centerYM) : 0,
+          moved: false,
+          startCenterXM: Number(group.centerXM) || 0,
+          startCenterYM: Number(group.centerYM) || 0,
+        };
         setOrbitEnabled(scene2, false);
-        scene2.getDomElement().setPointerCapture(event.pointerId);
+        dom.setPointerCapture(event.pointerId);
         event.preventDefault();
         event.stopImmediatePropagation();
       }
 
-      function onPointerMove(event) {
-        if (!formationDrag) return;
-        const scene2 = getScene2();
-        if (!scene2) return;
-        const squad = squadById(formationDrag.squadId);
-        const data = formationDrag.phase === 'start' ? squad?.start : squad?.end;
-        if (!data) return;
-        if (formationDrag.role === 'center') {
-          const hit = pickMapXY(scene2, event.clientX, event.clientY);
-          if (!hit) return;
-          data.centerXM = hit.x - formationDrag.offsetX;
-          data.centerYM = hit.y - formationDrag.offsetY;
-        } else {
-          const hit = pickMapXY(scene2, event.clientX, event.clientY);
-          if (!hit) return;
-          data.headingDeg = bearingDeg(data.centerXM, data.centerYM, hit.x, hit.y);
-        }
-        rebuildAll(scene2);
+      function formationAnchorMovedSinceDragStart(drag, group) {
+        if (!drag || !group) return false;
+        const eps = 0.05;
+        return (
+          Math.abs((Number(group.centerXM) || 0) - (drag.startCenterXM ?? 0)) > eps
+          || Math.abs((Number(group.centerYM) || 0) - (drag.startCenterYM ?? 0)) > eps
+        );
+      }
+
+      function moveFormationDrag(scene2, clientX, clientY) {
+        if (!formationDrag) return false;
+        const squad = findSquad(formationDrag.squadID);
+        const group = squad ? squadPhaseGroup(squad, formationDrag.phase) : null;
+        const zone = formationDrag.phase === 'end' ? editorState.zones?.end : editorState.zones?.start;
+        if (!squad || !group || !zone?.placed) return false;
+        const hit = pickMapSurface(scene2, clientX, clientY);
+        if (!hit) return false;
+        moveGroupAnchor(
+          group,
+          hit.x - (formationDrag.offsetX ?? 0),
+          hit.y - (formationDrag.offsetY ?? 0)
+        );
+        repaintFormationSquad(scene2, squad);
+        if (typeof scene2.render === 'function') scene2.render(0);
+        return true;
+      }
+
+      function beginFormationHeadingDrag(scene2, dom, event, hit) {
+        const selectedID = String(editorState.editSquadID || '');
+        if (!selectedID || String(hit.squadID) !== selectedID) return;
+        const squad = findSquad(hit.squadID);
+        const group = squad ? squadPhaseGroup(squad, hit.phase) : null;
+        if (!squad || !group?.slots?.length) return;
+        formationHeadingDrag = {
+          squadID: hit.squadID,
+          phase: hit.phase,
+          anchorXM: Number(group.centerXM) || 0,
+          anchorYM: Number(group.centerYM) || 0,
+          baseHeadingDeg: Number(group.headingDeg) || 0,
+          slotSnapshots: cloneFormationSlotSnapshots(group.slots),
+          moved: false,
+        };
+        setOrbitEnabled(scene2, false);
+        dom.setPointerCapture(event.pointerId);
         event.preventDefault();
+        event.stopImmediatePropagation();
       }
 
-      function onPointerUp(event) {
-        if (!formationDrag) return;
-        const scene2 = getScene2();
-        const squad = squadById(formationDrag.squadId);
-        const data = formationDrag.phase === 'start' ? squad?.start : squad?.end;
-        if (data) {
-          postGroupMoved(
-            formationDrag.squadId,
-            formationDrag.phase,
-            data.centerXM,
-            data.centerYM,
-            data.headingDeg
-          );
+      function moveFormationHeadingDrag(scene2, clientX, clientY) {
+        if (!formationHeadingDrag) return false;
+        const squad = findSquad(formationHeadingDrag.squadID);
+        const group = squad ? squadPhaseGroup(squad, formationHeadingDrag.phase) : null;
+        if (!squad || !group) return false;
+        const hit = pickMapSurface(scene2, clientX, clientY);
+        if (!hit) return false;
+        const headingDeg = headingDegFromMapPoint(
+          formationHeadingDrag.anchorXM,
+          formationHeadingDrag.anchorYM,
+          hit.x,
+          hit.y
+        );
+        applyGroupHeadingFromSnapshots(
+          group,
+          formationHeadingDrag.slotSnapshots,
+          formationHeadingDrag.anchorXM,
+          formationHeadingDrag.anchorYM,
+          headingDeg
+        );
+        repaintFormationSquad(scene2, squad);
+        if (typeof scene2.render === 'function') scene2.render(0);
+        return true;
+      }
+
+      function endFormationHeadingDrag(scene2, event) {
+        if (!formationHeadingDrag) return;
+        const squad = findSquad(formationHeadingDrag.squadID);
+        const group = squad ? squadPhaseGroup(squad, formationHeadingDrag.phase) : null;
+        const phase = formationHeadingDrag.phase;
+        const moved = formationHeadingDrag.moved;
+        formationHeadingDrag = null;
+        setOrbitEnabled(scene2, true);
+        if (squad && group && moved) {
+          notifyFormationMoved(squad, phase);
         }
-        formationDrag = null;
-        if (scene2) setOrbitEnabled(scene2, true);
+        try { scene2?.getDomElement?.()?.releasePointerCapture?.(event.pointerId); } catch (_) {}
       }
 
-      function attachDomListeners() {
-        if (domListenersAttached) return;
-        domListenersAttached = true;
-        const dom = document.getElementById('scene');
+      function endFormationDrag(scene2, event) {
+        if (!formationDrag) return;
+        const squad = findSquad(formationDrag.squadID);
+        const group = squad ? squadPhaseGroup(squad, formationDrag.phase) : null;
+        const moved = formationDrag.moved || formationAnchorMovedSinceDragStart(formationDrag, group);
+        const phase = formationDrag.phase;
+        formationDrag = null;
+        setOrbitEnabled(scene2, true);
+        if (squad && group && moved) {
+          notifyFormationMoved(squad, phase);
+        }
+        try { scene2?.getDomElement?.()?.releasePointerCapture?.(event.pointerId); } catch (_) {}
+      }
+
+      function formationPointerRoot(scene2) {
+        return scene2?.getDomElement?.() || document.getElementById('scene') || null;
+      }
+
+      function uninstallFormationHandlers() {
+        if (!formationPointerDom) return;
+        formationPointerDom.removeEventListener('pointerdown', onFormationPointerDown, true);
+        formationPointerDom.removeEventListener('pointermove', onFormationPointerMove, true);
+        formationPointerDom.removeEventListener('pointerup', onFormationPointerUp, true);
+        formationPointerDom.removeEventListener('pointercancel', onFormationPointerUp, true);
+        formationPointerDom = null;
+      }
+
+      function onFormationPointerDown(event) {
+        if (!(editorState.squads || []).length) return;
+        const scene2 = getScene2();
+        if (!scene2 || event.button !== 0 || event.shiftKey) return;
+        const dom = formationPointerRoot(scene2);
         if (!dom) return;
-        dom.addEventListener('pointerdown', onPointerDown, true);
-        dom.addEventListener('pointermove', onPointerMove, true);
-        dom.addEventListener('pointerup', onPointerUp, true);
-        dom.addEventListener('pointercancel', onPointerUp, true);
+        const rect = dom.getBoundingClientRect();
+        if (
+          event.clientX < rect.left || event.clientX > rect.right
+          || event.clientY < rect.top || event.clientY > rect.bottom
+        ) return;
+
+        formationOrbitClick = null;
+        formationPendingToggleID = null;
+
+        const target = classifyMapPointerTarget(scene2, event.clientX, event.clientY);
+        if (target.kind === 'formationHeading') {
+          guardianRecordClickHandler('formation-heading-down');
+          beginFormationHeadingDrag(scene2, dom, event, target.headingHit);
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          return;
+        }
+        if (target.kind !== 'formation') {
+          if (String(editorState.editSquadID || '')) {
+            formationOrbitClick = {
+              kind: target.kind,
+              startX: event.clientX,
+              startY: event.clientY,
+            };
+          }
+          return;
+        }
+
+        guardianRecordClickHandler('formation-primary-down');
+        const selectedID = String(editorState.editSquadID || '');
+        const hit = target.formationHit;
+        if (selectedID && String(hit.squadID) === selectedID) {
+          formationPendingToggleID = hit.squadID;
+          beginFormationDrag(scene2, dom, event, hit);
+        } else {
+          editorState.editSquadID = hit.squadID;
+          notifyFormationSelected(hit.squadID);
+          paintFormationSlots(scene2);
+        }
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+
+      function onFormationPointerMove(event) {
+        const scene2 = getScene2();
+        if (formationHeadingDrag && scene2) {
+          moveFormationHeadingDrag(scene2, event.clientX, event.clientY);
+          formationHeadingDrag.moved = true;
+          event.preventDefault();
+          return;
+        }
+        if (formationDrag && scene2) {
+          moveFormationDrag(scene2, event.clientX, event.clientY);
+          formationDrag.moved = true;
+          event.preventDefault();
+          return;
+        }
+      }
+
+      function onFormationPointerUp(event) {
+        if (event.button !== 0) return;
+        const scene2 = getScene2();
+        if (formationHeadingDrag && scene2) {
+          endFormationHeadingDrag(scene2, event);
+          formationOrbitClick = null;
+          event.preventDefault();
+          return;
+        }
+        if (formationDrag && scene2) {
+          const drag = formationDrag;
+          const pendingToggle = formationPendingToggleID;
+          const squad = findSquad(drag.squadID);
+          const group = squad ? squadPhaseGroup(squad, drag.phase) : null;
+          const moved = drag.moved || formationAnchorMovedSinceDragStart(drag, group);
+          endFormationDrag(scene2, event);
+          formationPendingToggleID = null;
+          formationOrbitClick = null;
+          event.preventDefault();
+          if (!moved && pendingToggle) {
+            editorState.editSquadID = null;
+            notifyFormationSelected(null);
+            paintFormationSlots(scene2);
+          }
+          return;
+        }
+        const orbitClick = formationOrbitClick;
+        formationOrbitClick = null;
+        if (orbitClick && scene2 && String(editorState.editSquadID || '')) {
+          const moved = Math.hypot(
+            event.clientX - orbitClick.startX,
+            event.clientY - orbitClick.startY
+          );
+          if (moved <= FORMATION_ORBIT_CLICK_DRAG_PX && orbitClick.kind === 'orbit') {
+            editorState.editSquadID = null;
+            notifyFormationSelected(null);
+            paintFormationSlots(scene2);
+          }
+        }
+      }
+
+      function installFormationHandlers(scene2) {
+        const dom = formationPointerRoot(scene2);
+        if (!dom || !(editorState.squads || []).length) {
+          uninstallFormationHandlers();
+          return;
+        }
+        if (formationPointerDom === dom) return;
+        uninstallFormationHandlers();
+        dom.addEventListener('pointerdown', onFormationPointerDown, true);
+        dom.addEventListener('pointermove', onFormationPointerMove, true);
+        dom.addEventListener('pointerup', onFormationPointerUp, true);
+        dom.addEventListener('pointercancel', onFormationPointerUp, true);
+        formationPointerDom = dom;
+        setOrbitEnabled(scene2, true);
       }
 
       return {
         attach(manager) {
           attachedManager = manager;
-          attachDomListeners();
-          const scene2 = getScene2();
-          if (scene2) rebuildAll(scene2);
+          const scene2 = manager?.scene;
+          if (!scene2) return;
+          ensureOverlay(scene2);
+          installFormationHandlers(scene2);
         },
         applyState(state) {
           if (!state) return false;
+          const dragging = formationDrag !== null || formationHeadingDrag !== null;
+          if (dragging) {
+            editorState.mapHalfExtentM = Number(state.mapHalfExtentM) || MAP_GROUND_HALF_EXTENT_M;
+            editorState.zones = state.zones || editorState.zones;
+            if (state.editSquadID !== undefined) {
+              editorState.editSquadID = state.editSquadID || null;
+            }
+            return true;
+          }
           editorState = {
             mapHalfExtentM: Number(state.mapHalfExtentM) || MAP_GROUND_HALF_EXTENT_M,
             zones: state.zones || editorState.zones,
@@ -2269,8 +2940,9 @@
             squads: Array.isArray(state.squads) ? state.squads : [],
           };
           const scene2 = getScene2();
-          if (!scene2) return false;
-          rebuildAll(scene2);
+          if (!scene2) return true;
+          paintFormationSlots(scene2);
+          installFormationHandlers(scene2);
           return true;
         },
       };
@@ -3792,6 +4464,8 @@
       try {
         const mod = await import('./dist/gzweb.bundle.mjs');
         guardianThree = mod;
+        resetOverlayThreeCache();
+        formationSlotLogDedupe = { key: '', at: 0 };
         zoneEditor.resetThreeCache();
         const SceneManager = mod.SceneManager ?? mod.default?.SceneManager;
         if (SceneManager) return SceneManager;

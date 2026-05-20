@@ -15,6 +15,7 @@ struct TrainingLabPanelView: View {
     @StateObject private var viewportZones = GazeboWebViewportZoneBridge()
     @StateObject private var viewportObstacles = GazeboWebViewportObstacleBridge()
     @StateObject private var viewportFormationSlots = GazeboWebViewportFormationSlotsBridge()
+    @StateObject private var viewportTransitRoutes = GazeboWebViewportTransitRoutesBridge()
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.guardianAppProduct) private var appProduct
@@ -107,6 +108,9 @@ struct TrainingLabPanelView: View {
         .onAppear {
             lab.teaching.clampVehicleClassToTrainingPanelOptions()
             attachBothControllers()
+            lab.onTransitRouteOverlaysDidChange = { [self] in
+                pushTrainingViewportTransitRoutes()
+            }
             refreshActiveMap()
             Task { await ensureTrainingGazeboWorldLoadedIfNeeded() }
         }
@@ -117,6 +121,7 @@ struct TrainingLabPanelView: View {
         .onChange(of: isSessionRunning) { running in
             if running {
                 appDrawer.dismiss()
+                pushTrainingViewportTransitRoutes()
             }
         }
         .onChange(of: generalSettings.simSpawnDefaults) { defaults in
@@ -190,6 +195,7 @@ struct TrainingLabPanelView: View {
                 pushTrainingViewportZones()
                 pushTrainingViewportObstacles()
                 pushTrainingViewportFormationSlots()
+                pushTrainingViewportTransitRoutes()
             }
         }
         .onChange(of: roster.squads) { _ in
@@ -203,6 +209,9 @@ struct TrainingLabPanelView: View {
         }
         .onChange(of: roster.mapSelectedSquadID) { _ in
             pushTrainingViewportFormationSlots()
+        }
+        .onChange(of: lab.run.transitRouteOverlays) { _ in
+            pushTrainingViewportTransitRoutes()
         }
         .onChange(of: lab.teaching.vehicleClass) { _ in
             lab.teaching.trainingTaskOrVehicleDidChange()
@@ -250,6 +259,7 @@ struct TrainingLabPanelView: View {
         guard let manifest = lab.teaching.selectedEnvironment?.manifest else {
             viewportZones.syncFromManifest(nil)
             viewportFormationSlots.clear()
+            viewportTransitRoutes.clear()
             viewportObstacles.pushEditorState(
                 editorActive: false,
                 placementActive: false,
@@ -271,6 +281,14 @@ struct TrainingLabPanelView: View {
             mapHalfExtentM: trainingGroundHalfExtentM
         )
         pushTrainingViewportFormationSlots(zones: zones)
+    }
+
+    private func pushTrainingViewportTransitRoutes() {
+        guard mapIsSelected, lab.teaching.usesGazeboTrainingViewport else {
+            viewportTransitRoutes.clear()
+            return
+        }
+        viewportTransitRoutes.push(routes: lab.run.transitRouteOverlays)
     }
 
     /// Read-only obstacle meshes on the map tile (Training `.run` — not World Builder edit mode).
@@ -518,6 +536,8 @@ struct TrainingLabPanelView: View {
                         obstacleCommandTick: viewportObstacles.tick,
                         formationSlotsBridge: viewportFormationSlots,
                         formationSlotsCommandTick: viewportFormationSlots.tick,
+                        transitRoutesBridge: viewportTransitRoutes,
+                        transitRoutesCommandTick: viewportTransitRoutes.tick,
                         showsCameraDebugHUD: fleetLink.isDebugEnabled,
                         groundHalfExtentM: trainingGroundHalfExtentM,
                         orbitMinDistanceM: trainingOrbitMinDistanceM,
@@ -587,6 +607,7 @@ struct TrainingLabPanelView: View {
             if case .live = viewport?.phase {
                 pushTrainingViewportObstacles()
                 pushTrainingViewportFormationSlots()
+                pushTrainingViewportTransitRoutes()
             }
         }
         .onChange(of: fleetLink.isDebugEnabled) { enabled in

@@ -8,6 +8,8 @@ final class TrainingLabRunOrchestrator: ObservableObject {
     @Published private(set) var result: TrainingRunResult = .idle
     @Published private(set) var statusText: String = ""
     @Published private(set) var logLines: [TrainingPanelLogLine] = []
+    /// Nav2 / geodesic polylines for the Gazebo viewport (cleared when a new run starts).
+    @Published private(set) var transitRouteOverlays: [TrainingLabTransitRouteOverlayPath] = []
 
     private static let monitorIntervalNs: UInt64 = 1_000_000_000
     /// Whole-run wall clock cap. Phase 4d waypoints: consider pausing or excluding authorized
@@ -15,8 +17,10 @@ final class TrainingLabRunOrchestrator: ObservableObject {
     private static let runTimeoutS: TimeInterval = 300
 
     private weak var lab: TrainingLabController?
+    private weak var boundRoster: TrainingLabRosterController?
     private var monitorTask: Task<Void, Never>?
     private var transitDriveTask: Task<Void, Never>?
+    private var proxySyncTask: Task<Void, Never>?
     private var activePlans: [TrainingLabRunVehiclePlan] = []
     private var squadDriveFailed: Set<UUID> = []
     private var learningSquadID: UUID?
@@ -26,9 +30,16 @@ final class TrainingLabRunOrchestrator: ObservableObject {
     private var safetyProgressTracks: [String: TrainingLabRunSafetyMonitor.VehicleProgressTrack] = [:]
     /// Resolved drive polylines (Nav2 or geodesic) for along-path stuck detection.
     private var transitPathsByVehicleID: [String: [RouteCoordinate]] = [:]
+    private var pathSourceByVehicleID: [String: TrainingNav2PlanPathResponse.Source] = [:]
+    private var resolvedPathsByVehicleID: [String: TrainingLabTransitMotion.PathResolution] = [:]
 
     var isSessionActive: Bool {
         phase == .staged || phase == .running
+    }
+
+    /// Whether ``completeRun(terminalPhase:...)`` may tear down the session (must use **current** phase, not the terminal outcome).
+    static func sessionAllowsCompletion(whileIn sessionPhase: TrainingRunPhase) -> Bool {
+        sessionPhase == .running || sessionPhase == .staged
     }
 
     func bind(lab: TrainingLabController) {
@@ -59,6 +70,11 @@ final class TrainingLabRunOrchestrator: ObservableObject {
         mapHalfExtentMForRun = mapHalfExtentM
         safetyProgressTracks = [:]
         transitPathsByVehicleID = [:]
+        pathSourceByVehicleID = [:]
+        resolvedPathsByVehicleID = [:]
+        transitRouteOverlays = []
+        lab.onTransitRouteOverlaysDidChange?()
+        boundRoster = roster
 
         roster.ensureZoneFormationAnchors(zones: zones)
         let staging = TrainingLabFormationSlotStaging.validate(
@@ -127,7 +143,7 @@ final class TrainingLabRunOrchestrator: ObservableObject {
 
         if let learning = roster.learningSquad,
            let learningPlan = activePlans.first(where: { $0.squadID == learning.id }) {
-            lab.teaching.applyTransitLayout(learningPlan.layout)
+            lab.teaching.setTransitRunLayout(learningPlan.layout)
             lab.teaching.vehicleClass = learning.primary.vehicleClass
             lab.teaching.vehicleSizeTier = learning.primary.vehicleSizeTier
         }
@@ -141,34 +157,56 @@ final class TrainingLabRunOrchestrator: ObservableObject {
         )
         phase = .running
         statusText = "Transit run in progress…"
-        appendLog("Map built. Driving squads to end zones (open-loop path follow).")
+        appendLog("Map built. Planning routes for transit (Nav2 or geodesic fallback).")
+        appendLog(TrainingLabRunPathPlanning.nav2StackLogLine(fleetLink: fleetLink))
 
-        for plan in activePlans {
-            let path = await TrainingLabTransitMotion.resolvePath(fleetLink: fleetLink, plan: plan)
-            transitPathsByVehicleID[plan.vehicleID] = path.points
-            appendLog(
-                "\(plan.squadLabel): route \(path.source.rawValue), \(path.points.count) pt — stuck uses along-path progress."
+        let runPaths = await TrainingLabRunPathPlanning.resolveAllForRun(
+            fleetLink: fleetLink,
+            plans: activePlans
+        )
+        resolvedPathsByVehicleID = runPaths.byVehicleID
+        if let origin = mapGeodeticOriginForRun {
+            transitRouteOverlays = TrainingLabTransitRouteOverlay.makePaths(
+                plans: activePlans,
+                resolvedByVehicleID: runPaths.byVehicleID,
+                mapGeodeticOrigin: origin
             )
+            lab.onTransitRouteOverlaysDidChange?()
+            let overlayPts = transitRouteOverlays.reduce(0) { $0 + $1.pointCount }
+            appendLog("Route overlay: \(transitRouteOverlays.count) path(s), \(overlayPts) map point(s) sent to 3D view.")
         }
+        for plan in activePlans {
+            guard let path = runPaths.byVehicleID[plan.vehicleID] else { continue }
+            transitPathsByVehicleID[plan.vehicleID] = path.points
+            pathSourceByVehicleID[plan.vehicleID] = path.source
+            appendLog(TrainingLabRunPathPlanning.routeLogLine(plan: plan, path: path))
+        }
+
+        if let learning = roster.learningSquad,
+           let learningPlan = activePlans.first(where: { $0.squadID == learning.id }),
+           let path = runPaths.byVehicleID[learningPlan.vehicleID] {
+            lab.teaching.applyRunPlannedPath(points: path.points, source: path.source)
+        }
+
+        appendLog("Driving squads to end zones (open-loop path follow).")
         appendLog(
             "Safety: map bounds enforced; stuck if no along-route progress for \(Int(TrainingLabRunSafetyMonitor.stuckNoProgressWindowS)) s (after \(Int(TrainingLabRunSafetyMonitor.stuckGraceAfterStartS)) s grace)."
         )
 
         GuardianApplicationLifecycle.shared.beginBackgroundLabRun()
         startMonitor(fleetLink: fleetLink, spawnDefaults: lab.teaching.spawnDefaultsForMapSession)
+        startGazeboProxyTelemetrySync(fleetLink: fleetLink, gazebo: lab.teaching.gazeboForMapSession)
         startTransitDrive(fleetLink: fleetLink)
+        appendLog("Gazebo proxies follow live hub telemetry during the run (~5 Hz).")
     }
 
     func stop(roster: TrainingLabRosterController) async {
-        stopMonitor()
-        stopTransitDrive(fleetLink: lab?.teaching.fleetLinkForMapSession)
         lab?.teaching.cancelTeaching()
         if let lab {
             await lab.stopActiveFormationSession()
         }
         if phase == .running || phase == .staged {
-            appendLog("Stop requested — resetting map session.")
-            await lab?.resetMap(roster: roster, runLog: mapRunLogHandler())
+            appendLog("Stop requested.")
             let aborted = activePlans.map { plan in
                 TrainingRunSquadOutcome.failed(
                     squadID: plan.squadID,
@@ -176,20 +214,24 @@ final class TrainingLabRunOrchestrator: ObservableObject {
                     message: "Run stopped by operator."
                 )
             }
-            completeRun(phase: .failed, squadOutcomes: aborted, status: "Run stopped.")
+            await completeRun(terminalPhase: .failed, squadOutcomes: aborted, status: "Run stopped.")
         } else {
             phase = .idle
             result = .idle
             statusText = ""
+            activePlans = []
+            squadDriveFailed = []
+            learningSquadID = nil
+            runStartedAt = nil
+            mapGeodeticOriginForRun = nil
+            safetyProgressTracks = [:]
+            transitPathsByVehicleID = [:]
+            pathSourceByVehicleID = [:]
+            resolvedPathsByVehicleID = [:]
+            boundRoster = nil
+            GuardianApplicationLifecycle.shared.endBackgroundLabRun()
         }
-        activePlans = []
-        squadDriveFailed = []
-        learningSquadID = nil
-        runStartedAt = nil
-        mapGeodeticOriginForRun = nil
-        safetyProgressTracks = [:]
-        transitPathsByVehicleID = [:]
-        GuardianApplicationLifecycle.shared.endBackgroundLabRun()
+        // Keep ``transitRouteOverlays`` until the next run starts (debug compare vs zone seams).
     }
 
     // MARK: - Transit drive (detached — fleet hops on ``FleetLinkService`` main actor)
@@ -197,10 +239,12 @@ final class TrainingLabRunOrchestrator: ObservableObject {
     private func startTransitDrive(fleetLink: FleetLinkService) {
         transitDriveTask?.cancel()
         let plans = activePlans
+        let preResolved = resolvedPathsByVehicleID
         transitDriveTask = Task.detached(priority: .userInitiated) { [weak self] in
             await TrainingLabTransitMotion.runParallelSquadDrives(
                 fleetLink: fleetLink,
                 plans: plans,
+                preResolvedByVehicleID: preResolved,
                 deliverReport: { report in
                     await MainActor.run {
                         self?.ingestTransitDriveReport(report)
@@ -213,6 +257,32 @@ final class TrainingLabRunOrchestrator: ObservableObject {
                 }
             )
         }
+    }
+
+    private func startGazeboProxyTelemetrySync(
+        fleetLink: FleetLinkService,
+        gazebo: GazeboService?
+    ) {
+        guard let gazebo else { return }
+        let vehicleIDs = activePlans.map(\.vehicleID)
+        guard let origin = mapGeodeticOriginForRun else { return }
+        proxySyncTask?.cancel()
+        proxySyncTask = Task { @MainActor [weak self] in
+            await TrainingLabGazeboProxyTelemetrySync.runWhileActive(
+                gazebo: gazebo,
+                fleetLink: fleetLink,
+                vehicleIDs: vehicleIDs,
+                mapGeodeticOrigin: origin,
+                shouldContinue: { [weak self] in
+                    self?.phase == .running
+                }
+            )
+        }
+    }
+
+    private func stopGazeboProxyTelemetrySync() {
+        proxySyncTask?.cancel()
+        proxySyncTask = nil
     }
 
     private func stopTransitDrive(fleetLink: FleetLinkService?) {
@@ -257,11 +327,11 @@ final class TrainingLabRunOrchestrator: ObservableObject {
                 message: "\(plan.squadLabel): run ended because another squad failed."
             )
         }
-        completeRun(
-            phase: .failed,
+        Task { await completeRun(
+            terminalPhase: .failed,
             squadOutcomes: outcomes,
             status: "Transit drive failed for one or more squads."
-        )
+        ) }
     }
 
     // MARK: - Monitor
@@ -285,7 +355,7 @@ final class TrainingLabRunOrchestrator: ObservableObject {
         guard phase == .running, let started = runStartedAt else { return }
         let elapsed = Date().timeIntervalSince(started)
         if elapsed >= Self.runTimeoutS {
-            finishWithTimeout()
+            await finishWithTimeout()
             return
         }
 
@@ -299,7 +369,7 @@ final class TrainingLabRunOrchestrator: ObservableObject {
                 mapGeodeticOrigin: mapOrigin,
                 mapHalfExtentM: mapHalfExtentMForRun
             ) {
-                abortTransitRunForSafety(bounds)
+                await abortTransitRunForSafety(bounds)
                 return
             }
             let routePath = transitPathsByVehicleID[plan.vehicleID]
@@ -314,7 +384,7 @@ final class TrainingLabRunOrchestrator: ObservableObject {
                 now: now
             ) {
                 if let track { safetyProgressTracks[plan.vehicleID] = track }
-                abortTransitRunForSafety(stuck)
+                await abortTransitRunForSafety(stuck)
                 return
             }
             if let track { safetyProgressTracks[plan.vehicleID] = track }
@@ -387,8 +457,8 @@ final class TrainingLabRunOrchestrator: ObservableObject {
         if failFast {
             guard allReachedEnd else { return }
             appendLog("Monitor: all squads within end-slot tolerance.")
-            completeRun(
-                phase: .succeeded,
+            await completeRun(
+                terminalPhase: .succeeded,
                 squadOutcomes: squadOutcomes,
                 status: "All squads reached end formation."
             )
@@ -402,17 +472,18 @@ final class TrainingLabRunOrchestrator: ObservableObject {
             let status = otherFailures == 0
                 ? "Learning squad and all supporting squads reached end formation."
                 : "Learning squad reached end formation; \(otherFailures) other squad(s) did not finish."
-            completeRun(phase: .succeeded, squadOutcomes: squadOutcomes, status: status)
+            await completeRun(terminalPhase: .succeeded, squadOutcomes: squadOutcomes, status: status)
         } else {
-            completeRun(
-                phase: .failed,
+            await completeRun(
+                terminalPhase: .failed,
                 squadOutcomes: squadOutcomes,
                 status: "Learning squad did not reach the end formation."
             )
         }
     }
 
-    private func abortTransitRunForSafety(_ violation: TrainingLabRunSafetyMonitor.Violation) {
+    private func abortTransitRunForSafety(_ violation: TrainingLabRunSafetyMonitor.Violation) async {
+        guard phase == .running else { return }
         appendLog("[Safety] \(violation.message)")
         let outcomes = activePlans.map { plan in
             if plan.vehicleID == violation.vehicleID {
@@ -428,10 +499,10 @@ final class TrainingLabRunOrchestrator: ObservableObject {
                 message: "Run aborted — \(violation.message)"
             )
         }
-        completeRun(phase: .failed, squadOutcomes: outcomes, status: violation.message)
+        await completeRun(terminalPhase: .failed, squadOutcomes: outcomes, status: violation.message)
     }
 
-    private func finishWithTimeout() {
+    private func finishWithTimeout() async {
         appendLog("Monitor: run timed out after \(Int(Self.runTimeoutS)) s.")
         let outcomes = activePlans.map { plan in
             TrainingRunSquadOutcome.failed(
@@ -440,31 +511,73 @@ final class TrainingLabRunOrchestrator: ObservableObject {
                 message: "\(plan.squadLabel) did not reach the end zone in time."
             )
         }
-        completeRun(phase: .failed, squadOutcomes: outcomes, status: "Transit run timed out.")
+        await completeRun(terminalPhase: .failed, squadOutcomes: outcomes, status: "Transit run timed out.")
     }
 
     private func completeRun(
-        phase: TrainingRunPhase,
+        terminalPhase: TrainingRunPhase,
         squadOutcomes: [TrainingRunSquadOutcome],
         status: String
-    ) {
+    ) async {
+        guard Self.sessionAllowsCompletion(whileIn: phase) else { return }
         stopMonitor()
+        stopGazeboProxyTelemetrySync()
         stopTransitDrive(fleetLink: lab?.teaching.fleetLinkForMapSession)
-        self.phase = phase
+        let finishedAt = Date()
+        let startedAt = runStartedAt
+        let plans = activePlans
+        let driveFailed = squadDriveFailed
+        let paths = transitPathsByVehicleID
+        let pathSources = pathSourceByVehicleID
+        let tracks = safetyProgressTracks
+        let learning = learningSquadID
+        let fleetLink = lab?.teaching.fleetLinkForMapSession
+
+        phase = terminalPhase
         result = TrainingRunResult(
-            phase: phase,
+            phase: terminalPhase,
             squadOutcomes: squadOutcomes,
-            startedAt: runStartedAt,
-            finishedAt: Date()
+            startedAt: startedAt,
+            finishedAt: finishedAt
         )
         statusText = status
         appendLog(status)
+
+        let snapshot = TrainingLabRunMetricsRecorder.makeSnapshot(
+            result: result,
+            statusMessage: status,
+            plans: plans,
+            squadOutcomes: squadOutcomes,
+            squadDriveFailed: driveFailed,
+            transitPathsByVehicleID: paths,
+            pathSourceByVehicleID: pathSources,
+            safetyProgressTracks: tracks,
+            fleetLink: fleetLink,
+            startedAt: startedAt,
+            finishedAt: finishedAt,
+            learningSquadID: learning
+        )
+
+        if let lab, let roster = boundRoster {
+            await lab.finalizeTransitRun(
+                snapshot: snapshot,
+                roster: roster,
+                appendRunLog: { [weak self] line in
+                    self?.appendLog(line)
+                }
+            )
+        }
+
         activePlans = []
+        squadDriveFailed = []
         learningSquadID = nil
         runStartedAt = nil
         mapGeodeticOriginForRun = nil
         safetyProgressTracks = [:]
         transitPathsByVehicleID = [:]
+        pathSourceByVehicleID = [:]
+        resolvedPathsByVehicleID = [:]
+        boundRoster = nil
         GuardianApplicationLifecycle.shared.endBackgroundLabRun()
     }
 

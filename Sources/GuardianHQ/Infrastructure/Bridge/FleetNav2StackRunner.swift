@@ -115,7 +115,7 @@ final class FleetNav2StackRunner {
             }
 
             let errTail = await captureLaunchStderrTailAfterTerminate(maxBytes: 4096)
-            onStatus?("timeout", "compute_path_to_pose_unavailable")
+            onStatus?("timeout", "compute_path_to_pose_action_unavailable")
             if errTail.isEmpty {
                 onLogLine?("Fleet Nav2: planner service not ready within \(Int(Self.readyTimeoutSeconds))s.")
             } else {
@@ -246,11 +246,31 @@ final class FleetNav2StackRunner {
     }
 
     private nonisolated static func plannerServiceIsAvailable(setupScriptPath: String) -> Bool {
+        plannerPlanningIsAvailable(setupScriptPath: setupScriptPath)
+    }
+
+    /// Nav2 Humble+ exposes ``ComputePathToPose`` as ``/compute_path_to_pose`` **action**, not a service.
+    nonisolated static func plannerPlanningIsAvailable(setupScriptPath: String) -> Bool {
         let script = """
+        set -euo pipefail
+        \(Ros2BridgeLocator.bashRosDiscoveryExportsForScripts)source "\(setupScriptPath)"
+        ros2 action list
+        """
+        if let actionLines = rosCliLines(script: script), actionLines.contains("/compute_path_to_pose")
+            || actionLines.contains("/planner_server/compute_path_to_pose") {
+            return true
+        }
+        let serviceScript = """
         set -euo pipefail
         \(Ros2BridgeLocator.bashRosDiscoveryExportsForScripts)source "\(setupScriptPath)"
         ros2 service list
         """
+        guard let serviceLines = rosCliLines(script: serviceScript) else { return false }
+        return serviceLines.contains("/planner_server/compute_path_to_pose")
+            || serviceLines.contains("/compute_path_to_pose")
+    }
+
+    private nonisolated static func rosCliLines(script: String) -> Set<String>? {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/bash")
         proc.arguments = ["-lc", script]
@@ -260,7 +280,7 @@ final class FleetNav2StackRunner {
         do {
             try proc.run()
         } catch {
-            return false
+            return nil
         }
         let group = DispatchGroup()
         group.enter()
@@ -273,12 +293,10 @@ final class FleetNav2StackRunner {
         let waitResult = group.wait(timeout: .now() + 10)
         guard waitResult == .success, finished, proc.terminationStatus == 0 else {
             if proc.isRunning { proc.terminate() }
-            return false
+            return nil
         }
         let data = out.fileHandleForReading.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else { return false }
-        let lines = Set(text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) })
-        return lines.contains("/planner_server/compute_path_to_pose")
-            || lines.contains("/compute_path_to_pose")
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        return Set(text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) })
     }
 }

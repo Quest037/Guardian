@@ -46,6 +46,7 @@ final class GazeboService: ObservableObject {
         let instanceIndex: Int
         let modelName: String
         let mavlinkSystemID: Int
+        let footprintHeightM: Double
     }
 
     init() {
@@ -190,6 +191,7 @@ final class GazeboService: ObservableObject {
             vehicleClass: params.vehicleClass,
             tier: params.vehicleSizeTier
         )
+        let footprintHeightM = footprint.metres().heightM
         let modelBase = GazeboVehicleModelSDFWriter.sanitizeModelName("guardian_veh_sysid_\(mavlinkSystemID)")
         await removeOrphanVehicleModelFromWorld(
             worldName: row.gazeboSDFWorldName,
@@ -208,14 +210,15 @@ final class GazeboService: ObservableObject {
                 instanceIndex: row.instanceIndex,
                 written: written,
                 params: params,
-                footprintHeightM: footprint.metres().heightM
+                footprintHeightM: footprintHeightM
             )
             vehicleVisualsBySystemID[mavlinkSystemID] = GazeboSpawnedVehicleVisual(
                 worldID: worldID,
                 worldName: row.gazeboSDFWorldName,
                 instanceIndex: row.instanceIndex,
                 modelName: written.modelName,
-                mavlinkSystemID: mavlinkSystemID
+                mavlinkSystemID: mavlinkSystemID,
+                footprintHeightM: footprintHeightM
             )
             let kind = written.usesCustomMesh ? "mesh" : "box"
             fleetLink?.appendSimulationLog(
@@ -228,6 +231,25 @@ final class GazeboService: ObservableObject {
             fleetLink?.appendSimulationLog("Gazebo: vehicle proxy spawn failed — \(message)")
             return false
         }
+    }
+
+    /// Moves a spawned training proxy to match live hub pose (ENU in the active `.run` world).
+    @discardableResult
+    func updateVehicleProxyPose(
+        mavlinkSystemID: Int,
+        pose: TrainingEnvironmentPose
+    ) async -> Bool {
+        guard let visual = vehicleVisualsBySystemID[mavlinkSystemID] else { return false }
+        guard worlds.first(where: { $0.id == visual.worldID && $0.isAlive }) != nil else {
+            return false
+        }
+        return await GazeboEntityFactoryClient.setModelPose(
+            worldName: visual.worldName,
+            instanceIndex: visual.instanceIndex,
+            modelName: visual.modelName,
+            pose: pose,
+            footprintHeightM: visual.footprintHeightM
+        )
     }
 
     func removeVehicleProxy(mavlinkSystemID: Int) async {

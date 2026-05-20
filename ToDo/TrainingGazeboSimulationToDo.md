@@ -34,7 +34,7 @@ Goal: **Guardian Training** is an autonomy lab with three cooperating surfaces:
 | # | Goal | Tracker |
 | --- | --- | --- |
 | 1 | **Vehicle actually moves** — ``Run`` drives SITL via training control segments (or first execute path); pose changes in fleet hub; end-slot evaluator sees real arrivals/failures. | Phase 7 → **Motion proof** |
-| 2 | **Nav2 plan on Run** — global plan start slot → end slot when ROS sidecar is up (not map-idle overlay only); path feeds drive + along-path stuck monitor. | Phase 7 → **Nav2 plan on Run** |
+| 2 | **Nav2 plan on Run** — global plan start slot → end slot when ROS sidecar is up (not map-idle overlay only); path feeds drive + along-path stuck monitor. | Phase 7 → **Nav2 plan on Run** (code shipped; confirm `nav2` source on roadtest) |
 | 3 | **Gazebo proxy follows sim** — vehicle meshes update from hub position/heading (``set_pose`` or equivalent), not spawn pose only. | Phase 7 → **Proxy telemetry sync** |
 | 4 | **Execute or tighten open-loop** — ``navigate_to_pose`` / cmd_vel (locked UGV strategy) **or** prove open-loop segments sufficient for end-zone pass/fail on flat maps. | Phase 7 → **Nav2 execute** |
 | 5 | **Roadtest matrix** — planner down, timeout, stuck, bad goal, sidecar late; **light run logs** (pose trace, path source, segment acks) — instrumentation, not scoring. | Phase 7 → **Roadtest instrumentation** |
@@ -55,7 +55,7 @@ Goal: **Guardian Training** is an autonomy lab with three cooperating surfaces:
 ## Phase 4 — Training lab: vehicle in environment
 
 - [x] **Embedded 3D viewport** — same stack as World Builder in Training lab (`GazeboSessionLaunchPolicy` + `TrainingLabPanelView`).
-- [x] **`resetMap()` / `buildMap()`** — on **Stop**: hold/disarm roster SITLs, ``applySimState`` to squad start poses, remove Gazebo vehicle proxies. On **Run**: teleport to starts, spawn proxies. Proxies for ``.trainingRoster`` are lab-managed only (no auto-spawn on SITL add).
+- [x] **`resetMap()` / `buildMap()`** — on **Run**: teleport to starts, spawn proxies. On **Stop** or **natural run end** (success/fail/stuck/timeout): ``TrainingLabController/finalizeTransitRun`` runs ``onTransitRunWillResetMap`` + default ``[Metrics]`` capture, then hold/disarm, ``applySimState`` to start poses, remove proxies. Proxies for ``.trainingRoster`` are lab-managed only (no auto-spawn on SITL add).
 - [x] **PX4 pose in Gazebo** — SITL home (`PX4_HOME_*` / ArduPilot `-l`) + Gazebo placement hint from **start formation slot** ENU via ``TrainingLabSitlSpawnAlignment`` / ``spawnAlignmentForPendingEntry`` (roster add/replace + teaching shell); map geodetic origin from manifest ``defaultSpawn``.
 - [x] **Start at formation slots (v1)** — ``buildMap`` / ``resetMap`` + post-spawn ``positionVehicleAtStartSlot`` use start-zone slot ENU; teach layout no longer overrides slot pose when zones are placed. **Geodetic shim (v1):** ``TrainingEnvironmentGeodesy/mapSessionOrigin`` anchors lat/lon at manifest ``defaultSpawn`` for map session / run goals / formation SITL seeds.
 - [x] **Run Drawers** — Map drawer omitted while a transit run is active; **Stop** before changing map (⌘1 blocked with toast).
@@ -63,6 +63,11 @@ Goal: **Guardian Training** is an autonomy lab with three cooperating surfaces:
 **Deferred to end of v1:** **Teaching loop** — see **End of v1** (needs roadtest-derived metrics from sim truth, not map geodesic alone).
 
 ---
+
+## Phase 4e - v1 vehicle meshes
+
+- [ ] **Heading Arrow** — Add a flat direction arrow on top of vehicle mesh to show heading.
+- [ ] **Telemetry Pin** — Add a floating pin above vehicle mesh (that moves with it) with a traffic light colour to represent vehicle connection status (vehicle 2 word coloured status concept)
 
 ## Phase 4c — v1 squad transit (start zone → end zone, no waypoints)
 
@@ -162,13 +167,13 @@ Let operators **save the current lab setup as a named template** and **load it l
 
 ### Now (roadtest lane)
 
-- [ ] **1 — Motion proof** — confirm **Run** changes SITL pose via ``TrainingLabTransitMotion`` / ``executeTrainingSegment``; fix link/preflight/offboard gaps before Nav2 execute. Squad-of-one, flat map.
-- [ ] **2 — Nav2 plan on Run** — ``requestTrainingNav2PlanPath`` for every driving vehicle on **Run** (today: partial — idle map overlay + ``resolvePath`` at drive start; fleet Nav2 stack at app launch). Plan must feed drive + ``TrainingLabRunSafetyMonitor`` along-path progress.
-- [ ] **3 — Proxy telemetry sync** — periodic Gazebo vehicle proxy pose from fleet hub (``GazeboEntityFactoryClient/setModelPose`` or bridge); proxies today are **spawn pose only**.
+- [ ] **1 — Motion proof** — confirm **Run** changes SITL pose in sim (operator roadtest). **Wiring shipped:** arm-before-drive (``FleetLinkService/ensureArmedForTransitDrive``), open-loop segments, start/end hub pose + horizontal delta in run logs (``TrainingLabTransitMotionProof``).
+- [x] **2 — Nav2 plan on Run** — ``TrainingLabRunPathPlanning/resolveAllForRun`` at **Run** start (PX4 sidecar enroll → ``plan_path`` per vehicle); same polyline feeds open-loop drive, stuck monitor, learning-squad map overlay (``applyRunPlannedPath``), and ``[Metrics]`` path source. Operator roadtest: run log should show `route nav2` when fleet stack is ready (else `geodesic_fallback`).
+- [x] **3 — Proxy telemetry sync** — ``TrainingLabGazeboProxyTelemetrySync`` (~5 Hz during ``phase == .running``): hub lat/lon/heading → map ENU via ``GazeboService/updateVehicleProxyPose`` / ``setModelPose``. Operator roadtest: proxy tracks SITL in embedded viewport.
 - [ ] **4 — Nav2 execute** — ``navigate_to_pose`` (or PX4 Rover setpoint path) replaces or validates open-loop segments for UGV transit to end slot.
 - [ ] **5 — Roadtest instrumentation** — run logs: pose samples, path source (nav2 vs geodesic), segment outcomes, planner/sidecar status; use to define End-of-v1 metrics.
 
-**Partially shipped (do not close step 2/4 yet):** ``ensurePx4Ros2Sidecar`` on transit drive; map debug Nav2 status line; open-loop segment follower; geodesic fallback when planner unavailable.
+**Partially shipped (do not close step 4 yet):** ``ensurePx4Ros2Sidecar`` on transit drive; map debug Nav2 status line; open-loop segment follower. **2026-05-21 fix:** readiness + ``plan_path`` now use Nav2 **``/compute_path_to_pose`` action** (Humble dropped the service) — was stuck on ``starting`` forever.
 
 ### Later (post roadtest)
 
@@ -205,8 +210,8 @@ Let operators **save the current lab setup as a named template** and **load it l
 | Training lab UI | `FormationsPlaygroundView.swift` (`TrainingLabPanelView`), `TrainingLabController.swift` |
 | Roster / squads | `TrainingLabRosterController.swift`, `TrainingLabRosterModels.swift`, `TrainingLabRosterStore.swift` |
 | Map session | `TrainingLabMapSessionLifecycle.swift`, `TrainingLabFormationSlotStaging.swift` |
-| Transit drive | `TrainingLabTransitMotion.swift`, `TrainingLabRunOrchestrator.swift` |
-| Proxy pose API | `GazeboEntityFactoryClient.swift` (`setModelPose` — obstacles today) |
+| Transit drive | `TrainingLabTransitMotion.swift`, `TrainingLabTransitMotionProof.swift`, `TrainingLabRunOrchestrator.swift` |
+| Proxy pose API | `GazeboEntityFactoryClient.swift` (`setModelPose`); `TrainingLabGazeboProxyTelemetrySync.swift` |
 | World Builder | `WorldBuilderView.swift`, `WorldBuilderController.swift` |
 | Environments | `TrainingEnvironmentCatalogue.swift` |
 | Gazebo | `GazeboService.swift`, `GazeboSessionPurpose.swift` |

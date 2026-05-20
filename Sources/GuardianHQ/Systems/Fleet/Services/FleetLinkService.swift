@@ -1987,6 +1987,32 @@ final class FleetLinkService: ObservableObject {
         sessionsByVehicleID[vehicleID]?.trainingControlStream?.isRunning == true
     }
 
+    /// Arms the vehicle when hub shows disarmed — required for PX4 MANUAL throttle/steering transit drive.
+    @discardableResult
+    func ensureArmedForTransitDrive(vehicleID: String, logPrefix: String) async -> Bool {
+        guard sessionsByVehicleID[vehicleID] != nil else {
+            appendVehicleLog("\(logPrefix): arm skipped — no MAVSDK session.", vehicleID: vehicleID)
+            return false
+        }
+        if hubTelemetryByVehicleID[vehicleID]?.isArmed == true {
+            appendVehicleLog("\(logPrefix): already armed.", vehicleID: vehicleID)
+            return true
+        }
+        guard let session = sessionsByVehicleID[vehicleID] else { return false }
+        do {
+            try await awaitCompletableForManualStream(session.drone.action.arm())
+            appendVehicleLog("\(logPrefix): arm acknowledged.", vehicleID: vehicleID)
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            return true
+        } catch {
+            appendVehicleLog(
+                "\(logPrefix): arm failed (\(mavsdkPublicErrorDescription(error))).",
+                vehicleID: vehicleID
+            )
+            return false
+        }
+    }
+
     @discardableResult
     func startTrainingControlStream(vehicleID: String) async -> Bool {
         guard let session = sessionsByVehicleID[vehicleID] else {

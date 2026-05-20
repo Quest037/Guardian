@@ -337,6 +337,27 @@ final class TrainingPanelController: ObservableObject {
         scheduleNav2PlanPathRefresh()
     }
 
+    /// Layout only during **Run** staging — path overlay comes from ``applyRunPlannedPath`` (no idle ``plan_path`` race).
+    func setTransitRunLayout(_ layout: TrainingTaskLayout) {
+        nav2PlanTask?.cancel()
+        taskLayout = layout
+    }
+
+    /// Map overlay path from the active **Run** plan (same polyline as drive + stuck monitor — no second ``plan_path``).
+    func applyRunPlannedPath(
+        points: [RouteCoordinate],
+        source: TrainingNav2PlanPathResponse.Source
+    ) {
+        nav2PlanTask?.cancel()
+        if points.count >= 2 {
+            nav2PlannedPath = points
+            nav2PlanPathSource = source
+        } else {
+            nav2PlannedPath = []
+            nav2PlanPathSource = source
+        }
+    }
+
     func refreshTaskLayout() {
         if let pkg = selectedEnvironment {
             taskLayout = TrainingGazeboRunOrchestrator.layout(

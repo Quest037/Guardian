@@ -12,6 +12,13 @@ final class TrainingLabController: ObservableObject {
     private weak var roster: TrainingLabRosterController?
     private var cancellables = Set<AnyCancellable>()
 
+    /// Invoked after a transit run publishes its result and **before** ``resetMap`` restores start poses.
+    /// Use for metrics, teaching evidence, or exports — hub telemetry and route progress are still valid.
+    var onTransitRunWillResetMap: (@MainActor (TrainingLabRunCompletionSnapshot) async -> Void)?
+
+    /// Fired when ``TrainingLabRunOrchestrator/transitRouteOverlays`` is updated (push into gzweb viewport).
+    var onTransitRouteOverlaysDidChange: (@MainActor () -> Void)?
+
     init() {
         teaching = TrainingPanelController()
         formation = FormationsPlaygroundController()
@@ -105,6 +112,20 @@ final class TrainingLabController: ObservableObject {
     func positionVehicleAtStartSlot(roster: TrainingLabRosterController, entryID: UUID) async {
         guard let context = mapSessionContext(roster: roster) else { return }
         await TrainingLabMapSessionLifecycle.positionVehicleAtStart(entryID: entryID, context: context)
+    }
+
+    /// Metrics hook → default run-log capture → ``resetMap`` (re-runnable lab session).
+    func finalizeTransitRun(
+        snapshot: TrainingLabRunCompletionSnapshot,
+        roster: TrainingLabRosterController,
+        appendRunLog: @escaping (String) -> Void
+    ) async {
+        if let onTransitRunWillResetMap {
+            await onTransitRunWillResetMap(snapshot)
+        }
+        TrainingLabRunMetricsRecorder.record(snapshot, appendLog: appendRunLog)
+        appendRunLog("[Map] Run complete — resetting vehicles to start formation.")
+        await resetMap(roster: roster, runLog: { appendRunLog($0) })
     }
 
     func resetMap(

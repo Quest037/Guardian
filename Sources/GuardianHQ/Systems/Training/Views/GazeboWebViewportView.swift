@@ -20,6 +20,8 @@ struct GazeboWebViewportView: View {
     var obstacleCommandTick: UUID?
     var formationSlotsBridge: GazeboWebViewportFormationSlotsBridge?
     var formationSlotsCommandTick: UUID?
+    var transitRoutesBridge: GazeboWebViewportTransitRoutesBridge?
+    var transitRoutesCommandTick: UUID?
     var showsCameraDebugHUD: Bool = false
     var groundHalfExtentM: Double = 500
     var orbitMinDistanceM: Double = 50
@@ -51,6 +53,8 @@ struct GazeboWebViewportView: View {
                 obstacleCommandTick: obstacleCommandTick,
                 formationSlotsBridge: formationSlotsBridge,
                 formationSlotsCommandTick: formationSlotsCommandTick,
+                transitRoutesBridge: transitRoutesBridge,
+                transitRoutesCommandTick: transitRoutesCommandTick,
                 showsCameraDebugHUD: showsCameraDebugHUD,
                 groundHalfExtentM: groundHalfExtentM,
                 orbitMinDistanceM: orbitMinDistanceM,
@@ -96,6 +100,8 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
     let obstacleCommandTick: UUID?
     let formationSlotsBridge: GazeboWebViewportFormationSlotsBridge?
     let formationSlotsCommandTick: UUID?
+    let transitRoutesBridge: GazeboWebViewportTransitRoutesBridge?
+    let transitRoutesCommandTick: UUID?
     let showsCameraDebugHUD: Bool
     let groundHalfExtentM: Double
     let orbitMinDistanceM: Double
@@ -163,6 +169,7 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
             context.coordinator.lastZoneTick = nil
             context.coordinator.lastObstacleTick = nil
             context.coordinator.lastFormationSlotsTick = nil
+            context.coordinator.lastTransitRoutesTick = nil
         } else if context.coordinator.loadedCameraDebug != showsCameraDebugHUD {
             context.coordinator.loadedCameraDebug = showsCameraDebugHUD
             syncCameraDebugHUD(on: webView, enabled: showsCameraDebugHUD)
@@ -184,6 +191,12 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
            context.coordinator.lastFormationSlotsTick != tick {
             context.coordinator.lastFormationSlotsTick = tick
             dispatchFormationSlotsState(on: webView, bridge: formationSlotsBridge, attempt: 0)
+        }
+
+        if let transitRoutesBridge, let tick = transitRoutesCommandTick,
+           context.coordinator.lastTransitRoutesTick != tick {
+            context.coordinator.lastTransitRoutesTick = tick
+            dispatchTransitRoutesState(on: webView, bridge: transitRoutesBridge, attempt: 0)
         }
 
         guard let cameraBridge, let tick = cameraCommandTick else { return }
@@ -210,6 +223,21 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
             guard attempt < 48 else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
                 dispatchFormationSlotsState(on: webView, bridge: bridge, attempt: attempt + 1)
+            }
+        }
+    }
+
+    private func dispatchTransitRoutesState(
+        on webView: WKWebView,
+        bridge: GazeboWebViewportTransitRoutesBridge,
+        attempt: Int
+    ) {
+        let expression = bridge.javaScriptExpression
+        webView.evaluateJavaScript(expression) { result, error in
+            if error == nil, Self.javaScriptBool(result) { return }
+            guard attempt < 48 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                dispatchTransitRoutesState(on: webView, bridge: bridge, attempt: attempt + 1)
             }
         }
     }
@@ -350,6 +378,7 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
         var lastZoneTick: UUID?
         var lastObstacleTick: UUID?
         var lastFormationSlotsTick: UUID?
+        var lastTransitRoutesTick: UUID?
         private let onZonesChanged: ((WorldBuilderZonesSnapshot, Bool) -> Void)?
         private let onZoneEditRequest: ((WorldBuilderZoneKind) -> Void)?
         private let onZoneDeleteRequest: ((WorldBuilderZoneKind) -> Void)?

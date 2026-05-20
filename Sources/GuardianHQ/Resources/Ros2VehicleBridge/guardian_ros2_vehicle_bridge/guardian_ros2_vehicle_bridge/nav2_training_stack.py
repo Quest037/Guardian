@@ -8,10 +8,9 @@ import threading
 import time
 
 from guardian_ros2_vehicle_bridge.json_emit import emit, log_err
-
-_TRAINING_SERVICE_CANDIDATES = (
-    "/planner_server/compute_path_to_pose",
-    "/compute_path_to_pose",
+from guardian_ros2_vehicle_bridge.nav2_planner_availability import (
+    TRAINING_COMPUTE_PATH_ACTION_CANDIDATES,
+    training_planner_planning_available,
 )
 
 _DEFAULT_READY_TIMEOUT_S = 120.0
@@ -94,7 +93,7 @@ class Nav2TrainingStack:
     def _poll_only_worker(self) -> None:
         """Swift owns ``ros2 launch``; bridge only mirrors readiness on stdout."""
         try:
-            if _compute_path_service_available(env=os.environ.copy()):
+            if training_planner_planning_available(env=os.environ.copy()):
                 with self._state_lock:
                     self._ready = True
                 emit({"type": "ros2_nav2_training_stack", "status": "ready"})
@@ -105,7 +104,7 @@ class Nav2TrainingStack:
                 with self._state_lock:
                     if not self._desired_active:
                         return
-                if _compute_path_service_available(env=os.environ.copy()):
+                if training_planner_planning_available(env=os.environ.copy()):
                     with self._state_lock:
                         self._ready = True
                     emit({"type": "ros2_nav2_training_stack", "status": "ready"})
@@ -115,7 +114,7 @@ class Nav2TrainingStack:
                 {
                     "type": "ros2_nav2_training_stack",
                     "status": "timeout",
-                    "message": "compute_path_to_pose_unavailable",
+                    "message": "compute_path_to_pose_action_unavailable",
                 }
             )
         finally:
@@ -145,7 +144,7 @@ class Nav2TrainingStack:
             "running": running,
             "starting": starting,
             "ready": ready,
-            "service": _TRAINING_SERVICE_CANDIDATES[0] if ready else None,
+            "service": TRAINING_COMPUTE_PATH_ACTION_CANDIDATES[0] if ready else None,
         }
 
     def _start_worker(self) -> None:
@@ -184,7 +183,7 @@ class Nav2TrainingStack:
     def _start_once(self) -> bool:
         """Launch stack once. Returns True when failure is permanent (no in-app retry)."""
         env = os.environ.copy()
-        if _compute_path_service_available(env=env):
+        if training_planner_planning_available(env=env):
             with self._state_lock:
                 self._ready = True
             emit({"type": "ros2_nav2_training_stack", "status": "ready"})
@@ -230,7 +229,7 @@ class Nav2TrainingStack:
             self._ready = False
 
         emit({"type": "ros2_nav2_training_stack", "status": "starting"})
-        ready = _wait_for_compute_path_service(env=env, timeout_s=_ready_timeout_s())
+        ready = _wait_for_planner_planning_available(env=env, timeout_s=_ready_timeout_s())
         with self._state_lock:
             self._ready = ready
             if self._proc and self._proc.poll() is not None:
@@ -251,7 +250,7 @@ class Nav2TrainingStack:
             {
                 "type": "ros2_nav2_training_stack",
                 "status": "timeout",
-                "message": "compute_path_to_pose_unavailable",
+                "message": "compute_path_to_pose_action_unavailable",
             }
         )
         self._stop()
@@ -286,30 +285,13 @@ def _nav2_launch_available() -> bool:
         return False
 
 
-def _wait_for_compute_path_service(*, env: dict[str, str], timeout_s: float) -> bool:
+def _wait_for_planner_planning_available(*, env: dict[str, str], timeout_s: float) -> bool:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        if _compute_path_service_available(env=env):
+        if training_planner_planning_available(env=env):
             return True
         time.sleep(0.4)
     return False
-
-
-def _compute_path_service_available(*, env: dict[str, str]) -> bool:
-    try:
-        result = subprocess.run(
-            ["ros2", "service", "list"],
-            capture_output=True,
-            text=True,
-            timeout=8.0,
-            env=env,
-        )
-        if result.returncode != 0:
-            return False
-        lines = {line.strip() for line in result.stdout.splitlines()}
-        return any(c in lines for c in _TRAINING_SERVICE_CANDIDATES)
-    except (OSError, subprocess.TimeoutExpired):
-        return False
 
 
 def training_plan_namespace(_vehicle_namespace: str) -> str:

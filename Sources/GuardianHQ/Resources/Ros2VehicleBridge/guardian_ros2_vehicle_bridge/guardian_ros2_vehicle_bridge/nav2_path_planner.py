@@ -6,6 +6,7 @@ import math
 from typing import Any
 
 from guardian_ros2_vehicle_bridge.geodetic_path_planner import plan_geodetic_path, path_to_route_coordinates
+from guardian_ros2_vehicle_bridge.nav2_planner_availability import TRAINING_COMPUTE_PATH_ACTION_CANDIDATES
 from guardian_ros2_vehicle_bridge.nav2_training_stack import Nav2TrainingStack
 
 
@@ -32,6 +33,16 @@ def _yaw_to_quaternion_z_w(yaw_rad: float) -> tuple[float, float, float, float]:
     return (0.0, 0.0, math.sin(half), math.cos(half))
 
 
+def _compute_path_action_candidates(namespace: str) -> tuple[str, ...]:
+    ns = namespace.strip("/")
+    primary = f"/{ns}/compute_path_to_pose" if ns else "/compute_path_to_pose"
+    ordered = [primary]
+    for name in TRAINING_COMPUTE_PATH_ACTION_CANDIDATES:
+        if name not in ordered:
+            ordered.append(name)
+    return tuple(ordered)
+
+
 def try_nav2_compute_path(
     node: Any,
     namespace: str,
@@ -45,33 +56,28 @@ def try_nav2_compute_path(
     timeout_s: float = 8.0,
 ) -> list[dict[str, float]] | None:
     """
-    Call Nav2 ``ComputePathToPose`` when the planner server is available.
+    Call Nav2 ``ComputePathToPose`` action when the planner server is active.
 
     Returns None when Nav2 is not installed, not running, or the call fails.
     """
     try:
-        from nav2_msgs.srv import ComputePathToPose  # type: ignore
+        from nav2_msgs.action import ComputePathToPose  # type: ignore
         from geometry_msgs.msg import PoseStamped  # type: ignore
         from builtin_interfaces.msg import Time  # type: ignore
+        from rclpy.action import ActionClient  # type: ignore
     except ImportError:
         return None
 
-    ns = namespace.strip("/")
-    service_name = f"/{ns}/compute_path_to_pose" if ns else "/compute_path_to_pose"
-    if not node.has_service(service_name):
-        # Common alternate when namespace is empty but stack uses /planner_server
-        for alt in (
-            "/planner_server/compute_path_to_pose",
-            "/compute_path_to_pose",
-        ):
-            if node.has_service(alt):
-                service_name = alt
-                break
-        else:
-            return None
-
-    client = node.create_client(ComputePathToPose, service_name)
-    if not client.wait_for_service(timeout_sec=min(timeout_s, 3.0)):
+    action_name: str | None = None
+    client: Any = None
+    wait_budget = min(timeout_s, 3.0)
+    for candidate in _compute_path_action_candidates(namespace):
+        probe = ActionClient(node, ComputePathToPose, candidate)
+        if probe.wait_for_server(timeout_sec=wait_budget):
+            action_name = candidate
+            client = probe
+            break
+    if client is None or action_name is None:
         return None
 
     origin_lat, origin_lon = start_lat, start_lon
@@ -94,23 +100,34 @@ def try_nav2_compute_path(
         msg.pose.orientation.w = qw
         return msg
 
-    req = ComputePathToPose.Request()
-    req.start = pose(s_e, s_n, start_yaw)
-    req.goal = pose(g_e, g_n, goal_yaw)
-    req.planner_id = ""
-    req.use_start = True
+    goal_msg = ComputePathToPose.Goal()
+    goal_msg.start = pose(s_e, s_n, start_yaw)
+    goal_msg.goal = pose(g_e, g_n, goal_yaw)
+    goal_msg.planner_id = ""
+    goal_msg.use_start = True
 
-    future = client.call_async(req)
     rclpy = __import__("rclpy")
-    rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_s)
-    if not future.done():
+    send_future = client.send_goal_async(goal_msg)
+    rclpy.spin_until_future_complete(node, send_future, timeout_sec=timeout_s)
+    if not send_future.done():
         return None
-    result = future.result()
-    if result is None or result.path is None or len(result.path.poses) < 2:
+    goal_handle = send_future.result()
+    if goal_handle is None or not goal_handle.accepted:
+        return None
+
+    result_future = goal_handle.get_result_async()
+    rclpy.spin_until_future_complete(node, result_future, timeout_sec=timeout_s)
+    if not result_future.done():
+        return None
+    action_result = result_future.result()
+    if action_result is None:
+        return None
+    path = action_result.result.path
+    if path is None or len(path.poses) < 2:
         return None
 
     out: list[dict[str, float]] = []
-    for ps in result.path.poses:
+    for ps in path.poses:
         lat, lon = _local_to_latlon(
             ps.pose.position.y, ps.pose.position.x, origin_lat, origin_lon
         )

@@ -34,13 +34,19 @@ enum TrainingLabTransitMotion {
     nonisolated static func runParallelSquadDrives(
         fleetLink: FleetLinkService,
         plans: [TrainingLabRunVehiclePlan],
+        preResolvedByVehicleID: [String: PathResolution] = [:],
         deliverReport: @escaping @Sendable (SquadDriveReport) async -> Void,
         finishWithFailures: @escaping @Sendable () async -> Void
     ) async {
         await withTaskGroup(of: SquadDriveReport.self) { group in
             for plan in plans {
+                let preResolved = preResolvedByVehicleID[plan.vehicleID]
                 group.addTask {
-                    await driveSquad(fleetLink: fleetLink, plan: plan)
+                    await driveSquad(
+                        fleetLink: fleetLink,
+                        plan: plan,
+                        preResolvedPath: preResolved
+                    )
                 }
             }
             for await report in group {
@@ -54,19 +60,59 @@ enum TrainingLabTransitMotion {
 
     nonisolated static func driveSquad(
         fleetLink: FleetLinkService,
-        plan: TrainingLabRunVehiclePlan
+        plan: TrainingLabRunVehiclePlan,
+        preResolvedPath: PathResolution? = nil
     ) async -> SquadDriveReport {
         await enrollPx4Sidecar(fleetLink: fleetLink, vehicleID: plan.vehicleID)
-        let path = await resolvePath(fleetLink: fleetLink, plan: plan)
+        let path: PathResolution
+        if let preResolvedPath {
+            path = preResolvedPath
+        } else {
+            path = await resolvePath(fleetLink: fleetLink, plan: plan)
+        }
         let roleLabel = plan.role == .learning ? "Learning" : "Supporting"
         let pathLabel = path.points.count >= 2
             ? "\(path.source.rawValue), \(path.points.count) pts"
             : "no path"
         var logLines = ["\(plan.squadLabel) (\(roleLabel)): \(pathLabel) — driving."]
+        let startSnap = await motionSnapshot(fleetLink: fleetLink, vehicleID: plan.vehicleID)
+        logLines.append("Motion start: \(startSnap.logLine).")
+        guard await ensureArmedForTransitDrive(
+            fleetLink: fleetLink,
+            vehicleID: plan.vehicleID,
+            squadLabel: plan.squadLabel
+        ) else {
+            return SquadDriveReport(
+                squadID: plan.squadID,
+                logLines: logLines,
+                failureMessage: "\(plan.squadLabel): could not arm for transit drive."
+            )
+        }
+        let segments = GuardianBrainPlannerSegmentSynthesis.segments(
+            path: path.points,
+            maxSpeedMS: defaultMaxSpeedMS,
+            initialHeadingDeg: plan.layout.start.headingDeg
+        )
+        guard !segments.isEmpty else {
+            return SquadDriveReport(
+                squadID: plan.squadID,
+                logLines: logLines,
+                failureMessage: "No drive segments for \(plan.squadLabel) — path too short."
+            )
+        }
+        let driveSeconds = segments.reduce(0.0) { $0 + $1.durationS }
+        logLines.append(
+            "\(plan.squadLabel): \(segments.count) segment(s), ~\(Int(driveSeconds)) s open-loop."
+        )
         let result = await executeOpenLoopFollow(
             fleetLink: fleetLink,
             plan: plan,
-            path: path.points
+            segments: segments
+        )
+        let endSnap = await motionSnapshot(fleetLink: fleetLink, vehicleID: plan.vehicleID)
+        logLines.append("Motion end: \(endSnap.logLine).")
+        logLines.append(
+            "Motion: \(TrainingLabTransitMotionProof.movementSummary(start: startSnap, end: endSnap))."
         )
         switch result {
         case .success:
@@ -81,10 +127,12 @@ enum TrainingLabTransitMotion {
         }
     }
 
+    /// Requests Nav2 ``plan_path`` when the fleet stack and vehicle ROS sidecar are up; otherwise geodesic fallback.
     nonisolated static func resolvePath(
         fleetLink: FleetLinkService,
         plan: TrainingLabRunVehiclePlan
     ) async -> PathResolution {
+        await enrollPx4Sidecar(fleetLink: fleetLink, vehicleID: plan.vehicleID)
         let response = await fetchNav2PlanPath(fleetLink: fleetLink, plan: plan)
         if response.points.count >= 2 {
             return PathResolution(points: response.points, source: response.source)
@@ -98,21 +146,13 @@ enum TrainingLabTransitMotion {
         return PathResolution(points: fallback, source: source)
     }
 
-    /// Start training control stream, follow ``path`` with synthesized segments, then stop the stream.
+    /// Start training control stream, execute synthesized segments, then stop the stream.
     nonisolated static func executeOpenLoopFollow(
         fleetLink: FleetLinkService,
         plan: TrainingLabRunVehiclePlan,
-        path: [RouteCoordinate]
+        segments: [TrainingControlSegment]
     ) async -> Result<Void, Failure> {
-        let segments = GuardianBrainPlannerSegmentSynthesis.segments(
-            path: path,
-            maxSpeedMS: defaultMaxSpeedMS,
-            initialHeadingDeg: plan.layout.start.headingDeg
-        )
-        guard !segments.isEmpty else {
-            return .failure(.message("No drive segments for \(plan.squadLabel) — path too short."))
-        }
-        return await runTrainingControlSegments(
+        await runTrainingControlSegments(
             fleetLink: fleetLink,
             vehicleID: plan.vehicleID,
             squadLabel: plan.squadLabel,
@@ -123,6 +163,25 @@ enum TrainingLabTransitMotion {
     @MainActor
     private static func enrollPx4Sidecar(fleetLink: FleetLinkService, vehicleID: String) {
         fleetLink.ensurePx4Ros2Sidecar(forVehicleID: vehicleID)
+    }
+
+    @MainActor
+    private static func motionSnapshot(
+        fleetLink: FleetLinkService,
+        vehicleID: String
+    ) async -> TrainingLabTransitMotionProof.Snapshot {
+        TrainingLabTransitMotionProof.snapshot(
+            hub: fleetLink.hubTelemetry(forVehicleID: vehicleID)
+        )
+    }
+
+    @MainActor
+    private static func ensureArmedForTransitDrive(
+        fleetLink: FleetLinkService,
+        vehicleID: String,
+        squadLabel: String
+    ) async -> Bool {
+        await fleetLink.ensureArmedForTransitDrive(vehicleID: vehicleID, logPrefix: squadLabel)
     }
 
     @MainActor

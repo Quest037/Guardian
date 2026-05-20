@@ -432,6 +432,8 @@ final class WorldBuilderController: ObservableObject {
     private var liveObstacleGazeboNames: [String: String] = [:]
     private var obstacleViewportPushTask: Task<Void, Never>?
     private var obstacleManifestPersistTask: Task<Void, Never>?
+    /// Serializes live Gazebo obstacle create/remove so concurrent spawns are not dropped.
+    private var obstacleLiveSerialTask: Task<Void, Never>?
     private var obstacleEditSyncTask: Task<Void, Never>?
     private var ensureBuilderGazeboInFlight: Task<Void, Never>?
 
@@ -595,13 +597,19 @@ final class WorldBuilderController: ObservableObject {
             return record.id
         })
         if !changedIDs.isEmpty {
-            Task {
-                for record in clamped where changedIDs.contains(record.id) {
-                    if let old = priorByID[record.id], copiesObstacleGeometry(old, record) {
-                        await repositionLiveObstacle(record)
+            let updates = clamped.filter { changedIDs.contains($0.id) }
+            let priorSnapshot = priorByID
+            enqueueObstacleLiveWork { [weak self] in
+                guard let self else { return }
+                for record in updates {
+                    if let old = priorSnapshot[record.id], self.copiesObstacleGeometry(old, record) {
+                        await self.repositionLiveObstacle(record)
                     } else {
-                        await refreshLiveObstacle(record)
+                        await self.refreshLiveObstacle(record)
                     }
+                }
+                if let worldID = self.activeGazeboWorldID {
+                    await self.rebuildLiveObstacleRegistryFromSim(worldID: worldID)
                 }
             }
         }
@@ -706,15 +714,21 @@ final class WorldBuilderController: ObservableObject {
             return
         }
         manifest.obstacles.append(record)
+        let placedID = record.id
         let newCount = manifest.obstacles.count
         obstacleSelectedID = nil
         obstaclePlacementDraft = TrainingEnvironmentObstacleRecord.defaults(for: record.kind)
         logMapObstaclePlace(
             "swift manifest append",
-            detail: "id=\(record.id.prefix(8))… count=\(newCount) syncLive=true"
+            detail: "id=\(placedID.prefix(8))… count=\(newCount) syncLive=true"
         )
         toastCenter?.show("Adding obstacle to map…", style: .info)
-        commitObstacleManifest(&manifest, syncLive: true, bumpViewport: true)
+        commitObstacleManifest(
+            &manifest,
+            syncLive: true,
+            bumpViewport: true,
+            liveSpawnObstacleID: placedID
+        )
         persistObstacleManifestToDiskNow()
         logMapObstaclePlace("swift placeObstacleAt done", detail: "awaiting live sim spawn")
     }
@@ -807,17 +821,24 @@ final class WorldBuilderController: ObservableObject {
             )
         }
         manifest.obstacles.append(record)
-        obstacleSelectedID = record.id
+        let cloneID = record.id
+        obstacleSelectedID = cloneID
         obstaclePlacementDraft = record
         toastCenter?.show("Adding clone to map…", style: .info)
-        commitObstacleManifest(&manifest, syncLive: true, bumpViewport: true)
+        commitObstacleManifest(
+            &manifest,
+            syncLive: true,
+            bumpViewport: true,
+            liveSpawnObstacleID: cloneID
+        )
         persistObstacleManifestToDiskNow()
     }
 
     private func commitObstacleManifest(
         _ manifest: inout TrainingEnvironmentManifest,
         syncLive: Bool,
-        bumpViewport: Bool = false
+        bumpViewport: Bool = false,
+        liveSpawnObstacleID: String? = nil
     ) {
         WorldBuilderObstacleManifestSupport.apply(manifest.obstacles, to: &manifest)
         draftManifest = manifest
@@ -825,8 +846,20 @@ final class WorldBuilderController: ObservableObject {
         if bumpViewport {
             scheduleDebouncedObstacleViewportPush()
         }
-        if syncLive, let record = manifest.obstacles.last {
-            Task { await spawnLiveObstacle(record, announceSuccess: true) }
+        guard syncLive else { return }
+        let targetID = liveSpawnObstacleID ?? manifest.obstacles.last?.id
+        guard let targetID,
+              let record = manifest.obstacles.first(where: { $0.id == targetID }) else { return }
+        enqueueObstacleLiveWork { [weak self] in
+            guard let self else { return }
+            await self.spawnLiveObstacle(record, announceSuccess: true)
+            if let worldID = self.activeGazeboWorldID {
+                await self.rebuildLiveObstacleRegistryFromSim(worldID: worldID)
+                if !self.liveObstacleIDs.contains(record.id) {
+                    await self.reconcileLiveObstaclesWithManifest(force: true)
+                }
+            }
+            self.bumpObstacleViewportRevision()
         }
     }
 
@@ -939,15 +972,53 @@ final class WorldBuilderController: ObservableObject {
         bakeObstaclesForTrainingWorld()
     }
 
-    private func needsObstacleReconcile() -> Bool {
-        Set(obstaclesSnapshot.map(\.id)) != liveObstacleIDs
+    private func manifestObstacleIDsInLiveSim(worldID: UUID) async -> Set<String> {
+        guard let row = gazebo?.worlds.first(where: { $0.id == worldID && $0.isAlive }) else {
+            return []
+        }
+        let liveNames = await GazeboEntityFactoryClient.listWorldModelNames(instanceIndex: row.instanceIndex)
+        return WorldBuilderLiveObstacleSync.obstacleIDsInSim(
+            manifest: obstaclesSnapshot,
+            liveModelNames: liveNames
+        )
+    }
+
+    private func needsObstacleReconcile(worldID: UUID) async -> Bool {
+        Set(obstaclesSnapshot.map(\.id)) != (await manifestObstacleIDsInLiveSim(worldID: worldID))
+    }
+
+    private func rebuildLiveObstacleRegistryFromSim(worldID: UUID) async {
+        clearLiveObstacleRegistry()
+        guard let row = gazebo?.worlds.first(where: { $0.id == worldID && $0.isAlive }) else { return }
+        let liveNames = await GazeboEntityFactoryClient.listWorldModelNames(instanceIndex: row.instanceIndex)
+        for record in obstaclesSnapshot {
+            if let gazeboName = WorldBuilderLiveObstacleSync.gazeboModelName(
+                for: record.id,
+                in: liveNames
+            ) {
+                registerLiveObstacle(id: record.id, gazeboName: gazeboName)
+            }
+        }
+    }
+
+    private func enqueueObstacleLiveWork(_ operation: @escaping @MainActor () async -> Void) {
+        let prior = obstacleLiveSerialTask
+        obstacleLiveSerialTask = Task { @MainActor in
+            if let prior {
+                _ = await prior.value
+            }
+            await operation()
+        }
     }
 
     /// Drops every `guardian_obstacle_*` model in the live sim, then re-inserts manifest obstacles.
     @discardableResult
     private func reconcileLiveObstaclesWithManifest(force: Bool = false) async -> Int {
         guard let worldID = activeGazeboWorldID, let gazebo else { return 0 }
-        if !force, !needsObstacleReconcile() { return 0 }
+        if !force, await needsObstacleReconcile(worldID: worldID) == false {
+            await rebuildLiveObstacleRegistryFromSim(worldID: worldID)
+            return 0
+        }
 
         let manifest = obstaclesSnapshot
         let (_, orphanCount) = await gazebo.stripAllGuardianObstacleModelsFromLiveSim(
@@ -963,6 +1034,7 @@ final class WorldBuilderController: ObservableObject {
             lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             return orphanCount
         }
+        var placed = 0
         for record in manifest {
             do {
                 let gazeboName = try await gazebo.spawnWorldBuilderObstacle(
@@ -971,10 +1043,20 @@ final class WorldBuilderController: ObservableObject {
                     meshDirectory: meshDir
                 )
                 registerLiveObstacle(id: record.id, gazeboName: gazeboName)
+                placed += 1
             } catch {
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 toastCenter?.show("Could not show \(record.kind.displayName) on map: \(message)", style: .warning)
+                logMapObstaclePlace("swift reconcile spawn failed", detail: "id=\(record.id.prefix(8))… \(message)")
             }
+        }
+
+        await rebuildLiveObstacleRegistryFromSim(worldID: worldID)
+        if placed < manifest.count {
+            logMapObstaclePlace(
+                "swift reconcile partial",
+                detail: "placed=\(placed) manifest=\(manifest.count)"
+            )
         }
 
         do {
@@ -991,14 +1073,24 @@ final class WorldBuilderController: ObservableObject {
         guard canEditScene, !isObstacleMapRepairInFlight else { return }
         isObstacleMapRepairInFlight = true
         defer { isObstacleMapRepairInFlight = false }
+        let manifestCount = obstaclesSnapshot.count
         let orphans = await reconcileLiveObstaclesWithManifest(force: true)
-        if orphans > 0 {
+        let onMap = liveObstacleIDs.count
+        if onMap < manifestCount {
             toastCenter?.show(
-                "Removed \(orphans) stray model(s) and synced obstacles to the list.",
+                "Only \(onMap) of \(manifestCount) obstacle models are on the map. See the simulation log for errors.",
+                style: .warning
+            )
+        } else if orphans > 0 {
+            toastCenter?.show(
+                "Removed \(orphans) stray model(s). \(onMap) obstacle models match the list.",
                 style: .info
             )
         } else {
-            toastCenter?.show("Obstacle models synced to the list.", style: .success)
+            toastCenter?.show(
+                "\(onMap) obstacle models synced to the list.",
+                style: .success
+            )
         }
     }
 
@@ -1060,8 +1152,8 @@ final class WorldBuilderController: ObservableObject {
 
     /// Aligns live sim obstacles with the manifest (repairs drift / phantom models).
     func syncManifestObstaclesToLiveSimIfNeeded() async {
-        guard sessionMode != .idle, activeGazeboWorldID != nil, gazebo != nil else { return }
-        if needsObstacleReconcile() {
+        guard sessionMode != .idle, let worldID = activeGazeboWorldID, let gazebo else { return }
+        if await needsObstacleReconcile(worldID: worldID) {
             guard !isObstacleMapRepairInFlight else { return }
             isObstacleMapRepairInFlight = true
             defer { isObstacleMapRepairInFlight = false }
@@ -1074,7 +1166,7 @@ final class WorldBuilderController: ObservableObject {
             }
             return
         }
-        guard let worldID = activeGazeboWorldID, let gazebo else { return }
+        await rebuildLiveObstacleRegistryFromSim(worldID: worldID)
         let meshDir: URL
         do {
             meshDir = try obstacleMeshDirectoryURL()
@@ -1094,6 +1186,7 @@ final class WorldBuilderController: ObservableObject {
                 toastCenter?.show("Could not show \(record.kind.displayName) on map: \(message)", style: .warning)
             }
         }
+        await rebuildLiveObstacleRegistryFromSim(worldID: worldID)
     }
 
     private func ensureDraftWorldFileURL() throws -> URL {
@@ -1515,10 +1608,13 @@ final class WorldBuilderController: ObservableObject {
     }
 
     private func syncBuilderLiveObstacleRegistryIfNeeded() async {
-        if needsObstacleReconcile() {
+        guard let worldID = activeGazeboWorldID else { return }
+        if await needsObstacleReconcile(worldID: worldID) {
             await syncManifestObstaclesToLiveSimIfNeeded()
         } else if obstaclesSnapshot.isEmpty {
             await stripOrphanLiveObstaclesIfNeeded()
+        } else {
+            await rebuildLiveObstacleRegistryFromSim(worldID: worldID)
         }
     }
 

@@ -297,6 +297,60 @@ final class TrainingLabRosterController: ObservableObject {
         persistRoster()
     }
 
+    /// Seeds missing start/end anchors at zone centres when zones are placed.
+    func ensureZoneFormationAnchors(zones: WorldBuilderZonesSnapshot) {
+        var changed = false
+        for index in squads.indices {
+            if squads[index].startZoneAnchor == nil, zones.start.placed {
+                squads[index].startZoneAnchor = .seeded(in: zones.start)
+                changed = true
+            }
+            if squads[index].endZoneAnchor == nil, zones.end.placed {
+                squads[index].endZoneAnchor = .seeded(in: zones.end)
+                changed = true
+            }
+        }
+        if changed { persistRoster() }
+    }
+
+    func updateZoneFormationAnchor(
+        squadID: UUID,
+        phase: TrainingLabFormationSlotGeometry.ZonePhase,
+        centerXM: Double,
+        centerYM: Double,
+        headingDeg: Double,
+        zones: WorldBuilderZonesSnapshot,
+        mapHalfExtentM: Double
+    ) {
+        guard let index = squads.firstIndex(where: { $0.id == squadID }) else { return }
+        let zone = phase == .start ? zones.start : zones.end
+        guard zone.placed else { return }
+        var anchor = TrainingLabZoneFormationAnchor(
+            centerXM: centerXM,
+            centerYM: centerYM,
+            headingDeg: headingDeg
+        )
+        let layout = TrainingLabFormationSlotGeometry.groupLayout(
+            squad: squads[index],
+            squadIndex: index,
+            phase: phase,
+            anchor: anchor
+        )
+        TrainingLabFormationSlotGeometry.clampAnchor(
+            &anchor,
+            circleRadiusM: layout.circleRadiusM,
+            zone: zone,
+            mapHalfExtentM: mapHalfExtentM
+        )
+        switch phase {
+        case .start:
+            squads[index].startZoneAnchor = anchor
+        case .end:
+            squads[index].endZoneAnchor = anchor
+        }
+        persistRoster()
+    }
+
     /// Stops the simulator and removes one roster row; promotes a wingman if the primary is removed.
     func removeVehicle(entryID: UUID) async {
         guard let playground else { return }

@@ -25,6 +25,8 @@ extension GazeboService {
             pose: pose,
             footprintHeightM: heightM
         )
+        // Harmonic queues creates; a short gap avoids dropped follow-up spawns on the same service.
+        try? await Task.sleep(nanoseconds: 250_000_000)
         fleetLink?.appendSimulationLog("Gazebo: placed obstacle \(written.modelName).")
         return written.modelName
     }

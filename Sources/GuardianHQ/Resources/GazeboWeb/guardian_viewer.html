@@ -119,6 +119,8 @@
     const MAP_ORBIT_MIN_DISTANCE_M = Number.isFinite(orbitMinParam) && orbitMinParam > 0
       ? orbitMinParam
       : 50;
+    /** Open-field floor walkable top (`TrainingEnvironmentWorldSDF` collision top at z = 0). */
+    const MAP_BASE_TOP_ZM = 0;
     /** Tiny Z offset above open-field floor top (z=0) for overlays and HUD lines — avoids z-fighting without visible float. */
     const MAP_SURFACE_LIFT_M = 0.0035;
 
@@ -565,6 +567,16 @@
 
     const mapDimensionHud = createMapDimensionHud();
     const zoneEditor = createZoneEditor(() => viewerSession?.manager?.scene, postZoneMessage);
+    function postFormationMessage(payload) {
+      const handler = window.webkit?.messageHandlers?.guardianFormationSlots;
+      if (handler) {
+        handler.postMessage(JSON.stringify(payload));
+      }
+    }
+    const formationSlotEditor = createFormationSlotEditor(
+      () => viewerSession?.manager?.scene,
+      postFormationMessage
+    );
     const postObstacleMessage = (payload) => {
       const handler = window.webkit?.messageHandlers?.guardianObstacles;
       if (!handler) {
@@ -637,6 +649,7 @@
     const obstacleEditor = createObstacleEditor(() => viewerSession?.manager?.scene, postObstacleMessage);
     installSceneTileClickProbe(obstacleEditor);
     let pendingZoneEditorState = null;
+    let pendingFormationSlotState = null;
     let pendingObstacleEditorState = null;
 
     window.guardianViewer = {
@@ -662,6 +675,10 @@
       setZoneEditorState(state) {
         pendingZoneEditorState = state;
         return zoneEditor.applyState(state);
+      },
+      setFormationSlotEditorState(state) {
+        pendingFormationSlotState = state;
+        return formationSlotEditor.applyState(state);
       },
       setObstacleEditorState(state) {
         pendingObstacleEditorState = state;
@@ -704,6 +721,120 @@
       sceneReady,
     };
 
+    /** Shared gzweb Three.js constructors for zone + formation slot overlays. */
+    let overlayThreeCache = null;
+
+    function findFirstSceneMesh(root) {
+      let found = null;
+      root.traverse((node) => {
+        if (!found && node.isMesh && node.name !== 'grid') found = node;
+      });
+      return found;
+    }
+
+    function refreshOverlayThreeConstructors() {
+      if (!overlayThreeCache) return;
+      if (typeof guardianThree?.MeshBasicMaterial === 'function') {
+        overlayThreeCache.MeshBasicMaterial = guardianThree.MeshBasicMaterial;
+      }
+      if (typeof guardianThree?.CircleGeometry === 'function') {
+        overlayThreeCache.CircleGeometry = guardianThree.CircleGeometry;
+      }
+      if (typeof guardianThree?.RingGeometry === 'function') {
+        overlayThreeCache.RingGeometry = guardianThree.RingGeometry;
+      }
+      if (typeof guardianThree?.PlaneGeometry === 'function') {
+        overlayThreeCache.PlaneGeometry = guardianThree.PlaneGeometry;
+      }
+      if (typeof guardianThree?.BoxGeometry === 'function') {
+        overlayThreeCache.BoxGeometry = guardianThree.BoxGeometry;
+      }
+      if (typeof guardianThree?.SphereGeometry === 'function') {
+        overlayThreeCache.SphereGeometry = guardianThree.SphereGeometry;
+      }
+    }
+
+    function cacheThree(scene2) {
+      if (overlayThreeCache) {
+        refreshOverlayThreeConstructors();
+        return overlayThreeCache;
+      }
+      const grid = scene2.grid;
+      const sampleMesh = findFirstSceneMesh(scene2.scene);
+      if (!grid || !sampleMesh) return null;
+      const Vector3 = scene2.camera.position.constructor;
+      const posAttr = sampleMesh.geometry.attributes.position;
+      const LineSegmentsCtor = grid.constructor.name === 'GridHelper'
+        ? Object.getPrototypeOf(grid.constructor.prototype).constructor
+        : grid.constructor;
+      const GroupCtor = Object.getPrototypeOf(scene2.scene.constructor.prototype).constructor;
+      overlayThreeCache = {
+        Vector3,
+        BufferGeometry: sampleMesh.geometry.constructor,
+        Float32BufferAttribute: posAttr.constructor,
+        LineBasicMaterial: grid.material.constructor,
+        LineSegments: LineSegmentsCtor,
+        Group: GroupCtor,
+        Mesh: sampleMesh.constructor,
+        MeshBasicMaterial: typeof guardianThree?.MeshBasicMaterial === 'function'
+          ? guardianThree.MeshBasicMaterial
+          : null,
+        DoubleSide: guardianThree?.DoubleSide ?? 2,
+        CircleGeometry: typeof guardianThree?.CircleGeometry === 'function'
+          ? guardianThree.CircleGeometry
+          : null,
+        RingGeometry: typeof guardianThree?.RingGeometry === 'function'
+          ? guardianThree.RingGeometry
+          : null,
+        PlaneGeometry: typeof guardianThree?.PlaneGeometry === 'function'
+          ? guardianThree.PlaneGeometry
+          : null,
+        BoxGeometry: typeof guardianThree?.BoxGeometry === 'function'
+          ? guardianThree.BoxGeometry
+          : null,
+        SphereGeometry: typeof guardianThree?.SphereGeometry === 'function'
+          ? guardianThree.SphereGeometry
+          : null,
+      };
+      return overlayThreeCache;
+    }
+
+    function resetOverlayThreeCache() {
+      overlayThreeCache = null;
+    }
+
+    /** gzweb `scene2.ray` is a THREE.Raycaster; world origin/direction are on `.ray`. */
+    function sceneRayWorldLine(scene2) {
+      const arm = scene2?.ray?.ray;
+      if (!arm?.origin || !arm?.direction) return null;
+      return { origin: arm.origin, direction: arm.direction };
+    }
+
+    function clientToNDC(dom, clientX, clientY) {
+      const rect = dom.getBoundingClientRect();
+      return {
+        x: ((clientX - rect.left) / rect.width) * 2 - 1,
+        y: -(((clientY - rect.top) / rect.height) * 2 - 1),
+      };
+    }
+
+    /** Camera ray ∩ z = 0 plane (map-base top) when no terrain mesh is hit. */
+    function intersectMapBasePlaneXY(scene2, clientX, clientY) {
+      if (!scene2?.ray || !scene2.camera) return null;
+      const dom = scene2.getDomElement();
+      scene2.ray.setFromCamera(clientToNDC(dom, clientX, clientY), scene2.camera);
+      const line = sceneRayWorldLine(scene2);
+      if (!line) return null;
+      const { origin, direction: dir } = line;
+      if (Math.abs(dir.z) < 1e-9) return null;
+      const t = -origin.z / dir.z;
+      if (t < 0) return null;
+      return {
+        x: origin.x + dir.x * t,
+        y: origin.y + dir.y * t,
+      };
+    }
+
     function createZoneEditor(getScene2, notifySwift) {
       const ZONE_COLORS = { start: 0x3b82f6, end: 0x22c55e };
       const ZONE_RADIUS_MIN_M = 20;
@@ -713,11 +844,8 @@
       const STROKE_WIDTH_M = 4;
       const CIRCLE_SEGMENTS = 64;
       const CIRCLE_EDGE_SAMPLES = 16;
-      /** Open-field floor collision top (`TrainingEnvironmentWorldSDF` / `open_field_floor`). */
-      const MAP_BASE_TOP_ZM = 0;
       const OVERLAY_RENDER_ORDER = 2000;
       const CENTER_MARKER_RADIUS_M = 2;
-      let three = null;
       let overlayRoot = null;
       let pointerDom = null;
       let zonePlacementKeyListenerInstalled = false;
@@ -744,69 +872,6 @@
       let zoneDragWindowEndHandler = null;
       /** Tap on a zone when not in placement mode — opens zone editor in Swift. */
       let zoneTapGesture = null;
-
-      function findFirstMesh(root) {
-        let found = null;
-        root.traverse((node) => {
-          if (!found && node.isMesh && node.name !== 'grid') found = node;
-        });
-        return found;
-      }
-
-      function refreshThreeGeometryConstructors() {
-        if (!three) return;
-        if (typeof guardianThree?.MeshBasicMaterial === 'function') {
-          three.MeshBasicMaterial = guardianThree.MeshBasicMaterial;
-        }
-        if (typeof guardianThree?.CircleGeometry === 'function') {
-          three.CircleGeometry = guardianThree.CircleGeometry;
-        }
-        if (typeof guardianThree?.RingGeometry === 'function') {
-          three.RingGeometry = guardianThree.RingGeometry;
-        }
-        if (typeof guardianThree?.PlaneGeometry === 'function') {
-          three.PlaneGeometry = guardianThree.PlaneGeometry;
-        }
-      }
-
-      function cacheThree(scene2) {
-        if (three) {
-          refreshThreeGeometryConstructors();
-          return three;
-        }
-        const grid = scene2.grid;
-        const sampleMesh = findFirstMesh(scene2.scene);
-        if (!grid || !sampleMesh) return null;
-        const Vector3 = scene2.camera.position.constructor;
-        const posAttr = sampleMesh.geometry.attributes.position;
-        const LineSegmentsCtor = grid.constructor.name === 'GridHelper'
-          ? Object.getPrototypeOf(grid.constructor.prototype).constructor
-          : grid.constructor;
-        const GroupCtor = Object.getPrototypeOf(scene2.scene.constructor.prototype).constructor;
-        three = {
-          Vector3,
-          BufferGeometry: sampleMesh.geometry.constructor,
-          Float32BufferAttribute: posAttr.constructor,
-          LineBasicMaterial: grid.material.constructor,
-          LineSegments: LineSegmentsCtor,
-          Group: GroupCtor,
-          Mesh: sampleMesh.constructor,
-          MeshBasicMaterial: typeof guardianThree?.MeshBasicMaterial === 'function'
-            ? guardianThree.MeshBasicMaterial
-            : null,
-          DoubleSide: guardianThree?.DoubleSide ?? 2,
-          CircleGeometry: typeof guardianThree?.CircleGeometry === 'function'
-            ? guardianThree.CircleGeometry
-            : null,
-          RingGeometry: typeof guardianThree?.RingGeometry === 'function'
-            ? guardianThree.RingGeometry
-            : null,
-          PlaneGeometry: typeof guardianThree?.PlaneGeometry === 'function'
-            ? guardianThree.PlaneGeometry
-            : null,
-        };
-        return three;
-      }
 
       function liftSurfacePoint(point) {
         if (!point) return point;
@@ -1343,11 +1408,13 @@
           if (node === skip || node.parent === skip) return;
           if (node.name === 'guardian_zone_overlay') return;
           if (node.name === 'guardian_map_dimensions') return;
+          if (node.name === 'guardian_obstacle_readonly_overlay') return;
           if (node.name === 'grid') return;
           let ancestor = node;
           while (ancestor) {
             const name = ancestor.name || '';
-            if (name === 'guardian_zone_overlay' || name === 'guardian_map_dimensions' || name.startsWith('guardian_zone_')) return;
+            if (name === 'guardian_zone_overlay' || name === 'guardian_map_dimensions'
+              || name === 'guardian_obstacle_readonly_overlay' || name.startsWith('guardian_zone_')) return;
             ancestor = ancestor.parent;
           }
           if (node.isMesh) out.push(node);
@@ -1379,9 +1446,9 @@
         return Math.max(MAP_BASE_TOP_ZM, zm);
       }
 
-      function regroundZoneCenterZM(scene2, record) {
-        if (!record?.placed || !scene2) return;
-        record.centerZM = centerZMFromTerrain(scene2, record.centerXM, record.centerYM);
+      function regroundZoneCenterZM(_scene2, record) {
+        if (!record?.placed) return;
+        record.centerZM = MAP_BASE_TOP_ZM;
       }
 
       /**
@@ -1393,12 +1460,7 @@
         const T = cacheThree(scene2);
         if (!T) return null;
         const dom = scene2.getDomElement();
-        const rect = dom.getBoundingClientRect();
-        const ndc = {
-          x: ((clientX - rect.left) / rect.width) * 2 - 1,
-          y: -(((clientY - rect.top) / rect.height) * 2 - 1),
-        };
-        scene2.ray.setFromCamera(ndc, scene2.camera);
+        scene2.ray.setFromCamera(clientToNDC(dom, clientX, clientY), scene2.camera);
         const meshes = [];
         collectTerrainMeshes(scene2.scene, meshes, overlayRoot);
         const hits = scene2.ray.intersectObjects(meshes, true);
@@ -1412,15 +1474,12 @@
           x = best.point.x;
           y = best.point.y;
         } else {
-          const origin = scene2.ray.origin;
-          const dir = scene2.ray.direction;
-          if (Math.abs(dir.z) < 1e-9) return null;
-          const t = -origin.z / dir.z;
-          if (t < 0) return null;
-          x = origin.x + dir.x * t;
-          y = origin.y + dir.y * t;
+          const planeXY = intersectMapBasePlaneXY(scene2, clientX, clientY);
+          if (!planeXY) return null;
+          x = planeXY.x;
+          y = planeXY.y;
         }
-        const centerZM = centerZMFromTerrain(scene2, x, y);
+        const centerZM = MAP_BASE_TOP_ZM;
         return new T.Vector3(x, y, centerZM + MAP_SURFACE_LIFT_M);
       }
 
@@ -1651,7 +1710,7 @@
         const oy = zoneDrag?.offsetY ?? 0;
         record.centerXM = hit.x - ox;
         record.centerYM = hit.y - oy;
-        record.centerZM = centerZMFromTerrain(scene2, record.centerXM, record.centerYM);
+        record.centerZM = MAP_BASE_TOP_ZM;
         const snapped = snapZoneToMapBase(record, mapBaseBounds());
         editorState.zones[kind] = snapped.record;
         if (zoneDrag) {
@@ -1668,7 +1727,7 @@
         const kind = editorState.placementKind;
         const prev = normalizeZoneRecord(zoneRecord(kind));
         const bounds = mapBaseBounds();
-        const centerZM = centerZMFromTerrain(scene2, hit.x, hit.y);
+        const centerZM = MAP_BASE_TOP_ZM;
         let record = {
           placed: true,
           centerXM: hit.x,
@@ -1853,7 +1912,7 @@
 
       return {
         resetThreeCache() {
-          three = null;
+          resetOverlayThreeCache();
         },
         attach(manager) {
           attachedManager = manager;
@@ -1896,6 +1955,322 @@
           if (!scene2) return false;
           setPlacementControls(scene2, editorState.placementActive);
           rebuildAll(scene2, attachedManager);
+          return true;
+        },
+      };
+    }
+
+    function createFormationSlotEditor(getScene2, notifySwift) {
+      const SLOT_LIFT_M = typeof MAP_SURFACE_LIFT_M === 'number' ? MAP_SURFACE_LIFT_M : 0.0035;
+      const SLOT_HEIGHT_M = 0.4;
+      const HANDLE_RADIUS_M = 1.8;
+      const HANDLE_Z = 6200;
+      const OVERLAY_ORDER = 2050;
+      const HEADING_EDGE_COLOR = 0xffffff;
+
+      let editorState = {
+        mapHalfExtentM: MAP_GROUND_HALF_EXTENT_M,
+        zones: {
+          start: { placed: false, centerXM: 0, centerYM: 0, centerZM: 0, radiusM: 30, shape: 'circle' },
+          end: { placed: false, centerXM: 0, centerYM: 0, centerZM: 0, radiusM: 30, shape: 'circle' },
+        },
+        editSquadID: null,
+        squads: [],
+      };
+      let overlayRoot = null;
+      let attachedManager = null;
+      let squadGroups = {};
+      let handleMeshes = [];
+      let formationDrag = null;
+      let domListenersAttached = false;
+
+      function pickMapXY(scene2, clientX, clientY) {
+        return intersectMapBasePlaneXY(scene2, clientX, clientY);
+      }
+
+      function setOrbitEnabled(scene2, enabled) {
+        if (scene2?.controls) scene2.controls.enabled = enabled;
+      }
+
+      function parseColor(hex) {
+        const h = String(hex || '#f59e0b').replace('#', '');
+        return parseInt(h, 16) || 0xf59e0b;
+      }
+
+      function slotRotationZ(headingDeg) {
+        return ((90 - Number(headingDeg) || 0) * Math.PI) / 180;
+      }
+
+      function rimXY(centerXM, centerYM, headingDeg, radiusM) {
+        const h = (Number(headingDeg) || 0) * Math.PI / 180;
+        const r = Math.max(3, Number(radiusM) || 6);
+        return {
+          x: centerXM + Math.sin(h) * r,
+          y: centerYM + Math.cos(h) * r,
+        };
+      }
+
+      function bearingDeg(cx, cy, x, y) {
+        const dx = x - cx;
+        const dy = y - cy;
+        let deg = (Math.atan2(dx, dy) * 180) / Math.PI;
+        if (deg < 0) deg += 360;
+        return deg;
+      }
+
+      function ensureOverlay(scene2) {
+        const existing = scene2.scene.getObjectByName('guardian_formation_slots_overlay');
+        if (existing) {
+          overlayRoot = existing;
+          return overlayRoot;
+        }
+        const T = cacheThree(scene2);
+        if (!T) return null;
+        overlayRoot = new T.Group();
+        overlayRoot.name = 'guardian_formation_slots_overlay';
+        overlayRoot.renderOrder = OVERLAY_ORDER;
+        scene2.scene.add(overlayRoot);
+        return overlayRoot;
+      }
+
+      function clearOverlay() {
+        if (!overlayRoot) return;
+        while (overlayRoot.children.length) {
+          const child = overlayRoot.children[0];
+          overlayRoot.remove(child);
+          child.traverse?.((node) => {
+            if (node.geometry) node.geometry.dispose?.();
+            if (node.material) {
+              if (Array.isArray(node.material)) node.material.forEach((m) => m.dispose?.());
+              else node.material.dispose?.();
+            }
+          });
+        }
+        squadGroups = {};
+        handleMeshes = [];
+      }
+
+      function buildSlotMeshes(T, group, slot, color, planeZ) {
+        const rotZ = slotRotationZ(slot.headingDeg);
+        const len = Math.max(0.8, Number(slot.lengthM) || 2);
+        const wid = Math.max(0.6, Number(slot.widthM) || 1.5);
+        const bodyGeo = new T.BoxGeometry(len, wid, SLOT_HEIGHT_M);
+        const bodyMat = new T.MeshBasicMaterial({
+          color: parseColor(color),
+          transparent: true,
+          opacity: 0.52,
+          depthWrite: false,
+        });
+        const body = new T.Mesh(bodyGeo, bodyMat);
+        body.position.set(slot.centerXM, slot.centerYM, planeZ + SLOT_HEIGHT_M * 0.5);
+        body.rotation.z = rotZ;
+        body.renderOrder = OVERLAY_ORDER + 2;
+        group.add(body);
+
+        const edgeLen = Math.max(0.15, len * 0.12);
+        const edgeGeo = new T.BoxGeometry(edgeLen, wid * 1.05, SLOT_HEIGHT_M * 1.02);
+        const edgeMat = new T.MeshBasicMaterial({
+          color: HEADING_EDGE_COLOR,
+          transparent: true,
+          opacity: 0.95,
+          depthWrite: false,
+        });
+        const edge = new T.Mesh(edgeGeo, edgeMat);
+        edge.position.set(len * 0.5 - edgeLen * 0.5, 0, 0);
+        edge.renderOrder = OVERLAY_ORDER + 3;
+        body.add(edge);
+      }
+
+      function buildHandleMeshes(T, scene2, squadId, phase, groupData, color) {
+        if (String(squadId) !== String(editorState.editSquadID)) return;
+        const planeZ = MAP_BASE_TOP_ZM + SLOT_LIFT_M;
+        const phases = [
+          { key: 'start', data: groupData.start },
+          { key: 'end', data: groupData.end },
+        ];
+        for (const { key, data } of phases) {
+          if (!data) continue;
+          const ctrGeo = new T.SphereGeometry(HANDLE_RADIUS_M, 12, 12);
+          const ctrMat = new T.MeshBasicMaterial({ color: parseColor(color), opacity: 0.9, transparent: true });
+          const ctr = new T.Mesh(ctrGeo, ctrMat);
+          ctr.position.set(data.centerXM, data.centerYM, planeZ + 0.5);
+          ctr.renderOrder = HANDLE_Z;
+          ctr.userData = { role: 'center', squadId, phase: key };
+          overlayRoot.add(ctr);
+          handleMeshes.push(ctr);
+
+          const rim = rimXY(data.centerXM, data.centerYM, data.headingDeg, data.circleRadiusM);
+          const rimGeo = new T.SphereGeometry(HANDLE_RADIUS_M * 0.85, 10, 10);
+          const rimMat = new T.MeshBasicMaterial({ color: 0xfbbf24, opacity: 0.95, transparent: true });
+          const rimMesh = new T.Mesh(rimGeo, rimMat);
+          rimMesh.position.set(rim.x, rim.y, planeZ + 0.55);
+          rimMesh.renderOrder = HANDLE_Z;
+          rimMesh.userData = { role: 'rim', squadId, phase: key };
+          overlayRoot.add(rimMesh);
+          handleMeshes.push(rimMesh);
+        }
+      }
+
+      function rebuildAll(scene2) {
+        const T = cacheThree(scene2);
+        if (!T?.Group || !ensureOverlay(scene2)) return;
+        clearOverlay();
+        const squads = editorState.squads || [];
+        if (!squads.length) {
+          if (typeof scene2.render === 'function') scene2.render(0);
+          return;
+        }
+        if (!T.BoxGeometry || !T.SphereGeometry) return;
+        const planeZ = MAP_BASE_TOP_ZM + SLOT_LIFT_M;
+        for (const squad of squads) {
+          const g = new T.Group();
+          g.name = `guardian_formation_squad_${squad.id}`;
+          if (squad.start?.slots) {
+            for (const slot of squad.start.slots) {
+              buildSlotMeshes(T, g, slot, squad.colorHex, planeZ);
+            }
+          }
+          if (squad.end?.slots) {
+            for (const slot of squad.end.slots) {
+              buildSlotMeshes(T, g, slot, squad.colorHex, planeZ);
+            }
+          }
+          overlayRoot.add(g);
+          squadGroups[squad.id] = g;
+          buildHandleMeshes(T, scene2, squad.id, null, squad, squad.colorHex);
+        }
+        if (typeof scene2.render === 'function') scene2.render(0);
+      }
+
+      function pickHandle(scene2, clientX, clientY) {
+        if (!scene2?.ray || !handleMeshes.length) return null;
+        const dom = scene2.getDomElement();
+        const rect = dom.getBoundingClientRect();
+        const ndc = {
+          x: ((clientX - rect.left) / rect.width) * 2 - 1,
+          y: -(((clientY - rect.top) / rect.height) * 2 - 1),
+        };
+        scene2.ray.setFromCamera(ndc, scene2.camera);
+        const hits = scene2.ray.intersectObjects(handleMeshes, false);
+        return hits.length ? hits[0].object : null;
+      }
+
+      function squadById(id) {
+        return (editorState.squads || []).find((s) => String(s.id) === String(id));
+      }
+
+      function postGroupMoved(squadId, phase, centerXM, centerYM, headingDeg) {
+        notifySwift({
+          type: 'formationSlotGroupMoved',
+          kind: phase,
+          squadID: String(squadId),
+          centerXM,
+          centerYM,
+          headingDeg,
+        });
+      }
+
+      function onPointerDown(event) {
+        const scene2 = getScene2();
+        if (!scene2 || event.button !== 0 || event.shiftKey) return;
+        const handle = pickHandle(scene2, event.clientX, event.clientY);
+        if (!handle?.userData?.role) return;
+        const squad = squadById(handle.userData.squadId);
+        const phase = handle.userData.phase;
+        const data = phase === 'start' ? squad?.start : squad?.end;
+        if (!data) return;
+        formationDrag = {
+          role: handle.userData.role,
+          squadId: handle.userData.squadId,
+          phase,
+          centerXM: data.centerXM,
+          centerYM: data.centerYM,
+          headingDeg: data.headingDeg,
+          circleRadiusM: data.circleRadiusM,
+          offsetX: 0,
+          offsetY: 0,
+        };
+        if (formationDrag.role === 'center') {
+          const hit = pickMapXY(scene2, event.clientX, event.clientY);
+          if (hit) {
+            formationDrag.offsetX = hit.x - data.centerXM;
+            formationDrag.offsetY = hit.y - data.centerYM;
+          }
+        }
+        setOrbitEnabled(scene2, false);
+        scene2.getDomElement().setPointerCapture(event.pointerId);
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+
+      function onPointerMove(event) {
+        if (!formationDrag) return;
+        const scene2 = getScene2();
+        if (!scene2) return;
+        const squad = squadById(formationDrag.squadId);
+        const data = formationDrag.phase === 'start' ? squad?.start : squad?.end;
+        if (!data) return;
+        if (formationDrag.role === 'center') {
+          const hit = pickMapXY(scene2, event.clientX, event.clientY);
+          if (!hit) return;
+          data.centerXM = hit.x - formationDrag.offsetX;
+          data.centerYM = hit.y - formationDrag.offsetY;
+        } else {
+          const hit = pickMapXY(scene2, event.clientX, event.clientY);
+          if (!hit) return;
+          data.headingDeg = bearingDeg(data.centerXM, data.centerYM, hit.x, hit.y);
+        }
+        rebuildAll(scene2);
+        event.preventDefault();
+      }
+
+      function onPointerUp(event) {
+        if (!formationDrag) return;
+        const scene2 = getScene2();
+        const squad = squadById(formationDrag.squadId);
+        const data = formationDrag.phase === 'start' ? squad?.start : squad?.end;
+        if (data) {
+          postGroupMoved(
+            formationDrag.squadId,
+            formationDrag.phase,
+            data.centerXM,
+            data.centerYM,
+            data.headingDeg
+          );
+        }
+        formationDrag = null;
+        if (scene2) setOrbitEnabled(scene2, true);
+      }
+
+      function attachDomListeners() {
+        if (domListenersAttached) return;
+        domListenersAttached = true;
+        const dom = document.getElementById('scene');
+        if (!dom) return;
+        dom.addEventListener('pointerdown', onPointerDown, true);
+        dom.addEventListener('pointermove', onPointerMove, true);
+        dom.addEventListener('pointerup', onPointerUp, true);
+        dom.addEventListener('pointercancel', onPointerUp, true);
+      }
+
+      return {
+        attach(manager) {
+          attachedManager = manager;
+          attachDomListeners();
+          const scene2 = getScene2();
+          if (scene2) rebuildAll(scene2);
+        },
+        applyState(state) {
+          if (!state) return false;
+          editorState = {
+            mapHalfExtentM: Number(state.mapHalfExtentM) || MAP_GROUND_HALF_EXTENT_M,
+            zones: state.zones || editorState.zones,
+            editSquadID: state.editSquadID || null,
+            squads: Array.isArray(state.squads) ? state.squads : [],
+          };
+          const scene2 = getScene2();
+          if (!scene2) return false;
+          rebuildAll(scene2);
           return true;
         },
       };
@@ -1961,6 +2336,10 @@
       const DELETE_FADE_STEP = 0.05;
       const DELETE_FADE_INTERVAL_MS = 200;
       const DELETE_FADE_MIN = 0.05;
+      const READONLY_OBSTACLE_OVERLAY_NAME = 'guardian_obstacle_readonly_overlay';
+      const READONLY_OBSTACLE_COLOR = 0x8a8a8a;
+      const READONLY_OBSTACLE_OPACITY = 0.88;
+      const READONLY_OBSTACLE_RENDER_ORDER = 1990;
       let editorState = {
         editorActive: false,
         placementActive: false,
@@ -2331,12 +2710,7 @@
        */
       function pickTerrainSurface(scene2, clientX, clientY) {
         const dom = scene2.getDomElement();
-        const rect = dom.getBoundingClientRect();
-        const ndc = {
-          x: ((clientX - rect.left) / rect.width) * 2 - 1,
-          y: -(((clientY - rect.top) / rect.height) * 2 - 1),
-        };
-        scene2.ray.setFromCamera(ndc, scene2.camera);
+        scene2.ray.setFromCamera(clientToNDC(dom, clientX, clientY), scene2.camera);
         const meshes = [];
         collectObstacleTerrainMeshes(scene2.scene, meshes);
         const hits = scene2.ray.intersectObjects(meshes, true);
@@ -2348,16 +2722,9 @@
           const p = best.point;
           return { x: p.x, y: p.y, z: p.z };
         }
-        const origin = scene2.ray.origin;
-        const dir = scene2.ray.direction;
-        if (Math.abs(dir.z) < 1e-9) return null;
-        const t = -origin.z / dir.z;
-        if (t < 0) return null;
-        return {
-          x: origin.x + dir.x * t,
-          y: origin.y + dir.y * t,
-          z: 0,
-        };
+        const planeXY = intersectMapBasePlaneXY(scene2, clientX, clientY);
+        if (!planeXY) return null;
+        return { x: planeXY.x, y: planeXY.y, z: MAP_BASE_TOP_ZM };
       }
 
       function pickSurface(scene2, clientX, clientY) {
@@ -2485,6 +2852,35 @@
         return best;
       }
 
+      /** When clones share a pose, prefer the manifest selection over an arbitrary ray hit. */
+      function pickObstacleIdForInteraction(scene2, clientX, clientY) {
+        const hitId = pickObstacleId(scene2, clientX, clientY);
+        const selected = editorState.selectedID;
+        if (!selected || isObstacleDeleting(selected)) return hitId;
+        const selectedRec = findObstacle(selected);
+        if (!selectedRec) return hitId;
+        const surface = pickSurface(scene2, clientX, clientY);
+        if (!surface) return hitId;
+        const { hx, hy } = footprintHalfM(selectedRec);
+        const localX = surface.x - selectedRec.centerXM;
+        const localY = surface.y - selectedRec.centerYM;
+        const yaw = (Number(selectedRec.yawDeg) || 0) * Math.PI / 180;
+        const cos = Math.cos(yaw);
+        const sin = Math.sin(yaw);
+        const lx = localX * cos + localY * sin;
+        const ly = -localX * sin + localY * cos;
+        const onSelected = Math.abs(lx) <= hx + 0.25 && Math.abs(ly) <= hy + 0.25;
+        if (!onSelected) return hitId;
+        if (!hitId || hitId === selected) return selected;
+        const hitRec = findObstacle(hitId);
+        if (!hitRec) return selected;
+        const stacked = Math.hypot(
+          hitRec.centerXM - selectedRec.centerXM,
+          hitRec.centerYM - selectedRec.centerYM
+        ) < 0.35;
+        return stacked ? selected : hitId;
+      }
+
       function findObstacle(id) {
         return editorState.obstacles.find((o) => o.id === id) ?? null;
       }
@@ -2577,6 +2973,82 @@
           setObstacleRootOpacity(liveRoot, current);
           if (typeof scene2.render === 'function') scene2.render(0);
         }, DELETE_FADE_INTERVAL_MS);
+      }
+
+      function obstacleSizeM(obstacle) {
+        const kind = obstacle?.kind;
+        if (kind === 'cuboid' && obstacle.cuboid) {
+          return {
+            x: Math.max(Number(obstacle.cuboid.lengthM) || 2, 0.1),
+            y: Math.max(Number(obstacle.cuboid.widthM) || 2, 0.1),
+            z: Math.max(Number(obstacle.cuboid.heightM) || 2, 0.1),
+          };
+        }
+        if (kind === 'cylinder' && obstacle.cylinder) {
+          const diameter = Math.max(Number(obstacle.cylinder.radiusM) || 1, 0.1) * 2;
+          const height = Math.max(Number(obstacle.cylinder.heightM) || 2, 0.1);
+          return { x: diameter, y: diameter, z: height };
+        }
+        const edge = Math.max(Number(obstacle?.cube?.edgeM) || 2, 0.1);
+        return { x: edge, y: edge, z: edge };
+      }
+
+      function clearReadOnlyObstacleOverlay(scene2) {
+        const root = scene2?.scene?.getObjectByName?.(READONLY_OBSTACLE_OVERLAY_NAME);
+        if (!root) return;
+        root.traverse((child) => {
+          child.geometry?.dispose?.();
+          if (Array.isArray(child.material)) {
+            child.material.forEach((m) => m?.dispose?.());
+          } else {
+            child.material?.dispose?.();
+          }
+        });
+        root.parent?.remove(root);
+      }
+
+      /** Training / Formation map tile: draw manifest obstacles when the editor is off. */
+      function syncReadOnlyObstacleOverlays(scene2) {
+        if (!scene2?.scene) return;
+        if (editorState.editorActive || editorState.obstacles.length === 0) {
+          clearReadOnlyObstacleOverlay(scene2);
+          return;
+        }
+        const T = cacheThree(scene2);
+        const BoxGeometry = T?.BoxGeometry;
+        const MeshBasicMaterial = guardianThree?.MeshBasicMaterial;
+        const Mesh = guardianThree?.Mesh;
+        if (!T || typeof BoxGeometry !== 'function' || !MeshBasicMaterial || typeof Mesh !== 'function') {
+          return;
+        }
+        clearReadOnlyObstacleOverlay(scene2);
+        const group = new T.Group();
+        group.name = READONLY_OBSTACLE_OVERLAY_NAME;
+        group.renderOrder = READONLY_OBSTACLE_RENDER_ORDER;
+        for (const obstacle of editorState.obstacles) {
+          const size = obstacleSizeM(obstacle);
+          const mesh = new Mesh(
+            new BoxGeometry(size.x, size.y, size.z),
+            new MeshBasicMaterial({
+              color: READONLY_OBSTACLE_COLOR,
+              transparent: true,
+              opacity: READONLY_OBSTACLE_OPACITY,
+            })
+          );
+          mesh.name = `guardian_obstacle_readonly_${obstacleSafeName(obstacle.id)}`;
+          mesh.userData.guardianObstacleId = obstacle.id;
+          mesh.position.set(
+            Number(obstacle.centerXM) || 0,
+            Number(obstacle.centerYM) || 0,
+            Number(obstacle.centerZM) || 0
+          );
+          mesh.rotation.set(0, 0, (Number(obstacle.yawDeg) || 0) * Math.PI / 180, 'ZYX');
+          group.add(mesh);
+        }
+        scene2.scene.add(group);
+        if (typeof scene2.render === 'function') {
+          scene2.render(0);
+        }
       }
 
       /** Clears legacy viewer scale caches (removed Box3 rescaling — sizes come from Gazebo SDF). */
@@ -2924,7 +3396,7 @@
         if (!editorState.editorActive) return;
         const scene2 = getScene2();
         if (!scene2) return;
-        const id = pickObstacleId(scene2, event.clientX, event.clientY);
+        const id = pickObstacleIdForInteraction(scene2, event.clientX, event.clientY);
         if (!id || isObstacleDeleting(id)) return;
         event.preventDefault();
         notifySwift({ type: 'deleteObstacleRequest', obstacleID: id });
@@ -2961,7 +3433,7 @@
           return;
         }
 
-        const hitId = pickObstacleId(scene2, event.clientX, event.clientY);
+        const hitId = pickObstacleIdForInteraction(scene2, event.clientX, event.clientY);
         if (hitId) {
           logObstaclePlace('pointerDown', `obstacle drag start id=${hitId}`);
           cancelPlacementGesture();
@@ -3245,9 +3717,14 @@
                 const stillListed = editorState.obstacles.some((o) => o.id === prevDeletingID);
                 stopDeleteFade(scene2, { restore: stillListed, id: prevDeletingID });
               }
+              syncReadOnlyObstacleOverlays(scene2);
               purgeOrphanObstacleMeshes(scene2);
-              syncObstacleVisualTransforms(scene2);
-              rebuildSelectionOutlines(scene2);
+              if (editorState.editorActive) {
+                syncObstacleVisualTransforms(scene2);
+                rebuildSelectionOutlines(scene2);
+              } else {
+                clearAllSelectionOutlines(scene2);
+              }
             } else {
               logObstaclePlace('applyState', 'scene2 missing — handlers not installed');
             }
@@ -3440,10 +3917,14 @@
             bindViewerSession(active);
             mapDimensionHud.attach();
             zoneEditor.attach(active.manager);
+            formationSlotEditor.attach(active.manager);
             obstacleEditor.attach(active.manager);
             installSceneTileClickProbe(obstacleEditor);
             if (pendingZoneEditorState) {
               zoneEditor.applyState(pendingZoneEditorState);
+            }
+            if (pendingFormationSlotState) {
+              formationSlotEditor.applyState(pendingFormationSlotState);
             }
             if (pendingObstacleEditorState) {
               obstacleEditor.applyState(pendingObstacleEditorState);

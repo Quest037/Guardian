@@ -13,6 +13,8 @@ struct TrainingLabPanelView: View {
     @StateObject private var roster = TrainingLabRosterController()
     @StateObject private var viewportCamera = GazeboWebViewportCameraBridge()
     @StateObject private var viewportZones = GazeboWebViewportZoneBridge()
+    @StateObject private var viewportObstacles = GazeboWebViewportObstacleBridge()
+    @StateObject private var viewportFormationSlots = GazeboWebViewportFormationSlotsBridge()
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.guardianAppProduct) private var appProduct
@@ -183,9 +185,19 @@ struct TrainingLabPanelView: View {
         .onChange(of: lab.teaching.selectedEnvironmentID) { _ in
             lab.teaching.environmentSelectionDidChange()
             pushTrainingViewportZones()
+            pushTrainingViewportObstacles()
         }
         .onChange(of: isTrainingViewportCameraLive) { live in
-            if live { pushTrainingViewportZones() }
+            if live {
+                pushTrainingViewportZones()
+                pushTrainingViewportObstacles()
+            }
+        }
+        .onReceive(roster.objectWillChange) { _ in
+            pushTrainingViewportFormationSlots()
+        }
+        .onChange(of: roster.learningSquadID) { _ in
+            pushTrainingViewportFormationSlots()
         }
         .onChange(of: lab.teaching.vehicleClass) { _ in
             lab.teaching.trainingTaskOrVehicleDidChange()
@@ -226,19 +238,82 @@ struct TrainingLabPanelView: View {
         if let worldID = lab.teaching.activeGazeboWorldID, gazebo.isWorldAlive(id: worldID) { return }
         await lab.teaching.selectEnvironmentAndLoadGazeboWorld(environmentID: envID)
         pushTrainingViewportZones()
+        pushTrainingViewportObstacles()
     }
 
     private func pushTrainingViewportZones() {
         guard let manifest = lab.teaching.selectedEnvironment?.manifest else {
             viewportZones.syncFromManifest(nil)
+            viewportFormationSlots.clear()
+            viewportObstacles.pushEditorState(
+                editorActive: false,
+                placementActive: false,
+                selectedID: nil,
+                draft: TrainingEnvironmentObstacleRecord.defaults(for: .cube),
+                obstacles: [],
+                mapHalfExtentM: trainingGroundHalfExtentM,
+                zones: .empty
+            )
             return
         }
+        let zones = WorldBuilderZoneManifestSupport.zones(from: manifest)
         viewportZones.pushEditorState(
             placementActive: false,
             tapToEditEnabled: false,
             placementKind: .start,
-            zones: WorldBuilderZoneManifestSupport.zones(from: manifest),
+            zones: zones,
             obstacles: manifest.obstacles,
+            mapHalfExtentM: trainingGroundHalfExtentM
+        )
+        pushTrainingViewportFormationSlots(zones: zones)
+    }
+
+    /// Read-only obstacle meshes on the map tile (Training `.run` — not World Builder edit mode).
+    private func pushTrainingViewportObstacles() {
+        guard let manifest = lab.teaching.selectedEnvironment?.manifest else {
+            viewportObstacles.pushEditorState(
+                editorActive: false,
+                placementActive: false,
+                selectedID: nil,
+                draft: TrainingEnvironmentObstacleRecord.defaults(for: .cube),
+                obstacles: [],
+                mapHalfExtentM: trainingGroundHalfExtentM,
+                zones: .empty
+            )
+            return
+        }
+        let zones = WorldBuilderZoneManifestSupport.zones(from: manifest)
+        viewportObstacles.pushEditorState(
+            editorActive: false,
+            placementActive: false,
+            selectedID: nil,
+            draft: TrainingEnvironmentObstacleRecord.defaults(for: .cube),
+            obstacles: manifest.obstacles,
+            mapHalfExtentM: trainingGroundHalfExtentM,
+            zones: zones
+        )
+    }
+
+    private func pushTrainingViewportFormationSlots(zones: WorldBuilderZonesSnapshot? = nil) {
+        guard mapIsSelected, lab.teaching.usesGazeboTrainingViewport else {
+            viewportFormationSlots.clear()
+            return
+        }
+        let resolvedZones: WorldBuilderZonesSnapshot
+        if let zones {
+            resolvedZones = zones
+        } else if let manifest = lab.teaching.selectedEnvironment?.manifest {
+            resolvedZones = WorldBuilderZoneManifestSupport.zones(from: manifest)
+        } else {
+            viewportFormationSlots.clear()
+            return
+        }
+        roster.ensureZoneFormationAnchors(zones: resolvedZones)
+        let editID = roster.learningSquadID ?? roster.squads.first?.id
+        viewportFormationSlots.push(
+            squads: roster.squads,
+            editSquadID: editID,
+            zones: resolvedZones,
             mapHalfExtentM: trainingGroundHalfExtentM
         )
     }
@@ -389,9 +464,27 @@ struct TrainingLabPanelView: View {
                         cameraCommandTick: viewportCamera.tick,
                         zoneBridge: viewportZones,
                         zoneCommandTick: viewportZones.tick,
+                        obstacleBridge: viewportObstacles,
+                        obstacleCommandTick: viewportObstacles.tick,
+                        formationSlotsBridge: viewportFormationSlots,
+                        formationSlotsCommandTick: viewportFormationSlots.tick,
                         showsCameraDebugHUD: fleetLink.isDebugEnabled,
                         groundHalfExtentM: trainingGroundHalfExtentM,
-                        orbitMinDistanceM: trainingOrbitMinDistanceM
+                        orbitMinDistanceM: trainingOrbitMinDistanceM,
+                        onFormationSlotGroupMoved: { squadID, phase, centerXM, centerYM, headingDeg in
+                            guard let manifest = lab.teaching.selectedEnvironment?.manifest else { return }
+                            let zones = WorldBuilderZoneManifestSupport.zones(from: manifest)
+                            roster.updateZoneFormationAnchor(
+                                squadID: squadID,
+                                phase: phase,
+                                centerXM: centerXM,
+                                centerYM: centerYM,
+                                headingDeg: headingDeg,
+                                zones: zones,
+                                mapHalfExtentM: trainingGroundHalfExtentM
+                            )
+                            pushTrainingViewportFormationSlots(zones: zones)
+                        }
                     )
                     .id(viewport.worldID)
                 } else {
@@ -424,6 +517,9 @@ struct TrainingLabPanelView: View {
         .onChange(of: gazebo.embeddedViewport) { viewport in
             lab.teaching.reconcileActiveGazeboRunWorldIfNeeded()
             lab.teaching.noteEmbeddedViewport(viewport)
+            if case .live = viewport?.phase {
+                pushTrainingViewportObstacles()
+            }
         }
         .onChange(of: fleetLink.isDebugEnabled) { enabled in
             if enabled {
@@ -812,6 +908,18 @@ struct TrainingLabPanelView: View {
 
     private func startSession() {
         guard canStartSession else { return }
+        guard let manifest = lab.teaching.selectedEnvironment?.manifest else { return }
+        let zones = WorldBuilderZoneManifestSupport.zones(from: manifest)
+        roster.ensureZoneFormationAnchors(zones: zones)
+        let staging = TrainingLabFormationSlotStaging.validate(
+            squads: roster.squads,
+            zones: zones,
+            mapHalfExtentM: trainingGroundHalfExtentM
+        )
+        guard staging.isReady else {
+            toastCenter.show(staging.operatorMessage, style: .warning, duration: 5)
+            return
+        }
         Task {
             await lab.buildMap(roster: roster)
             roster.syncTrainingFromLearningSquad()

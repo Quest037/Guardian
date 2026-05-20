@@ -99,6 +99,24 @@ final class GazeboService: ObservableObject {
         URL(fileURLWithPath: path).standardizedFileURL.path
     }
 
+    /// Rebakes `world.sdf` + obstacle meshes from `manifest.json` so Training `.run` loads current obstacles.
+    private func refreshTrainingRunWorldSDF(
+        package: TrainingEnvironmentPackage,
+        worldURL: URL
+    ) {
+        do {
+            try TrainingEnvironmentWorldComposer.writeWorld(
+                manifest: package.manifest,
+                to: worldURL,
+                mode: .trainingRun
+            )
+        } catch {
+            fleetLink?.appendSimulationLog(
+                "Gazebo: could not refresh training world for \(package.manifest.displayName) — \((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
+            )
+        }
+    }
+
     /// Rewrites on-disk `world.sdf` when an older package still used the shared `guardian_open_field` name.
     private func migrateWorldSDFWorldNameIfNeeded(
         package: TrainingEnvironmentPackage,
@@ -265,6 +283,9 @@ final class GazeboService: ObservableObject {
 
         if let pkg = resolvedPackage {
             migrateWorldSDFWorldNameIfNeeded(package: pkg, worldURL: world, purpose: purpose)
+            if purpose == .run {
+                refreshTrainingRunWorldSDF(package: pkg, worldURL: world)
+            }
         }
 
         let resolvedFloorSizeLabel = resolvedPackage?.manifest.floorSize ?? floorSizeLabel

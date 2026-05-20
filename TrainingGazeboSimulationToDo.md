@@ -62,10 +62,10 @@ Let operators **save the current lab setup as a named template** and **load it l
 
 Place each squad’s **start** and **end** formation slot groups inside the world’s authored **start** and **end** zones (from `manifest.json` / World Builder zone editor), not as free-floating map pins unrelated to the environment.
 
-- [ ] **Start zone** — squad start formation slot group is authored/placed within the map start zone disc (respect zone center, radius, shape).
-- [ ] **End zone** — squad end formation slot group within the map end zone (same rules).
-- [ ] **Drag + rotate (Training Formation map parity)** — reuse the interaction model the old **Training Formation** Leaflet map used: drag the **formation group center** within the zone; drag a **heading** handle to rotate the slot layout. Implementation anchor: `GuardianFormationSlotGroupMapEdit` + `onFormationSlotGroupCenterMoved` / `onFormationSlotGroupHeadingMoved` (`FormationsPlaygroundView` / `OSMMapView`); port equivalent affordances to the **Gazebo** lab viewport when Formation/Training runs on the embedded 3D map.
-- [ ] **Policy-driven slot layout** — when the operator changes a squad’s **start/end formation policy** in the **settings drawer** (`TrainingLabSquad.formationPolicy` — formation shape + spacing), recompute and refresh the displayed slot positions/heading for that squad in the matching zone without requiring a manual re-place. Same policy → same geometry as `FormationsPlaygroundController` formation preview / `buildFormationSlotTargetMarkers` today.
+- [x] **Start zone** — squad start formation slot group is authored/placed within the map start zone disc (respect zone center, radius, shape).
+- [x] **End zone** — squad end formation slot group within the map end zone (same rules).
+- [x] **Drag + rotate (Training Formation map parity)** — Gazebo viewport: squad-coloured slot boxes, centre + rim handles for the learning squad; `guardianFormationSlots` bridge.
+- [x] **Policy-driven slot layout** — drawer formation/spacing + roster changes refresh slots; **Run** staging rejects overlap / out-of-zone / off-map (`TrainingLabFormationSlotStaging`).
 
 **Cross-links:** `README_FULL.md` → **Unified Training lab** (squad settings drawer, Run wiring); `WorldBuilderView` / zone manifest (`startZoneConfigured`, `endZoneConfigured`); `TrainingPanelController.buildTargetSlotMapEdit()` (existing slot-group edit helper).
 

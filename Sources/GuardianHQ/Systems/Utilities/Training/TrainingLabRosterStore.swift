@@ -15,19 +15,25 @@ enum TrainingLabRosterStore {
         var wingmen: [PersistedEntry]
         var taskKind: TrainingTaskKind
         var formationPolicy: TrainingLabSquadFormationPolicy
+        var startZoneAnchor: TrainingLabZoneFormationAnchor?
+        var endZoneAnchor: TrainingLabZoneFormationAnchor?
 
         init(
             id: UUID,
             primary: PersistedEntry,
             wingmen: [PersistedEntry],
             taskKind: TrainingTaskKind = .reverseIntoSlot,
-            formationPolicy: TrainingLabSquadFormationPolicy
+            formationPolicy: TrainingLabSquadFormationPolicy,
+            startZoneAnchor: TrainingLabZoneFormationAnchor? = nil,
+            endZoneAnchor: TrainingLabZoneFormationAnchor? = nil
         ) {
             self.id = id
             self.primary = primary
             self.wingmen = wingmen
             self.taskKind = taskKind
             self.formationPolicy = formationPolicy
+            self.startZoneAnchor = startZoneAnchor
+            self.endZoneAnchor = endZoneAnchor
         }
 
         init(from decoder: Decoder) throws {
@@ -37,6 +43,8 @@ enum TrainingLabRosterStore {
             wingmen = try container.decode([PersistedEntry].self, forKey: .wingmen)
             taskKind = try container.decodeIfPresent(TrainingTaskKind.self, forKey: .taskKind) ?? .reverseIntoSlot
             formationPolicy = try container.decode(TrainingLabSquadFormationPolicy.self, forKey: .formationPolicy)
+            startZoneAnchor = try container.decodeIfPresent(TrainingLabZoneFormationAnchor.self, forKey: .startZoneAnchor)
+            endZoneAnchor = try container.decodeIfPresent(TrainingLabZoneFormationAnchor.self, forKey: .endZoneAnchor)
         }
     }
 
@@ -71,7 +79,9 @@ enum TrainingLabRosterStore {
                         PersistedEntry(vehicleClass: $0.vehicleClass, vehicleSizeTier: $0.vehicleSizeTier)
                     },
                     taskKind: squad.taskKind,
-                    formationPolicy: squad.formationPolicy
+                    formationPolicy: squad.formationPolicy,
+                    startZoneAnchor: squad.startZoneAnchor,
+                    endZoneAnchor: squad.endZoneAnchor
                 )
             },
             learningSquadID: learningSquadID
@@ -90,7 +100,9 @@ enum TrainingLabRosterStore {
                     TrainingLabRosterEntry(vehicleClass: $0.vehicleClass, vehicleSizeTier: $0.vehicleSizeTier)
                 },
                 taskKind: row.taskKind,
-                formationPolicy: row.formationPolicy
+                formationPolicy: row.formationPolicy,
+                startZoneAnchor: row.startZoneAnchor,
+                endZoneAnchor: row.endZoneAnchor
             )
         }
     }

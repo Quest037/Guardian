@@ -41,8 +41,59 @@ enum TrainingLabMapSessionLifecycle {
         learningSquadID: UUID?,
         learningSquadSingleVehicleStart: TrainingTaskPose?
     ) -> [TrainingLabMapSessionVehicleStart] {
+        let zones = WorldBuilderZoneManifestSupport.zones(from: environment.manifest)
         var out: [TrainingLabMapSessionVehicleStart] = []
         for (squadIndex, squad) in squads.enumerated() {
+            let isLearningSquad = learningSquadID == squad.id
+                || (learningSquadID == nil && squadIndex == 0)
+
+            if zones.start.placed {
+                let anchor = squad.startZoneAnchor ?? .seeded(in: zones.start)
+                let layout = TrainingLabFormationSlotGeometry.groupLayout(
+                    squad: squad,
+                    squadIndex: squadIndex,
+                    phase: .start,
+                    anchor: anchor
+                )
+                for (index, entry) in squad.allEntries.enumerated() {
+                    guard index < layout.slots.count,
+                          let slotState = entry.slotState,
+                          let vehicleID = slotState.vehicleID,
+                          let mavlinkSystemID = mavlinkSystemID(instances: sitlInstances, slot: slotState)
+                    else { continue }
+                    let slot = layout.slots[index]
+                    var envPose = TrainingEnvironmentPose(
+                        xM: slot.centerXM,
+                        yM: slot.centerYM,
+                        zM: WorldBuilderZoneBoundsCheck.mapBaseTopZM,
+                        yawDeg: slot.headingDeg
+                    )
+                    var taskPose = TrainingEnvironmentGeodesy.taskPose(
+                        environmentPose: envPose,
+                        origin: spawnDefaults
+                    )
+                    if squad.isSingleVehicle, isLearningSquad, index == 0, let override = learningSquadSingleVehicleStart {
+                        taskPose = override
+                        envPose = TrainingEnvironmentGeodesy.environmentPose(
+                            taskPose: override,
+                            origin: spawnDefaults
+                        )
+                    }
+                    out.append(
+                        TrainingLabMapSessionVehicleStart(
+                            entryID: entry.id,
+                            vehicleID: vehicleID,
+                            mavlinkSystemID: mavlinkSystemID,
+                            taskPose: taskPose,
+                            environmentPose: envPose,
+                            vehicleClass: entry.vehicleClass.fleetVehicleType,
+                            vehicleSizeTier: entry.vehicleSizeTier
+                        )
+                    )
+                }
+                continue
+            }
+
             let primaryEnv = staggeredPrimaryEnvironmentPose(
                 manifest: environment.manifest,
                 squadIndex: squadIndex
@@ -51,8 +102,6 @@ enum TrainingLabMapSessionLifecycle {
                 environmentPose: primaryEnv,
                 origin: spawnDefaults
             )
-            let isLearningSquad = learningSquadID == squad.id
-                || (learningSquadID == nil && squadIndex == 0)
             if squad.isSingleVehicle, isLearningSquad, let override = learningSquadSingleVehicleStart {
                 primaryTask = override
             }

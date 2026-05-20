@@ -1,6 +1,6 @@
 <?xml version="1.0" ?>
 <sdf version="1.9">
-  <world name="guardian_guardian_open_field">
+  <world name="guardian_gc_micro_corridor_clean">
     <physics name="1ms" type="ignored">
       <max_step_size>0.001</max_step_size>
       <real_time_factor>1.0</real_time_factor>
@@ -21,7 +21,6 @@
       <specular>0.2 0.2 0.2 1</specular>
     </light>
 
-    <!-- Map-base square: floorSide × floorSide × 10 m (top face at z = 0): top #ffffff, bottom #fbffce. -->
     <model name="open_field_floor">
       <static>true</static>
       <pose>0 0 -5 0 0 0</pose>
@@ -29,15 +28,15 @@
         <collision name="collision">
           <geometry>
             <box>
-              <size>1000 1000 10</size>
+              <size>100 100 10</size>
             </box>
           </geometry>
         </collision>
         <visual name="visual_bottom">
-          <pose>0 0 -7.5 0 0 0</pose>
+          <pose>0 0 -7.500 0 0 0</pose>
           <geometry>
             <box>
-              <size>1000 1000 5</size>
+              <size>100 100 5</size>
             </box>
           </geometry>
           <material>
@@ -47,16 +46,51 @@
           </material>
         </visual>
         <visual name="visual_top">
-          <pose>0 0 -2.5 0 0 0</pose>
+          <pose>0 0 -2.500 0 0 0</pose>
           <geometry>
             <box>
-              <size>1000 1000 5</size>
+              <size>100 100 5</size>
             </box>
           </geometry>
           <material>
             <ambient>1.000 1.000 1.000 1</ambient>
             <diffuse>1.000 1.000 1.000 1</diffuse>
             <specular>0.05 0.05 0.05 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="guardian_obstacles_baked">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="link">
+        <collision name="collision_0">
+          <pose>0.5000 -26.3053 1.5000 0.0000 0.0000 0.0000</pose>
+          <geometry>
+            <box>
+              <size>99.0000 3.0000 3.0000</size>
+            </box>
+          </geometry>
+        </collision>
+        <collision name="collision_1">
+          <pose>0.0000 26.9399 1.5000 0.0000 0.0000 0.0000</pose>
+          <geometry>
+            <box>
+              <size>100.0000 3.0000 3.0000</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <mesh>
+              <uri>file://obstacle_meshes/guardian_obstacles_baked.obj</uri>
+            </mesh>
+          </geometry>
+          <material>
+            <ambient>0.45 0.45 0.45 1</ambient>
+            <diffuse>0.55 0.55 0.55 1</diffuse>
+            <specular>0.08 0.08 0.08 1</specular>
           </material>
         </visual>
       </link>

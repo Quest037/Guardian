@@ -18,6 +18,8 @@ struct GazeboWebViewportView: View {
     var zoneCommandTick: UUID?
     var obstacleBridge: GazeboWebViewportObstacleBridge?
     var obstacleCommandTick: UUID?
+    var formationSlotsBridge: GazeboWebViewportFormationSlotsBridge?
+    var formationSlotsCommandTick: UUID?
     var showsCameraDebugHUD: Bool = false
     var groundHalfExtentM: Double = 500
     var orbitMinDistanceM: Double = 50
@@ -28,6 +30,7 @@ struct GazeboWebViewportView: View {
     var onObstacleDeleteRequest: ((String) -> Void)?
     var onObstaclePlaceRequest: ((Double, Double) -> Void)?
     var onObstaclePlaceDebug: ((String) -> Void)?
+    var onFormationSlotGroupMoved: ((UUID, TrainingLabFormationSlotGeometry.ZonePhase, Double, Double, Double) -> Void)?
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -44,6 +47,8 @@ struct GazeboWebViewportView: View {
                 zoneCommandTick: zoneCommandTick,
                 obstacleBridge: obstacleBridge,
                 obstacleCommandTick: obstacleCommandTick,
+                formationSlotsBridge: formationSlotsBridge,
+                formationSlotsCommandTick: formationSlotsCommandTick,
                 showsCameraDebugHUD: showsCameraDebugHUD,
                 groundHalfExtentM: groundHalfExtentM,
                 orbitMinDistanceM: orbitMinDistanceM,
@@ -53,7 +58,8 @@ struct GazeboWebViewportView: View {
                 onObstaclesChanged: onObstaclesChanged,
                 onObstacleDeleteRequest: onObstacleDeleteRequest,
                 onObstaclePlaceRequest: onObstaclePlaceRequest,
-                onObstaclePlaceDebug: onObstaclePlaceDebug
+                onObstaclePlaceDebug: onObstaclePlaceDebug,
+                onFormationSlotGroupMoved: onFormationSlotGroupMoved
             )
 
             if case .failed(let message) = phase {
@@ -84,6 +90,8 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
     let zoneCommandTick: UUID?
     let obstacleBridge: GazeboWebViewportObstacleBridge?
     let obstacleCommandTick: UUID?
+    let formationSlotsBridge: GazeboWebViewportFormationSlotsBridge?
+    let formationSlotsCommandTick: UUID?
     let showsCameraDebugHUD: Bool
     let groundHalfExtentM: Double
     let orbitMinDistanceM: Double
@@ -94,6 +102,7 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
     let onObstacleDeleteRequest: ((String) -> Void)?
     let onObstaclePlaceRequest: ((Double, Double) -> Void)?
     let onObstaclePlaceDebug: ((String) -> Void)?
+    let onFormationSlotGroupMoved: ((UUID, TrainingLabFormationSlotGeometry.ZonePhase, Double, Double, Double) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -103,7 +112,8 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
             onObstaclesChanged: onObstaclesChanged,
             onObstacleDeleteRequest: onObstacleDeleteRequest,
             onObstaclePlaceRequest: onObstaclePlaceRequest,
-            onObstaclePlaceDebug: onObstaclePlaceDebug
+            onObstaclePlaceDebug: onObstaclePlaceDebug,
+            onFormationSlotGroupMoved: onFormationSlotGroupMoved
         )
     }
 
@@ -116,6 +126,7 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
         }
         config.userContentController.add(context.coordinator, name: Coordinator.zonesMessageHandlerName)
         config.userContentController.add(context.coordinator, name: Coordinator.obstaclesMessageHandlerName)
+        config.userContentController.add(context.coordinator, name: Coordinator.formationSlotsMessageHandlerName)
 
         let webView = GazeboWebViewportWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
@@ -143,6 +154,7 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
             context.coordinator.lastCameraTick = nil
             context.coordinator.lastZoneTick = nil
             context.coordinator.lastObstacleTick = nil
+            context.coordinator.lastFormationSlotsTick = nil
         } else if context.coordinator.loadedCameraDebug != showsCameraDebugHUD {
             context.coordinator.loadedCameraDebug = showsCameraDebugHUD
             syncCameraDebugHUD(on: webView, enabled: showsCameraDebugHUD)
@@ -160,6 +172,12 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
             dispatchObstacleState(on: webView, bridge: obstacleBridge, attempt: 0)
         }
 
+        if let formationSlotsBridge, let tick = formationSlotsCommandTick,
+           context.coordinator.lastFormationSlotsTick != tick {
+            context.coordinator.lastFormationSlotsTick = tick
+            dispatchFormationSlotsState(on: webView, bridge: formationSlotsBridge, attempt: 0)
+        }
+
         guard let cameraBridge, let tick = cameraCommandTick else { return }
         guard context.coordinator.lastCameraTick != tick else { return }
         context.coordinator.lastCameraTick = tick
@@ -170,6 +188,22 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
         let controller = webView.configuration.userContentController
         controller.removeScriptMessageHandler(forName: Coordinator.zonesMessageHandlerName)
         controller.removeScriptMessageHandler(forName: Coordinator.obstaclesMessageHandlerName)
+        controller.removeScriptMessageHandler(forName: Coordinator.formationSlotsMessageHandlerName)
+    }
+
+    private func dispatchFormationSlotsState(
+        on webView: WKWebView,
+        bridge: GazeboWebViewportFormationSlotsBridge,
+        attempt: Int
+    ) {
+        let expression = bridge.javaScriptExpression
+        webView.evaluateJavaScript(expression) { result, error in
+            if error == nil, let ok = result as? Bool, ok { return }
+            guard attempt < 48 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                dispatchFormationSlotsState(on: webView, bridge: bridge, attempt: attempt + 1)
+            }
+        }
     }
 
     private func reload(webView: WKWebView) {
@@ -296,6 +330,7 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
     final class Coordinator: NSObject, WKScriptMessageHandler {
         static let zonesMessageHandlerName = "guardianZones"
         static let obstaclesMessageHandlerName = "guardianObstacles"
+        static let formationSlotsMessageHandlerName = "guardianFormationSlots"
 
         weak var webView: WKWebView?
         var loadedPort: Int?
@@ -306,6 +341,7 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
         var lastCameraTick: UUID?
         var lastZoneTick: UUID?
         var lastObstacleTick: UUID?
+        var lastFormationSlotsTick: UUID?
         private let onZonesChanged: ((WorldBuilderZonesSnapshot, Bool) -> Void)?
         private let onZoneEditRequest: ((WorldBuilderZoneKind) -> Void)?
         private let onZoneDeleteRequest: ((WorldBuilderZoneKind) -> Void)?
@@ -313,6 +349,7 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
         private let onObstacleDeleteRequest: ((String) -> Void)?
         private let onObstaclePlaceRequest: ((Double, Double) -> Void)?
         private let onObstaclePlaceDebug: ((String) -> Void)?
+        private let onFormationSlotGroupMoved: ((UUID, TrainingLabFormationSlotGeometry.ZonePhase, Double, Double, Double) -> Void)?
 
         init(
             onZonesChanged: ((WorldBuilderZonesSnapshot, Bool) -> Void)?,
@@ -321,7 +358,8 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
             onObstaclesChanged: (([TrainingEnvironmentObstacleRecord], String?, Bool) -> Void)?,
             onObstacleDeleteRequest: ((String) -> Void)?,
             onObstaclePlaceRequest: ((Double, Double) -> Void)?,
-            onObstaclePlaceDebug: ((String) -> Void)? = nil
+            onObstaclePlaceDebug: ((String) -> Void)? = nil,
+            onFormationSlotGroupMoved: ((UUID, TrainingLabFormationSlotGeometry.ZonePhase, Double, Double, Double) -> Void)? = nil
         ) {
             self.onZonesChanged = onZonesChanged
             self.onZoneEditRequest = onZoneEditRequest
@@ -330,6 +368,7 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
             self.onObstacleDeleteRequest = onObstacleDeleteRequest
             self.onObstaclePlaceRequest = onObstaclePlaceRequest
             self.onObstaclePlaceDebug = onObstaclePlaceDebug
+            self.onFormationSlotGroupMoved = onFormationSlotGroupMoved
         }
 
         func userContentController(
@@ -360,6 +399,19 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
                     case "deleteZoneRequest":
                         guard let kind = envelope.zoneKind else { return }
                         onZoneDeleteRequest?(kind)
+                    default:
+                        break
+                    }
+                case Self.formationSlotsMessageHandlerName:
+                    switch envelope.type {
+                    case "formationSlotGroupMoved":
+                        guard let squadID = envelope.squadUUID,
+                              let phase = envelope.zonePhase,
+                              let centerXM = envelope.centerXM,
+                              let centerYM = envelope.centerYM,
+                              let headingDeg = envelope.headingDeg
+                        else { return }
+                        onFormationSlotGroupMoved?(squadID, phase, centerXM, centerYM, headingDeg)
                     default:
                         break
                     }
@@ -403,13 +455,25 @@ private struct ViewportMessageEnvelope: Decodable {
     var obstacles: [TrainingEnvironmentObstacleRecord]?
     var selectedID: String?
     var obstacleID: String?
+    var squadID: String?
     var centerXM: Double?
     var centerYM: Double?
+    var headingDeg: Double?
     var outOfBounds: Bool?
     var message: String?
 
     var zoneKind: WorldBuilderZoneKind? {
         guard let kind else { return nil }
         return WorldBuilderZoneKind(rawValue: kind)
+    }
+
+    var squadUUID: UUID? {
+        guard let squadID else { return nil }
+        return UUID(uuidString: squadID)
+    }
+
+    var zonePhase: TrainingLabFormationSlotGeometry.ZonePhase? {
+        guard let kind else { return nil }
+        return TrainingLabFormationSlotGeometry.ZonePhase(rawValue: kind)
     }
 }

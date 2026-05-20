@@ -49,19 +49,27 @@ struct TrainingLabSquad: Identifiable, Equatable, Sendable {
     /// Skill task for this squad (each squad may differ; the designated learning squad drives teach / promote).
     var taskKind: TrainingTaskKind
     var formationPolicy: TrainingLabSquadFormationPolicy
+    /// Start-zone formation group anchor (ENU m); seeded from zone centre when nil.
+    var startZoneAnchor: TrainingLabZoneFormationAnchor?
+    /// End-zone formation group anchor (ENU m); seeded from zone centre when nil.
+    var endZoneAnchor: TrainingLabZoneFormationAnchor?
 
     init(
         id: UUID = UUID(),
         primary: TrainingLabRosterEntry,
         wingmen: [TrainingLabRosterEntry] = [],
         taskKind: TrainingTaskKind = .reverseIntoSlot,
-        formationPolicy: TrainingLabSquadFormationPolicy = .default
+        formationPolicy: TrainingLabSquadFormationPolicy = .default,
+        startZoneAnchor: TrainingLabZoneFormationAnchor? = nil,
+        endZoneAnchor: TrainingLabZoneFormationAnchor? = nil
     ) {
         self.id = id
         self.primary = primary
         self.wingmen = wingmen
         self.taskKind = taskKind
         self.formationPolicy = formationPolicy
+        self.startZoneAnchor = startZoneAnchor
+        self.endZoneAnchor = endZoneAnchor
     }
 
     var allEntries: [TrainingLabRosterEntry] {

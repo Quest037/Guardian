@@ -36,19 +36,60 @@ enum GazeboEntityFactoryClient {
     let req = """
     sdf_filename: "\(sdfPath)", name: "\(modelName)", allow_renaming: false, pose: { position: { x: \(pose.xM) y: \(pose.yM) z: \(zCenter) }, orientation: { z: \(qz) w: \(qw) } }
     """
-    let ok = try await runService(
+    switch await runServiceWithOutput(
       gz: gz,
       instanceIndex: instanceIndex,
       service: "/world/\(worldName)/create",
       reqType: "gz.msgs.EntityFactory",
       repType: "gz.msgs.Boolean",
       req: req,
-      timeoutMS: 8000,
-      booleanPolicy: .asyncQueueAck
-    )
-    guard ok else {
-      throw GazeboEntityFactoryError.serviceFailed("Gazebo did not confirm model create for \(modelName).")
+      timeoutMS: 8000
+    ) {
+    case .success(let output):
+      if !parseBooleanServiceResponse(output.stdout, policy: .asyncQueueAck) {
+        let detail = [output.stdout, output.stderr]
+          .joined(separator: "\n")
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+        throw GazeboEntityFactoryError.serviceFailed(
+          detail.isEmpty
+            ? "Gazebo did not confirm model create for \(modelName)."
+            : detail
+        )
+      }
+    case .failure(let detail):
+      throw GazeboEntityFactoryError.serviceFailed(detail)
     }
+
+    let appeared = await waitForModelName(
+      modelName,
+      instanceIndex: instanceIndex,
+      timeoutMS: 8000,
+      pollIntervalMS: 200
+    )
+    guard appeared else {
+      throw GazeboEntityFactoryError.serviceFailed(
+        "Model \(modelName) did not appear in Gazebo after create (world \(worldName))."
+      )
+    }
+  }
+
+  /// Polls `gz model --list` until a model name is present (async create ack is not enough).
+  static func waitForModelName(
+    _ modelName: String,
+    instanceIndex: Int,
+    timeoutMS: Int = 8000,
+    pollIntervalMS: Int = 200
+  ) async -> Bool {
+    let deadline = Date().addingTimeInterval(Double(timeoutMS) / 1000)
+    while Date() < deadline {
+      let names = await listWorldModelNames(instanceIndex: instanceIndex)
+      if names.contains(modelName) {
+        return true
+      }
+      let sleepNs = UInt64(max(pollIntervalMS, 50)) * 1_000_000
+      try? await Task.sleep(nanoseconds: sleepNs)
+    }
+    return false
   }
 
   /// Moves an existing model in-place (drag / nudge) without remove+respawn.

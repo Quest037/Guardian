@@ -37,6 +37,8 @@ final class TrainingPanelController: ObservableObject {
     @Published var selectedEnvironmentID: String?
     @Published private(set) var activeGazeboWorldID: UUID?
     @Published private(set) var gazeboWorldStatusText: String?
+    /// Timestamped gzweb / embedded viewport lines for the Training map debug overlay (Debug toggle only).
+    @Published private(set) var mapDebugLines: [String] = []
 
     private weak var fleetLink: FleetLinkService?
     private weak var sitl: SitlService?
@@ -87,6 +89,7 @@ final class TrainingPanelController: ObservableObject {
         reloadEnvironmentCatalogue()
         selectedEnvironmentID = nil
         refreshTaskLayout()
+        wireTrainingMapDebugLogHandlerIfNeeded()
     }
 
     var selectedEnvironment: TrainingEnvironmentPackage? {
@@ -103,8 +106,10 @@ final class TrainingPanelController: ObservableObject {
     private func clampSelectedEnvironmentToSelectableMaps() {
         guard let id = selectedEnvironmentID else { return }
         let stillListed = availableEnvironments.contains(where: { $0.id == id })
-        let selectable = availableEnvironments.first(where: { $0.id == id })?.hasConfiguredStartAndEndZones == true
-            || TrainingEnvironmentCatalogue.package(id: id)?.manifest.hasConfiguredStartAndEndZones == true
+        let selectable = TrainingEnvironmentSelectionPolicy.isSelectableForTrainingLab(
+            environmentID: id,
+            packages: availableEnvironments
+        )
         if !stillListed || !selectable {
             selectedEnvironmentID = nil
             Task { await stopTrainingGazeboRunWorld() }
@@ -112,10 +117,10 @@ final class TrainingPanelController: ObservableObject {
     }
 
     func isEnvironmentSelectableForTrainingLab(environmentID: String) -> Bool {
-        if let pkg = availableEnvironments.first(where: { $0.id == environmentID }) {
-            return pkg.hasConfiguredStartAndEndZones
-        }
-        return TrainingEnvironmentCatalogue.package(id: environmentID)?.hasConfiguredStartAndEndZones == true
+        TrainingEnvironmentSelectionPolicy.isSelectableForTrainingLab(
+            environmentID: environmentID,
+            packages: availableEnvironments
+        )
     }
 
     func restoreEnvironmentSelectionFromPersistence() {
@@ -167,7 +172,9 @@ final class TrainingPanelController: ObservableObject {
 
         let priorID = selectedEnvironmentID
         let switchingMap = priorID != nil && priorID != environmentID
+        logMap("selectEnvironment — id \(environmentID) switching=\(switchingMap)")
         if switchingMap {
+            GuardianGazeboOrphanBlitz.suppressDuringEmbeddedMapHandoff()
             await stopTrainingGazeboRunWorld()
             onMapEnvironmentWillChange?()
         }
@@ -175,6 +182,7 @@ final class TrainingPanelController: ObservableObject {
         environmentSelectionDidChange()
         guard requiresGazeboRunWorld else { return }
         _ = await startTrainingGazeboRunWorldIfNeeded()
+        noteEmbeddedViewport(gazebo?.embeddedViewport)
     }
 
     func trainingTaskOrVehicleDidChange() {
@@ -230,6 +238,7 @@ final class TrainingPanelController: ObservableObject {
         if simulatorSlot != nil {
             statusText = "Simulator remains in Vehicles. Run teaching when you return."
         }
+        clearTrainingMapDebugLogHandler()
     }
 
     private func persistTargetSlot() {
@@ -999,6 +1008,93 @@ final class TrainingPanelController: ObservableObject {
         try? TrainingSimulatorSessionStore.save(inst.id)
     }
 
+    func logMap(_ message: String) {
+        mapDebugLines.append(WorldBuilderMapDebugLog.formattedLine(message))
+        if mapDebugLines.count > WorldBuilderMapDebugLog.maxLines {
+            mapDebugLines.removeFirst(mapDebugLines.count - WorldBuilderMapDebugLog.maxLines)
+        }
+    }
+
+    func clearMapDebugLog() {
+        mapDebugLines.removeAll(keepingCapacity: true)
+    }
+
+    func noteEmbeddedViewport(_ state: GazeboEmbeddedViewportState?) {
+        guard let state else {
+            logMap("embedded viewport state: nil")
+            logMapEmbeddedViewportGate()
+            return
+        }
+        let phase: String
+        switch state.phase {
+        case .starting:
+            phase = "starting"
+        case .live:
+            phase = "live"
+        case .failed(let detail):
+            phase = "failed — \(detail)"
+        }
+        logMap(
+            "embedded viewport — id \(state.worldID.uuidString.prefix(8))… port \(state.websocketPort) sdf \"\(state.gazeboWorldName)\" phase \(phase)"
+        )
+        logMapEmbeddedViewportGate()
+    }
+
+    func logMapEmbeddedViewportGate() {
+        guard requiresGazeboRunWorld else { return }
+        var parts: [String] = []
+        if selectedEnvironmentID == nil {
+            parts.append("no map selected")
+        }
+        if let gazebo, !gazebo.runtimeAvailable {
+            parts.append("runtime unavailable")
+        }
+        if GuardianBundledResourceLocator.gazeboWebViewerHTMLURL() == nil {
+            parts.append("guardian_viewer.html missing")
+        }
+        if let worldID = activeGazeboWorldID {
+            parts.append("activeGazeboWorldID=\(worldID.uuidString.prefix(8))…")
+        } else {
+            parts.append("activeGazeboWorldID=nil")
+        }
+        if let viewport = gazebo?.embeddedViewport {
+            switch viewport.phase {
+            case .starting:
+                parts.append("embeddedViewport phase=starting")
+            case .live:
+                parts.append("embeddedViewport phase=live")
+            case .failed(let detail):
+                parts.append("embeddedViewport phase=failed: \(detail)")
+            }
+        } else {
+            parts.append("embeddedViewport=nil")
+        }
+        parts.append("isGazeboRunWorldReadyForVehicleSpawn=\(isGazeboRunWorldReadyForVehicleSpawn)")
+        logMap("map gate: \(parts.joined(separator: "; "))")
+    }
+
+    private func wireTrainingMapDebugLogHandlerIfNeeded() {
+        guard requiresGazeboRunWorld, let gazebo else {
+            clearTrainingMapDebugLogHandler()
+            return
+        }
+        gazebo.embeddedMapLogHandler = { [weak self] line in
+            self?.logMap(line)
+        }
+        logMap("Training attach — runtimeAvailable=\(gazebo.runtimeAvailable)")
+        if let url = GuardianBundledResourceLocator.gazeboWebViewerHTMLURL() {
+            logMap("guardian_viewer.html — \(url.path)")
+        } else {
+            logMap("guardian_viewer.html — missing from bundle")
+        }
+        noteEmbeddedViewport(gazebo.embeddedViewport)
+    }
+
+    private func clearTrainingMapDebugLogHandler() {
+        guard requiresGazeboRunWorld else { return }
+        gazebo?.embeddedMapLogHandler = nil
+    }
+
     /// Reuses an already-running `.run` world when the embedded viewport is live but this controller lost `activeGazeboWorldID`.
     func reconcileActiveGazeboRunWorldIfNeeded() {
         guard requiresGazeboRunWorld, let gazebo else { return }
@@ -1098,9 +1194,13 @@ final class TrainingPanelController: ObservableObject {
             return false
         }
 
+        logMap("startTrainingGazeboRunWorld — \(pkg.manifest.displayName) restartExisting=\(restartExisting)")
         if restartExisting {
+            GuardianGazeboOrphanBlitz.suppressDuringEmbeddedMapHandoff()
             await stopTrainingGazeboRunWorld()
         } else if let worldID = activeGazeboWorldID, gazebo.isWorldAlive(id: worldID) {
+            logMap("startTrainingGazeboRunWorld — reusing alive world \(worldID.uuidString.prefix(8))…")
+            noteEmbeddedViewport(gazebo.embeddedViewport)
             return true
         }
         gazeboWorldStatusText = nil
@@ -1110,10 +1210,14 @@ final class TrainingPanelController: ObservableObject {
         guard let worldID else {
             gazeboWorldStatusText = gazebo.lastError
             statusText = gazebo.lastError ?? "Could not start Gazebo world."
+            logMap("startTrainingGazeboRunWorld failed — \(gazebo.lastError ?? "unknown")")
+            noteEmbeddedViewport(gazebo.embeddedViewport)
             return false
         }
         activeGazeboWorldID = worldID
         gazeboWorldStatusText = "Gazebo: \(pkg.manifest.displayName) (\(plan.purpose.rawValue))"
+        logMap("startTrainingGazeboRunWorld — spawned \(worldID.uuidString.prefix(8))…")
+        noteEmbeddedViewport(gazebo.embeddedViewport)
         try? await Task.sleep(nanoseconds: 1_500_000_000)
         return true
     }
@@ -1127,10 +1231,12 @@ final class TrainingPanelController: ObservableObject {
     }
 
     private func stopTrainingGazeboRunWorld() async {
+        logMap("stopTrainingGazeboRunWorld")
         activeGazeboWorldID = nil
         gazeboWorldStatusText = nil
         guard let gazebo else { return }
         await gazebo.stopAllEmbeddedViewportWorldsCompletely()
+        noteEmbeddedViewport(gazebo.embeddedViewport)
     }
 
     /// Stops only this panel's training SITL and waits for UDP ports — does not touch formation sims.

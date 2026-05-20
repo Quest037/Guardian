@@ -238,6 +238,7 @@ struct TrainingLabPanelView: View {
             tapToEditEnabled: false,
             placementKind: .start,
             zones: WorldBuilderZoneManifestSupport.zones(from: manifest),
+            obstacles: manifest.obstacles,
             mapHalfExtentM: trainingGroundHalfExtentM
         )
     }
@@ -411,6 +412,25 @@ struct TrainingLabPanelView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
+        .overlay(alignment: .bottom) {
+            if fleetLink.isDebugEnabled {
+                WorldBuilderMapDebugOverlay(
+                    lines: lab.teaching.mapDebugLines,
+                    theme: theme,
+                    accessibilityLabel: "Training map debug log"
+                )
+            }
+        }
+        .onChange(of: gazebo.embeddedViewport) { viewport in
+            lab.teaching.reconcileActiveGazeboRunWorldIfNeeded()
+            lab.teaching.noteEmbeddedViewport(viewport)
+        }
+        .onChange(of: fleetLink.isDebugEnabled) { enabled in
+            if enabled {
+                lab.teaching.logMap("Debug overlay enabled")
+                lab.teaching.noteEmbeddedViewport(gazebo.embeddedViewport)
+            }
+        }
     }
 
     private var trainingViewportLoadingOverlay: some View {

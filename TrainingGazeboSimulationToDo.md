@@ -7,7 +7,7 @@ Goal: **Guardian Training** is an autonomy lab with three cooperating surfaces:
 
 **Today:** **Worlds** + World Builder with embedded 3D viewport (headless `gz sim -s` + websocket + `gzweb` in-panel). **Training lab** loads the same embedded stack for `.run` when a map is chosen (`TrainingLabPanelView`). Portable Gazebo bundle deferred.
 
-**Cross-links:** `README_FULL.md` → **Gazebo training simulation**; **Two-app SwiftPM products**.
+**Cross-links:** `README_FULL.md` → **Gazebo training simulation**; **Two-app SwiftPM products**; **`GazeboAppWideInstanceToDo.md`** (single headless `gz sim`, world swap across Builder/Training — not sim restart per map).
 
 ---
 

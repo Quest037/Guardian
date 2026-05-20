@@ -27,6 +27,12 @@ final class GazeboService: ObservableObject {
     @Published private(set) var embeddedViewport: GazeboEmbeddedViewportState?
 
     weak var fleetLink: FleetLinkService?
+    /// When set (World Builder / Training), embedded viewport / websocket lines are mirrored for the map debug overlay.
+    var embeddedMapLogHandler: ((String) -> Void)?
+
+    private func logEmbeddedMap(_ line: String) {
+        embeddedMapLogHandler?(line)
+    }
 
     private var runners: [UUID: GazeboProcessRunner] = [:]
     private var websocketRunners: [UUID: GazeboProcessRunner] = [:]
@@ -93,6 +99,31 @@ final class GazeboService: ObservableObject {
         URL(fileURLWithPath: path).standardizedFileURL.path
     }
 
+    /// Rewrites on-disk `world.sdf` when an older package still used the shared `guardian_open_field` name.
+    private func migrateWorldSDFWorldNameIfNeeded(
+        package: TrainingEnvironmentPackage,
+        worldURL: URL,
+        purpose: GazeboSessionPurpose
+    ) {
+        let expected = TrainingEnvironmentWorldSDF.worldName(environmentID: package.id)
+        guard TrainingEnvironmentWorldSDF.parseWorldName(from: worldURL) != expected else { return }
+        let mode: TrainingEnvironmentWorldCompositionMode = purpose == .run ? .trainingRun : .builderSession
+        do {
+            try TrainingEnvironmentWorldComposer.writeWorld(
+                manifest: package.manifest,
+                to: worldURL,
+                mode: mode
+            )
+            fleetLink?.appendSimulationLog(
+                "Gazebo: updated world name to \(expected) for \(package.manifest.displayName)."
+            )
+        } catch {
+            fleetLink?.appendSimulationLog(
+                "Gazebo: could not refresh world.sdf for \(package.manifest.displayName) — \((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
+            )
+        }
+    }
+
     /// Reuse an embedded gzweb session only when path, environment, and manifest `floorSize` match.
     static func canReuseEmbeddedWorld(
         existing: GazeboRunningWorld,
@@ -114,7 +145,10 @@ final class GazeboService: ObservableObject {
             return false
         }
         let expected = TrainingEnvironmentFloorSize.resolved(from: requested).floorSideM
-        return abs(sideM - expected) < 0.001
+        guard abs(sideM - expected) < 0.001 else { return false }
+        let requestedWorldName = TrainingEnvironmentWorldSDF.parseWorldName(from: URL(fileURLWithPath: worldPath))
+        guard let requestedWorldName else { return false }
+        return requestedWorldName == existing.gazeboSDFWorldName
     }
 
     /// Inserts a class-coloured box (or optional custom mesh) for one built-in SITL into a **``.run``** world
@@ -205,6 +239,9 @@ final class GazeboService: ObservableObject {
         guard runtimeAvailable else {
             lastError = GazeboError.missingRuntime.errorDescription
             fleetLink?.appendSimulationLog("Gazebo: runtime not found (run make gazebo-runtime).")
+            if GazeboSessionLaunchPolicy.usesEmbeddedWebViewport(for: purpose) {
+                logEmbeddedMap("spawn blocked — Gazebo runtime not found (run make gazebo-runtime)")
+            }
             return nil
         }
 
@@ -220,12 +257,20 @@ final class GazeboService: ObservableObject {
 
         guard let world = resolvedWorld else {
             lastError = GazeboError.missingWorldFile("world.sdf").errorDescription
+            if GazeboSessionLaunchPolicy.usesEmbeddedWebViewport(for: purpose) {
+                logEmbeddedMap("spawn blocked — world.sdf not found")
+            }
             return nil
+        }
+
+        if let pkg = resolvedPackage {
+            migrateWorldSDFWorldNameIfNeeded(package: pkg, worldURL: world, purpose: purpose)
         }
 
         let resolvedFloorSizeLabel = resolvedPackage?.manifest.floorSize ?? floorSizeLabel
 
         if GazeboSessionLaunchPolicy.usesEmbeddedWebViewport(for: purpose) {
+            GuardianGazeboOrphanBlitz.suppressDuringEmbeddedMapHandoff()
             if let existingID = firstAliveRunWorldID(),
                isEmbeddedViewportLive(worldID: existingID),
                let existing = worlds.first(where: { $0.id == existingID }) {
@@ -281,7 +326,8 @@ final class GazeboService: ObservableObject {
         }
         let headless = GazeboSessionLaunchPolicy.headless(for: purpose)
         let sdfWorldName = TrainingEnvironmentWorldSDF.parseWorldName(from: world)
-            ?? TrainingEnvironmentWorldSDF.defaultWorldName
+            ?? resolvedPackage.map { TrainingEnvironmentWorldSDF.worldName(environmentID: $0.id) }
+            ?? TrainingEnvironmentWorldSDF.worldName(environmentID: environmentID ?? "world")
 
         let spec: GazeboProcessSpec
         do {
@@ -311,6 +357,9 @@ final class GazeboService: ObservableObject {
         runner.onLogLine = { [weak self] line in
             sceneTracker?.consume(line)
             self?.fleetLink?.appendSimulationLog("Gazebo: \(line)")
+            if GazeboSessionLaunchPolicy.usesEmbeddedWebViewport(for: purpose) {
+                self?.logEmbeddedMap("sim: \(line)")
+            }
         }
         runner.onTerminated = { [weak self] code in
             self?.handleTerminated(worldID: id, exitCode: code)
@@ -346,6 +395,11 @@ final class GazeboService: ObservableObject {
         fleetLink?.appendSimulationLog(
             "Gazebo (\(GazeboSessionLaunchPolicy.logLabel(for: purpose))): started \(envLabel) (logs: \(spec.logDirectoryURL.path))"
         )
+        if GazeboSessionLaunchPolicy.usesEmbeddedWebViewport(for: purpose) {
+            logEmbeddedMap(
+                "gz sim started — world \"\(envLabel)\" path \(spec.worldPath) instance \(instance) sdf \"\(sdfWorldName)\""
+            )
+        }
 
         if GazeboSessionLaunchPolicy.usesEmbeddedWebViewport(for: purpose) {
             await startEmbeddedWebBridge(worldID: id, instanceIndex: instance, gazeboWorldName: sdfWorldName)
@@ -471,6 +525,7 @@ final class GazeboService: ObservableObject {
                 gazeboWorldName: worldName,
                 phase: .failed(detail)
             )
+            logEmbeddedMap("websocket bridge ended — \(detail)")
         }
         if exitCode != 0 {
             fleetLink?.appendSimulationLog("Gazebo: websocket bridge exited with code \(exitCode).")
@@ -490,6 +545,9 @@ final class GazeboService: ObservableObject {
         worlds[idx].lastExitCode = exitCode
         if embeddedViewport?.worldID == worldID {
             embeddedViewport = nil
+            logEmbeddedMap("sim world exited (code \(exitCode)); embedded viewport cleared")
+        } else if GazeboSessionLaunchPolicy.usesEmbeddedWebViewport(for: worlds[idx].purpose) {
+            logEmbeddedMap("sim world exited (code \(exitCode))")
         }
         if exitCode != 0 {
             fleetLink?.appendSimulationLog("Gazebo: world exited with code \(exitCode).")
@@ -507,17 +565,46 @@ final class GazeboService: ObservableObject {
             gazeboWorldName: gazeboWorldName,
             phase: .starting
         )
+        logEmbeddedMap("embedded viewport starting — port \(port), sdf world \"\(gazeboWorldName)\"")
 
         guard GazeboLocator.isWebsocketServerPluginAvailable else {
             let message = GazeboLocator.websocketServerPluginInstallHint
             failEmbeddedViewport(worldID: worldID, port: port, gazeboWorldName: gazeboWorldName, message: message)
             fleetLink?.appendSimulationLog("Gazebo: websocket plugin not found — \(message)")
+            logEmbeddedMap("websocket plugin missing — \(message)")
             return
         }
 
         do {
             let launchURL = try GazeboLaunchRecipe.writeWebsocketLaunchFile(port: port, instanceIndex: instanceIndex)
-            await waitForSimScenePublishing(worldID: worldID, timeout: 30)
+            guard await waitForSimScenePublishing(
+                worldID: worldID,
+                gazeboWorldName: gazeboWorldName,
+                instanceIndex: instanceIndex,
+                timeout: 25
+            ) else {
+                let row = worlds.first(where: { $0.id == worldID })
+                let message: String
+                if row?.isAlive == false {
+                    let code = row?.lastExitCode ?? -1
+                    message =
+                        "Gazebo simulator exited before the map finished loading (code \(code)). "
+                        + "Use Stop Gazebo, wait a moment, then open the world again."
+                } else {
+                    message =
+                        "Simulator did not publish scene information for \"\(gazeboWorldName)\". "
+                        + "Confirm SceneBroadcaster is in world.sdf and retry after Stop Gazebo."
+                }
+                failEmbeddedViewport(
+                    worldID: worldID,
+                    port: port,
+                    gazeboWorldName: gazeboWorldName,
+                    message: message
+                )
+                fleetLink?.appendSimulationLog("Gazebo: \(message)")
+                logEmbeddedMap("embedded viewport failed — sim scene not published")
+                return
+            }
             try await launchEmbeddedWebsocketBridgeWithRetries(
                 worldID: worldID,
                 instanceIndex: instanceIndex,
@@ -529,6 +616,7 @@ final class GazeboService: ObservableObject {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             failEmbeddedViewport(worldID: worldID, port: port, gazeboWorldName: gazeboWorldName, message: message)
             fleetLink?.appendSimulationLog("Gazebo: websocket bridge failed — \(message)")
+            logEmbeddedMap("websocket bridge failed — \(message)")
         }
     }
 
@@ -570,10 +658,12 @@ final class GazeboService: ObservableObject {
                 launchFileURL: launchFileURL
             )
             let logTracker = GazeboWebsocketBridgeLogTracker()
+            logTracker.resetForRetry()
             let wsRunner = GazeboProcessRunner()
             wsRunner.onLogLine = { [weak self] line in
                 logTracker.consume(line)
                 self?.fleetLink?.appendSimulationLog("Gazebo WS: \(line)")
+                self?.logEmbeddedMap("WS: \(line)")
             }
             wsRunner.onTerminated = { [weak self] code in
                 self?.handleWebsocketTerminated(worldID: worldID, exitCode: code)
@@ -585,20 +675,35 @@ final class GazeboService: ObservableObject {
                 port: port,
                 wsRunner: wsRunner,
                 logTracker: logTracker,
-                timeout: 12
+                timeout: 15
             )
 
-            guard listening, wsRunner.isRunning, !logTracker.serverBindFailed, !logTracker.sceneInfoQueryFailed else {
+            guard listening, wsRunner.isRunning, !logTracker.serverBindFailed else {
                 lastFailure = logTracker.serverBindFailed
                     ? "Websocket server could not bind port \(port) (often a stale gz-launch). Use Stop Gazebo and try again."
-                    : logTracker.sceneInfoQueryFailed
-                    ? "Websocket bridge could not read the scene from the simulator (transport not ready)."
                     : "Websocket bridge exited before listening on port \(port)."
                 stopWebsocketBridge(worldID: worldID)
                 continue
             }
 
-            try? await Task.sleep(nanoseconds: 800_000_000)
+            let sceneReady = await waitForEmbeddedSceneHandshake(
+                gazeboWorldName: gazeboWorldName,
+                instanceIndex: instanceIndex,
+                wsRunner: wsRunner,
+                logTracker: logTracker,
+                timeout: 22
+            )
+
+            guard sceneReady, wsRunner.isRunning, !logTracker.sceneInfoQueryFailed else {
+                lastFailure = logTracker.sceneInfoQueryFailed
+                    ? "Websocket bridge could not read scene information from the simulator (transport or world name mismatch)."
+                    : "Scene information was not available on gz-transport before loading the map."
+                logEmbeddedMap(
+                    "scene handshake failed — \(lastFailure) (topic \(GazeboTransportSceneReadiness.sceneInfoTopicPath(worldName: gazeboWorldName)))"
+                )
+                stopWebsocketBridge(worldID: worldID)
+                continue
+            }
 
             patchRunningWorldWebsocketPort(worldID: worldID, port: port)
             embeddedViewport = GazeboEmbeddedViewportState(
@@ -608,6 +713,8 @@ final class GazeboService: ObservableObject {
                 phase: .live
             )
             fleetLink?.appendSimulationLog("Gazebo: websocket bridge listening on port \(port).")
+            logEmbeddedMap("embedded viewport live — port \(port), sdf world \"\(gazeboWorldName)\"")
+            GuardianGazeboOrphanBlitz.suppressFor(seconds: 8)
             return
         }
 
@@ -686,6 +793,7 @@ final class GazeboService: ObservableObject {
             phase: .failed(message)
         )
         lastError = message
+        logEmbeddedMap("embedded viewport failed — \(message)")
     }
 
     private func stopWebsocketBridge(worldID: UUID) {
@@ -696,48 +804,111 @@ final class GazeboService: ObservableObject {
         }
     }
 
-    private func waitForSimScenePublishing(worldID: UUID, timeout: TimeInterval) async {
+    /// `nil` = still running; non-`nil` = sim row marked dead (exit code, or -1 if unknown).
+    private func embeddedSimExitCodeIfTerminated(worldID: UUID) -> Int32? {
+        if runners[worldID]?.isRunning == true { return nil }
+        guard let row = worlds.first(where: { $0.id == worldID }) else { return -1 }
+        if row.isAlive {
+            if Date().timeIntervalSince(row.startedAt) < 2.5 { return nil }
+            return -1
+        }
+        return row.lastExitCode ?? -1
+    }
+
+    /// Waits for sim scene publish (sim log primary; optional `gz topic -i` cross-check). Does not start websocket until confirmed.
+    private func waitForSimScenePublishing(
+        worldID: UUID,
+        gazeboWorldName: String,
+        instanceIndex: Int,
+        timeout: TimeInterval
+    ) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
+
         while Date() < deadline {
+            if let exitCode = embeddedSimExitCodeIfTerminated(worldID: worldID) {
+                logEmbeddedMap("scene publish wait aborted — gz sim exited (code \(exitCode))")
+                return false
+            }
+
             if simSceneTrackers[worldID]?.scenePublishing == true {
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                return
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                if await GazeboTransportSceneReadiness.sceneInfoTopicHasPublisher(
+                    worldName: gazeboWorldName,
+                    instanceIndex: instanceIndex
+                ) {
+                    logEmbeddedMap("scene publish confirmed — sim log + topic publishers")
+                } else {
+                    logEmbeddedMap("scene publish confirmed — sim log (topic -i skipped or unavailable)")
+                }
+                return true
             }
-            if runners[worldID]?.isRunning != true {
-                return
+
+            if await GazeboTransportSceneReadiness.sceneInfoTopicHasPublisher(
+                worldName: gazeboWorldName,
+                instanceIndex: instanceIndex
+            ) {
+                logEmbeddedMap("scene publish confirmed — topic publishers (ahead of sim log)")
+                return true
             }
-            try? await Task.sleep(nanoseconds: 100_000_000)
+
+            try? await Task.sleep(nanoseconds: 200_000_000)
         }
+
+        if simSceneTrackers[worldID]?.scenePublishing == true,
+           runners[worldID]?.isRunning == true {
+            logEmbeddedMap("scene publish confirmed — sim log after wait deadline")
+            return true
+        }
+
         fleetLink?.appendSimulationLog(
-            "Gazebo: scene publish wait timed out; starting websocket bridge anyway."
+            "Gazebo: scene publish not confirmed for \"\(gazeboWorldName)\" before websocket bridge."
         )
+        logEmbeddedMap("scene publish not confirmed — websocket bridge will not start")
+        return false
     }
-}
 
-/// Parses gz-launch websocket plugin stderr for bind / scene handshake failures.
-@MainActor
-final class GazeboWebsocketBridgeLogTracker {
-    private(set) var serverBindFailed = false
-    private(set) var sceneInfoQueryFailed = false
+    /// After the websocket port is listening, confirm scene info is reachable and no scene query errors appeared.
+    private func waitForEmbeddedSceneHandshake(
+        gazeboWorldName: String,
+        instanceIndex: Int,
+        wsRunner: GazeboProcessRunner,
+        logTracker: GazeboWebsocketBridgeLogTracker,
+        timeout: TimeInterval
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastProbeLog = Date.distantPast
 
-    func consume(_ line: String) {
-        if line.contains("Unable to create websocket server") {
-            serverBindFailed = true
+        while Date() < deadline {
+            if logTracker.sceneInfoQueryFailed || !wsRunner.isRunning {
+                return false
+            }
+
+            if await GazeboTransportSceneReadiness.sceneInfoTopicHasPublisher(
+                worldName: gazeboWorldName,
+                instanceIndex: instanceIndex
+            ) {
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                if logTracker.sceneInfoQueryFailed || !wsRunner.isRunning {
+                    return false
+                }
+                logEmbeddedMap("embedded scene handshake ok — topic publishers after websocket listen")
+                return true
+            }
+
+            if Date().timeIntervalSince(lastProbeLog) >= 2.5 {
+                lastProbeLog = Date()
+                logEmbeddedMap(
+                    "waiting for scene publishers on \(GazeboTransportSceneReadiness.sceneInfoTopicPath(worldName: gazeboWorldName))…"
+                )
+            }
+
+            try? await Task.sleep(nanoseconds: 250_000_000)
         }
-        if line.contains("Failed to get the scene information") {
-            sceneInfoQueryFailed = true
-        }
-    }
-}
 
-/// Tracks `gz sim -s` logs until scene topics are published (embedded web viewport).
-@MainActor
-final class GazeboSimSceneReadinessTracker {
-    private(set) var scenePublishing = false
-
-    func consume(_ line: String) {
-        if line.contains("Publishing scene information") {
-            scenePublishing = true
-        }
+        guard !logTracker.sceneInfoQueryFailed, wsRunner.isRunning else { return false }
+        return await GazeboTransportSceneReadiness.sceneInfoTopicHasPublisher(
+            worldName: gazeboWorldName,
+            instanceIndex: instanceIndex
+        )
     }
 }

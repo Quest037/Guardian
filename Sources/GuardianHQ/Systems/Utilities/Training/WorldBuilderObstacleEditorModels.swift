@@ -8,6 +8,8 @@ struct WorldBuilderObstaclesEditorSnapshot: Codable, Equatable, Sendable {
     var draft: TrainingEnvironmentObstacleRecord
     var obstacles: [TrainingEnvironmentObstacleRecord]
     var mapHalfExtentM: Double
+    /// Start/end zones for placement and drag bounds (overlap with zones is out-of-bounds).
+    var zones: WorldBuilderZonesSnapshot
     /// Obstacle being removed from Gazebo — viewport fades it and blocks selection until done.
     var deletingID: String?
 
@@ -18,6 +20,7 @@ struct WorldBuilderObstaclesEditorSnapshot: Codable, Equatable, Sendable {
         draft: TrainingEnvironmentObstacleRecord,
         obstacles: [TrainingEnvironmentObstacleRecord],
         mapHalfExtentM: Double,
+        zones: WorldBuilderZonesSnapshot = .empty,
         deletingID: String? = nil
     ) -> WorldBuilderObstaclesEditorSnapshot {
         WorldBuilderObstaclesEditorSnapshot(
@@ -27,6 +30,7 @@ struct WorldBuilderObstaclesEditorSnapshot: Codable, Equatable, Sendable {
             draft: draft,
             obstacles: obstacles,
             mapHalfExtentM: mapHalfExtentM,
+            zones: zones,
             deletingID: deletingID
         )
     }

@@ -51,7 +51,7 @@ final class TrainingEnvironmentAuthoringTests: XCTestCase {
     }
 
     func test_floorSize_orbitMinDistance() {
-        XCTAssertEqual(TrainingEnvironmentFloorSize.micro.orbitMinDistanceM, 1, accuracy: 0.001)
+        XCTAssertEqual(TrainingEnvironmentFloorSize.micro.orbitMinDistanceM, 25, accuracy: 0.001)
         XCTAssertEqual(TrainingEnvironmentFloorSize.mini.orbitMinDistanceM, 50, accuracy: 0.001)
         XCTAssertEqual(TrainingEnvironmentFloorSize.small.orbitMinDistanceM, 50, accuracy: 0.001)
     }
@@ -60,7 +60,11 @@ final class TrainingEnvironmentAuthoringTests: XCTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("guardian-micro-floor-\(UUID().uuidString).sdf")
         defer { try? FileManager.default.removeItem(at: url) }
-        try TrainingEnvironmentWorldSDF.writeOpenFieldWorld(to: url, floorSideM: 100)
+        try TrainingEnvironmentWorldSDF.writeOpenFieldWorld(
+            to: url,
+            environmentID: "micro-map",
+            floorSideM: 100
+        )
         XCTAssertEqual(TrainingEnvironmentWorldSDF.parseOpenFieldFloorSideM(from: url), 100, accuracy: 0.001)
     }
 
@@ -76,7 +80,11 @@ final class TrainingEnvironmentAuthoringTests: XCTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("guardian-test-world-\(UUID().uuidString).sdf")
         defer { try? FileManager.default.removeItem(at: url) }
-        try TrainingEnvironmentWorldSDF.writeOpenFieldWorld(to: url, floorSideM: 2000)
+        try TrainingEnvironmentWorldSDF.writeOpenFieldWorld(
+            to: url,
+            environmentID: "large-test",
+            floorSideM: 2000
+        )
         let xml = try String(contentsOf: url, encoding: .utf8)
         XCTAssertTrue(xml.contains("<size>2000 2000 4</size>"))
         XCTAssertEqual(TrainingEnvironmentWorldSDF.openFieldFloorDepthM, 10, accuracy: 0.001)
@@ -86,7 +94,18 @@ final class TrainingEnvironmentAuthoringTests: XCTestCase {
         XCTAssertTrue(xml.contains(TrainingEnvironmentWorldSDF.OpenFieldFloorColors.bottomDiffuse))
         XCTAssertEqual(
             TrainingEnvironmentWorldSDF.parseWorldName(fromSDFXML: xml),
-            TrainingEnvironmentWorldSDF.defaultWorldName
+            TrainingEnvironmentWorldSDF.worldName(environmentID: "large-test")
+        )
+    }
+
+    func test_worldName_derivesFromEnvironmentID() {
+        XCTAssertEqual(
+            TrainingEnvironmentWorldSDF.worldName(environmentID: "micro-map"),
+            "guardian_micro_map"
+        )
+        XCTAssertEqual(
+            TrainingEnvironmentWorldSDF.worldName(environmentID: "guardian-open-field"),
+            "guardian_guardian_open_field"
         )
     }
 

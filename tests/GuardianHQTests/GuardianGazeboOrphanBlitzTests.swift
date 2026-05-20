@@ -2,6 +2,10 @@ import XCTest
 @testable import GuardianCore
 
 final class GuardianGazeboOrphanBlitzTests: XCTestCase {
+    func test_coldLaunchBlitz_ignoresEmbeddedMapHandoffSuppress() {
+        XCTAssertFalse(GuardianGazeboOrphanBlitz.respectsHandoffSuppressOnColdLaunch)
+    }
+
     func test_pgrepPatterns_includeGzLauncherAndRubySubcommands() {
         let patterns = GuardianGazeboOrphanBlitz.allPgrepPatternsForTesting()
         let joined = patterns.joined(separator: "\n")

@@ -7,33 +7,46 @@ struct WorldBuilderObstacleToolBar: View {
     let footZMinM: Double
     let footZMaxM: Double
     let theme: GuardianThemePalette
+    /// Map placement mode (click to add); inactive while a placed model is selected.
+    let placementActive: Bool
     let isEditingPlaced: Bool
     let obstacleCount: Int
     let isSyncInFlight: Bool
+    let onClone: () -> Void
+    let onDelete: () -> Void
     let onRepairMap: () -> Void
     let onClose: () -> Void
 
     private static let dimensionMinM = WorldBuilderObstacleManifestSupport.dimensionMinM
     private static let dimensionMaxM = WorldBuilderObstacleManifestSupport.dimensionMaxM
+    private static let cuboidLengthMaxM = WorldBuilderObstacleManifestSupport.cuboidLengthMaxM
     private static let dimensionStepM = 0.25
     private static let yawMinDeg = -180.0
     private static let yawMaxDeg = 180.0
     private static let yawStepDeg = 1.0
     private static let footZStepM = 0.25
     private static let numericFieldWidth: CGFloat = 88
+    private static let modeOutlineWidth: CGFloat = 3
+
+    private enum PanelMode {
+        case placing
+        case editing
+        case neutral
+    }
+
+    private var panelMode: PanelMode {
+        if isEditingPlaced { return .editing }
+        if placementActive { return .placing }
+        return .neutral
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
             header
             kindPicker
+            modeCaption
             if isEditingPlaced {
-                Text("Editing placed obstacle")
-                    .font(GuardianTypography.Scale.caption.font())
-                    .foregroundStyle(theme.textTertiary)
-            } else {
-                Text("Placement prototype — click map to add")
-                    .font(GuardianTypography.Scale.caption.font())
-                    .foregroundStyle(theme.textTertiary)
+                selectedObstacleActions
             }
             fields
             Text("\(obstacleCount) / \(TrainingEnvironmentObstacleRecord.maxCount) obstacles")
@@ -64,6 +77,85 @@ struct WorldBuilderObstacleToolBar: View {
         .clipShape(RoundedRectangle(cornerRadius: GuardianSpacing.xs))
         .overlay(
             RoundedRectangle(cornerRadius: GuardianSpacing.xs)
+                .stroke(panelOutlineColor, lineWidth: panelOutlineWidth)
+        )
+    }
+
+    @ViewBuilder
+    private var modeCaption: some View {
+        Group {
+            switch panelMode {
+            case .editing:
+                Text("Editing placed model — adjust settings below or drag on the map.")
+            case .placing:
+                Text("Click the map to place this model.")
+            case .neutral:
+                Text("Click a model on the map to edit it.")
+            }
+        }
+        .font(GuardianTypography.Scale.caption.font())
+        .foregroundStyle(theme.textTertiary)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var panelOutlineColor: Color {
+        switch panelMode {
+        case .placing:
+            GuardianSemanticColors.successStroke
+        case .editing:
+            GuardianSemanticColors.warningStroke
+        case .neutral:
+            theme.borderSubtle
+        }
+    }
+
+    private var panelOutlineWidth: CGFloat {
+        switch panelMode {
+        case .placing, .editing:
+            Self.modeOutlineWidth
+        case .neutral:
+            1
+        }
+    }
+
+    private var selectedObstacleActions: some View {
+        VStack(alignment: .leading, spacing: GuardianSpacing.xs) {
+            Text("Selected model")
+                .font(GuardianTypography.Scale.caption.font())
+                .foregroundStyle(theme.textTertiary)
+            HStack(spacing: GuardianSpacing.xs) {
+                GuardianThemedButton(
+                    accent: .primary,
+                    surface: .outline,
+                    size: .small,
+                    action: onClone,
+                    label: {
+                        Label("Clone", systemImage: "plus.square.on.square")
+                            .font(GuardianTypography.Scale.caption.font(weight: .semibold))
+                    }
+                )
+                .help("Duplicate this model at the same position")
+                .guardianPointerOnHover()
+                GuardianThemedButton(
+                    accent: .danger,
+                    surface: .outline,
+                    size: .small,
+                    action: onDelete,
+                    label: {
+                        Label("Delete", systemImage: "trash")
+                            .font(GuardianTypography.Scale.caption.font(weight: .semibold))
+                    }
+                )
+                .help("Remove this model from the world")
+                .guardianPointerOnHover()
+            }
+        }
+        .padding(GuardianSpacing.xs)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(theme.backgroundElevated)
+        .clipShape(RoundedRectangle(cornerRadius: GuardianSpacing.xxs))
+        .overlay(
+            RoundedRectangle(cornerRadius: GuardianSpacing.xxs)
                 .stroke(theme.borderSubtle, lineWidth: 1)
         )
     }
@@ -84,22 +176,31 @@ struct WorldBuilderObstacleToolBar: View {
         }
     }
 
+    /// Only operator changes to Type reset shape parameters — not selection sync from the map.
+    private var kindSelection: Binding<TrainingEnvironmentObstacleKind> {
+        Binding(
+            get: { record.kind },
+            set: { newKind in
+                guard newKind != record.kind else { return }
+                var updated = record
+                updated.kind = newKind
+                updated.applyDefaultParameters()
+                record = updated
+            }
+        )
+    }
+
     private var kindPicker: some View {
         VStack(alignment: .leading, spacing: GuardianSpacing.xxs) {
             Text("Type")
                 .font(GuardianTypography.Scale.caption.font())
                 .foregroundStyle(theme.textTertiary)
-            Picker("Type", selection: $record.kind) {
+            Picker("Type", selection: kindSelection) {
                 ForEach(TrainingEnvironmentObstacleKind.allCases) { kind in
                     Text(kind.displayName).tag(kind)
                 }
             }
             .labelsHidden()
-            .onChange(of: record.kind) { _ in
-                var updated = record
-                updated.applyDefaultParameters()
-                record = updated
-            }
         }
     }
 
@@ -113,7 +214,7 @@ struct WorldBuilderObstacleToolBar: View {
         case .cube:
             dimensionRow("Edge (m)", value: cubeEdgeBinding, step: Self.dimensionStepM, min: Self.dimensionMinM, max: Self.dimensionMaxM)
         case .cuboid:
-            dimensionRow("Length (m)", value: cuboidLengthBinding, step: Self.dimensionStepM, min: Self.dimensionMinM, max: Self.dimensionMaxM)
+            dimensionRow("Length (m)", value: cuboidLengthBinding, step: Self.dimensionStepM, min: Self.dimensionMinM, max: Self.cuboidLengthMaxM)
             dimensionRow("Width (m)", value: cuboidWidthBinding, step: Self.dimensionStepM, min: Self.dimensionMinM, max: Self.dimensionMaxM)
             dimensionRow("Height (m)", value: cuboidHeightBinding, step: Self.dimensionStepM, min: Self.dimensionMinM, max: Self.dimensionMaxM)
         case .cylinder:

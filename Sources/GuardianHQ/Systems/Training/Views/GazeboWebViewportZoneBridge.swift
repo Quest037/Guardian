@@ -8,6 +8,7 @@ final class GazeboWebViewportZoneBridge: ObservableObject {
     @Published var tapToEditEnabled = false
     @Published var placementKind: WorldBuilderZoneKind = .start
     @Published var zones: WorldBuilderZonesSnapshot = .empty
+    @Published var obstacles: [TrainingEnvironmentObstacleRecord] = []
 
     func pushZones(_ zones: WorldBuilderZonesSnapshot) {
         self.zones = zones
@@ -30,17 +31,22 @@ final class GazeboWebViewportZoneBridge: ObservableObject {
         tapToEditEnabled: Bool,
         placementKind: WorldBuilderZoneKind,
         zones: WorldBuilderZonesSnapshot,
-        mapHalfExtentM: Double
+        obstacles: [TrainingEnvironmentObstacleRecord],
+        mapHalfExtentM: Double,
+        maxZoneRadiusM: Double = WorldBuilderZoneState.maxRadiusM
     ) {
         self.placementToolActive = placementActive
         self.tapToEditEnabled = tapToEditEnabled
         self.placementKind = placementKind
         self.zones = zones
+        self.obstacles = obstacles
         self.mapHalfExtentM = mapHalfExtentM
+        self.maxZoneRadiusM = maxZoneRadiusM
         tick = UUID()
     }
 
     var mapHalfExtentM: Double = 500
+    var maxZoneRadiusM: Double = WorldBuilderZoneState.maxRadiusM
 
     var javaScriptExpression: String {
         let payload = ZoneEditorJSState(
@@ -48,7 +54,9 @@ final class GazeboWebViewportZoneBridge: ObservableObject {
             tapToEditEnabled: tapToEditEnabled,
             placementKind: placementKind.rawValue,
             zones: zones,
-            mapHalfExtentM: mapHalfExtentM
+            obstacles: obstacles,
+            mapHalfExtentM: mapHalfExtentM,
+            maxZoneRadiusM: maxZoneRadiusM
         )
         guard let data = try? JSONEncoder().encode(payload) else {
             return "window.guardianViewer?.setZoneEditorState?.({})"
@@ -69,5 +77,7 @@ private struct ZoneEditorJSState: Encodable {
     var tapToEditEnabled: Bool
     var placementKind: String
     var zones: WorldBuilderZonesSnapshot
+    var obstacles: [TrainingEnvironmentObstacleRecord]
     var mapHalfExtentM: Double
+    var maxZoneRadiusM: Double
 }

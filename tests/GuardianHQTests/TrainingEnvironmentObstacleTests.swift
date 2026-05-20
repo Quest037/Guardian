@@ -161,4 +161,43 @@ final class TrainingEnvironmentObstacleTests: XCTestCase {
         let ok = WorldBuilderObstacleBoundsCheck.snapObstacleToFloor(&record, floor: floor)
         XCTAssertFalse(ok)
     }
+
+    func test_normalizeDimensions_cuboidLengthAllows100m() {
+        var record = TrainingEnvironmentObstacleRecord.defaults(for: .cuboid)
+        record.setCuboidDimensions(lengthM: 100)
+        WorldBuilderObstacleManifestSupport.normalizeDimensions(&record)
+        XCTAssertEqual(record.cuboid?.lengthM, 100, accuracy: 0.001)
+
+        record.setCuboidDimensions(lengthM: 150)
+        WorldBuilderObstacleManifestSupport.normalizeDimensions(&record)
+        XCTAssertEqual(record.cuboid?.lengthM, 100, accuracy: 0.001)
+    }
+
+    func test_fitsPlacement_rejectsOverlapWithPlacedStartZone() {
+        var record = TrainingEnvironmentObstacleRecord.defaults(for: .cube)
+        record.centerXM = 0
+        record.centerYM = 0
+        var zones = WorldBuilderZonesSnapshot.empty
+        zones.start.placed = true
+        zones.start.centerXM = 0
+        zones.start.centerYM = 0
+        zones.start.radiusM = 30
+        zones.start.shape = .circle
+        let floor = WorldBuilderZoneFloorRect.centeredSquare(halfExtentM: 500)
+        XCTAssertFalse(WorldBuilderObstacleBoundsCheck.fitsPlacement(record, floor: floor, zones: zones))
+    }
+
+    func test_fitsPlacement_allowsObstacleAwayFromZones() {
+        var record = TrainingEnvironmentObstacleRecord.defaults(for: .cube)
+        record.centerXM = 80
+        record.centerYM = 80
+        var zones = WorldBuilderZonesSnapshot.empty
+        zones.start.placed = true
+        zones.start.centerXM = 0
+        zones.start.centerYM = 0
+        zones.start.radiusM = 20
+        zones.start.shape = .circle
+        let floor = WorldBuilderZoneFloorRect.centeredSquare(halfExtentM: 500)
+        XCTAssertTrue(WorldBuilderObstacleBoundsCheck.fitsPlacement(record, floor: floor, zones: zones))
+    }
 }

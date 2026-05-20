@@ -50,10 +50,43 @@
       line-height: 1.35;
     }
     #camera-debug.hidden { display: none; }
+    #map-dimensions {
+      position: absolute;
+      inset: 0;
+      z-index: 15;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    #map-dimensions.hidden { display: none; }
+    #map-dimensions svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    #map-dimensions .dim-line {
+      stroke: #1e3a8a;
+      stroke-width: 1;
+      vector-effect: non-scaling-stroke;
+    }
+    #map-dimensions .dim-label {
+      fill: #1e3a8a;
+      font: 600 13px -apple-system, BlinkMacSystemFont, sans-serif;
+      paint-order: stroke;
+      stroke: #ffffff;
+      stroke-width: 3px;
+    }
   </style>
 </head>
 <body>
   <div id="scene"></div>
+  <div id="map-dimensions" class="hidden" aria-hidden="true">
+    <svg xmlns="http://www.w3.org/2000/svg">
+      <line id="dim-south-line" class="dim-line"></line>
+      <line id="dim-west-line" class="dim-line"></line>
+      <text id="dim-south-label" class="dim-label" text-anchor="middle"></text>
+      <text id="dim-west-label" class="dim-label" text-anchor="middle"></text>
+    </svg>
+  </div>
   <div id="loading">
     <div class="spinner" aria-hidden="true"></div>
     <div id="loading-label">Loading scene…</div>
@@ -64,7 +97,15 @@
     const loadingLabel = document.getElementById('loading-label');
     const cameraDebug = document.getElementById('camera-debug');
     const root = document.getElementById('scene');
-    const params = new URLSearchParams(location.search);
+    /** file:// loads sometimes leave `location.search` empty while `location.href` still has `?…`. */
+    function guardianViewerQueryString() {
+      if (location.search && location.search.length > 1) return location.search;
+      const href = String(location.href || '');
+      const q = href.indexOf('?');
+      return q >= 0 ? href.slice(q) : '';
+    }
+    const params = new URLSearchParams(guardianViewerQueryString());
+    window.__guardianViewerParams = params;
     const port = params.get('port') || '9002';
     const worldOverride = params.get('world') || '';
     let cameraDebugEnabled = params.get('cameraDebug') === '1';
@@ -78,6 +119,8 @@
     const MAP_ORBIT_MIN_DISTANCE_M = Number.isFinite(orbitMinParam) && orbitMinParam > 0
       ? orbitMinParam
       : 50;
+    /** Tiny Z offset above open-field floor top (z=0) for overlays and HUD lines — avoids z-fighting without visible float. */
+    const MAP_SURFACE_LIFT_M = 0.0035;
 
     /** Oblique 3D view direction (unit vector); distance is computed from floor size + viewport FOV. */
     const MAP_OBLIQUE_LOOK_AT = { x: 0, y: 0, z: 0 };
@@ -343,6 +386,176 @@
       return commitViewportFit(manager, 'birdseye');
     }
 
+    /** Metres outside the map edge (south / west) for the HUD dimension line. */
+    const MAP_DIMENSION_EDGE_OFFSET_M = 3;
+
+    function formatDimensionLabelMetres(lengthM) {
+      if (!Number.isFinite(lengthM) || lengthM <= 0) return '—';
+      const rounded = Math.round(lengthM * 10) / 10;
+      if (Math.abs(rounded - Math.round(rounded)) < 0.05) {
+        return `${Math.round(rounded)} m`;
+      }
+      return `${rounded.toFixed(1)} m`;
+    }
+
+    /** Square map tile in ENU metres — prefers live `open_field_floor` footprint, else manifest `groundHalf`. */
+    function resolveMapTileSquare(manager) {
+      const frame = mapBaseFrame(manager);
+      const footprint = manager ? resolveOpenFieldFloorFootprint(manager) : null;
+      if (footprint?.valid) {
+        const sideXM = Math.max(footprint.max.x - footprint.min.x, 0.01);
+        const sideYM = Math.max(footprint.max.y - footprint.min.y, 0.01);
+        return {
+          minX: footprint.min.x,
+          maxX: footprint.max.x,
+          minY: footprint.min.y,
+          maxY: footprint.max.y,
+          planeZ: footprint.max.z + MAP_SURFACE_LIFT_M,
+          sideXM,
+          sideYM,
+          fromSimMesh: true,
+        };
+      }
+      const half = frame.half;
+      return {
+        minX: frame.cx - half,
+        maxX: frame.cx + half,
+        minY: frame.cy - half,
+        maxY: frame.cy + half,
+        planeZ: frame.cz + MAP_SURFACE_LIFT_M,
+        sideXM: half * 2,
+        sideYM: half * 2,
+        fromSimMesh: false,
+      };
+    }
+
+    /**
+     * Screen-space dimension lines (south + west edges). Survives gzweb scene reloads;
+     * Three.js scene children were being dropped on each sim broadcast.
+     */
+    function createMapDimensionHud() {
+      const hud = document.getElementById('map-dimensions');
+      const southLine = document.getElementById('dim-south-line');
+      const westLine = document.getElementById('dim-west-line');
+      const southLabel = document.getElementById('dim-south-label');
+      const westLabel = document.getElementById('dim-west-label');
+      let frameId = 0;
+      let active = false;
+      let loopRunning = false;
+
+      function worldToScreenPx(scene2, x, y, z) {
+        const Vector3 = guardianThree?.Vector3;
+        if (!Vector3 || !scene2?.camera) return null;
+        const dom = scene2.getDomElement?.() ?? root;
+        const rect = dom.getBoundingClientRect();
+        const v = new Vector3(x, y, z);
+        v.project(scene2.camera);
+        if (!Number.isFinite(v.x) || !Number.isFinite(v.y) || v.z > 1) return null;
+        return {
+          x: (v.x * 0.5 + 0.5) * rect.width,
+          y: (-v.y * 0.5 + 0.5) * rect.height,
+        };
+      }
+
+      function setLine(lineEl, a, b) {
+        if (!a || !b) {
+          lineEl.setAttribute('visibility', 'hidden');
+          return;
+        }
+        lineEl.setAttribute('visibility', 'visible');
+        lineEl.setAttribute('x1', String(a.x));
+        lineEl.setAttribute('y1', String(a.y));
+        lineEl.setAttribute('x2', String(b.x));
+        lineEl.setAttribute('y2', String(b.y));
+      }
+
+      function setLabel(textEl, text, a, b, offsetPx) {
+        if (!a || !b) {
+          textEl.setAttribute('visibility', 'hidden');
+          return;
+        }
+        const mx = (a.x + b.x) * 0.5;
+        const my = (a.y + b.y) * 0.5;
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const len = Math.hypot(dx, dy) || 1;
+        const nx = -dy / len;
+        const ny = dx / len;
+        textEl.setAttribute('visibility', 'visible');
+        textEl.textContent = text;
+        textEl.setAttribute('x', String(mx + nx * offsetPx));
+        textEl.setAttribute('y', String(my + ny * offsetPx));
+      }
+
+      function tick() {
+        if (!active) {
+          loopRunning = false;
+          frameId = 0;
+          return;
+        }
+        const manager = viewerSession?.manager;
+        const scene2 = manager?.scene;
+        if (scene2?.camera) {
+          const tile = resolveMapTileSquare(manager);
+          const z = tile.planeZ;
+          const off = MAP_DIMENSION_EDGE_OFFSET_M;
+          const ySouth = tile.minY - off;
+          const xWest = tile.minX - off;
+          const southA = worldToScreenPx(scene2, tile.minX, ySouth, z);
+          const southB = worldToScreenPx(scene2, tile.maxX, ySouth, z);
+          const westA = worldToScreenPx(scene2, xWest, tile.minY, z);
+          const westB = worldToScreenPx(scene2, xWest, tile.maxY, z);
+          setLine(southLine, southA, southB);
+          setLine(westLine, westA, westB);
+          setLabel(
+            southLabel,
+            formatDimensionLabelMetres(tile.sideXM),
+            southA,
+            southB,
+            14
+          );
+          setLabel(
+            westLabel,
+            formatDimensionLabelMetres(tile.sideYM),
+            westA,
+            westB,
+            14
+          );
+        }
+        frameId = requestAnimationFrame(tick);
+      }
+
+      function startLoop() {
+        if (loopRunning) return;
+        loopRunning = true;
+        tick();
+      }
+
+      return {
+        attach() {
+          active = true;
+          hud?.classList.remove('hidden');
+          startLoop();
+        },
+        refresh() {
+          if (active) startLoop();
+        },
+        detach() {
+          active = false;
+          loopRunning = false;
+          if (frameId) {
+            cancelAnimationFrame(frameId);
+            frameId = 0;
+          }
+          hud?.classList.add('hidden');
+          southLine?.setAttribute('visibility', 'hidden');
+          westLine?.setAttribute('visibility', 'hidden');
+          southLabel?.setAttribute('visibility', 'hidden');
+          westLabel?.setAttribute('visibility', 'hidden');
+        },
+      };
+    }
+
     function postZoneMessage(payload) {
       const handler = window.webkit?.messageHandlers?.guardianZones;
       if (handler) {
@@ -350,12 +563,79 @@
       }
     }
 
+    const mapDimensionHud = createMapDimensionHud();
     const zoneEditor = createZoneEditor(() => viewerSession?.manager?.scene, postZoneMessage);
     const postObstacleMessage = (payload) => {
       const handler = window.webkit?.messageHandlers?.guardianObstacles;
-      if (handler) handler.postMessage(JSON.stringify(payload));
+      if (!handler) {
+        console.warn('guardianObstacles message handler missing', payload);
+        return false;
+      }
+      handler.postMessage(JSON.stringify(payload));
+      return true;
     };
+
+    function postObstaclePlaceDebug(message) {
+      return postObstacleMessage({ type: 'obstaclePlaceDebug', message: String(message) });
+    }
+
+    function describeSceneClickTarget(el) {
+      if (!el) return 'null';
+      return `${el.tagName || '?'}${el.id ? `#${el.id}` : ''}`;
+    }
+
+    /** Always logs map-tile clicks to Swift (no editorActive gate — shows JS vs Swift mode drift). */
+    function installSceneTileClickProbe(obstacleEditorApi) {
+      if (window.__guardianSceneTileClickProbe) return;
+      window.__guardianSceneTileClickProbe = true;
+      window.addEventListener('pointerdown', (event) => {
+        const sceneEl = document.getElementById('scene');
+        if (!sceneEl) return;
+        const rect = sceneEl.getBoundingClientRect();
+        if (
+          event.clientX < rect.left || event.clientX > rect.right
+          || event.clientY < rect.top || event.clientY > rect.bottom
+        ) return;
+        if (event.button !== 0) return;
+        window.__guardianClickProbeActive = true;
+        window.__guardianClickHits = [];
+        const scene2 = viewerSession?.manager?.scene;
+        const flags = typeof obstacleEditorApi?.getDebugFlags === 'function'
+          ? obstacleEditorApi.getDebugFlags()
+          : 'getDebugFlags unavailable';
+        postObstaclePlaceDebug(
+          `click TILE down — ${flags} target=${describeSceneClickTarget(event.target)} `
+          + `controls.enabled=${scene2?.controls?.enabled ?? 'n/a'}`
+        );
+      }, true);
+      window.addEventListener('pointerup', (event) => {
+        if (!window.__guardianClickProbeActive || event.button !== 0) return;
+        const sceneEl = document.getElementById('scene');
+        if (!sceneEl) return;
+        const rect = sceneEl.getBoundingClientRect();
+        if (
+          event.clientX < rect.left || event.clientX > rect.right
+          || event.clientY < rect.top || event.clientY > rect.bottom
+        ) return;
+        const hits = window.__guardianClickHits || [];
+        const route = hits.length
+          ? hits.join(' → ')
+          : 'NONE (orbit/pan or no Guardian handler)';
+        postObstaclePlaceDebug(`click TILE up — route=${route}`);
+        window.__guardianClickProbeActive = false;
+        window.__guardianClickHits = [];
+      }, true);
+      postObstaclePlaceDebug('click probe installed — every left-click on #scene logs here');
+    }
+
+    function guardianRecordClickHandler(name) {
+      if (!window.__guardianClickProbeActive) return;
+      window.__guardianClickHits = window.__guardianClickHits || [];
+      window.__guardianClickHits.push(name);
+    }
+
     const obstacleEditor = createObstacleEditor(() => viewerSession?.manager?.scene, postObstacleMessage);
+    installSceneTileClickProbe(obstacleEditor);
     let pendingZoneEditorState = null;
     let pendingObstacleEditorState = null;
 
@@ -385,7 +665,41 @@
       },
       setObstacleEditorState(state) {
         pendingObstacleEditorState = state;
-        return obstacleEditor.applyState(state);
+        if (!window.guardianViewer) {
+          postObstaclePlaceDebug('setObstacleEditorState — guardianViewer missing');
+          return false;
+        }
+        const scene2 = viewerSession?.manager?.scene;
+        if (!scene2) {
+          postObstaclePlaceDebug('setObstacleEditorState — scene not ready (queued pending)');
+          return false;
+        }
+        postObstaclePlaceDebug('setObstacleEditorState — calling applyState');
+        const ok = obstacleEditor.applyState(state);
+        const manager = viewerSession?.manager;
+        if (manager) obstacleEditor.attach(manager);
+        postObstaclePlaceDebug(`setObstacleEditorState — applyState returned ${ok}`);
+        return ok;
+      },
+      routeScenePointer(phase, clientX, clientY) {
+        return obstacleEditor.routeScenePointer(phase, clientX, clientY);
+      },
+      placeObstacleAtScreen(clientX, clientY) {
+        return obstacleEditor.placeAtScreen(clientX, clientY);
+      },
+      prepareObstaclePlacement() {
+        const manager = viewerSession?.manager;
+        const scene2 = manager?.scene;
+        if (!scene2) {
+          postObstaclePlaceDebug('prepareObstaclePlacement — scene missing');
+          return false;
+        }
+        if (pendingObstacleEditorState) {
+          obstacleEditor.applyState(pendingObstacleEditorState);
+        }
+        obstacleEditor.attach(manager);
+        postObstaclePlaceDebug('prepareObstaclePlacement — attach done');
+        return true;
       },
       sceneReady,
     };
@@ -399,21 +713,25 @@
       const STROKE_WIDTH_M = 4;
       const CIRCLE_SEGMENTS = 64;
       const CIRCLE_EDGE_SAMPLES = 16;
-      const SURFACE_LIFT_M = 0.35;
+      /** Open-field floor collision top (`TrainingEnvironmentWorldSDF` / `open_field_floor`). */
+      const MAP_BASE_TOP_ZM = 0;
       const OVERLAY_RENDER_ORDER = 2000;
       const CENTER_MARKER_RADIUS_M = 2;
       let three = null;
       let overlayRoot = null;
-      let installed = false;
+      let pointerDom = null;
+      let zonePlacementKeyListenerInstalled = false;
       let editorState = {
         placementActive: false,
         tapToEditEnabled: false,
         placementKind: 'start',
         mapHalfExtentM: MAP_GROUND_HALF_EXTENT_M,
+        maxZoneRadiusM: ZONE_RADIUS_MAX_M,
         zones: {
           start: { placed: false, centerXM: 0, centerYM: 0, centerZM: 0, radiusM: 30, shape: 'circle' },
           end: { placed: false, centerXM: 0, centerYM: 0, centerZM: 0, radiusM: 30, shape: 'circle' },
         },
+        obstacles: [],
       };
       let visuals = { start: null, end: null };
       /** Wait before placing so shift-pan / drag-rotate can cancel the gesture. */
@@ -422,6 +740,8 @@
       let placementGesture = null;
       /** Dragging a placed zone (orbit off until release). */
       let zoneDrag = null;
+      let zoneDragCapturedPointerId = null;
+      let zoneDragWindowEndHandler = null;
       /** Tap on a zone when not in placement mode — opens zone editor in Swift. */
       let zoneTapGesture = null;
 
@@ -490,7 +810,7 @@
 
       function liftSurfacePoint(point) {
         if (!point) return point;
-        point.z += SURFACE_LIFT_M;
+        point.z += MAP_SURFACE_LIFT_M;
         return point;
       }
 
@@ -499,8 +819,13 @@
         return Number.isFinite(half) && half > 0 ? half : MAP_GROUND_HALF_EXTENT_M;
       }
 
+      function effectiveMaxZoneRadiusM() {
+        const max = Number(editorState.maxZoneRadiusM);
+        return Number.isFinite(max) && max > 0 ? max : ZONE_RADIUS_MAX_M;
+      }
+
       function clampRadiusM(radiusM) {
-        return Math.max(ZONE_RADIUS_MIN_M, Math.min(ZONE_RADIUS_MAX_M, radiusM));
+        return Math.max(ZONE_RADIUS_MIN_M, Math.min(effectiveMaxZoneRadiusM(), radiusM));
       }
 
       function copyZoneRecord(record) {
@@ -564,13 +889,182 @@
         return true;
       }
 
+      const ZONE_SEPARATION_EPSILON_M = 1e-6;
+
+      function axisAlignedSquaresOverlap(a, b) {
+        const aMinX = a.centerXM - a.radiusM;
+        const aMaxX = a.centerXM + a.radiusM;
+        const aMinY = a.centerYM - a.radiusM;
+        const aMaxY = a.centerYM + a.radiusM;
+        const bMinX = b.centerXM - b.radiusM;
+        const bMaxX = b.centerXM + b.radiusM;
+        const bMinY = b.centerYM - b.radiusM;
+        const bMaxY = b.centerYM + b.radiusM;
+        if (aMaxX <= bMinX + ZONE_SEPARATION_EPSILON_M) return false;
+        if (bMaxX <= aMinX + ZONE_SEPARATION_EPSILON_M) return false;
+        if (aMaxY <= bMinY + ZONE_SEPARATION_EPSILON_M) return false;
+        if (bMaxY <= aMinY + ZONE_SEPARATION_EPSILON_M) return false;
+        return true;
+      }
+
+      function circleOverlapsSquare(circle, square) {
+        const half = square.radiusM;
+        const closestX = Math.min(
+          Math.max(circle.centerXM, square.centerXM - half),
+          square.centerXM + half
+        );
+        const closestY = Math.min(
+          Math.max(circle.centerYM, square.centerYM - half),
+          square.centerYM + half
+        );
+        const dx = circle.centerXM - closestX;
+        const dy = circle.centerYM - closestY;
+        const r = circle.radiusM;
+        return (dx * dx + dy * dy) < (r * r - ZONE_SEPARATION_EPSILON_M);
+      }
+
+      function zonesOverlapPair(a, b) {
+        if (!a.placed || !b.placed) return false;
+        if (a.shape === 'circle' && b.shape === 'circle') {
+          const dx = a.centerXM - b.centerXM;
+          const dy = a.centerYM - b.centerYM;
+          return Math.hypot(dx, dy) < a.radiusM + b.radiusM - ZONE_SEPARATION_EPSILON_M;
+        }
+        if (a.shape === 'square' && b.shape === 'square') {
+          return axisAlignedSquaresOverlap(a, b);
+        }
+        if (a.shape === 'circle' && b.shape === 'square') {
+          return circleOverlapsSquare(a, b);
+        }
+        if (a.shape === 'square' && b.shape === 'circle') {
+          return circleOverlapsSquare(b, a);
+        }
+        return false;
+      }
+
+      function obstacleFootprintPointsForOverlap(obstacle) {
+        const min = 0.01;
+        const kind = obstacle.kind;
+        const axis = obstacle.axisOrientation === 'horizontal' ? 'horizontal' : 'vertical';
+        let dx = 2;
+        let dy = 2;
+        if (kind === 'cube' && obstacle.cube) {
+          dx = dy = Math.max(Number(obstacle.cube.edgeM) || 2, min);
+        } else if (kind === 'cuboid' && obstacle.cuboid) {
+          dx = Math.max(Number(obstacle.cuboid.lengthM) || 2, min);
+          dy = Math.max(Number(obstacle.cuboid.widthM) || 2, min);
+        } else if (kind === 'cylinder' && obstacle.cylinder) {
+          dx = dy = Math.max(Number(obstacle.cylinder.radiusM) || 1, min) * 2;
+          if (axis === 'horizontal') {
+            dx = Math.max(Number(obstacle.cylinder.heightM) || 2, min);
+            dy = Math.max(Number(obstacle.cylinder.radiusM) || 1, min) * 2;
+          }
+        } else if (kind === 'cone' && obstacle.cone) {
+          dx = dy = Math.max(Number(obstacle.cone.radiusM) || 1, min) * 2;
+        } else if (kind === 'pyramid' && obstacle.pyramid) {
+          dx = Math.max(Number(obstacle.pyramid.baseWidthM) || 2, min);
+          dy = Math.max(Number(obstacle.pyramid.baseDepthM) || 2, min);
+        } else if (kind === 'toblerone' && obstacle.toblerone) {
+          const w = Math.max(Number(obstacle.toblerone.widthM) || 2, min);
+          const l = Math.max(Number(obstacle.toblerone.lengthM) || 2, min);
+          const triH = w * Math.sqrt(3) / 2;
+          if (axis === 'horizontal') {
+            dx = l;
+            dy = triH;
+          } else {
+            dx = w;
+            dy = triH;
+          }
+        }
+        const cx = Number(obstacle.centerXM) || 0;
+        const cy = Number(obstacle.centerYM) || 0;
+        const yaw = (Number(obstacle.yawDeg) || 0) * Math.PI / 180;
+        const cos = Math.cos(yaw);
+        const sin = Math.sin(yaw);
+        const hx = dx / 2;
+        const hy = dy / 2;
+        const corners = [
+          { x: hx, y: hy },
+          { x: hx, y: -hy },
+          { x: -hx, y: -hy },
+          { x: -hx, y: hy },
+        ];
+        return corners.map((corner) => ({
+          x: cx + corner.x * cos - corner.y * sin,
+          y: cy + corner.x * sin + corner.y * cos,
+        }));
+      }
+
+      function convexPolygonsOverlap2D(a, b) {
+        if (!a?.length || !b?.length || a.length < 3 || b.length < 3) return false;
+        const polygons = [a, b];
+        for (const poly of polygons) {
+          const count = poly.length;
+          for (let index = 0; index < count; index += 1) {
+            const p1 = poly[index];
+            const p2 = poly[(index + 1) % count];
+            const edgeX = p2.x - p1.x;
+            const edgeY = p2.y - p1.y;
+            let axisX = -edgeY;
+            let axisY = edgeX;
+            const length = Math.hypot(axisX, axisY);
+            if (length <= 1e-12) continue;
+            axisX /= length;
+            axisY /= length;
+            let aMin = Infinity;
+            let aMax = -Infinity;
+            let bMin = Infinity;
+            let bMax = -Infinity;
+            for (const p of a) {
+              const projection = p.x * axisX + p.y * axisY;
+              aMin = Math.min(aMin, projection);
+              aMax = Math.max(aMax, projection);
+            }
+            for (const p of b) {
+              const projection = p.x * axisX + p.y * axisY;
+              bMin = Math.min(bMin, projection);
+              bMax = Math.max(bMax, projection);
+            }
+            if (aMax <= bMin + ZONE_SEPARATION_EPSILON_M
+              || bMax <= aMin + ZONE_SEPARATION_EPSILON_M) {
+              return false;
+            }
+          }
+        }
+        return true;
+      }
+
+      function zoneOverlapsAnyObstacle(zone) {
+        if (!zone?.placed) return false;
+        const obstacles = editorState.obstacles || [];
+        const zonePoly = zoneEdgePoints(zone);
+        for (const obstacle of obstacles) {
+          if (convexPolygonsOverlap2D(zonePoly, obstacleFootprintPointsForOverlap(obstacle))) {
+            return true;
+          }
+        }
+        return false;
+      }
+
+      function editorZonesInvalid() {
+        const bounds = mapBaseBounds();
+        const start = normalizeZoneRecord(zoneRecord('start'));
+        const end = normalizeZoneRecord(zoneRecord('end'));
+        if (start.placed && !zoneFitsMapBase(start, bounds)) return true;
+        if (end.placed && !zoneFitsMapBase(end, bounds)) return true;
+        if (zonesOverlapPair(start, end)) return true;
+        if (zoneOverlapsAnyObstacle(start)) return true;
+        if (zoneOverlapsAnyObstacle(end)) return true;
+        return false;
+      }
+
       function maxRadiusOnMapBase(record, bounds) {
         return Math.min(
           record.centerXM - bounds.minX,
           bounds.maxX - record.centerXM,
           record.centerYM - bounds.minY,
           bounds.maxY - record.centerYM,
-          ZONE_RADIUS_MAX_M
+          effectiveMaxZoneRadiusM()
         );
       }
 
@@ -633,20 +1127,22 @@
         const side = T.DoubleSide ?? 2;
         const base = {
           color,
-          depthTest: false,
+          /** Respect sim depth (opaque obstacles occlude zones behind them). */
+          depthTest: true,
           fog: false,
           toneMapped: false,
           side,
+          /** Slight bias above the floor plane; avoids z-fight with terrain, not “always on top”. */
           polygonOffset: true,
-          polygonOffsetFactor: -2,
-          polygonOffsetUnits: -2,
+          polygonOffsetFactor: -1,
+          polygonOffsetUnits: -1,
         };
         return {
           fill: new BasicMaterial({
             ...base,
             transparent: true,
             opacity: FILL_OPACITY,
-            depthWrite: true,
+            depthWrite: false,
           }),
           stroke: new BasicMaterial({
             ...base,
@@ -846,11 +1342,12 @@
         root.traverse((node) => {
           if (node === skip || node.parent === skip) return;
           if (node.name === 'guardian_zone_overlay') return;
+          if (node.name === 'guardian_map_dimensions') return;
           if (node.name === 'grid') return;
           let ancestor = node;
           while (ancestor) {
             const name = ancestor.name || '';
-            if (name === 'guardian_zone_overlay' || name.startsWith('guardian_zone_')) return;
+            if (name === 'guardian_zone_overlay' || name === 'guardian_map_dimensions' || name.startsWith('guardian_zone_')) return;
             ancestor = ancestor.parent;
           }
           if (node.isMesh) out.push(node);
@@ -866,12 +1363,33 @@
         collectTerrainMeshes(scene2.scene, meshes, overlayRoot);
         const hits = scene2.ray.intersectObjects(meshes, true);
         if (hits.length > 0) {
-          return liftSurfacePoint(hits[0].point.clone());
+          let topZ = hits[0].point.z;
+          for (let i = 1; i < hits.length; i += 1) {
+            topZ = Math.max(topZ, hits[i].point.z);
+          }
+          return liftSurfacePoint(new T.Vector3(x, y, topZ));
         }
-        return liftSurfacePoint(new T.Vector3(x, y, 0));
+        return liftSurfacePoint(new T.Vector3(x, y, MAP_BASE_TOP_ZM));
       }
 
-      function pickSurface(scene2, clientX, clientY) {
+      /** Stored centre Z on the map-base top (open_field_floor top is z = 0). */
+      function centerZMFromTerrain(scene2, x, y) {
+        const lifted = sampleTerrain(scene2, x, y);
+        const zm = lifted.z - MAP_SURFACE_LIFT_M;
+        return Math.max(MAP_BASE_TOP_ZM, zm);
+      }
+
+      function regroundZoneCenterZM(scene2, record) {
+        if (!record?.placed || !scene2) return;
+        record.centerZM = centerZMFromTerrain(scene2, record.centerXM, record.centerYM);
+      }
+
+      /**
+       * Pointer → map XY using terrain raycast only (never gzweb getRayCastModel — that
+       * hits sibling zone overlays and ratchets centreZM). Z comes from a vertical terrain
+       * sample at the resolved XY.
+       */
+      function pickTerrainPointer(scene2, clientX, clientY) {
         const T = cacheThree(scene2);
         if (!T) return null;
         const dom = scene2.getDomElement();
@@ -884,13 +1402,54 @@
         const meshes = [];
         collectTerrainMeshes(scene2.scene, meshes, overlayRoot);
         const hits = scene2.ray.intersectObjects(meshes, true);
-        if (hits.length > 0) return liftSurfacePoint(hits[0].point.clone());
-        const fallback = new T.Vector3();
-        scene2.getRayCastModel({ x: clientX, y: clientY }, fallback);
-        if (Number.isFinite(fallback.x) && Number.isFinite(fallback.y) && Number.isFinite(fallback.z)) {
-          return liftSurfacePoint(fallback);
+        let x;
+        let y;
+        if (hits.length > 0) {
+          let best = hits[0];
+          for (let i = 1; i < hits.length; i += 1) {
+            if (hits[i].point.z > best.point.z) best = hits[i];
+          }
+          x = best.point.x;
+          y = best.point.y;
+        } else {
+          const origin = scene2.ray.origin;
+          const dir = scene2.ray.direction;
+          if (Math.abs(dir.z) < 1e-9) return null;
+          const t = -origin.z / dir.z;
+          if (t < 0) return null;
+          x = origin.x + dir.x * t;
+          y = origin.y + dir.y * t;
         }
-        return sampleTerrain(scene2, 0, 0);
+        const centerZM = centerZMFromTerrain(scene2, x, y);
+        return new T.Vector3(x, y, centerZM + MAP_SURFACE_LIFT_M);
+      }
+
+      function clearZoneDragPointerWatch(scene2) {
+        if (zoneDragWindowEndHandler) {
+          window.removeEventListener('pointerup', zoneDragWindowEndHandler, true);
+          window.removeEventListener('pointercancel', zoneDragWindowEndHandler, true);
+          zoneDragWindowEndHandler = null;
+        }
+        if (scene2 && zoneDragCapturedPointerId != null) {
+          try {
+            scene2.getDomElement()?.releasePointerCapture?.(zoneDragCapturedPointerId);
+          } catch (_) { /* already released */ }
+          zoneDragCapturedPointerId = null;
+        }
+      }
+
+      function armZoneDragPointerWatch(scene2, pointerId) {
+        clearZoneDragPointerWatch(scene2);
+        zoneDragCapturedPointerId = pointerId;
+        const onGlobalPointerEnd = (event) => {
+          if (!zoneDrag) return;
+          if (event.pointerId !== zoneDragCapturedPointerId) return;
+          const notify = zoneDrag.moved;
+          endZoneDrag(scene2, notify);
+        };
+        zoneDragWindowEndHandler = onGlobalPointerEnd;
+        window.addEventListener('pointerup', onGlobalPointerEnd, true);
+        window.addEventListener('pointercancel', onGlobalPointerEnd, true);
       }
 
       function zoneRecord(kind) {
@@ -929,7 +1488,7 @@
 
         // Radius/shape rebuilds must not resample terrain — that ray can hit this zone's
         // own overlay (or a sibling zone) and ratchet centerZM upward.
-        const planeZ = Number(record.centerZM) + SURFACE_LIFT_M;
+        const planeZ = Number(record.centerZM) + MAP_SURFACE_LIFT_M;
 
         const cx = record.centerXM;
         const cy = record.centerYM;
@@ -1067,7 +1626,7 @@
       }
 
       function pickZoneKindAt(scene2, clientX, clientY) {
-        const hit = pickSurface(scene2, clientX, clientY);
+        const hit = pickTerrainPointer(scene2, clientX, clientY);
         if (!hit) return null;
         for (const kind of ['end', 'start']) {
           const record = zoneRecord(kind);
@@ -1084,7 +1643,7 @@
       }
 
       function moveZoneTo(scene2, kind, clientX, clientY) {
-        const hit = pickSurface(scene2, clientX, clientY);
+        const hit = pickTerrainPointer(scene2, clientX, clientY);
         if (!hit) return false;
         const record = normalizeZoneRecord(zoneRecord(kind));
         record.placed = true;
@@ -1092,11 +1651,11 @@
         const oy = zoneDrag?.offsetY ?? 0;
         record.centerXM = hit.x - ox;
         record.centerYM = hit.y - oy;
-        record.centerZM = hit.z - SURFACE_LIFT_M;
+        record.centerZM = centerZMFromTerrain(scene2, record.centerXM, record.centerYM);
         const snapped = snapZoneToMapBase(record, mapBaseBounds());
         editorState.zones[kind] = snapped.record;
         if (zoneDrag) {
-          zoneDrag.zoneFailed = snapped.failed;
+          zoneDrag.zoneFailed = snapped.failed || editorZonesInvalid();
         }
         rebuildVisual(scene2, kind);
         return true;
@@ -1104,37 +1663,45 @@
 
       function placeZoneAt(scene2, clientX, clientY) {
         ensureOverlay(scene2, attachedManager);
-        const hit = pickSurface(scene2, clientX, clientY);
+        const hit = pickTerrainPointer(scene2, clientX, clientY);
         if (!hit) return false;
         const kind = editorState.placementKind;
         const prev = normalizeZoneRecord(zoneRecord(kind));
         const bounds = mapBaseBounds();
+        const centerZM = centerZMFromTerrain(scene2, hit.x, hit.y);
         let record = {
           placed: true,
           centerXM: hit.x,
           centerYM: hit.y,
-          centerZM: hit.z - SURFACE_LIFT_M,
+          centerZM,
           radiusM: prev.radiusM,
           shape: prev.shape,
         };
         const snapped = snapZoneToMapBase(record, bounds);
         editorState.zones[kind] = snapped.record;
         rebuildVisual(scene2, kind);
-        notifyZonesChanged(snapped.failed);
-        return !snapped.failed;
+        const invalid = snapped.failed || editorZonesInvalid();
+        notifyZonesChanged(invalid);
+        return !invalid;
       }
 
       function endZoneDrag(scene2, notify) {
         if (!zoneDrag) return;
         const zoneFailed = zoneDrag.zoneFailed;
+        const shouldNotify = notify;
+        clearZoneDragPointerWatch(scene2);
         zoneDrag = null;
         setOrbitEnabled(scene2, true);
-        if (notify) notifyZonesChanged(zoneFailed);
+        if (shouldNotify) notifyZonesChanged(zoneFailed);
       }
 
       function onDomPointerDown(event) {
         const scene2 = getScene2();
         if (!scene2 || !pointerIsOverCanvas(scene2, event.clientX, event.clientY)) return;
+        guardianRecordClickHandler('zone-capture-pointerDown');
+        if (window.__guardianClickProbeActive) {
+          postObstaclePlaceDebug('HANDLER zone capture pointerDown');
+        }
         if (event.button !== 0) return;
         if (event.shiftKey) return;
 
@@ -1143,7 +1710,7 @@
         if (hitKind) {
           cancelPlacementGesture();
           if (editorState.placementActive) {
-            const grab = pickSurface(scene2, event.clientX, event.clientY);
+            const grab = pickTerrainPointer(scene2, event.clientX, event.clientY);
             const grabbed = zoneRecord(hitKind);
             zoneDrag = {
               kind: hitKind,
@@ -1154,6 +1721,7 @@
             };
             setOrbitEnabled(scene2, false);
             dom.setPointerCapture(event.pointerId);
+            armZoneDragPointerWatch(scene2, event.pointerId);
             event.preventDefault();
             event.stopImmediatePropagation();
             return;
@@ -1221,9 +1789,6 @@
 
         if (zoneDrag) {
           const notify = zoneDrag.moved;
-          try {
-            scene2?.getDomElement?.()?.releasePointerCapture?.(event.pointerId);
-          } catch (_) { /* released */ }
           endZoneDrag(scene2, notify);
           event.preventDefault();
           return;
@@ -1257,16 +1822,31 @@
         notifySwift({ type: 'deleteZoneRequest', kind: hitKind });
       }
 
+      function uninstallPointerHandlers() {
+        if (!pointerDom) return;
+        pointerDom.removeEventListener('pointerdown', onDomPointerDown, true);
+        pointerDom.removeEventListener('pointermove', onDomPointerMove, true);
+        pointerDom.removeEventListener('pointerup', onDomPointerUp, true);
+        pointerDom.removeEventListener('pointercancel', onDomPointerUp, true);
+        pointerDom.removeEventListener('contextmenu', onContextMenu, true);
+        pointerDom = null;
+      }
+
       function installPointerHandlers(scene2) {
-        if (installed) return;
-        const dom = scene2.getDomElement();
+        const dom = scene2?.getDomElement?.();
+        if (!dom) return;
+        if (pointerDom === dom) return;
+        uninstallPointerHandlers();
         dom.addEventListener('pointerdown', onDomPointerDown, true);
         dom.addEventListener('pointermove', onDomPointerMove, true);
         dom.addEventListener('pointerup', onDomPointerUp, true);
         dom.addEventListener('pointercancel', onDomPointerUp, true);
         dom.addEventListener('contextmenu', onContextMenu, true);
-        window.addEventListener('keydown', onPlacementKeyDown, true);
-        installed = true;
+        pointerDom = dom;
+        if (!zonePlacementKeyListenerInstalled) {
+          window.addEventListener('keydown', onPlacementKeyDown, true);
+          zonePlacementKeyListenerInstalled = true;
+        }
       }
 
       let attachedManager = null;
@@ -1287,25 +1867,32 @@
           const mapHalf = Number(state.mapHalfExtentM) > 0
             ? Number(state.mapHalfExtentM)
             : MAP_GROUND_HALF_EXTENT_M;
+          const maxZoneR = Number(state.maxZoneRadiusM) > 0
+            ? Number(state.maxZoneRadiusM)
+            : ZONE_RADIUS_MAX_M;
           const bounds = resolveMapBaseSquareBounds(attachedManager, mapHalf);
           editorState = {
             placementActive: Boolean(state.placementActive),
             tapToEditEnabled: Boolean(state.tapToEditEnabled),
             placementKind: state.placementKind === 'end' ? 'end' : 'start',
             mapHalfExtentM: mapHalf,
+            maxZoneRadiusM: maxZoneR,
             zones: {
               start: normalizeZoneRecord(state.zones.start),
               end: normalizeZoneRecord(state.zones.end),
             },
+            obstacles: Array.isArray(state.obstacles) ? state.obstacles : [],
           };
+          const scene2 = getScene2();
           for (const kind of ['start', 'end']) {
             const snapped = snapZoneToMapBase(editorState.zones[kind], bounds);
             editorState.zones[kind] = snapped.record;
+            regroundZoneCenterZM(scene2, editorState.zones[kind]);
           }
           cancelPlacementGesture();
+          clearZoneDragPointerWatch(scene2);
           zoneDrag = null;
           zoneTapGesture = null;
-          const scene2 = getScene2();
           if (!scene2) return false;
           setPlacementControls(scene2, editorState.placementActive);
           rebuildAll(scene2, attachedManager);
@@ -1316,12 +1903,61 @@
 
     function createObstacleEditor(getScene2, notifySwift) {
       const PLACEMENT_WAIT_MS = 300;
-      const PLACEMENT_ARM_MS = 350;
+      /** Cancel placement when the pointer moves farther than this (orbit / pan drag). Same as zone editor. */
       const PLACEMENT_DRAG_PX = 7;
+      const PLACEMENT_ARM_MS = 350;
       const PICK_RADIUS_PX = 22;
+
+      function logObstaclePlace(step, detail) {
+        const line = detail ? `${step} — ${detail}` : step;
+        if (!postObstaclePlaceDebug(line)) {
+          console.warn('obstacle place (no Swift bridge):', line);
+        }
+      }
+
+      function setObstaclePlacementModeUI(scene2, active) {
+        const sceneContainer = document.getElementById('scene');
+        const canvas = scene2?.getDomElement?.();
+        if (sceneContainer) {
+          sceneContainer.classList.toggle('placement-mode', Boolean(active));
+        }
+        if (canvas && editorState.placementActive) {
+          canvas.style.cursor = 'crosshair';
+        } else if (canvas) {
+          canvas.style.cursor = '';
+        }
+      }
+
+      function draftPlacementSummary() {
+        const d = editorState.draft || {};
+        const kind = d.kind || '?';
+        let size = '';
+        if (kind === 'cube' && d.cube) size = `edge=${Number(d.cube.edgeM).toFixed(2)}m`;
+        else if (kind === 'cuboid' && d.cuboid) {
+          size = `${Number(d.cuboid.lengthM).toFixed(1)}×${Number(d.cuboid.widthM).toFixed(1)}×${Number(d.cuboid.heightM).toFixed(1)}m`;
+        } else if (kind === 'cylinder' && d.cylinder) {
+          size = `r=${Number(d.cylinder.radiusM).toFixed(1)} h=${Number(d.cylinder.heightM).toFixed(1)}m`;
+        }
+        return `kind=${kind} ${size} autoZ=${Boolean(d.usesAutoZ)} yaw=${Number(d.yawDeg) || 0}°`;
+      }
+
+      function editorFlagsSummary() {
+        const armedMs = Math.max(0, placementArmedAt - Date.now());
+        return [
+          `editorActive=${editorState.editorActive}`,
+          `placementActive=${editorState.placementActive}`,
+          `selected=${editorState.selectedID ?? 'nil'}`,
+          `obstacles=${editorState.obstacles.length}`,
+          `mapHalf=${editorState.mapHalfExtentM}`,
+          `armedInMs=${armedMs}`,
+        ].join(' ');
+      }
       const GIZMO_RENDER_ORDER = 2100;
       const SELECTED_OUTLINE_COLOR = 0x39ff14;
+      /** Back-face shell scales (gzweb bundle has no fat-line API; linewidth is always 1px in WebGL). */
+      const SELECTION_OUTLINE_SHELL_SCALES = [1.04, 1.08];
       const SELECTION_OUTLINE_NAME = 'guardian_obstacle_selection_outline';
+      const THREE_BACK_SIDE = 1;
       const DELETE_FADE_STEP = 0.05;
       const DELETE_FADE_INTERVAL_MS = 200;
       const DELETE_FADE_MIN = 0.05;
@@ -1333,13 +1969,40 @@
         draft: {},
         obstacles: [],
         mapHalfExtentM: MAP_GROUND_HALF_EXTENT_M,
+        zones: {
+          start: { placed: false, centerXM: 0, centerYM: 0, centerZM: 0, radiusM: 30, shape: 'circle' },
+          end: { placed: false, centerXM: 0, centerYM: 0, centerZM: 0, radiusM: 30, shape: 'circle' },
+        },
       };
       let placementGesture = null;
       let placementArmedAt = 0;
       let obstacleDrag = null;
       let obstacleDragFrame = 0;
       let deleteFadeTimer = null;
-      let installed = false;
+      let pointerDom = null;
+      let placementKeyListenerInstalled = false;
+      let obstacleDeleteKeyListenerInstalled = false;
+      function recordClickHandler(name) {
+        guardianRecordClickHandler(name);
+      }
+
+      function instrumentGzwebOrbitCanvas(scene2) {
+        const canvas = scene2?.getDomElement?.();
+        if (!canvas || canvas.dataset.guardianOrbitTapProbe) return;
+        canvas.dataset.guardianOrbitTapProbe = '1';
+        for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
+          canvas.addEventListener(type, (event) => {
+            if (event.button !== 0) return;
+            recordClickHandler(`gzweb-canvas-${type}`);
+            if (window.__guardianClickProbeActive) {
+              logObstaclePlace(
+                'HANDLER gzweb canvas',
+                `${type} controls.enabled=${scene2?.controls?.enabled}`
+              );
+            }
+          }, false);
+        }
+      }
 
       function isObstacleDeleting(id) {
         return Boolean(id) && editorState.deletingID === id;
@@ -1397,6 +2060,19 @@
       function mapHalfM() {
         const half = Number(editorState.mapHalfExtentM);
         return Number.isFinite(half) && half > 0 ? half : MAP_GROUND_HALF_EXTENT_M;
+      }
+
+      /** Map-base square XY bounds (manifest `mapHalfExtentM` / Swift floor half). */
+      function mapBaseBounds() {
+        const half = mapHalfM();
+        return { valid: true, minX: -half, maxX: half, minY: -half, maxY: half };
+      }
+
+      function pointInsideMapBase(x, y, bounds, epsilon = 1e-6) {
+        return x >= bounds.minX - epsilon
+          && x <= bounds.maxX + epsilon
+          && y >= bounds.minY - epsilon
+          && y <= bounds.maxY + epsilon;
       }
 
       function notifyChanged(outOfBounds = false) {
@@ -1522,10 +2198,85 @@
         return true;
       }
 
+      const OBSTACLE_ZONE_CIRCLE_EDGE_SAMPLES = 16;
+      const OBSTACLE_SEPARATION_EPSILON_M = 1e-6;
+
+      function zoneEdgePointsForBounds(zone) {
+        if (!zone?.placed) return [];
+        const cx = zone.centerXM;
+        const cy = zone.centerYM;
+        const r = zone.radiusM;
+        if (zone.shape === 'square') {
+          return [
+            { x: cx - r, y: cy - r },
+            { x: cx + r, y: cy - r },
+            { x: cx + r, y: cy + r },
+            { x: cx - r, y: cy + r },
+          ];
+        }
+        const points = [];
+        for (let i = 0; i < OBSTACLE_ZONE_CIRCLE_EDGE_SAMPLES; i += 1) {
+          const t = (i / OBSTACLE_ZONE_CIRCLE_EDGE_SAMPLES) * Math.PI * 2;
+          points.push({ x: cx + Math.cos(t) * r, y: cy + Math.sin(t) * r });
+        }
+        return points;
+      }
+
+      function projectPolygon(poly, axisX, axisY) {
+        let minP = Infinity;
+        let maxP = -Infinity;
+        for (const p of poly) {
+          const projection = p.x * axisX + p.y * axisY;
+          minP = Math.min(minP, projection);
+          maxP = Math.max(maxP, projection);
+        }
+        return { min: minP, max: maxP };
+      }
+
+      function convexPolygonsOverlap(a, b) {
+        if (!a?.length || !b?.length || a.length < 3 || b.length < 3) return false;
+        const polygons = [a, b];
+        for (const poly of polygons) {
+          const count = poly.length;
+          for (let index = 0; index < count; index += 1) {
+            const p1 = poly[index];
+            const p2 = poly[(index + 1) % count];
+            const edgeX = p2.x - p1.x;
+            const edgeY = p2.y - p1.y;
+            let axisX = -edgeY;
+            let axisY = edgeX;
+            const length = Math.hypot(axisX, axisY);
+            if (length <= 1e-12) continue;
+            axisX /= length;
+            axisY /= length;
+            const aRange = projectPolygon(a, axisX, axisY);
+            const bRange = projectPolygon(b, axisX, axisY);
+            if (aRange.max <= bRange.min + OBSTACLE_SEPARATION_EPSILON_M
+              || bRange.max <= aRange.min + OBSTACLE_SEPARATION_EPSILON_M) {
+              return false;
+            }
+          }
+        }
+        return true;
+      }
+
+      function obstacleOverlapsPlacedZone(obstacle, zone) {
+        if (!zone?.placed) return false;
+        return convexPolygonsOverlap(obstacleFootprintPoints(obstacle), zoneEdgePointsForBounds(zone));
+      }
+
+      function obstacleFitsPlacement(obstacle, bounds) {
+        if (!obstacleFitsMapBase(obstacle, bounds)) return false;
+        const zones = editorState.zones || {};
+        if (obstacleOverlapsPlacedZone(obstacle, zones.start)) return false;
+        if (obstacleOverlapsPlacedZone(obstacle, zones.end)) return false;
+        return true;
+      }
+
       /** Zone-style snap: translate footprint inside map-base; failed only when it cannot fit. */
       function snapObstacleToMapBase(obstacle, bounds) {
         if (!bounds?.valid) return { obstacle, failed: false };
-        if (obstacleFitsMapBase(obstacle, bounds)) {
+        if (obstacleFitsPlacement(obstacle, bounds)) {
           return { obstacle, failed: false };
         }
         let points = [{ x: obstacle.centerXM, y: obstacle.centerYM }];
@@ -1546,7 +2297,7 @@
         if (dyMin <= dyMax) {
           obstacle.centerYM += Math.min(Math.max(0, dyMin), dyMax);
         }
-        return { obstacle, failed: !obstacleFitsMapBase(obstacle, bounds) };
+        return { obstacle, failed: !obstacleFitsPlacement(obstacle, bounds) };
       }
 
       function setOrbitEnabled(scene2, enabled) {
@@ -1554,7 +2305,31 @@
         if (controls) controls.enabled = enabled;
       }
 
-      function pickSurface(scene2, clientX, clientY) {
+      /** Exclude editor overlays; match zone editor terrain pick (highest Z + z=0 fallback). */
+      function collectObstacleTerrainMeshes(root, out) {
+        root.traverse((node) => {
+          if (node.name === 'guardian_obstacle_gizmo' || node.name === 'guardian_zone_overlay'
+            || node.name === 'guardian_map_dimensions' || node.name === 'grid') {
+            return;
+          }
+          let ancestor = node;
+          while (ancestor) {
+            const name = ancestor.name || '';
+            if (name === 'guardian_zone_overlay' || name === 'guardian_map_dimensions'
+              || name.startsWith('guardian_zone_') || name.startsWith('guardian_obstacle_')) {
+              return;
+            }
+            ancestor = ancestor.parent;
+          }
+          if (node.isMesh) out.push(node);
+        });
+      }
+
+      /**
+       * Map click → floor XY (never `.clone()` on hit points — gzweb may return plain objects).
+       * Same strategy as zone ``pickTerrainPointer``: terrain meshes, highest Z, else z=0 plane.
+       */
+      function pickTerrainSurface(scene2, clientX, clientY) {
         const dom = scene2.getDomElement();
         const rect = dom.getBoundingClientRect();
         const ndc = {
@@ -1563,27 +2338,71 @@
         };
         scene2.ray.setFromCamera(ndc, scene2.camera);
         const meshes = [];
-        scene2.scene.traverse((node) => {
-          if (node.name === 'guardian_obstacle_gizmo' || node.name === 'guardian_zone_overlay' || node.name === 'grid') return;
-          if (node.isMesh) meshes.push(node);
-        });
+        collectObstacleTerrainMeshes(scene2.scene, meshes);
         const hits = scene2.ray.intersectObjects(meshes, true);
-        if (hits.length > 0) return hits[0].point.clone();
-        return null;
+        if (hits.length > 0) {
+          let best = hits[0];
+          for (let i = 1; i < hits.length; i += 1) {
+            if (hits[i].point.z > best.point.z) best = hits[i];
+          }
+          const p = best.point;
+          return { x: p.x, y: p.y, z: p.z };
+        }
+        const origin = scene2.ray.origin;
+        const dir = scene2.ray.direction;
+        if (Math.abs(dir.z) < 1e-9) return null;
+        const t = -origin.z / dir.z;
+        if (t < 0) return null;
+        return {
+          x: origin.x + dir.x * t,
+          y: origin.y + dir.y * t,
+          z: 0,
+        };
+      }
+
+      function pickSurface(scene2, clientX, clientY) {
+        return pickTerrainSurface(scene2, clientX, clientY);
       }
 
       /** Placement click must hit the floor and fit the prototype footprint on the map-base square. */
-      function placementHitOnMapBase(scene2, clientX, clientY) {
+      function placementHitOnMapBase(scene2, clientX, clientY, logFailures) {
         const hit = pickSurface(scene2, clientX, clientY);
-        if (!hit) return null;
+        if (!hit) {
+          if (logFailures) logObstaclePlace('placementHit', 'no raycast surface hit');
+          return null;
+        }
         const bounds = mapBaseBounds();
-        if (!bounds?.valid) return hit;
+        if (!bounds?.valid) {
+          if (logFailures) {
+            logObstaclePlace(
+              'placementHit',
+              `surface ok (${hit.x.toFixed(2)}, ${hit.y.toFixed(2)}) z=${hit.z.toFixed(2)} — bounds invalid, using hit`
+            );
+          }
+          return hit;
+        }
         const candidate = {
           ...editorState.draft,
           centerXM: hit.x,
           centerYM: hit.y,
         };
-        return obstacleFitsMapBase(candidate, bounds) ? hit : null;
+        if (!obstacleFitsMapBase(candidate, bounds)) {
+          if (logFailures) {
+            const { hx, hy } = footprintHalfM(candidate);
+            logObstaclePlace(
+              'placementHit',
+              `footprint outside map at (${hit.x.toFixed(2)}, ${hit.y.toFixed(2)}) hx=${hx.toFixed(2)} hy=${hy.toFixed(2)} ${draftPlacementSummary()}`
+            );
+          }
+          return null;
+        }
+        if (logFailures) {
+          logObstaclePlace(
+            'placementHit',
+            `ok (${hit.x.toFixed(2)}, ${hit.y.toFixed(2)}) z=${hit.z.toFixed(2)} ${draftPlacementSummary()}`
+          );
+        }
+        return hit;
       }
 
       function projectToClient(scene2, x, y, z) {
@@ -1625,7 +2444,7 @@
         const meshes = [];
         scene2.scene.traverse((node) => {
           if (!node.isMesh) return;
-          if (node.name === 'guardian_obstacle_gizmo' || node.name === 'guardian_zone_overlay' || node.name === 'grid') return;
+          if (node.name === 'guardian_obstacle_gizmo' || node.name === 'guardian_zone_overlay' || node.name === 'guardian_map_dimensions' || node.name === 'grid') return;
           let ancestor = node;
           while (ancestor) {
             const name = ancestor.name || '';
@@ -1760,35 +2579,30 @@
         }, DELETE_FADE_INTERVAL_MS);
       }
 
-      /** Live toolbar feedback: move / rotate / scale gzweb models to match manifest obstacles. */
+      /** Clears legacy viewer scale caches (removed Box3 rescaling — sizes come from Gazebo SDF). */
+      function resetObstacleRootViewerScale(root) {
+        if (!root) return;
+        root.scale.set(1, 1, 1);
+        if (root.userData) {
+          delete root.userData.guardianMeshBaseExtents;
+          delete root.userData.guardianAppliedExtents;
+        }
+      }
+
+      /** Live toolbar feedback: move / rotate gzweb models to match manifest obstacles (metres from sim). */
       function syncObstacleVisualTransforms(scene2, onlyID = null) {
         if (!scene2?.scene) return;
         for (const obstacle of editorState.obstacles) {
           if (onlyID && obstacle.id !== onlyID) continue;
           const root = findObstacleRoot(scene2, obstacle.id);
           if (!root) continue;
-          const target = orientedExtentsM(obstacle);
           const cx = Number(obstacle.centerXM) || 0;
           const cy = Number(obstacle.centerYM) || 0;
           const cz = Number(obstacle.centerZM) || 0;
           const yawRad = (Number(obstacle.yawDeg) || 0) * Math.PI / 180;
+          resetObstacleRootViewerScale(root);
           root.position.set(cx, cy, cz);
           root.rotation.set(0, 0, yawRad, 'ZYX');
-          const prev = root.userData?.guardianAppliedExtents;
-          if (!prev) {
-            if (!root.userData) root.userData = {};
-            root.userData.guardianAppliedExtents = { dx: target.dx, dy: target.dy, dz: target.dz };
-            continue;
-          }
-          const sx = prev.dx > 0 ? target.dx / prev.dx : 1;
-          const sy = prev.dy > 0 ? target.dy / prev.dy : 1;
-          const sz = prev.dz > 0 ? target.dz / prev.dz : 1;
-          root.scale.set(
-            (Number(root.scale?.x) || 1) * sx,
-            (Number(root.scale?.y) || 1) * sy,
-            (Number(root.scale?.z) || 1) * sz
-          );
-          root.userData.guardianAppliedExtents = { dx: target.dx, dy: target.dy, dz: target.dz };
         }
         if (typeof scene2.render === 'function') {
           scene2.render(0);
@@ -1830,14 +2644,13 @@
         node.traverse((child) => {
           if (child.name === SELECTION_OUTLINE_NAME) toRemove.push(child);
         });
-        for (const child of toRemove) {
-          child.parent?.remove(child);
-          child.geometry?.dispose?.();
-          if (Array.isArray(child.material)) {
-            child.material.forEach((m) => m?.dispose?.());
+        for (const outline of toRemove) {
+          if (Array.isArray(outline.material)) {
+            outline.material.forEach((m) => m?.dispose?.());
           } else {
-            child.material?.dispose?.();
+            outline.material?.dispose?.();
           }
+          outline.parent?.remove(outline);
         }
       }
 
@@ -1849,6 +2662,32 @@
         }
       }
 
+      /**
+       * Thick green selection rim without WebGL linewidth (unsupported in gzweb's Three build).
+       * Renders slightly enlarged back-face shells of each mesh — reads as ~3px halo on cubes/primitives.
+       */
+      function addSelectionOutlineShells(mesh) {
+        const MeshBasicMaterial = guardianThree?.MeshBasicMaterial;
+        if (!MeshBasicMaterial || !mesh?.isMesh || !mesh.geometry) return;
+        const MeshCtor = mesh.constructor;
+        SELECTION_OUTLINE_SHELL_SCALES.forEach((scale, index) => {
+          const shell = new MeshCtor(mesh.geometry, new MeshBasicMaterial({
+            color: SELECTED_OUTLINE_COLOR,
+            side: THREE_BACK_SIDE,
+            depthTest: true,
+            depthWrite: false,
+            fog: false,
+            toneMapped: false,
+            transparent: index > 0,
+            opacity: index === 0 ? 1 : 0.55,
+          }));
+          shell.name = SELECTION_OUTLINE_NAME;
+          shell.renderOrder = GIZMO_RENDER_ORDER + index;
+          shell.scale.set(scale, scale, scale);
+          mesh.add(shell);
+        });
+      }
+
       function rebuildSelectionOutlines(scene2) {
         if (!scene2) return;
         clearAllSelectionOutlines(scene2);
@@ -1856,42 +2695,53 @@
         if (!id || !editorState.editorActive || isObstacleDeleting(id)) return;
         const root = findObstacleRoot(scene2, id);
         if (!root) return;
-        const EdgesGeometry = guardianThree?.EdgesGeometry;
-        const LineBasicMaterial = guardianThree?.MeshBasicMaterial;
-        const LineSegments = guardianThree?.LineSegments;
-        if (!EdgesGeometry || !LineBasicMaterial || !LineSegments) return;
         root.traverse((child) => {
           if (!child.isMesh || !child.geometry) return;
           if (child.name === SELECTION_OUTLINE_NAME) return;
-          const edges = new EdgesGeometry(child.geometry, 1);
-          const outline = new LineSegments(edges, new LineBasicMaterial({
-            color: SELECTED_OUTLINE_COLOR,
-            depthTest: false,
-            depthWrite: false,
-            fog: false,
-            toneMapped: false,
-          }));
-          outline.name = SELECTION_OUTLINE_NAME;
-          outline.renderOrder = GIZMO_RENDER_ORDER;
-          child.add(outline);
+          addSelectionOutlineShells(child);
         });
         if (typeof scene2.render === 'function') {
           scene2.render(0);
         }
       }
 
+      function onObstacleDeleteKeyDown(event) {
+        if (!editorState.editorActive) return;
+        if (event.key !== 'Delete' && event.key !== 'Backspace') return;
+        const tag = event.target?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || event.target?.isContentEditable) return;
+        const id = editorState.selectedID;
+        if (!id || isObstacleDeleting(id)) return;
+        event.preventDefault();
+        notifySwift({ type: 'deleteObstacleRequest', obstacleID: id });
+      }
+
+      function installObstacleDeleteKeyListener() {
+        if (obstacleDeleteKeyListenerInstalled) return;
+        window.addEventListener('keydown', onObstacleDeleteKeyDown, true);
+        obstacleDeleteKeyListenerInstalled = true;
+      }
+
       function setSelectedObstacle(scene2, id, notify = true) {
         if (id && isObstacleDeleting(id)) return;
-        if (editorState.selectedID === id) return;
         editorState.selectedID = id;
         if (scene2) rebuildSelectionOutlines(scene2);
         if (notify) notifyChanged(false);
       }
 
       function placeNewAt(scene2, clientX, clientY) {
-        const hit = placementHitOnMapBase(scene2, clientX, clientY);
-        if (!hit) return;
-        notifySwift({ type: 'placeObstacle', centerXM: hit.x, centerYM: hit.y });
+        logObstaclePlace('placeNewAt', `client=(${clientX.toFixed(0)},${clientY.toFixed(0)}) ${editorFlagsSummary()}`);
+        try {
+          const hit = placementHitOnMapBase(scene2, clientX, clientY, true);
+          if (!hit) {
+            logObstaclePlace('placeNewAt', 'aborted — placementHit failed');
+            return;
+          }
+          logObstaclePlace('placeNewAt', `notifySwift placeObstacle (${hit.x.toFixed(2)}, ${hit.y.toFixed(2)})`);
+          notifySwift({ type: 'placeObstacle', centerXM: hit.x, centerYM: hit.y });
+        } catch (err) {
+          logObstaclePlace('placeNewAt', `error — ${err?.message || String(err)}`);
+        }
       }
 
       function moveSelected(scene2, clientX, clientY) {
@@ -1961,27 +2811,88 @@
         placementGesture = null;
       }
 
+      function tryPlaceFromGesture(source) {
+        const gesture = placementGesture;
+        if (!gesture) {
+          logObstaclePlace('tryPlace', `${source} — no gesture`);
+          return;
+        }
+        if (gesture.cancelled) {
+          logObstaclePlace('tryPlace', `${source} — gesture cancelled`);
+          return;
+        }
+        if (gesture.placed) {
+          logObstaclePlace('tryPlace', `${source} — already placed`);
+          return;
+        }
+        if (gesture.shiftHeld) {
+          logObstaclePlace('tryPlace', `${source} — shift held`);
+          return;
+        }
+        if (gesture.dragged) {
+          logObstaclePlace('tryPlace', `${source} — dragged`);
+          return;
+        }
+        const now = Date.now();
+        if (now < placementArmedAt) {
+          logObstaclePlace('tryPlace', `${source} — not armed (${placementArmedAt - now}ms left)`);
+          return;
+        }
+        const scene2 = getScene2();
+        if (!scene2) {
+          logObstaclePlace('tryPlace', `${source} — scene2 missing`);
+          return;
+        }
+        if (!editorState.placementActive) {
+          logObstaclePlace('tryPlace', `${source} — placementActive=false ${editorFlagsSummary()}`);
+          return;
+        }
+        logObstaclePlace('tryPlace', `${source} — invoking placeNewAt ${draftPlacementSummary()}`);
+        placeNewAt(scene2, gesture.clientX, gesture.clientY);
+        gesture.placed = true;
+        cancelPlacementGesture();
+      }
+
+      function onPlacementWaitElapsed() {
+        const gesture = placementGesture;
+        if (!gesture || gesture.cancelled || gesture.placed) return;
+        if (gesture.dragged || gesture.shiftHeld) return;
+        logObstaclePlace('timer', `wait ${PLACEMENT_WAIT_MS}ms elapsed`);
+        tryPlaceFromGesture('timer');
+      }
+
+      function cancelPlacementForShiftOrDrag(reason) {
+        const gesture = placementGesture;
+        if (!gesture || gesture.cancelled || gesture.placed) return;
+        gesture.cancelled = true;
+        if (gesture.timerId) clearTimeout(gesture.timerId);
+        placementGesture = null;
+        logObstaclePlace('gesture cancel', reason);
+      }
+
+      function onPlacementKeyDown(event) {
+        if (!placementGesture) return;
+        if (event.key === 'Shift' || event.shiftKey) {
+          placementGesture.shiftHeld = true;
+          cancelPlacementForShiftOrDrag('shift key');
+        }
+      }
+
       function beginPlacementGesture(clientX, clientY) {
         cancelPlacementGesture();
         placementGesture = {
           clientX,
           clientY,
-          timerId: null,
           cancelled: false,
           placed: false,
           dragged: false,
           shiftHeld: false,
+          timerId: setTimeout(onPlacementWaitElapsed, PLACEMENT_WAIT_MS),
         };
-      }
-
-      function tryPlaceFromGesture() {
-        const gesture = placementGesture;
-        if (!gesture || gesture.cancelled || gesture.placed || gesture.dragged) return;
-        if (Date.now() < placementArmedAt) return;
-        const scene2 = getScene2();
-        if (!scene2 || !editorState.placementActive) return;
-        placeNewAt(scene2, gesture.clientX, gesture.clientY);
-        gesture.placed = true;
+        logObstaclePlace(
+          'pointerDown',
+          `begin placement gesture (${clientX.toFixed(0)},${clientY.toFixed(0)}) wait=${PLACEMENT_WAIT_MS}ms ${editorFlagsSummary()} ${draftPlacementSummary()}`
+        );
       }
 
       function beginObstacleDrag(scene2, dom, event, id) {
@@ -1999,7 +2910,7 @@
             y: Number(selected.centerYM) || 0,
           },
         };
-        setSelectedObstacle(scene2, id, false);
+        setSelectedObstacle(scene2, id, true);
         setObstacleDragLock(scene2, id, true);
         setOrbitEnabled(scene2, false);
         syncObstacleVisualTransforms(scene2, id);
@@ -2020,19 +2931,39 @@
       }
 
       function onPointerDown(event) {
-        if (!editorState.editorActive) return;
+        recordClickHandler('obstacle-capture-pointerDown');
+        if (!editorState.editorActive) {
+          logObstaclePlace('HANDLER obstacle pointerDown', 'ignored — editorActive=false');
+          return;
+        }
+        logObstaclePlace('HANDLER obstacle pointerDown', 'entered');
         const scene2 = getScene2();
-        if (!scene2) return;
-        if (event.button !== 0 || event.shiftKey) return;
-        const dom = scene2.getDomElement();
+        if (!scene2) {
+          logObstaclePlace('pointerDown', 'ignored — scene2 missing');
+          return;
+        }
+        if (event.button !== 0) return;
+        if (event.shiftKey) {
+          logObstaclePlace('pointerDown', 'ignored — shift+click');
+          return;
+        }
+        const dom = obstaclePointerRoot(scene2);
+        if (!dom) {
+          logObstaclePlace('pointerDown', 'ignored — no pointer root');
+          return;
+        }
         const rect = dom.getBoundingClientRect();
         if (
           event.clientX < rect.left || event.clientX > rect.right
           || event.clientY < rect.top || event.clientY > rect.bottom
-        ) return;
+        ) {
+          logObstaclePlace('pointerDown', 'ignored — outside scene');
+          return;
+        }
 
         const hitId = pickObstacleId(scene2, event.clientX, event.clientY);
         if (hitId) {
+          logObstaclePlace('pointerDown', `obstacle drag start id=${hitId}`);
           cancelPlacementGesture();
           beginObstacleDrag(scene2, dom, event, hitId);
           return;
@@ -2040,6 +2971,7 @@
 
         cancelPlacementGesture();
         if (editorState.selectedID) {
+          logObstaclePlace('pointerDown', `clear selection was=${editorState.selectedID}`);
           if (obstacleDrag) {
             endObstacleDrag(scene2, event, obstacleDrag.moved);
           }
@@ -2048,6 +2980,8 @@
         }
         if (editorState.placementActive) {
           beginPlacementGesture(event.clientX, event.clientY);
+        } else {
+          logObstaclePlace('pointerDown', `ignored — placementActive=false ${editorFlagsSummary()}`);
         }
       }
 
@@ -2059,12 +2993,16 @@
           event.preventDefault();
           return;
         }
+
         const gesture = placementGesture;
         if (gesture && !gesture.cancelled && !gesture.placed && !gesture.dragged) {
-          const moved = Math.hypot(event.clientX - gesture.clientX, event.clientY - gesture.clientY);
+          const moved = Math.hypot(
+            event.clientX - gesture.clientX,
+            event.clientY - gesture.clientY
+          );
           if (moved > PLACEMENT_DRAG_PX) {
             gesture.dragged = true;
-            cancelPlacementGesture();
+            cancelPlacementForShiftOrDrag(`drag > ${PLACEMENT_DRAG_PX}px`);
           }
         }
       }
@@ -2078,90 +3016,252 @@
           return;
         }
 
-        const placement = placementGesture;
-        if (placement && !placement.cancelled && !placement.placed && !placement.dragged) {
-          tryPlaceFromGesture();
+        const gesture = placementGesture;
+        if (!gesture) return;
+        if (gesture.cancelled) {
+          logObstaclePlace('pointerUp', 'gesture was cancelled');
           cancelPlacementGesture();
           return;
         }
-
+        if (gesture.placed) {
+          logObstaclePlace('pointerUp', 'gesture already placed');
+          cancelPlacementGesture();
+          return;
+        }
+        if (gesture.timerId) {
+          clearTimeout(gesture.timerId);
+          gesture.timerId = null;
+        }
+        if (!gesture.dragged && !gesture.shiftHeld) {
+          logObstaclePlace('pointerUp', 'release — try place');
+          tryPlaceFromGesture('pointerUp');
+          return;
+        }
+        if (gesture.dragged) {
+          logObstaclePlace('pointerUp', 'drag — no place');
+        } else {
+          logObstaclePlace('pointerUp', 'shift held — no place');
+        }
         cancelPlacementGesture();
       }
 
+      function obstaclePointerRoot(scene2) {
+        return document.getElementById('scene') || scene2?.getDomElement?.() || null;
+      }
+
+      function uninstallHandlers() {
+        if (pointerDom) {
+          pointerDom.removeEventListener('pointerdown', onPointerDown, true);
+          pointerDom.removeEventListener('pointermove', onPointerMove, true);
+          pointerDom.removeEventListener('pointerup', onPointerUp, true);
+          pointerDom.removeEventListener('pointercancel', onPointerUp, true);
+          pointerDom.removeEventListener('contextmenu', onContextMenu, true);
+          pointerDom = null;
+        }
+      }
+
       function installHandlers(scene2) {
-        if (installed) return;
-        const dom = scene2.getDomElement();
+        const dom = obstaclePointerRoot(scene2);
+        if (!dom) {
+          logObstaclePlace('installHandlers', 'no #scene or canvas dom');
+          return;
+        }
+        if (pointerDom === dom) {
+          logObstaclePlace('installHandlers', `already bound on #${dom.id || dom.tagName}`);
+          return;
+        }
+        uninstallHandlers();
         dom.addEventListener('pointerdown', onPointerDown, true);
         dom.addEventListener('pointermove', onPointerMove, true);
         dom.addEventListener('pointerup', onPointerUp, true);
         dom.addEventListener('pointercancel', onPointerUp, true);
         dom.addEventListener('contextmenu', onContextMenu, true);
-        installed = true;
+        pointerDom = dom;
+        if (!placementKeyListenerInstalled) {
+          window.addEventListener('keydown', onPlacementKeyDown, true);
+          placementKeyListenerInstalled = true;
+        }
+        installObstacleDeleteKeyListener();
+        const canvas = scene2?.getDomElement?.();
+        instrumentGzwebOrbitCanvas(scene2);
+        logObstaclePlace(
+          'installHandlers',
+          `bound on #${dom.id || dom.tagName} canvas=${canvas ? canvas.tagName : 'none'}`
+        );
+      }
+
+      function routeScenePointer(phase, clientX, clientY) {
+        logObstaclePlace(
+          'routeScenePointer',
+          `${phase} (${Number(clientX).toFixed(0)},${Number(clientY).toFixed(0)}) ${editorFlagsSummary()}`
+        );
+        if (!editorState.editorActive) {
+          logObstaclePlace('routeScenePointer', 'ignored — editorActive=false');
+          return;
+        }
+        const scene2 = getScene2();
+        if (!scene2) {
+          logObstaclePlace('routeScenePointer', 'ignored — scene2 missing');
+          return;
+        }
+        const dom = obstaclePointerRoot(scene2);
+        if (!dom) {
+          logObstaclePlace('routeScenePointer', 'ignored — no pointer root');
+          return;
+        }
+        const rect = dom.getBoundingClientRect();
+        if (
+          clientX < rect.left || clientX > rect.right
+          || clientY < rect.top || clientY > rect.bottom
+        ) {
+          logObstaclePlace('routeScenePointer', 'ignored — outside scene');
+          return;
+        }
+        if (phase === 'down') {
+          if (obstacleDrag) return;
+          const hitId = pickObstacleId(scene2, clientX, clientY);
+          if (hitId) {
+            cancelPlacementGesture();
+            logObstaclePlace('routeScenePointer', `down on obstacle ${hitId} — use DOM drag`);
+            return;
+          }
+          cancelPlacementGesture();
+          if (editorState.selectedID) {
+            setSelectedObstacle(scene2, null, true);
+            return;
+          }
+          if (editorState.placementActive) {
+            beginPlacementGesture(clientX, clientY);
+          }
+          return;
+        }
+        if (phase === 'up') {
+          if (obstacleDrag) return;
+          const gesture = placementGesture;
+          if (!gesture) return;
+          if (gesture.cancelled || gesture.placed) {
+            cancelPlacementGesture();
+            return;
+          }
+          if (gesture.timerId) {
+            clearTimeout(gesture.timerId);
+            gesture.timerId = null;
+          }
+          if (!gesture.shiftHeld) {
+            tryPlaceFromGesture('route-up');
+          }
+          cancelPlacementGesture();
+        }
+      }
+
+      function placeAtScreen(clientX, clientY) {
+        const scene2 = getScene2();
+        if (!scene2) return false;
+        if (!editorState.editorActive || !editorState.placementActive) {
+          logObstaclePlace('placeAtScreen', `blocked ${editorFlagsSummary()}`);
+          return false;
+        }
+        placeNewAt(scene2, clientX, clientY);
+        return true;
       }
 
       return {
+        getDebugFlags() {
+          return `${editorFlagsSummary()} handlersBound=${Boolean(pointerDom)}`;
+        },
+        routeScenePointer,
+        placeAtScreen,
         attach(manager) {
           const scene2 = manager?.scene;
-          if (!scene2) return;
+          if (!scene2) {
+            logObstaclePlace('attach', 'skipped — manager.scene missing');
+            return;
+          }
           installObstaclePoseGuard(scene2);
           removeObstacleGizmo(scene2);
           installHandlers(scene2);
         },
         applyState(state) {
-          const prevDeletingID = editorState.deletingID;
-          const prevPlacementActive = editorState.placementActive;
-          const dragID = obstacleDrag?.id;
-          const draggedLive = dragID
-            ? editorState.obstacles.find((o) => o.id === dragID)
-            : null;
-          editorState = {
-            editorActive: Boolean(state?.editorActive),
-            placementActive: Boolean(state?.placementActive),
-            selectedID: state?.selectedID ?? null,
-            deletingID: state?.deletingID ?? null,
-            draft: state?.draft ?? {},
-            obstacles: Array.isArray(state?.obstacles) ? state.obstacles : [],
-            mapHalfExtentM: Number(state?.mapHalfExtentM) > 0
-              ? Number(state.mapHalfExtentM)
-              : MAP_GROUND_HALF_EXTENT_M,
-          };
-          if (draggedLive && dragID) {
-            const incoming = editorState.obstacles.find((o) => o.id === dragID);
-            if (incoming) {
-              incoming.centerXM = draggedLive.centerXM;
-              incoming.centerYM = draggedLive.centerYM;
-              incoming.centerZM = draggedLive.centerZM;
-              incoming.yawDeg = draggedLive.yawDeg;
+          try {
+            postObstaclePlaceDebug('applyState enter');
+            const prevDeletingID = editorState.deletingID;
+            const prevEditorActive = editorState.editorActive;
+            const prevPlacementActive = editorState.placementActive;
+            const dragID = obstacleDrag?.id;
+            const draggedLive = dragID
+              ? editorState.obstacles.find((o) => o.id === dragID)
+              : null;
+            const defaultZones = {
+              start: { placed: false, centerXM: 0, centerYM: 0, centerZM: 0, radiusM: 30, shape: 'circle' },
+              end: { placed: false, centerXM: 0, centerYM: 0, centerZM: 0, radiusM: 30, shape: 'circle' },
+            };
+            editorState = {
+              editorActive: Boolean(state?.editorActive),
+              placementActive: Boolean(state?.placementActive),
+              selectedID: state?.selectedID ?? null,
+              deletingID: state?.deletingID ?? null,
+              draft: state?.draft ?? {},
+              obstacles: Array.isArray(state?.obstacles) ? state.obstacles : [],
+              mapHalfExtentM: Number(state?.mapHalfExtentM) > 0
+                ? Number(state.mapHalfExtentM)
+                : MAP_GROUND_HALF_EXTENT_M,
+              zones: state?.zones ?? defaultZones,
+            };
+            if (draggedLive && dragID) {
+              const incoming = editorState.obstacles.find((o) => o.id === dragID);
+              if (incoming) {
+                incoming.centerXM = draggedLive.centerXM;
+                incoming.centerYM = draggedLive.centerYM;
+                incoming.centerZM = draggedLive.centerZM;
+                incoming.yawDeg = draggedLive.yawDeg;
+              }
             }
-          }
-          if (editorState.placementActive && !prevPlacementActive) {
-            placementArmedAt = Date.now() + PLACEMENT_ARM_MS;
-          }
-          cancelPlacementGesture();
-          const preserveDrag = obstacleDrag;
-          const preserveDragFrame = obstacleDragFrame;
-          obstacleDrag = null;
-          obstacleDragFrame = 0;
-          const scene2 = getScene2();
-          if (scene2) {
-            if (editorState.deletingID && editorState.deletingID !== prevDeletingID) {
-              startDeleteFade(scene2, editorState.deletingID);
-            } else if (!editorState.deletingID && prevDeletingID) {
-              const stillListed = editorState.obstacles.some((o) => o.id === prevDeletingID);
-              stopDeleteFade(scene2, { restore: stillListed, id: prevDeletingID });
+            if (editorState.placementActive && !prevPlacementActive) {
+              placementArmedAt = Date.now() + PLACEMENT_ARM_MS;
+              logObstaclePlace('applyState', `placement armed for ${PLACEMENT_ARM_MS}ms ${editorFlagsSummary()}`);
             }
-            purgeOrphanObstacleMeshes(scene2);
-            syncObstacleVisualTransforms(scene2);
-            rebuildSelectionOutlines(scene2);
-          } else if (!editorState.deletingID && prevDeletingID) {
-            stopDeleteFade(null, { restore: false, id: prevDeletingID });
+            if (editorState.editorActive !== prevEditorActive
+              || editorState.placementActive !== prevPlacementActive) {
+              logObstaclePlace('applyState flags', `${editorFlagsSummary()} ${draftPlacementSummary()}`);
+            }
+            cancelPlacementGesture();
+            const preserveDrag = obstacleDrag;
+            const preserveDragFrame = obstacleDragFrame;
+            obstacleDrag = null;
+            obstacleDragFrame = 0;
+            const scene2 = getScene2();
+            if (scene2) {
+              if (editorState.editorActive) {
+                installHandlers(scene2);
+                installObstacleDeleteKeyListener();
+                instrumentGzwebOrbitCanvas(scene2);
+                setObstaclePlacementModeUI(scene2, editorState.placementActive);
+              } else {
+                setObstaclePlacementModeUI(scene2, false);
+              }
+              if (editorState.deletingID && editorState.deletingID !== prevDeletingID) {
+                startDeleteFade(scene2, editorState.deletingID);
+              } else if (!editorState.deletingID && prevDeletingID) {
+                const stillListed = editorState.obstacles.some((o) => o.id === prevDeletingID);
+                stopDeleteFade(scene2, { restore: stillListed, id: prevDeletingID });
+              }
+              purgeOrphanObstacleMeshes(scene2);
+              syncObstacleVisualTransforms(scene2);
+              rebuildSelectionOutlines(scene2);
+            } else {
+              logObstaclePlace('applyState', 'scene2 missing — handlers not installed');
+            }
+            obstacleDrag = preserveDrag;
+            obstacleDragFrame = preserveDragFrame;
+            if (preserveDrag && scene2) {
+              startObstacleDragFollowLoop(scene2);
+            }
+            logObstaclePlace('applyState done', editorFlagsSummary());
+            return true;
+          } catch (err) {
+            logObstaclePlace('applyState error', err?.message || String(err));
+            return false;
           }
-          obstacleDrag = preserveDrag;
-          obstacleDragFrame = preserveDragFrame;
-          if (preserveDrag && scene2) {
-            startObstacleDragFollowLoop(scene2);
-          }
-          return true;
         },
       };
     }
@@ -2267,6 +3367,7 @@
         return;
       }
       commitViewportFit(manager, 'oblique');
+      mapDimensionHud.attach();
       onReady?.();
     }
 
@@ -2337,8 +3438,10 @@
             }
             active = await connectOnce(SceneManager);
             bindViewerSession(active);
+            mapDimensionHud.attach();
             zoneEditor.attach(active.manager);
             obstacleEditor.attach(active.manager);
+            installSceneTileClickProbe(obstacleEditor);
             if (pendingZoneEditorState) {
               zoneEditor.applyState(pendingZoneEditorState);
             }

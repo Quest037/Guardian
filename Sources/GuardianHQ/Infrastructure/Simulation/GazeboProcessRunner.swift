@@ -58,11 +58,13 @@ final class GazeboProcessRunner {
         do {
             try proc.run()
             process = proc
+            let pid = proc.processIdentifier
             GuardianGazeboSpawnRegistry.register(
-                pid: proc.processIdentifier,
+                pid: pid,
                 executablePath: spec.executable,
                 arguments: spec.arguments
             )
+            GuardianGazeboOrphanBlitz.noteLiveSpawn(pid: pid)
         } catch {
             try? stdinWriteKeepAlive?.close()
             stdinWriteKeepAlive = nil
@@ -125,6 +127,7 @@ final class GazeboProcessRunner {
         guard !didTeardown else { return }
         didTeardown = true
         if let pid = process?.processIdentifier {
+            GuardianGazeboOrphanBlitz.noteLiveSpawnEnded(pid: pid)
             GuardianGazeboSpawnRegistry.unregister(pid: pid)
         }
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil

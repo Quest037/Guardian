@@ -60,9 +60,15 @@ struct WorldBuilderView: View {
         }
         .onChange(of: builder.zoneEditorRevision) { _ in
             pushViewportZoneState()
+            if builder.openSceneToolPanel == .obstacleEditor {
+                pushViewportObstacleState()
+            }
         }
         .onChange(of: builder.obstacleViewportRevision) { _ in
             pushViewportObstacleState()
+            if builder.openSceneToolPanel == .zoneEditor {
+                pushViewportZoneState()
+            }
         }
         .onChange(of: builder.obstacleSelectedID) { _ in
             pushViewportObstacleState()
@@ -104,6 +110,7 @@ struct WorldBuilderView: View {
                 builder.closeSceneToolPanel()
             }
         }
+        .modifier(WorldBuilderObstacleDeleteKeyModifier(builder: builder))
     }
 
     private func pushViewportZoneState() {
@@ -114,12 +121,20 @@ struct WorldBuilderView: View {
             tapToEditEnabled: builder.canEditScene && builder.openSceneToolPanel != .obstacleEditor,
             placementKind: builder.zonePlacementKind,
             zones: zones,
-            mapHalfExtentM: builder.activeFloorHalfExtentM
+            obstacles: builder.obstaclesSnapshot,
+            mapHalfExtentM: builder.activeFloorHalfExtentM,
+            maxZoneRadiusM: builder.activeZoneMaxRadiusM
         )
     }
 
     private func pushViewportObstacleState() {
+        if fleetLink.isDebugEnabled {
+            builder.logObstacleEditorViewportPush()
+            builder.logMapObstaclePlace("swift", detail: "pushViewportObstacleState → gzweb dispatch")
+        }
         let obstacles = builder.obstaclesSnapshot
+        let zones = builder.draftManifest.map(WorldBuilderZoneManifestSupport.zones(from:))
+            ?? .empty
         viewportObstacles.pushEditorState(
             editorActive: builder.openSceneToolPanel == .obstacleEditor,
             placementActive: builder.obstaclePlacementToolActive,
@@ -127,6 +142,7 @@ struct WorldBuilderView: View {
             draft: builder.obstaclePlacementDraft,
             obstacles: obstacles,
             mapHalfExtentM: builder.activeFloorHalfExtentM,
+            zones: zones,
             deletingID: builder.obstacleDeletingID
         )
     }
@@ -361,13 +377,7 @@ struct WorldBuilderView: View {
     /// Swift spinner until the web viewer is mounted; gzweb HTML overlay handles load after that.
     private var showsEmbeddedViewportSpinner: Bool {
         guard builder.hasOpenWorld else { return false }
-        guard let worldID = builder.resolvedEmbeddedWorldID,
-              let viewport = gazebo.embeddedViewport,
-              viewport.worldID == worldID else {
-            return true
-        }
-        if case .live = viewport.phase { return false }
-        return true
+        return !builder.isBuilderEmbeddedWorldReadyForMap
     }
 
     private var gazeboViewportWithBuildRail: some View {
@@ -400,7 +410,26 @@ struct WorldBuilderView: View {
         .overlay(alignment: .topLeading) {
             sceneToolPanelOverlay
         }
+        .overlay(alignment: .bottom) {
+            if fleetLink.isDebugEnabled {
+                WorldBuilderMapDebugOverlay(
+                    lines: builder.mapDebugLines,
+                    theme: theme,
+                    accessibilityLabel: "World Builder map debug log"
+                )
+            }
+        }
         .animation(GuardianMotion.drawerSlide, value: builder.openSceneToolPanel)
+        .onChange(of: gazebo.embeddedViewport) { viewport in
+            builder.reconcileActiveBuilderWorldIfNeeded()
+            builder.noteEmbeddedViewport(viewport)
+        }
+        .onChange(of: fleetLink.isDebugEnabled) { enabled in
+            if enabled {
+                builder.logMap("Debug overlay enabled")
+                builder.noteEmbeddedViewport(gazebo.embeddedViewport)
+            }
+        }
     }
 
     @ViewBuilder
@@ -411,9 +440,20 @@ struct WorldBuilderView: View {
                 footZMinM: builder.obstacleFootZLimitsM.min,
                 footZMaxM: builder.obstacleFootZLimitsM.max,
                 theme: theme,
+                placementActive: builder.obstaclePlacementToolActive
+                    && builder.obstacleSelectedID == nil,
                 isEditingPlaced: builder.obstacleSelectedID != nil,
                 obstacleCount: builder.obstaclesSnapshot.count,
                 isSyncInFlight: builder.isObstacleMapRepairInFlight,
+                onClone: {
+                    guard let id = builder.obstacleSelectedID else { return }
+                    builder.cloneObstacle(id: id)
+                    pushViewportObstacleState()
+                },
+                onDelete: {
+                    guard let id = builder.obstacleSelectedID else { return }
+                    builder.requestDeleteObstacle(id: id)
+                },
                 onRepairMap: {
                     Task { await builder.repairObstacleMapAlignment() }
                 },
@@ -428,11 +468,15 @@ struct WorldBuilderView: View {
                 placementKind: builder.zonePlacementKind,
                 zoneShape: builder.activeZoneShape,
                 zoneRadiusM: builder.activeZoneRadiusM,
+                zoneRadiusRangeM: WorldBuilderZoneState.minRadiusM ... builder.activeZoneMaxRadiusM,
                 onSelectPlacementKind: { builder.setZonePlacementKind($0) },
                 onSelectZoneShape: { builder.setActiveZoneShape($0) },
                 onZoneRadiusChange: { radius in
                     if builder.setActiveZoneRadiusM(radius) {
-                        toastCenter.show("Zone does not fit on the map", style: .error)
+                        toastCenter.show(
+                            "Zones must fit on the map without overlapping each other or obstacle models",
+                            style: .error
+                        )
                     }
                     pushViewportZoneState()
                 },
@@ -446,9 +490,7 @@ struct WorldBuilderView: View {
 
     private var embeddedViewportStack: some View {
         Group {
-            if let viewport = gazebo.embeddedViewport,
-               let worldID = builder.resolvedEmbeddedWorldID,
-               viewport.worldID == worldID {
+            if let viewport = builder.builderEmbeddedViewportForMap {
                 GazeboWebViewportView(
                     websocketPort: viewport.websocketPort,
                     gazeboWorldName: viewport.gazeboWorldName,
@@ -463,9 +505,15 @@ struct WorldBuilderView: View {
                     groundHalfExtentM: builder.activeFloorHalfExtentM,
                     orbitMinDistanceM: builder.activeOrbitMinDistanceM,
                     onZonesChanged: { zones, jsZoneFailed in
-                        let swiftFailed = builder.applyZonesFromViewport(zones)
+                        let swiftFailed = builder.applyZonesFromViewport(
+                            zones,
+                            jsOutOfBounds: jsZoneFailed
+                        )
                         if jsZoneFailed || swiftFailed {
-                            toastCenter.show("Zone does not fit on the map", style: .error)
+                            toastCenter.show(
+                                "Zones must fit on the map without overlapping each other or obstacle models",
+                                style: .error
+                            )
                         }
                         viewportZones.pushZones(builder.zonesSnapshot)
                     },
@@ -508,11 +556,18 @@ struct WorldBuilderView: View {
                         builder.requestDeleteObstacle(id: id)
                     },
                     onObstaclePlaceRequest: { x, y in
+                        builder.logMapObstaclePlace(
+                            "swift bridge placeObstacle",
+                            detail: "centerXM=\(String(format: "%.2f", x)) centerYM=\(String(format: "%.2f", y))"
+                        )
                         builder.placeObstacleAt(centerXM: x, centerYM: y)
                         pushViewportObstacleState()
+                    },
+                    onObstaclePlaceDebug: { message in
+                        builder.logMapObstaclePlace("gzweb", detail: message)
                     }
                 )
-                .id(worldID)
+                .id(viewport.worldID)
             } else {
                 viewportPreparingSurface
             }
@@ -1006,12 +1061,11 @@ private struct WorldBuilderSceneToolBar: View {
     let placementKind: WorldBuilderZoneKind
     let zoneShape: TrainingEnvironmentZoneShape
     let zoneRadiusM: Double
+    let zoneRadiusRangeM: ClosedRange<Double>
     let onSelectPlacementKind: (WorldBuilderZoneKind) -> Void
     let onSelectZoneShape: (TrainingEnvironmentZoneShape) -> Void
     let onZoneRadiusChange: (Double) -> Void
     let onClose: () -> Void
-
-    private static let radiusRangeM = WorldBuilderZoneState.minRadiusM ... WorldBuilderZoneState.maxRadiusM
 
     var body: some View {
         VStack(alignment: .leading, spacing: GuardianSpacing.sm) {
@@ -1061,7 +1115,7 @@ private struct WorldBuilderSceneToolBar: View {
                         get: { zoneRadiusM },
                         set: { onZoneRadiusChange($0) }
                     ),
-                    in: Self.radiusRangeM,
+                    in: zoneRadiusRangeM,
                     step: 5
                 )
             }
@@ -1101,6 +1155,32 @@ private struct WorldBuilderSceneToolBar: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+        }
+    }
+}
+
+/// Delete / Backspace while a placed model is selected opens the obstacle delete confirm (map focus).
+private struct WorldBuilderObstacleDeleteKeyModifier: ViewModifier {
+    @ObservedObject var builder: WorldBuilderController
+
+    private var isEnabled: Bool {
+        builder.canEditScene
+            && builder.openSceneToolPanel == .obstacleEditor
+            && builder.obstacleSelectedID != nil
+            && builder.pendingObstacleDeleteID == nil
+    }
+
+    func body(content: Content) -> some View {
+        if #available(macOS 14.0, *) {
+            content
+                .focusable()
+                .onKeyPress(.delete) {
+                    guard isEnabled, let id = builder.obstacleSelectedID else { return .ignored }
+                    builder.requestDeleteObstacle(id: id)
+                    return .handled
+                }
+        } else {
+            content
         }
     }
 }

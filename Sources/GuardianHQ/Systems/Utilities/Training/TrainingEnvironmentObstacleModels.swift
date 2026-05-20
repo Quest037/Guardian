@@ -303,6 +303,8 @@ enum TrainingEnvironmentObstacleNaming {
 enum WorldBuilderObstacleManifestSupport {
     static let dimensionMinM = 0.25
     static let dimensionMaxM = 80.0
+    /// Cuboid length (m) may exceed ``dimensionMaxM`` for long ground structures.
+    static let cuboidLengthMaxM = 100.0
     /// Obstacle foot (lowest point) height (m) relative to map-base top (z = 0).
     static func footZLimitsM(
         sceneType: TrainingEnvironmentSceneType,
@@ -488,7 +490,7 @@ enum WorldBuilderObstacleManifestSupport {
             }
         case .cuboid:
             if var cuboid = record.cuboid {
-                cuboid.lengthM = clamp(cuboid.lengthM)
+                cuboid.lengthM = min(cuboidLengthMaxM, max(dimensionMinM, cuboid.lengthM))
                 cuboid.widthM = clamp(cuboid.widthM)
                 cuboid.heightM = clamp(cuboid.heightM)
                 record.cuboid = cuboid
@@ -600,5 +602,79 @@ enum WorldBuilderObstacleBoundsCheck {
         obstacles.indices.allSatisfy { index in
             snapObstacleToFloor(&obstacles[index], floor: floor)
         }
+    }
+
+    /// `true` when the obstacle footprint shares area with a placed start or end zone.
+    static func overlapsPlacedZone(
+        _ record: TrainingEnvironmentObstacleRecord,
+        _ zone: WorldBuilderZoneState
+    ) -> Bool {
+        guard zone.placed else { return false }
+        let obstaclePoly = edgePoints(for: record)
+        let zonePoly = WorldBuilderZoneBoundsCheck.edgePoints(for: zone).map { (x: $0.x, y: $0.y) }
+        return convexPolygonsOverlap(obstaclePoly, zonePoly)
+    }
+
+    static func overlapsAnyPlacedZone(
+        _ record: TrainingEnvironmentObstacleRecord,
+        zones: WorldBuilderZonesSnapshot
+    ) -> Bool {
+        overlapsPlacedZone(record, zones.start) || overlapsPlacedZone(record, zones.end)
+    }
+
+    /// Map-base fit and no overlap with placed start/end zones.
+    static func fitsPlacement(
+        _ record: TrainingEnvironmentObstacleRecord,
+        floor: WorldBuilderZoneFloorRect,
+        zones: WorldBuilderZonesSnapshot
+    ) -> Bool {
+        fitsOnFloor(record, floor: floor) && !overlapsAnyPlacedZone(record, zones: zones)
+    }
+
+    private static let separationEpsilonM = 1e-6
+
+    private static func projectPolygon(
+        _ poly: [(x: Double, y: Double)],
+        axis: (x: Double, y: Double)
+    ) -> (min: Double, max: Double) {
+        var minP = Double.infinity
+        var maxP = -Double.infinity
+        for point in poly {
+            let projection = point.x * axis.x + point.y * axis.y
+            minP = min(minP, projection)
+            maxP = max(maxP, projection)
+        }
+        return (minP, maxP)
+    }
+
+    /// Separating-axis test for two convex polygons (obstacle OBB vs zone footprint).
+    static func convexPolygonsOverlap(
+        _ a: [(x: Double, y: Double)],
+        _ b: [(x: Double, y: Double)]
+    ) -> Bool {
+        guard a.count >= 3, b.count >= 3 else { return false }
+        let polygons = [a, b]
+        for poly in polygons {
+            let count = poly.count
+            for index in 0..<count {
+                let p1 = poly[index]
+                let p2 = poly[(index + 1) % count]
+                let edgeX = p2.x - p1.x
+                let edgeY = p2.y - p1.y
+                var axisX = -edgeY
+                var axisY = edgeX
+                let length = (axisX * axisX + axisY * axisY).squareRoot()
+                guard length > 1e-12 else { continue }
+                axisX /= length
+                axisY /= length
+                let aRange = projectPolygon(a, axis: (axisX, axisY))
+                let bRange = projectPolygon(b, axis: (axisX, axisY))
+                if aRange.max <= bRange.min + separationEpsilonM
+                    || bRange.max <= aRange.min + separationEpsilonM {
+                    return false
+                }
+            }
+        }
+        return true
     }
 }

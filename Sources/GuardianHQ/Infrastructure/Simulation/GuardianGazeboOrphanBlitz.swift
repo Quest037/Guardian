@@ -10,11 +10,69 @@ enum GuardianGazeboOrphanBlitz {
     private static let appLaunchedAt = Date().timeIntervalSince1970
 
     private static let coldLaunchLock = NSLock()
+    private static let suppressLock = NSLock()
     nonisolated(unsafe) private static var coldLaunchBlitzFinished = false
     nonisolated(unsafe) private static var coldLaunchSemaphores: [DispatchSemaphore] = []
+    /// Wall-clock epoch seconds until which **teardown** blitz is skipped (embedded map handoff only — not cold launch).
+    nonisolated(unsafe) private static var suppressUntilEpoch: TimeInterval = 0
+    nonisolated(unsafe) private static var liveProtectedPids: Set<pid_t> = []
 
+    /// Teardown followed by another embedded spawn (map switch) — must cover async blitz from the *prior* stop.
+    static let embeddedMapHandoffSuppressSeconds: TimeInterval = 60
+
+    /// Skips ``kickoffWhenAllWorldsStopped`` / teardown blitz while a new `gz sim` is starting (avoids killing the fresh server).
+    static func suppressFor(seconds: TimeInterval) {
+        let until = Date().timeIntervalSince1970 + seconds
+        suppressLock.lock()
+        suppressUntilEpoch = max(suppressUntilEpoch, until)
+        suppressLock.unlock()
+    }
+
+    /// Call **before** ``stopAllEmbeddedViewportWorldsCompletely`` when a new map load follows (World Builder / Training map switch).
+    static func suppressDuringEmbeddedMapHandoff() {
+        suppressFor(seconds: embeddedMapHandoffSuppressSeconds)
+    }
+
+    /// In-memory guard so an in-flight blitz cannot SIGTERM a process that just registered (file registry can lag).
+    static func noteLiveSpawn(pid: pid_t) {
+        guard pid > 1 else { return }
+        suppressLock.lock()
+        liveProtectedPids.insert(pid)
+        suppressLock.unlock()
+    }
+
+    static func noteLiveSpawnEnded(pid: pid_t) {
+        guard pid > 1 else { return }
+        suppressLock.lock()
+        liveProtectedPids.remove(pid)
+        suppressLock.unlock()
+    }
+
+    private static func liveProtectedPidsSnapshot() -> Set<pid_t> {
+        suppressLock.lock()
+        defer { suppressLock.unlock() }
+        return liveProtectedPids
+    }
+
+    private static var isSuppressed: Bool {
+        suppressLock.lock()
+        defer { suppressLock.unlock() }
+        return Date().timeIntervalSince1970 < suppressUntilEpoch
+    }
+
+    /// Cold launch never consults ``isSuppressed`` (regression guard for tests).
+    static let respectsHandoffSuppressOnColdLaunch = false
+
+    /// Force-quit orphans from a prior session. Ignores ``suppressDuringEmbeddedMapHandoff`` so an early map open cannot skip the sweep.
     static func kickoffFromColdLaunch() {
-        kickoffInBackground(markColdLaunch: true)
+        guard ProcessInfo.processInfo.environment[skipEnvKey] == nil else {
+            finishColdLaunchBlitz()
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            runBlocking(respectHandoffSuppress: false)
+            finishColdLaunchBlitz()
+        }
     }
 
     static func blockUntilColdLaunchBlitzFinishedIfNeeded() {
@@ -41,27 +99,27 @@ enum GuardianGazeboOrphanBlitz {
     }
 
     static func kickoffWhenAllWorldsStopped() {
-        kickoffInBackground()
+        kickoffTeardownBlitzInBackground()
     }
 
-    private static func kickoffInBackground(markColdLaunch: Bool = false) {
-        guard ProcessInfo.processInfo.environment[skipEnvKey] == nil else {
-            if markColdLaunch { finishColdLaunchBlitz() }
-            return
-        }
-        DispatchQueue.global(qos: .utility).async {
-            runBlocking()
-            if markColdLaunch { finishColdLaunchBlitz() }
-        }
-    }
-
-    static func runBlocking() {
+    private static func kickoffTeardownBlitzInBackground() {
         guard ProcessInfo.processInfo.environment[skipEnvKey] == nil else { return }
+        guard !isSuppressed else { return }
+        DispatchQueue.global(qos: .utility).async {
+            guard !isSuppressed else { return }
+            runBlocking(respectHandoffSuppress: true)
+        }
+    }
+
+    static func runBlocking(respectHandoffSuppress: Bool = true) {
+        guard ProcessInfo.processInfo.environment[skipEnvKey] == nil else { return }
+        if respectHandoffSuppress, isSuppressed { return }
         let ownPid = ProcessInfo.processInfo.processIdentifier
         let ownPid32 = Int32(ownPid)
 
         var roots: Set<pid_t> = []
         var protected = GuardianGazeboSpawnRegistry.protectedPIDSet(registeredSince: appLaunchedAt)
+        protected.formUnion(liveProtectedPidsSnapshot())
         addDescendants(of: protected, into: &protected)
 
         for rec in GuardianGazeboSpawnRegistry.allRecords() {

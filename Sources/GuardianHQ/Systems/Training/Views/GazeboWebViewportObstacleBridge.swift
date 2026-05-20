@@ -10,6 +10,7 @@ final class GazeboWebViewportObstacleBridge: ObservableObject {
     @Published var draft = TrainingEnvironmentObstacleRecord.defaults(for: .cube)
     @Published var obstacles: [TrainingEnvironmentObstacleRecord] = []
     @Published var mapHalfExtentM: Double = 500
+    @Published var zones: WorldBuilderZonesSnapshot = .empty
     @Published var deletingID: String?
 
     func pushEditorState(
@@ -19,6 +20,7 @@ final class GazeboWebViewportObstacleBridge: ObservableObject {
         draft: TrainingEnvironmentObstacleRecord,
         obstacles: [TrainingEnvironmentObstacleRecord],
         mapHalfExtentM: Double,
+        zones: WorldBuilderZonesSnapshot,
         deletingID: String? = nil
     ) {
         self.editorActive = editorActive
@@ -27,6 +29,7 @@ final class GazeboWebViewportObstacleBridge: ObservableObject {
         self.draft = draft
         self.obstacles = obstacles
         self.mapHalfExtentM = mapHalfExtentM
+        self.zones = zones
         self.deletingID = deletingID
         tick = UUID()
     }
@@ -39,6 +42,7 @@ final class GazeboWebViewportObstacleBridge: ObservableObject {
             draft: draft,
             obstacles: obstacles,
             mapHalfExtentM: mapHalfExtentM,
+            zones: zones,
             deletingID: deletingID
         )
         guard let data = try? JSONEncoder().encode(snapshot) else {
@@ -47,9 +51,28 @@ final class GazeboWebViewportObstacleBridge: ObservableObject {
         let b64 = data.base64EncodedString()
         return """
         (function () {
-          if (!window.guardianViewer?.setObstacleEditorState) return false;
-          const state = JSON.parse(atob('\(b64)'));
-          return window.guardianViewer.setObstacleEditorState(state);
+          const post = (msg) => {
+            try {
+              window.webkit?.messageHandlers?.guardianObstacles?.postMessage(
+                JSON.stringify({ type: 'obstaclePlaceDebug', message: msg })
+              );
+            } catch (_) { /* bridge not ready */ }
+          };
+          if (!window.guardianViewer?.setObstacleEditorState) {
+            post('expr — guardianViewer.setObstacleEditorState missing');
+            return false;
+          }
+          let state;
+          try {
+            state = JSON.parse(atob('\(b64)'));
+          } catch (err) {
+            post('expr — JSON.parse failed: ' + (err?.message || err));
+            return false;
+          }
+          const ok = window.guardianViewer.setObstacleEditorState(state);
+          const prep = window.guardianViewer?.prepareObstaclePlacement?.();
+          post('expr — setObstacleEditorState returned ' + ok + ' prepare=' + prep);
+          return ok;
         })()
         """
     }

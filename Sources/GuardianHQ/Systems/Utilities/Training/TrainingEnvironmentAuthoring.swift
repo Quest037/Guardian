@@ -62,13 +62,18 @@ enum TrainingEnvironmentAuthoring {
 
     /// Writes a fresh `world.sdf` for a new user package from manifest floor + scene presets.
     static func writeNewWorldFile(
+        environmentID: String,
         floorSize: TrainingEnvironmentFloorSize,
         sceneType: TrainingEnvironmentSceneType,
         to url: URL
     ) throws {
         switch sceneType {
         case .flat:
-            try TrainingEnvironmentWorldSDF.writeOpenFieldWorld(to: url, floorSideM: floorSize.floorSideM)
+            try TrainingEnvironmentWorldSDF.writeOpenFieldWorld(
+                to: url,
+                environmentID: environmentID,
+                floorSideM: floorSize.floorSideM
+            )
         }
     }
 

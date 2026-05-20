@@ -5,9 +5,13 @@ enum GuardianBundledResourceLocator {
     /// SPM resource bundle names for Training-only assets (Gazebo runtime, gzweb viewer, environment packages).
     static let trainingSimulationBundleBaseNames = [
         "GuardianTrainingSimulationResources_GuardianTrainingSimulationResources",
+        // Xcode SwiftPM integration (package name + target name).
+        "GuardianHQ_GuardianTrainingSimulationResources",
+        "GuardianTraining_GuardianTrainingSimulationResources",
         // Cutover: monolith / pre-split bundles that still embed training assets in the core module bundle.
         "GuardianCore_GuardianCore",
         "GuardianHQ_GuardianHQ",
+        "GuardianHQ_GuardianCore",
     ]
 
     /// Bundles to search for shared Guardian assets (logos, SITL, fleet bodies, …).

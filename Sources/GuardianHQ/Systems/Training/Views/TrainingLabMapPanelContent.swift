@@ -14,7 +14,7 @@ struct TrainingLabMapPanelContent: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GuardianSpacing.denseGutter) {
-                Text("Choose a training map with start and end zones. The world loads in the simulator viewport when selected.")
+                Text(trainingMapPanelIntro)
                     .font(GuardianTypography.font(.denseFootnoteRegular))
                     .foregroundStyle(theme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -29,6 +29,7 @@ struct TrainingLabMapPanelContent: View {
                             package: pkg,
                             isSelected: training.selectedEnvironmentID == pkg.id,
                             isFullyBuilt: pkg.hasConfiguredStartAndEndZones,
+                            isSelectable: TrainingEnvironmentSelectionPolicy.isSelectableForTrainingLab(package: pkg),
                             controlsLocked: controlsLocked,
                             onSelect: { onSelectEnvironmentID(pkg.id) },
                             onSelectUnavailable: {
@@ -53,6 +54,13 @@ struct TrainingLabMapPanelContent: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
+
+    private var trainingMapPanelIntro: String {
+        if TrainingEnvironmentSelectionPolicy.allowsMapsWithoutStartAndEndZones {
+            return "Choose a training map. The world loads in the simulator viewport when selected. Maps without start and end zones can load for now."
+        }
+        return "Choose a training map with start and end zones. The world loads in the simulator viewport when selected."
+    }
 }
 
 // MARK: - Card (no delete)
@@ -61,6 +69,7 @@ private struct TrainingLabEnvironmentChooseCard: View {
     let package: TrainingEnvironmentPackage
     let isSelected: Bool
     let isFullyBuilt: Bool
+    let isSelectable: Bool
     let controlsLocked: Bool
     let onSelect: () -> Void
     let onSelectUnavailable: () -> Void
@@ -132,19 +141,19 @@ private struct TrainingLabEnvironmentChooseCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         )
-        .opacity(isFullyBuilt ? 1 : 0.5)
+        .opacity(isSelectable ? 1 : 0.5)
         .contentShape(Rectangle())
         .onTapGesture(perform: handleTap)
         .guardianPointerOnHover()
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel(package.manifest.displayName)
-        .accessibilityHint(isFullyBuilt ? "" : "Not fully built yet")
+        .accessibilityHint(isSelectable ? (isFullyBuilt ? "" : "Start and end zones not configured") : "Not fully built yet")
     }
 
     private func handleTap() {
         guard !controlsLocked else { return }
         guard !isSelected else { return }
-        guard isFullyBuilt else {
+        guard isSelectable else {
             onSelectUnavailable()
             return
         }

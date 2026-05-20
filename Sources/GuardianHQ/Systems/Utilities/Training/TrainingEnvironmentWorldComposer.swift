@@ -50,6 +50,7 @@ enum TrainingEnvironmentWorldComposer {
             }
             try TrainingEnvironmentWorldSDF.writeOpenFieldWorld(
                 to: worldURL,
+                environmentID: manifest.id,
                 floorSideM: floor.floorSideM,
                 additionalModelsXML: obstacleXML
             )

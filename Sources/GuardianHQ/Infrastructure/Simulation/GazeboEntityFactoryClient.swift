@@ -212,10 +212,41 @@ enum GazeboEntityFactoryClient {
     }
   }
 
-  private struct CommandOutput: Sendable {
+  struct CommandOutput: Sendable {
     let stdout: String
     let stderr: String
     let exitCode: Int32
+  }
+
+  /// `gz topic -i` — lists publishers (fast; does not block like `topic -e`).
+  static func runTopicInfoProbe(
+    gz: String,
+    instanceIndex: Int,
+    topic: String,
+    timeoutMS: Int = 4000
+  ) async -> CommandOutput {
+    await runGazeboCommand(
+      gz: gz,
+      instanceIndex: instanceIndex,
+      arguments: ["topic", "-i", "-t", topic],
+      timeoutMS: timeoutMS
+    )
+  }
+
+  /// `gz topic -e` probe for embedded map scene readiness (shared transport partition with sim).
+  static func runTopicEchoProbe(
+    gz: String,
+    instanceIndex: Int,
+    topic: String,
+    messageCount: Int,
+    timeoutMS: Int
+  ) async -> CommandOutput {
+    await runGazeboCommand(
+      gz: gz,
+      instanceIndex: instanceIndex,
+      arguments: ["topic", "-e", "-t", topic, "-n", "\(messageCount)"],
+      timeoutMS: timeoutMS
+    )
   }
 
   private enum ServiceOutputResult: Sendable {

@@ -7,6 +7,12 @@ final class GuardianBundledResourceLocatorTests: XCTestCase {
         XCTAssertNotNil(url, "Expected guardian_viewer.html in the Training simulation resource bundle")
     }
 
+    func test_trainingSimulationBundleBaseNames_includeXcodeSPMBundleNames() {
+        let names = GuardianBundledResourceLocator.trainingSimulationBundleBaseNames
+        XCTAssertTrue(names.contains("GuardianHQ_GuardianTrainingSimulationResources"))
+        XCTAssertTrue(names.contains("GuardianTraining_GuardianTrainingSimulationResources"))
+    }
+
     func test_trainingSimulationBundles_resolveTrainingEnvironments() {
         let root = GuardianBundledResourceLocator.subdirectoryURL(
             "TrainingEnvironments",

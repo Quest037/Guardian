@@ -104,8 +104,7 @@ final class FleetNav2StackRunner {
                 return
             }
 
-            let errTail = drainLaunchStderr(maxBytes: 4096)
-            terminateLaunchProcess()
+            let errTail = await captureLaunchStderrTailAfterTerminate(maxBytes: 4096)
             onStatus?("timeout", "compute_path_to_pose_unavailable")
             if errTail.isEmpty {
                 onLogLine?("Fleet Nav2: planner service not ready within \(Int(Self.readyTimeoutSeconds))s.")
@@ -146,7 +145,10 @@ final class FleetNav2StackRunner {
     private var launchStderrPipe: Pipe?
 
     private func terminateLaunchProcess() {
-        guard let proc = launchProcess else { return }
+        guard let proc = launchProcess else {
+            launchStderrPipe = nil
+            return
+        }
         let pid = proc.processIdentifier
         if proc.isRunning {
             proc.terminate()
@@ -156,15 +158,44 @@ final class FleetNav2StackRunner {
         launchStderrPipe = nil
     }
 
-    private func drainLaunchStderr(maxBytes: Int) -> String {
-        guard let pipe = launchStderrPipe else { return "" }
-        let handle = pipe.fileHandleForReading
-        var data = Data()
-        while data.count < maxBytes {
-            let chunk = handle.availableData
-            if chunk.isEmpty { break }
-            data.append(chunk)
+    /// Terminates the launch child, then reads stderr on a utility thread (never blocks the main actor on pipe I/O).
+    private func captureLaunchStderrTailAfterTerminate(maxBytes: Int) async -> String {
+        guard let proc = launchProcess, let handle = launchStderrPipe?.fileHandleForReading else {
+            return ""
         }
+        let pid = proc.processIdentifier
+        if proc.isRunning {
+            proc.terminate()
+        }
+        GuardianRos2SpawnRegistry.unregister(pid: pid)
+        launchProcess = nil
+        launchStderrPipe = nil
+
+        return await Task.detached(priority: .utility) {
+            Self.stderrTail(afterTerminating: proc, handle: handle, maxBytes: maxBytes)
+        }.value
+    }
+
+    /// Bounded stderr read after the child has been signalled to stop. Safe to call off the main actor.
+    nonisolated static func stderrTail(
+        afterTerminating process: Process,
+        handle: FileHandle,
+        maxBytes: Int,
+        waitForExitSeconds: TimeInterval = 5
+    ) -> String {
+        if process.isRunning {
+            let group = DispatchGroup()
+            group.enter()
+            DispatchQueue.global(qos: .utility).async {
+                process.waitUntilExit()
+                group.leave()
+            }
+            _ = group.wait(timeout: .now() + waitForExitSeconds)
+            if process.isRunning {
+                process.terminate()
+            }
+        }
+        let data = handle.readDataToEndOfFile()
         guard !data.isEmpty else { return "" }
         let text = String(data: data.prefix(maxBytes), encoding: .utf8) ?? ""
         return text.trimmingCharacters(in: .whitespacesAndNewlines)

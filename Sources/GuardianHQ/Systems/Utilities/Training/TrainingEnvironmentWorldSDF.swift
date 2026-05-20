@@ -2,7 +2,7 @@ import Foundation
 
 /// Generates Harmonic `world.sdf` files for open-field training environments.
 enum TrainingEnvironmentWorldSDF {
-    static let defaultWorldName = "guardian_open_field"
+    private static let worldNamePrefix = "guardian_"
 
     /// Map-base square depth (m). Top face stays at z = 0; block extends downward.
     static let openFieldFloorDepthM: Double = 10
@@ -51,11 +51,26 @@ enum TrainingEnvironmentWorldSDF {
         return max(x, y)
     }
 
+    /// Harmonic `<world name="…">` for a catalogue environment id (`guardian_<id>` with `-` → `_`).
+    static func worldName(environmentID: String) -> String {
+        let raw = environmentID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return "\(worldNamePrefix)world" }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
+        let cleaned = raw.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
+        let slug = String(cleaned)
+            .replacingOccurrences(of: "-", with: "_")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        let body = slug.isEmpty ? "world" : String(slug.prefix(64))
+        return "\(worldNamePrefix)\(body)"
+    }
+
     static func writeOpenFieldWorld(
         to url: URL,
+        environmentID: String,
         floorSideM: Double,
         additionalModelsXML: String = ""
     ) throws {
+        let worldName = worldName(environmentID: environmentID)
         let side = max(1, floorSideM)
         let sideText = formatMetres(side)
         let depth = max(0.1, openFieldFloorDepthM)
@@ -75,7 +90,7 @@ enum TrainingEnvironmentWorldSDF {
         let xml = """
         <?xml version="1.0" ?>
         <sdf version="1.9">
-          <world name="\(defaultWorldName)">
+          <world name="\(worldName)">
             <physics name="1ms" type="ignored">
               <max_step_size>0.001</max_step_size>
               <real_time_factor>1.0</real_time_factor>

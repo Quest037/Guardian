@@ -1,3 +1,4 @@
+
 import Foundation
 
 /// Square training floor area preset (side² = footprint in m²).
@@ -34,8 +35,16 @@ enum TrainingEnvironmentFloorSize: String, Codable, CaseIterable, Identifiable, 
     /// Closest allowed orbit radius (metres from target) for embedded gzweb maps (`OrbitControls.minDistance`).
     var orbitMinDistanceM: Double {
         switch self {
-        case .micro: return 1
+        case .micro: return 25
         default: return 50
+        }
+    }
+
+    /// Max start/end zone radius (m) for this floor preset (`WorldBuilderZoneState.minRadiusM` … this value).
+    var maxZoneRadiusM: Double {
+        switch self {
+        case .micro: return 25
+        default: return WorldBuilderZoneState.maxRadiusM
         }
     }
 

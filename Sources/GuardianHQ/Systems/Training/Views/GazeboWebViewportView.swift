@@ -27,6 +27,7 @@ struct GazeboWebViewportView: View {
     var onObstaclesChanged: (([TrainingEnvironmentObstacleRecord], String?, Bool) -> Void)?
     var onObstacleDeleteRequest: ((String) -> Void)?
     var onObstaclePlaceRequest: ((Double, Double) -> Void)?
+    var onObstaclePlaceDebug: ((String) -> Void)?
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -51,7 +52,8 @@ struct GazeboWebViewportView: View {
                 onZoneDeleteRequest: onZoneDeleteRequest,
                 onObstaclesChanged: onObstaclesChanged,
                 onObstacleDeleteRequest: onObstacleDeleteRequest,
-                onObstaclePlaceRequest: onObstaclePlaceRequest
+                onObstaclePlaceRequest: onObstaclePlaceRequest,
+                onObstaclePlaceDebug: onObstaclePlaceDebug
             )
 
             if case .failed(let message) = phase {
@@ -91,6 +93,7 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
     let onObstaclesChanged: (([TrainingEnvironmentObstacleRecord], String?, Bool) -> Void)?
     let onObstacleDeleteRequest: ((String) -> Void)?
     let onObstaclePlaceRequest: ((Double, Double) -> Void)?
+    let onObstaclePlaceDebug: ((String) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -99,7 +102,8 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
             onZoneDeleteRequest: onZoneDeleteRequest,
             onObstaclesChanged: onObstaclesChanged,
             onObstacleDeleteRequest: onObstacleDeleteRequest,
-            onObstaclePlaceRequest: onObstaclePlaceRequest
+            onObstaclePlaceRequest: onObstaclePlaceRequest,
+            onObstaclePlaceDebug: onObstaclePlaceDebug
         )
     }
 
@@ -115,6 +119,11 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
 
         let webView = GazeboWebViewportWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
+        #if DEBUG
+        if #available(macOS 13.3, *) {
+            webView.isInspectable = true
+        }
+        #endif
         context.coordinator.webView = webView
         reload(webView: webView)
         return webView
@@ -173,17 +182,24 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
             webView.loadHTMLString(html, baseURL: nil)
             return
         }
-        var components = URLComponents()
-        components.queryItems = [
+        var queryItems: [URLQueryItem] = [
             URLQueryItem(name: "port", value: "\(websocketPort)"),
             URLQueryItem(name: "world", value: gazeboWorldName),
             URLQueryItem(name: "groundHalf", value: String(format: "%.3f", groundHalfExtentM)),
             URLQueryItem(name: "orbitMinDistance", value: String(format: "%.2f", orbitMinDistanceM)),
         ]
         if showsCameraDebugHUD {
-            components.queryItems?.append(URLQueryItem(name: "cameraDebug", value: "1"))
+            queryItems.append(URLQueryItem(name: "cameraDebug", value: "1"))
         }
-        let query = components.url(relativeTo: base) ?? base
+        // Merge query onto the file URL directly — empty `URLComponents().url(relativeTo:)`
+        // can drop params in some WebKit loads; `location.search` may still be empty on file://.
+        let query: URL
+        if var components = URLComponents(url: base, resolvingAgainstBaseURL: false) {
+            components.queryItems = queryItems
+            query = components.url ?? base
+        } else {
+            query = base
+        }
         let gazeboWebRoot =
             GuardianBundledResourceLocator.trainingSimulationResourceBundles
                 .compactMap(\.resourceURL)
@@ -216,15 +232,46 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
         }
     }
 
+    private static func javaScriptBool(_ value: Any?) -> Bool {
+        if let flag = value as? Bool { return flag }
+        if let number = value as? NSNumber { return number.boolValue }
+        return false
+    }
+
     private func dispatchObstacleState(
         on webView: WKWebView,
         bridge: GazeboWebViewportObstacleBridge,
         attempt: Int
     ) {
         let expression = bridge.javaScriptExpression
+        let placeDebug = onObstaclePlaceDebug
+        if attempt == 0 {
+            placeDebug?(
+                "bridge dispatch editor=\(bridge.editorActive) placement=\(bridge.placementActive) obstacles=\(bridge.obstacles.count)"
+            )
+        }
         webView.evaluateJavaScript(expression) { result, error in
-            if error == nil, let ok = result as? Bool, ok { return }
-            guard attempt < 48 else { return }
+            let ok = Self.javaScriptBool(result)
+            if error == nil, ok {
+                if attempt > 0 {
+                    placeDebug?("bridge setObstacleEditorState ok (attempt \(attempt + 1))")
+                }
+                return
+            }
+            guard attempt < 48 else {
+                let errText = error?.localizedDescription ?? "none"
+                let resultText = String(describing: result)
+                placeDebug?(
+                    "bridge setObstacleEditorState failed after 48 tries error=\(errText) result=\(resultText) parsedOk=\(ok)"
+                )
+                return
+            }
+            if attempt == 0 || attempt == 5 || attempt == 11 {
+                let errText = error?.localizedDescription ?? "none"
+                placeDebug?(
+                    "bridge retry \(attempt + 1) error=\(errText) result=\(String(describing: result)) parsedOk=\(ok)"
+                )
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
                 dispatchObstacleState(on: webView, bridge: bridge, attempt: attempt + 1)
             }
@@ -265,6 +312,7 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
         private let onObstaclesChanged: (([TrainingEnvironmentObstacleRecord], String?, Bool) -> Void)?
         private let onObstacleDeleteRequest: ((String) -> Void)?
         private let onObstaclePlaceRequest: ((Double, Double) -> Void)?
+        private let onObstaclePlaceDebug: ((String) -> Void)?
 
         init(
             onZonesChanged: ((WorldBuilderZonesSnapshot, Bool) -> Void)?,
@@ -272,7 +320,8 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
             onZoneDeleteRequest: ((WorldBuilderZoneKind) -> Void)?,
             onObstaclesChanged: (([TrainingEnvironmentObstacleRecord], String?, Bool) -> Void)?,
             onObstacleDeleteRequest: ((String) -> Void)?,
-            onObstaclePlaceRequest: ((Double, Double) -> Void)?
+            onObstaclePlaceRequest: ((Double, Double) -> Void)?,
+            onObstaclePlaceDebug: ((String) -> Void)? = nil
         ) {
             self.onZonesChanged = onZonesChanged
             self.onZoneEditRequest = onZoneEditRequest
@@ -280,6 +329,7 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
             self.onObstaclesChanged = onObstaclesChanged
             self.onObstacleDeleteRequest = onObstacleDeleteRequest
             self.onObstaclePlaceRequest = onObstaclePlaceRequest
+            self.onObstaclePlaceDebug = onObstaclePlaceDebug
         }
 
         func userContentController(
@@ -287,8 +337,16 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
             didReceive message: WKScriptMessage
         ) {
             guard let raw = message.body as? String,
-                  let data = raw.data(using: .utf8),
-                  let envelope = try? JSONDecoder().decode(ViewportMessageEnvelope.self, from: data) else { return }
+                  let data = raw.data(using: .utf8) else {
+                onObstaclePlaceDebug?("bridge decode failed — message body not a string")
+                return
+            }
+            guard let envelope = try? JSONDecoder().decode(ViewportMessageEnvelope.self, from: data) else {
+                if message.name == Self.obstaclesMessageHandlerName {
+                    onObstaclePlaceDebug?("bridge decode failed — invalid JSON envelope")
+                }
+                return
+            }
             Task { @MainActor in
                 switch message.name {
                 case Self.zonesMessageHandlerName:
@@ -320,6 +378,12 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
                     case "placeObstacle":
                         if let x = envelope.centerXM, let y = envelope.centerYM {
                             onObstaclePlaceRequest?(x, y)
+                        } else {
+                            onObstaclePlaceDebug?("bridge placeObstacle — missing centerXM/centerYM")
+                        }
+                    case "obstaclePlaceDebug":
+                        if let message = envelope.message {
+                            onObstaclePlaceDebug?(message)
                         }
                     default:
                         break
@@ -342,6 +406,7 @@ private struct ViewportMessageEnvelope: Decodable {
     var centerXM: Double?
     var centerYM: Double?
     var outOfBounds: Bool?
+    var message: String?
 
     var zoneKind: WorldBuilderZoneKind? {
         guard let kind else { return nil }

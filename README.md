@@ -63,6 +63,6 @@ Optional SITL/bridge setup: see **[README_FULL.md](README_FULL.md)** (dependenci
 | --- | --- |
 | **[README_FULL.md](README_FULL.md)** | Contributor reference: architecture, locked product rules, SIM battery, reserve pool, map performance, fleet recipes, tests. |
 | **[AGENTS.md](AGENTS.md)** | AI/agent entry points and links into rules & trackers. |
-| **[TODO.md](TODO.md)** | Active engineering backlog. |
+| **[ToDo/TODO.md](ToDo/TODO.md)** | Active engineering backlog. |
 | **Live Leaflet map utilities** | `Sources/GuardianHQ/Systems/Utilities/LiveLeafletMap/` — shared live map markers, caching, hub apply throttle. |
 | **[CommandsCatalogueDoc.md](CommandsCatalogueDoc.md)** | Fleet command & recipe catalogue notes. |

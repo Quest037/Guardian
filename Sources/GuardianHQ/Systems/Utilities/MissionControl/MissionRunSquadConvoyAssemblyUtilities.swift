@@ -1,6 +1,6 @@
 import Foundation
 
-/// Convoy **assembly** readiness — wingmen on heading-based slots astern of the primary (`SquadFollow&Formation.md` §C).
+/// Convoy **assembly** readiness — wingmen on heading-based slots astern of the primary (`ToDo/SquadFollow&Formation.md` §C).
 enum MissionRunSquadConvoyAssemblyUtilities {
 
     /// Horizontal distance from wingman to its convoy slot (m).

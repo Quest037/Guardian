@@ -29,6 +29,8 @@ final class FormationsPlaygroundController: ObservableObject {
     private weak var sitl: SitlService?
     private var simulationPlatform: SimulationPlatform = .ardupilot
     private var spawnDefaults: SimSpawnDefaults = .default
+    /// Training lab: snap vehicle to start formation slot after MAVLink link is up (`vehicleID`).
+    var onTrainingSimulatorLinkReady: (@MainActor (String) async -> Void)?
     private var formationAnchorLat: Double = SimSpawnDefaults.default.latitudeDeg
     private var formationAnchorLon: Double = SimSpawnDefaults.default.longitudeDeg
     private var formationAnchorHeadingDeg: Double = SimSpawnDefaults.default.headingDeg
@@ -58,11 +60,16 @@ final class FormationsPlaygroundController: ObservableObject {
         self.fleetLink = fleetLink
         self.sitl = sitl
         self.simulationPlatform = simulationPlatform
-        self.spawnDefaults = spawnDefaults
-        formationAnchorLat = spawnDefaults.latitudeDeg
-        formationAnchorLon = spawnDefaults.longitudeDeg
-        formationAnchorHeadingDeg = spawnDefaults.headingDeg
-        formationAnchorAltM = spawnDefaults.altitudeM
+        applyMapSessionSpawnDefaults(spawnDefaults)
+    }
+
+    /// Training map selected — SITL seeds use the map-local geodetic anchor (manifest ``defaultSpawn``).
+    func applyMapSessionSpawnDefaults(_ origin: SimSpawnDefaults) {
+        spawnDefaults = origin
+        formationAnchorLat = origin.latitudeDeg
+        formationAnchorLon = origin.longitudeDeg
+        formationAnchorHeadingDeg = origin.headingDeg
+        formationAnchorAltM = origin.altitudeM
     }
 
     /// Ends formation follow / control streams without despawning simulators (Training **Stop**).
@@ -249,6 +256,7 @@ final class FormationsPlaygroundController: ObservableObject {
         preset: SimulationVehiclePreset,
         platform: SimulationPlatform,
         sizeTier: VehicleSizeTier,
+        sitlSpawnDefaults: SimSpawnDefaults,
         gazeboPlacement: GazeboVehiclePlacement?,
         missionControl: MissionControlStore
     ) async -> FormationsPlaygroundSlotState? {
@@ -258,13 +266,11 @@ final class FormationsPlaygroundController: ObservableObject {
             return nil
         }
 
-        let index = slots.count
         let before = Set(sitl.instances.map(\.id))
-        let defaults = staggeredSpawnDefaults(slotIndex: index)
         sitl.spawn(
             preset: preset,
             platform: platform,
-            defaults: defaults,
+            defaults: sitlSpawnDefaults,
             owner: .trainingRoster,
             gazeboPlacement: gazeboPlacement
         )
@@ -339,6 +345,7 @@ final class FormationsPlaygroundController: ObservableObject {
         }
         refreshSlotRows(fleetLink: fleetLink)
         statusText = liveStatusLabel()
+        await notifyTrainingSimulatorLinkReady(vehicleID: vehicleID)
     }
 
     /// Replaces in-memory slot list when the Training lab roster edits squads (no SITL stop).
@@ -473,6 +480,7 @@ final class FormationsPlaygroundController: ObservableObject {
         preset: SimulationVehiclePreset? = nil,
         platform: SimulationPlatform? = nil,
         sizeTier: VehicleSizeTier? = nil,
+        sitlSpawnDefaults: SimSpawnDefaults? = nil,
         gazeboPlacement: GazeboVehiclePlacement? = nil
     ) async -> FormationsPlaygroundSlotState? {
         guard let fleetLink, let sitl,
@@ -501,7 +509,7 @@ final class FormationsPlaygroundController: ObservableObject {
         statusText = "Replacing simulator (stop + spawn)…"
         isBusy = true
         let before = Set(sitl.instances.map(\.id))
-        let defaults = staggeredSpawnDefaults(slotIndex: index)
+        let defaults = sitlSpawnDefaults ?? staggeredSpawnDefaults(slotIndex: index)
         sitl.spawn(
             preset: resolvedPreset,
             platform: resolvedPlatform,
@@ -537,6 +545,9 @@ final class FormationsPlaygroundController: ObservableObject {
             return slots.first(where: { $0.id == replacement.id })
         }
         refreshSlotRows(fleetLink: fleetLink)
+        if let vehicleID = replacement.vehicleID {
+            await notifyTrainingSimulatorLinkReady(vehicleID: vehicleID)
+        }
         try? await Task.sleep(nanoseconds: 750_000_000)
 
         await retrySimulatorConnection(slotID: replacement.id, missionControl: missionControl)
@@ -789,6 +800,10 @@ final class FormationsPlaygroundController: ObservableObject {
         }
         let systemID = index + 1
         return fleetLink.vehicleID(forSystemID: systemID) ?? "sysid:\(systemID)"
+    }
+
+    private func notifyTrainingSimulatorLinkReady(vehicleID: String) async {
+        await onTrainingSimulatorLinkReady?(vehicleID)
     }
 
     private func staggeredSpawnDefaults(slotIndex: Int) -> SimSpawnDefaults {

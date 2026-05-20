@@ -56,11 +56,16 @@ final class TrainingPanelController: ObservableObject {
 
     /// Fired when the operator selects a different training environment (prior map reset).
     var onMapEnvironmentWillChange: (() -> Void)?
+    /// Fired after a training map is selected (or restored) so formation SITL seeds use map geodetic origin.
+    var onMapEnvironmentSelected: (() -> Void)?
 
     var fleetLinkForMapSession: FleetLinkService? { fleetLink }
     var sitlForMapSession: SitlService? { sitl }
     var gazeboForMapSession: GazeboService? { gazebo }
-    var spawnDefaultsForMapSession: SimSpawnDefaults { spawnDefaults }
+    /// Map-local geodetic anchor when a training environment is selected; otherwise operator sim defaults.
+    var spawnDefaultsForMapSession: SimSpawnDefaults {
+        selectedEnvironment != nil ? mapSessionGeodeticOrigin() : spawnDefaults
+    }
     var simulationPlatformForMapSession: SimulationPlatform { simulationPlatform }
 
     private static let linkWaitTimeoutS: TimeInterval = 60
@@ -147,6 +152,14 @@ final class TrainingPanelController: ObservableObject {
         )
     }
 
+    func mapSessionGeodeticOrigin() -> SimSpawnDefaults {
+        guard let pkg = selectedEnvironment else { return spawnDefaults }
+        return TrainingEnvironmentGeodesy.mapSessionOrigin(
+            manifest: pkg.manifest,
+            fallback: spawnDefaults
+        )
+    }
+
     func environmentSelectionDidChange() {
         persistEnvironmentSelection()
         if selectedEnvironmentID == nil {
@@ -154,6 +167,7 @@ final class TrainingPanelController: ObservableObject {
         }
         restoreTargetSlotForSelectedEnvironment()
         refreshTaskLayout()
+        onMapEnvironmentSelected?()
     }
 
     /// Map panel (rail or drawer): persist selection and start `.run` Gazebo world when required.
@@ -210,7 +224,7 @@ final class TrainingPanelController: ObservableObject {
         if let pkg = selectedEnvironment {
             targetSlot = TrainingEnvironmentGeodesy.taskPose(
                 environmentPose: pkg.manifest.defaultGoal,
-                origin: spawnDefaults
+                origin: mapSessionGeodeticOrigin()
             )
         } else {
             targetSlot = TrainingTaskLayoutFactory.defaultTargetSlot(spawn: spawnDefaults)
@@ -228,7 +242,7 @@ final class TrainingPanelController: ObservableObject {
         vehicleClass = .ugvWheeled
     }
 
-    /// Leaving the Training tab: stop streamed control only (SITL stays in Vehicles).
+    /// Called from ``TrainingLabController/leaveLab`` after run/map wind-down — persists teach target, clears debug log wiring.
     func leavePanel() {
         teachTask?.cancel()
         teachTask = nil
@@ -315,6 +329,12 @@ final class TrainingPanelController: ObservableObject {
 
     func taskKindDidChange() {
         refreshTaskLayout()
+    }
+
+    /// Start/end layout for a transit run (learning squad path overlay + Nav2 plan request).
+    func applyTransitLayout(_ layout: TrainingTaskLayout) {
+        taskLayout = layout
+        scheduleNav2PlanPathRefresh()
     }
 
     func refreshTaskLayout() {
@@ -718,13 +738,14 @@ final class TrainingPanelController: ObservableObject {
         await sitl.waitForRecentlyReleasedPortsToSettle()
 
         statusText = "Replacing simulator…"
+        let sessionSpawn = alignedSessionSpawn()
         let before = Set(sitl.instances.map(\.id))
         sitl.spawn(
             preset: vehicleClass.simulationPreset,
             platform: simulationPlatform,
-            defaults: spawnDefaults,
+            defaults: sessionSpawn.sitlDefaults,
             owner: .trainingRoster,
-            gazeboPlacement: trainingGazeboPlacement()
+            gazeboPlacement: sessionSpawn.gazeboPlacement
         )
         guard let row = sitl.instances.first(where: {
             !before.contains($0.id) && $0.spawnOwner == .trainingRoster
@@ -774,13 +795,14 @@ final class TrainingPanelController: ObservableObject {
         }
 
         await stopPriorTrainingSitlForRespawn()
+        let sessionSpawn = alignedSessionSpawn()
         let before = Set(sitl.instances.map(\.id))
         sitl.spawn(
             preset: vehicleClass.simulationPreset,
             platform: simulationPlatform,
-            defaults: spawnDefaults,
+            defaults: sessionSpawn.sitlDefaults,
             owner: .trainingRoster,
-            gazeboPlacement: trainingGazeboPlacement()
+            gazeboPlacement: sessionSpawn.gazeboPlacement
         )
         guard let row = sitl.instances.first(where: {
             !before.contains($0.id) && $0.spawnOwner == .trainingRoster
@@ -1171,8 +1193,54 @@ final class TrainingPanelController: ObservableObject {
         return false
     }
 
-    func trainingGazeboPlacementForSpawn() -> GazeboVehiclePlacement? {
-        trainingGazeboPlacement()
+    /// PX4 / ArduPilot home + optional Gazebo proxy pose aligned to the roster row's **start formation slot** (map ENU).
+    func spawnAlignmentForPendingEntry(
+        squad: TrainingLabSquad,
+        squadIndex: Int,
+        entryIndex: Int,
+        learningSquadID: UUID? = nil
+    ) -> (sitlDefaults: SimSpawnDefaults, gazeboPlacement: GazeboVehiclePlacement?)? {
+        guard let pkg = selectedEnvironment else { return nil }
+        let origin = mapSessionGeodeticOrigin()
+        let zonesConfigured = pkg.manifest.hasConfiguredStartAndEndZones == true
+        let singleVehicleStart: TrainingTaskPose? =
+            (!zonesConfigured && squad.isSingleVehicle) ? taskLayout?.start : nil
+        let envPose = TrainingLabMapSessionLifecycle.startEnvironmentPoseForPendingEntry(
+            squad: squad,
+            squadIndex: squadIndex,
+            entryIndex: entryIndex,
+            environment: pkg,
+            mapGeodeticOrigin: origin,
+            learningSquadID: learningSquadID,
+            learningSquadSingleVehicleStart: singleVehicleStart
+        )
+        let sitlDefaults = TrainingLabSitlSpawnAlignment.sitlSpawnDefaults(
+            environmentPose: envPose,
+            mapGeodeticOrigin: origin,
+            batterySeed: spawnDefaults
+        )
+        let placement: GazeboVehiclePlacement? =
+            requiresGazeboRunWorld && activeGazeboWorldID != nil
+            ? TrainingLabSitlSpawnAlignment.gazeboPlacement(
+                worldID: activeGazeboWorldID!,
+                environmentPose: envPose
+            )
+            : nil
+        return (sitlDefaults, placement)
+    }
+
+    func trainingGazeboPlacementForSpawn(
+        squad: TrainingLabSquad,
+        squadIndex: Int,
+        entryIndex: Int,
+        learningSquadID: UUID? = nil
+    ) -> GazeboVehiclePlacement? {
+        spawnAlignmentForPendingEntry(
+            squad: squad,
+            squadIndex: squadIndex,
+            entryIndex: entryIndex,
+            learningSquadID: learningSquadID
+        )?.gazeboPlacement
     }
 
     /// Adopts a roster row as the single-vehicle teaching target (one primary, no wingmen).
@@ -1183,19 +1251,15 @@ final class TrainingPanelController: ObservableObject {
         }
     }
 
-    /// Push the designated learning squad's task and vehicle class into the teaching controller.
+    /// Push the designated learning squad's vehicle class (and optional single-vehicle slot) into teaching.
     func applyLearningSquadContext(
-        taskKind: TrainingTaskKind,
         vehicleClass: TrainingVehicleClass,
         vehicleSizeTier: VehicleSizeTier,
         primarySlot: FormationsPlaygroundSlotState?
     ) {
-        self.taskKind = taskKind
-        forbiddenAxes = taskKind.defaultForbiddenAxes
         self.vehicleClass = vehicleClass
         self.vehicleSizeTier = vehicleSizeTier
         clampVehicleClassToTrainingPanelOptions()
-        taskKindDidChange()
         if let primarySlot {
             adoptRosterPrimarySlot(primarySlot)
         } else {
@@ -1255,12 +1319,26 @@ final class TrainingPanelController: ObservableObject {
         return true
     }
 
+    /// Single-vehicle teaching shell spawn (no roster row yet).
+    private func alignedSessionSpawn() -> (sitlDefaults: SimSpawnDefaults, gazeboPlacement: GazeboVehiclePlacement?) {
+        let placeholder = TrainingLabSquad(
+            primary: TrainingLabRosterEntry(
+                vehicleClass: vehicleClass,
+                vehicleSizeTier: vehicleSizeTier
+            )
+        )
+        if let aligned = spawnAlignmentForPendingEntry(
+            squad: placeholder,
+            squadIndex: 0,
+            entryIndex: 0
+        ) {
+            return aligned
+        }
+        return (spawnDefaultsForMapSession, nil)
+    }
+
     private func trainingGazeboPlacement() -> GazeboVehiclePlacement? {
-        guard requiresGazeboRunWorld,
-              let worldID = activeGazeboWorldID,
-              let pkg = selectedEnvironment
-        else { return nil }
-        return GazeboVehiclePlacement(worldID: worldID, pose: pkg.manifest.defaultSpawn)
+        alignedSessionSpawn().gazeboPlacement
     }
 
     private func stopTrainingGazeboRunWorld() async {

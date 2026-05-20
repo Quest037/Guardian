@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class WorldBuilderObstacleViewportSyncPolicyTests: XCTestCase {
     func test_mergingPoseUpdates_preservesManifestDimensions() {

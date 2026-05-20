@@ -23,7 +23,7 @@ plugin UI, etc.):
 ## Exceptions
 
 - **Internal** diagnostics (`notImplemented` command details, logs, developer
-  comments, `TODO.md`, tracker markdown) may still note wiring gaps for
+  comments, `ToDo/TODO.md`, tracker markdown) may still note wiring gaps for
   contributors — not as customer-facing chrome.
 - **Version numbers** in About / settings (“Guardian 1.2.3”) are not roadmap
   copy.

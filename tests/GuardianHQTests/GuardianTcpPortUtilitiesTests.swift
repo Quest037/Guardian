@@ -27,7 +27,7 @@ final class GuardianTcpPortUtilitiesTests: XCTestCase {
         addr.sin_addr.s_addr = inet_addr("127.0.0.1")
         let bound = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
-                bind(fd, saPtr, socklen_t(MemoryLayout<sockaddr_in>.stride)) == 0
+                Darwin.bind(fd, saPtr, socklen_t(MemoryLayout<sockaddr_in>.stride)) == 0
             }
         }
         guard bound, listen(fd, 1) == 0 else {

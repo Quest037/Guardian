@@ -71,11 +71,15 @@ enum TrainingLabFormationSlotGeometry {
     ) -> GroupLayout {
         let formation = formation(for: phase, policy: squad.formationPolicy)
         let spacingKind = spacing(for: phase, policy: squad.formationPolicy)
+        let rosterFootprints = squad.allEntries.map {
+            ($0.vehicleClass.fleetVehicleType, $0.vehicleSizeTier)
+        }
         let convoySpacing = MissionSquadConvoySpacingPolicy.resolvedSpacing(
             taskPattern: .convoy,
             primaryGranularClass: squad.primary.vehicleClass.fleetVehicleType,
             spacing: spacingKind,
-            formation: formation
+            formation: formation,
+            rosterEntries: rosterFootprints
         )
         let colorHex = TrainingLabSquadFormationPalette.colorHex(squadIndex: squadIndex)
         var slots: [Slot] = []
@@ -207,6 +211,36 @@ enum TrainingLabFormationSlotGeometry {
             }
         }
         return true
+    }
+
+    /// `true` when the vehicle centre lies inside the oriented slot rectangle (ENU map frame).
+    static func vehicleCenterInsideSlot(
+        vehicleXM: Double,
+        vehicleYM: Double,
+        slot: Slot,
+        edgeInsetM: Double = 0.15
+    ) -> Bool {
+        let halfL = max(0, slot.lengthM * 0.5 - edgeInsetM)
+        let halfW = max(0, slot.widthM * 0.5 - edgeInsetM)
+        guard halfL > 0, halfW > 0 else { return false }
+        let dx = vehicleXM - slot.centerXM
+        let dy = vehicleYM - slot.centerYM
+        let h = slot.headingDeg * .pi / 180
+        let sinH = sin(h)
+        let cosH = cos(h)
+        let localForward = dx * sinH + dy * cosH
+        let localRight = dx * cosH - dy * sinH
+        return abs(localForward) <= halfL + 1e-6 && abs(localRight) <= halfW + 1e-6
+    }
+
+    static func horizontalDistanceToSlotCenterM(
+        vehicleXM: Double,
+        vehicleYM: Double,
+        slot: Slot
+    ) -> Double {
+        let dx = vehicleXM - slot.centerXM
+        let dy = vehicleYM - slot.centerYM
+        return (dx * dx + dy * dy).squareRoot()
     }
 
     static func slotsOverlap(_ a: Slot, _ b: Slot) -> Bool {

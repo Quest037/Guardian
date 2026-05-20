@@ -7,13 +7,16 @@ struct GazeboVehicleSpawnParams: Equatable, Sendable {
   /// Optional custom mesh URI/path (v10). When nil or unreadable, a sized box is used.
   var customMeshURI: String?
   var pose: TrainingEnvironmentPose
+  /// When set, proxy box/mesh tint uses squad palette (``TrainingLabSquadFormationPalette``) instead of macro class colour.
+  var squadColorHex: String?
 
   @MainActor
   init(
     vehicleClass: FleetVehicleType,
     vehicleID: String,
     pose: TrainingEnvironmentPose,
-    customMeshURI: String? = nil
+    customMeshURI: String? = nil,
+    squadColorHex: String? = nil
   ) {
     self.vehicleClass = vehicleClass
     self.vehicleSizeTier = VehicleClassSizePreferencesStore.shared.resolvedTier(
@@ -22,18 +25,21 @@ struct GazeboVehicleSpawnParams: Equatable, Sendable {
     )
     self.customMeshURI = customMeshURI
     self.pose = pose
+    self.squadColorHex = squadColorHex
   }
 
   init(
     vehicleClass: FleetVehicleType,
     vehicleSizeTier: VehicleSizeTier,
     pose: TrainingEnvironmentPose,
-    customMeshURI: String? = nil
+    customMeshURI: String? = nil,
+    squadColorHex: String? = nil
   ) {
     self.vehicleClass = vehicleClass
     self.vehicleSizeTier = vehicleSizeTier
     self.customMeshURI = customMeshURI
     self.pose = pose
+    self.squadColorHex = squadColorHex
   }
 }
 

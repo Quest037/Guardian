@@ -2,9 +2,9 @@
 
 Goal: **one** long-lived headless `gz sim` + **one** gz-launch websocket bridge (instance **0**, shared port) for all embedded maps in **World Builder** and **Training lab**. Changing environment, floor preset, or panel must **swap world content inside that process**, not start/stop `gz sim` on every map pick. Reduces freezes, port races, and orphan `gz` children after force quit.
 
-**Does not replace:** `TrainingGazeboSimulationToDo.md` (features, PX4-in-world, templates, Formation). **Defers:** portable runtime bundle, procedural terrain (`GazeboTerrainToDo.md`), second concurrent sim for parallel maps.
+**Does not replace:** `ToDo/TrainingGazeboSimulationToDo.md` (features, PX4-in-world, templates, Formation). **Defers:** portable runtime bundle, procedural terrain (`ToDo/GazeboTerrainToDo.md`), second concurrent sim for parallel maps.
 
-**Cross-links:** `README_FULL.md` → **Gazebo training simulation**, **Child processes and cold launch**; `TrainingGazeboSimulationToDo.md`; `Sources/GuardianHQ/Infrastructure/Simulation/GazeboService.swift`, `GazeboEntityFactoryClient.swift`, `GuardianGazeboOrphanBlitz.swift`; `WorldBuilderController.swift`, `TrainingPanelController.swift`; `Resources/GazeboWeb/guardian_viewer.html`.
+**Cross-links:** `README_FULL.md` → **Gazebo training simulation**, **Child processes and cold launch**; `ToDo/TrainingGazeboSimulationToDo.md`; `Sources/GuardianHQ/Infrastructure/Simulation/GazeboService.swift`, `GazeboEntityFactoryClient.swift`, `GuardianGazeboOrphanBlitz.swift`; `WorldBuilderController.swift`, `TrainingPanelController.swift`; `Resources/GazeboWeb/guardian_viewer.html`.
 
 ---
 
@@ -140,7 +140,7 @@ Implement in `GazeboEntityFactoryClient` + `GazeboService` extension.
 
 - [ ] Update `README_FULL.md` **Session purposes** / map switch bullet when Phase B ships (world handoff primary; full stop = fallback).
 - [ ] Update `AGENTS.md` Gazebo bullet to reference this tracker.
-- [ ] Link from `TrainingGazeboSimulationToDo.md` (architecture section).
+- [ ] Link from `ToDo/TrainingGazeboSimulationToDo.md` (architecture section).
 - [ ] When complete: migrate locks to README, delete this file per todo hygiene.
 
 ---
@@ -153,7 +153,7 @@ Implement in `GazeboEntityFactoryClient` + `GazeboService` extension.
 | `WorldControl` reset | Does `reset: { all: true }` replace static models from disk or only dynamic state? |
 | Keep sim on app section change | Warm idle sim vs battery — operator-visible? |
 | Formation tab later | Second embedded viewport + same sim vs instance 1 — defer until Formation 3D ships. |
-| Procedural terrain | `GazeboTerrainToDo.md` includes heightmap in SDF — handoff must replace terrain model + floor, not only `open_field_floor`. |
+| Procedural terrain | `ToDo/GazeboTerrainToDo.md` includes heightmap in SDF — handoff must replace terrain model + floor, not only `open_field_floor`. |
 | Mission app | No Gazebo — unchanged. |
 
 ---

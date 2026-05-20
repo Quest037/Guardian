@@ -10,7 +10,7 @@ Deferred product and engineering ideas for a future release. Entries are appende
 
 - **Idea:** Park the old **Deferred / Out of Scope** list: `subscribe` verb for streaming catalogue responses; cross-system bus extensions (`command.mc.*`, `command.plugin.*` outside Fleet); **partial-success** recipe outcomes; **recursive composition** beyond the locked one-level-each-side cap; a **richer plugin permission model** than manifest namespace claims alone; **auto-discovered recipe dependency graph** for plugins. Separately, explore an **MRE planner** morph toward a deeper **recipe-executor** architecture (planner-level composition / scheduling) — distinct from the **MissionRunEnvironment** catalogue / runner dispatch that has since shipped (README **Fleet Commands & Recipes** → Mission / MRE policy dispatch).
 - **Context:** Former `CommandsRecipesToDo.md` tracker removed 2026-05-11; Stage E wizard work lives in **2026-05-11 — Vehicle Inspector recipe wizard (Stage E) + deferred UX** at the end of this file.
-- **Notes:** Mission `subscribe` / stream verbs remain under `TODO.md` → **FleetCommands** where applicable.
+- **Notes:** Mission `subscribe` / stream verbs remain under `ToDo/TODO.md` → **FleetCommands** where applicable.
 
 ## 2026-05-10 — Per-step cancel-cleanup hooks in recipes
 
@@ -34,7 +34,7 @@ Deferred product and engineering ideas for a future release. Entries are appende
 
 - **Idea:** **Stage E —** Replace hardcoded calibration / preflight entry points with a **directory-driven** flow that runs **recipes**, shows **progress**, and resolves **escalations** inline (same vocabulary as Mission Control / LiveDrive later): **OperatorPromptCenter** — stateful host (registration, dispatch + mirror withdrawal, per-event expiry, `publish(_:) async -> OperatorPromptAnswer` or equivalent on `OperatorPromptResumptionChannel` + `OperatorPromptRouter`). **Wizard shell** — single Vehicle Inspector surface: recipe picker / progress / step transcript / escalation affordances wired to `FleetRecipeRunner` + `wizardProgressByVehicleID` + `vehicleInspectorWizardEscalationHandler(for:)`. **Calibration tab** — Run rows already honour live-mission gate; wire **Start** into real wizard runs (not one-off command buttons where a recipe exists). **Preflight / arm-help** — surface `recipe.fleet.diagnose.armprobe` and `recipe.fleet.errors.fix.calibrationrequired` (and siblings) where the product still hardcodes arm / calibration copy. **Open design —** prompt router placement (app layer with `withToasts` / `withAppDrawer` vs Fleet; likely App for LiveDrive + MCR); wizard chrome inside Vehicle Inspector vs reusable `RecipeWizardOverlay` for MCR/LiveDrive; Stage F plugins namespace **fail-closed** on publish vs warn-then-skip on invoke. **Revisit —** unify operator-facing text across procedure-failure banners, toasts, and inline remediation (who owns headline vs stack detail vs CTAs; catalogue / mapper / advisor without echo).
 - **Context:** Previously tracked under `CommandsRecipesToDo.md` (removed). MRE preferential policy / between-cycles dispatch is documented in README; this capture is the product backlog for inspector wizard + messaging model only.
-- **Notes:** `TODO.md` Vehicles → Calibration / Preflight bullets that pointed at the old tracker should follow this block until shipped.
+- **Notes:** `ToDo/TODO.md` Vehicles → Calibration / Preflight bullets that pointed at the old tracker should follow this block until shipped.
 
 ## 2026-05-11 — Mission map points: live RoE / replan when coordinates or closed state change (MCR / MRE)
 
@@ -57,7 +57,7 @@ Deferred product and engineering ideas for a future release. Entries are appende
 ## 2026-05-17 — Squad wingman follow on long AUTO mission legs
 
 - **Idea:** Wingmen often stop tracking the primary convoy slot when the primary stays on **AUTO mission** with a steady heading for a long stretch; a turn wakes follow again, but wingmen may already be too far to catch up. **AUTO** does not let the primary slow for wingmen to close (acceptable for v1 — document operator expectation; optional future: convoy speed cap, follow re-engage pulse, or OFFBOARD catch-up leg before resuming mission).
-- **Context:** `MissionRunSquadFollowSubsystem`, convoy formation setpoints vs primary `AUTO_MISSION`, `SquadFollow&Formation.md`.
+- **Context:** `MissionRunSquadFollowSubsystem`, convoy formation setpoints vs primary `AUTO_MISSION`, `ToDo/SquadFollow&Formation.md`.
 - **Notes:** Distinct from GR wind-down / end-policy routing work.
 
 ## 2026-05-19 — Brain pack & MRE follow-up

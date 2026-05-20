@@ -79,4 +79,4 @@ Nav2, Aerostack2, `as2_platform_pixhawk`, `px4_msgs`, and this bridge are built 
 ## Related docs
 
 - `README.md` — ROS 2 vehicle bridge setup (Micro XRCE-DDS Agent, `px4_msgs`).
-- `TODO.md` — Vehicles System → live links + autonomy backlog.
+- `ToDo/TODO.md` — Vehicles System → live links + autonomy backlog.

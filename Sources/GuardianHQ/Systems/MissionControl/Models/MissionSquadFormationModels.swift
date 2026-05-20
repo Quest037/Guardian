@@ -1,6 +1,6 @@
 import Foundation
 
-/// v1 formation shape for squad wingmen (see `SquadFollow&Formation.md`). Geometry: ``MissionSquadFormationGeometry``.
+/// v1 formation shape for squad wingmen (see `ToDo/SquadFollow&Formation.md`). Geometry: ``MissionSquadFormationGeometry``.
 enum MissionSquadFormationKind: String, Codable, CaseIterable, Sendable, Equatable, Identifiable {
     /// Single-file astern line (no alternating lateral lanes).
     case convoy
@@ -64,8 +64,10 @@ struct MissionSquadConvoySpacing: Equatable, Sendable {
     var lateralLaneMeters: Double
 
     static let uavDefault = MissionSquadConvoySpacing(alongTrackMetersPerOrdinal: 25, lateralLaneMeters: 0)
-    /// Tight astern spacing for UGV convoy SIM / field testing until per-task authoring ships.
-    static let ugvConvoyTest = MissionSquadConvoySpacing(alongTrackMetersPerOrdinal: 3, lateralLaneMeters: 0)
+    /// Field convoy baseline for UGV squads (live spacing; footprint floors may raise tight/normal further).
+    static let ugvDefault = MissionSquadConvoySpacing(alongTrackMetersPerOrdinal: 8, lateralLaneMeters: 3)
+    /// Legacy alias — prefer ``ugvDefault`` (was SITL-tight 3 m; too small for real vehicles).
+    static let ugvConvoyTest = ugvDefault
     static let surfaceDefault = MissionSquadConvoySpacing(alongTrackMetersPerOrdinal: 15, lateralLaneMeters: 0)
     static let genericDefault = MissionSquadConvoySpacing(alongTrackMetersPerOrdinal: 20, lateralLaneMeters: 0)
 }
@@ -79,7 +81,7 @@ enum MissionSquadConvoySpacingPolicy {
         if let cls = primaryGranularClass {
             switch cls.universalClass {
             case .uav: return .uavDefault
-            case .ugv: return .ugvConvoyTest
+            case .ugv: return .ugvDefault
             case .usv, .uuv, .unknown: return .surfaceDefault
             }
         }
@@ -92,28 +94,90 @@ enum MissionSquadConvoySpacingPolicy {
         taskPattern: MissionTaskPattern,
         primaryGranularClass: FleetVehicleType?,
         spacing: MissionSquadFormationSpacing,
-        formation: MissionSquadFormationKind
+        formation: MissionSquadFormationKind,
+        rosterEntries: [(vehicleClass: FleetVehicleType, tier: VehicleSizeTier)] = []
     ) -> MissionSquadConvoySpacing {
         let base = lockedSpacing(taskPattern: taskPattern, primaryGranularClass: primaryGranularClass)
         let alongKindScale: Double = switch formation {
         case .convoy, .staggeredConvoy: 1.0
         case .chevron: 0.92
-        case .arrowhead: 0.78
+        case .arrowhead: 1.0
         }
         let lateralKindScale: Double = switch formation {
         case .convoy, .staggeredConvoy: 1.0
         case .chevron: 0.92
-        case .arrowhead: 0.62
+        case .arrowhead: 1.0
         }
-        return MissionSquadConvoySpacing(
-            alongTrackMetersPerOrdinal: base.alongTrackMetersPerOrdinal * spacing.alongTrackScale * alongKindScale,
-            lateralLaneMeters: base.lateralLaneMeters * spacing.lateralScale * lateralKindScale
+        let alongPack = operatorAlongTrackPackScale(formation: formation, spacing: spacing)
+        let lateralPack = operatorLateralPackScale(formation: formation, spacing: spacing)
+        let scaled = MissionSquadConvoySpacing(
+            alongTrackMetersPerOrdinal: base.alongTrackMetersPerOrdinal * alongPack * alongKindScale,
+            lateralLaneMeters: base.lateralLaneMeters * lateralPack * lateralKindScale
         )
+        return MissionSquadFormationFootprintSpacing.floored(
+            spacing: scaled,
+            formation: formation,
+            primaryGranularClass: primaryGranularClass,
+            rosterEntries: rosterEntries
+        )
+    }
+
+    /// Operator tight / normal / loose — per-formation ladders (v1 Training lab tuning).
+    private static func operatorAlongTrackPackScale(
+        formation: MissionSquadFormationKind,
+        spacing: MissionSquadFormationSpacing
+    ) -> Double {
+        switch formation {
+        case .convoy, .staggeredConvoy:
+            switch spacing {
+            case .tight: return 1.0
+            case .normal: return 1.38
+            case .loose: return 1.72
+            }
+        case .chevron:
+            switch spacing {
+            case .tight: return 1.0
+            case .normal: return 1.38
+            case .loose: return 1.72
+            }
+        case .arrowhead:
+            switch spacing {
+            case .tight: return 1.0
+            case .normal: return 1.35
+            case .loose: return 1.72
+            }
+        }
+    }
+
+    private static func operatorLateralPackScale(
+        formation: MissionSquadFormationKind,
+        spacing: MissionSquadFormationSpacing
+    ) -> Double {
+        switch formation {
+        case .convoy, .staggeredConvoy:
+            switch spacing {
+            case .tight: return 1.0
+            case .normal: return 1.42
+            case .loose: return 1.75
+            }
+        case .chevron:
+            switch spacing {
+            case .tight: return 1.0
+            case .normal: return 1.42
+            case .loose: return 1.75
+            }
+        case .arrowhead:
+            switch spacing {
+            case .tight: return 1.0
+            case .normal: return 1.35
+            case .loose: return 1.72
+            }
+        }
     }
 
 }
 
-/// Locked v1 wingman OFFBOARD pursuit / convoy assembly (see `SquadFollow&Formation.md` §C).
+/// Locked v1 wingman OFFBOARD pursuit / convoy assembly (see `ToDo/SquadFollow&Formation.md` §C).
 enum MissionSquadConvoyFollowControlPolicy {
     /// Wingman within this distance of its heading-based slot counts as in formation (m).
     static let convoyAssemblyArrivalM: Double = 1.5

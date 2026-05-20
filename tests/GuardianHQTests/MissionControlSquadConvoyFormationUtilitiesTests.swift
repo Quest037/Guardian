@@ -107,26 +107,26 @@ final class MissionControlSquadConvoyFormationUtilitiesTests: XCTestCase {
         let normal = MissionSquadConvoySpacingPolicy.resolvedSpacing(
             taskPattern: .convoy,
             primaryGranularClass: .ugvRover,
-            shape: .normal,
+            spacing: .normal,
             formation: .arrowhead
         )
         let tight = MissionSquadConvoySpacingPolicy.resolvedSpacing(
             taskPattern: .convoy,
             primaryGranularClass: .ugvRover,
-            shape: .tight,
+            spacing: .tight,
             formation: .arrowhead
         )
         XCTAssertLessThan(tight.alongTrackMetersPerOrdinal, normal.alongTrackMetersPerOrdinal)
     }
 
-    func test_arrowhead_row2_tighterLateralSpreadThanOldChevronStyle() {
+    func test_arrowhead_tight_row2_lateralSpread_clearsFootprints() {
         let spacing = MissionSquadConvoySpacingPolicy.resolvedSpacing(
             taskPattern: .convoy,
-            primaryGranularClass: .ugvRover,
-            shape: .tight,
+            primaryGranularClass: .ugvWheeled,
+            spacing: .tight,
             formation: .arrowhead
         )
-        let row1Center = MissionControlSquadConvoyFormationUtilities.desiredFormationCoordinate(
+        let row1Left = MissionControlSquadConvoyFormationUtilities.desiredFormationCoordinate(
             formation: .arrowhead,
             primaryLatitudeDeg: -35,
             primaryLongitudeDeg: 149,
@@ -134,16 +134,16 @@ final class MissionControlSquadConvoyFormationUtilitiesTests: XCTestCase {
             wingmanOrdinal: 0,
             spacing: spacing
         )
-        let row2Left = MissionControlSquadConvoyFormationUtilities.desiredFormationCoordinate(
+        let row1Right = MissionControlSquadConvoyFormationUtilities.desiredFormationCoordinate(
             formation: .arrowhead,
             primaryLatitudeDeg: -35,
             primaryLongitudeDeg: 149,
             primaryHeadingDeg: 0,
-            wingmanOrdinal: 2,
+            wingmanOrdinal: 1,
             spacing: spacing
         )
-        let lateralM = abs(row2Left.lon - row1Center.lon) * 85_000
-        XCTAssertLessThan(lateralM, 8.0)
+        let row1WidthM = abs(row1Right.lon - row1Left.lon) * 85_000
+        XCTAssertGreaterThan(row1WidthM, 2.8)
     }
 
     func test_chevron_row2_deeperAndWiderThanRow1() {
@@ -433,7 +433,7 @@ final class MissionControlSquadConvoyFormationUtilitiesTests: XCTestCase {
         XCTAssertLessThan(slot.coordinate.lat, 50.7539)
     }
 
-    func test_desiredConvoySlot_firstWingmanThreeMetresBehindOnPath() {
+    func test_desiredConvoySlot_firstWingmanSpacingUsesFieldUgvBaseline() {
         let task = MissionTask(
             name: "T",
             waypoints: [
@@ -465,7 +465,7 @@ final class MissionControlSquadConvoyFormationUtilitiesTests: XCTestCase {
             lat1: w0.coordinate.lat, lon1: w0.coordinate.lon,
             lat2: w1.coordinate.lat, lon2: w1.coordinate.lon
         )
-        XCTAssertEqual(gap01, 3, accuracy: 0.75)
+        XCTAssertEqual(gap01, 8, accuracy: 0.75)
     }
 
     func test_pursuitForwardSpeed_boostsWhenBehindSlot() {

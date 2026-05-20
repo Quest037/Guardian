@@ -32,7 +32,7 @@ Goal: ship a **real `Guardian HQ.app`** (not only the SwiftPM flat `GuardianHQ` 
 
 ---
 
-## Phase D — Operator prompts + routing (`TODO.md` cross-links)
+## Phase D — Operator prompts + routing (`ToDo/TODO.md` cross-links)
 
 - [ ] **`ProcessPromptPolicy` / `OperatorPromptDeliveryTarget`:** route selected prompts to `UserNotificationService.deliver` when target is `.userNotification(…)` and operator is out-of-app / background (replace or complement stub path); keep in-app toast + bottom prompt behaviour unchanged when focused.
 - [ ] **Replace `stubNotifyMissionRunOperatorPrompt`** with real payload (title/subtitle/body/thread id from `OperatorPromptEvent` / run context); ensure **no “future version”** operator copy per `.cursor/rules/no-future-version-user-copy.mdc`.
@@ -62,4 +62,4 @@ Goal: ship a **real `Guardian HQ.app`** (not only the SwiftPM flat `GuardianHQ` 
 
 ## When this file is empty
 
-Migrate any **locked** packaging or entitlement rules to `README.md`, delete this file, and restore a short one-liner in `TODO.md` **App System** if anything remains optional.
+Migrate any **locked** packaging or entitlement rules to `README.md`, delete this file, and restore a short one-liner in `ToDo/TODO.md` **App System** if anything remains optional.

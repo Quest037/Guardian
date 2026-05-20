@@ -10,7 +10,7 @@ When answering questions about **PX4**, **ArduPilot**, autopilot **modes**, **pa
 ## Retrieval order (strict)
 
 1. **Local stack wiki** — `Resources/StackWiki/index/chunks.jsonl` (JSONL; one object per line). Use **Grep**, **Read**, or **SemanticSearch** scoped to `Resources/StackWiki/`. Prefer chunks whose `project` matches the stack in question. Check `Resources/StackWiki/manifest.json` for `retrieved_at` and upstream commits.
-2. **Guardian internal docs** — `README_FULL.md`, `AGENTS.md`, `CommandsCatalogueDoc.md`, relevant `*ToDo.md`, and code under `Sources/GuardianHQ/` for *Guardian-specific* behaviour.
+2. **Guardian internal docs** — `README_FULL.md`, `AGENTS.md`, `CommandsCatalogueDoc.md`, relevant `ToDo/*ToDo.md` trackers, and code under `Sources/GuardianHQ/` for *Guardian-specific* behaviour.
 3. **WebSearch / WebFetch** — only if:
    - the local index is **missing** (`Resources/StackWiki/index/chunks.jsonl` not present),
    - the topic is **outside** indexed trees (e.g. a third-party tool),

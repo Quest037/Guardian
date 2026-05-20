@@ -32,7 +32,7 @@ struct LiveDriveView: View {
     /// Keyboard → `Offboard.setVelocityBody` (predictable body-frame velocity).
     /// Controller → `ManualControl.setManualControlInput` (raw stick passthrough).
     /// Right now only `.keyboard` is wired; controller integration ships with
-    /// the GameController/IOHID work tracked in TODO.md.
+    /// the GameController/IOHID work tracked in ToDo/TODO.md.
     @State private var inputSource: LiveDriveInputSource = .keyboard
     @State private var streamActive = false
     @State private var simControlsSidebarVisible = false

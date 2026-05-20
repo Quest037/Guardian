@@ -2,6 +2,7 @@ import XCTest
 
 @testable import GuardianCore
 
+@MainActor
 final class GuardianSquadAutonomyPlannerRoutingTests: XCTestCase {
     func test_summary_ugv_primary_nav2() {
         let summary = GuardianSquadAutonomyPlannerRouting.summary(

@@ -47,4 +47,18 @@ final class GazeboVehicleModelSDFWriterTests: XCTestCase {
         let ugv = GazeboUniversalClassVisualStyle.rgba(for: .ugv)
         XCTAssertNotEqual(uav.diffuseTriple, ugv.diffuseTriple)
     }
+
+    func test_box_sdf_uses_squad_colour_when_provided() {
+        let footprint = VehicleClassSizeCatalogue.footprint(vehicleClass: .ugvWheeled, tier: .medium)
+        let squadTint = TrainingLabSquadFormationPalette.gazeboMaterialRGBA(squadIndex: 0)
+        let xml = GazeboVehicleModelSDFWriter.modelSDFXML(
+            modelName: "guardian_veh_sysid_1",
+            footprint: footprint,
+            universalClass: .ugv,
+            meshFilePath: nil,
+            materialRGBA: squadTint
+        )
+        XCTAssertTrue(xml.contains(squadTint.diffuseTriple))
+        XCTAssertFalse(xml.contains("0.200 0.450 1.000"))
+    }
 }

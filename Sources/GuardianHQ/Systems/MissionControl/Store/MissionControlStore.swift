@@ -358,7 +358,7 @@ final class MissionControlStore: ObservableObject {
     /// Default-deny gate: vehicle is currently bound to a `.running` / `.paused` / `.recovery` Mission Control run.
     /// Operators can opt in to mid-mission preflight via the `allowDuringLiveMission` parameter on
     /// ``runSingleVehiclePreflightProbe`` once the override surfaces (reserve swap-in, recovery flow,
-    /// plugin-authored auto-preflight) are wired — see `TODO.md`.
+    /// plugin-authored auto-preflight) are wired — see `ToDo/TODO.md`.
     static let preflightProbeBlockedByLiveMissionDetail =
         "Preflight is locked while this vehicle is assigned to an active Mission Control run."
 

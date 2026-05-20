@@ -12,7 +12,6 @@ struct TrainingLabSquadSettingsDrawerContent: View {
     @State private var startSpacing: MissionSquadFormationSpacing = .tight
     @State private var endFormationChoice: TrainingLabEndFormationChoice = .auto
     @State private var endSpacingChoice: TrainingLabEndSpacingChoice = .auto
-    @State private var taskKind: TrainingTaskKind = .reverseIntoSlot
 
     private var theme: GuardianThemePalette { GuardianTheme.palette(for: colorScheme) }
 
@@ -30,19 +29,6 @@ struct TrainingLabSquadSettingsDrawerContent: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: GuardianSpacing.sectionStack) {
-                    policyRow(
-                        title: "Skill task",
-                        help: "Task this squad trains toward. The designated learning squad drives teach and promote."
-                    ) {
-                        Picker("Skill task", selection: $taskKind) {
-                            ForEach(TrainingTaskKind.allCases) { kind in
-                                Text(kind.displayTitle).tag(kind)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                    }
-
                     policyRow(title: "Start formation", help: "Formation when the squad begins.") {
                         Picker("Start formation", selection: $startFormation) {
                             ForEach(MissionSquadFormationKind.allCases) { kind in
@@ -92,7 +78,6 @@ struct TrainingLabSquadSettingsDrawerContent: View {
         .onChange(of: startSpacing) { _ in persist() }
         .onChange(of: endFormationChoice) { _ in persist() }
         .onChange(of: endSpacingChoice) { _ in persist() }
-        .onChange(of: taskKind) { _ in persistTaskKind() }
         .disabled(controlsLocked)
     }
 
@@ -118,11 +103,6 @@ struct TrainingLabSquadSettingsDrawerContent: View {
         startSpacing = policy.startSpacing
         endFormationChoice = TrainingLabEndFormationChoice(resolved: policy.endFormation)
         endSpacingChoice = TrainingLabEndSpacingChoice(resolved: policy.endSpacing)
-        taskKind = squad.taskKind
-    }
-
-    private func persistTaskKind() {
-        roster.updateTaskKind(squadID: squadID, taskKind: taskKind)
     }
 
     private func persist() {

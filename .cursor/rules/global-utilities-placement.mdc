@@ -12,4 +12,4 @@ When you add **new utilities** (pure helpers, derivations, small services, forma
 - **Domain-specific** orchestration, heavy UI, and feature-only models stay in their system; **cross-cutting** math, string/date rules, MAV/telemetry conversions, and shared policy snippets belong in Utilities.
 - When extending Utilities: keep types **focused and documented**; match **concurrency** with surrounding code (e.g. `@MainActor` on the graph where the rest of the file already is); add or extend the smallest namespace that fits (`mission`, `fleet`, or a new top-level branch on ``GlobalUtilities`` / ``Utilities`` if a whole new domain appears).
 
-**Reference:** `Sources/GuardianHQ/Systems/Utilities/Utilities.swift` and the **Global Utilities migration** note in `TODO.md`.
+**Reference:** `Sources/GuardianHQ/Systems/Utilities/Utilities.swift` and the **Global Utilities migration** note in `ToDo/TODO.md`.

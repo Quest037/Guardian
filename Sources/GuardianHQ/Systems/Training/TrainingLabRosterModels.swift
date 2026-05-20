@@ -52,7 +52,7 @@ struct TrainingLabSquad: Identifiable, Equatable, Sendable {
     let id: UUID
     var primary: TrainingLabRosterEntry
     var wingmen: [TrainingLabRosterEntry]
-    /// Skill task for this squad (each squad may differ; the designated learning squad drives teach / promote).
+    /// Legacy persisted field; skill task is app-wide on ``TrainingPanelController``, not per squad.
     var taskKind: TrainingTaskKind
     var formationPolicy: TrainingLabSquadFormationPolicy
     /// Start-zone formation group anchor (ENU m); seeded from zone centre when nil.

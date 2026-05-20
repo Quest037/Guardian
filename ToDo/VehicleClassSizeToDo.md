@@ -25,7 +25,7 @@ Goal: add a **size tier** (and concrete **footprint dimensions**) to each granul
 
 **Out of scope:** reserve swap tier matching; changing class codes; per-tier min/max in app models; auto-classify from measured assets (matrix classification rule is later).
 
-**Cross-links:** `Resources/vehicle_size_matrix.md`; `README_FULL.md`; `FleetVehicleModel.swift`; `Mission.swift`; `TrainingGazeboSimulationToDo.md`; `CesiumJSMapIntegrationReadMe.md`; `README_AUTONOMY.md`.
+**Cross-links:** `Resources/vehicle_size_matrix.md`; `README_FULL.md`; `FleetVehicleModel.swift`; `Mission.swift`; `ToDo/TrainingGazeboSimulationToDo.md`; `CesiumJSMapIntegrationReadMe.md`; `README_AUTONOMY.md`.
 
 ---
 

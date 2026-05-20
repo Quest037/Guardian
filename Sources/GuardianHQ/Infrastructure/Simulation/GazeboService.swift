@@ -191,6 +191,11 @@ final class GazeboService: ObservableObject {
             tier: params.vehicleSizeTier
         )
         let modelBase = GazeboVehicleModelSDFWriter.sanitizeModelName("guardian_veh_sysid_\(mavlinkSystemID)")
+        await removeOrphanVehicleModelFromWorld(
+            worldName: row.gazeboSDFWorldName,
+            instanceIndex: row.instanceIndex,
+            modelName: modelBase
+        )
 
         do {
             let written = try GazeboVehicleModelSDFWriter.writeTemporaryModel(
@@ -198,12 +203,11 @@ final class GazeboService: ObservableObject {
                 params: params,
                 footprint: footprint
             )
-            try await GazeboEntityFactoryClient.createModel(
+            try await spawnVehicleProxyModelWithRetry(
                 worldName: row.gazeboSDFWorldName,
                 instanceIndex: row.instanceIndex,
-                sdfURL: written.sdfURL,
-                modelName: written.modelName,
-                pose: params.pose,
+                written: written,
+                params: params,
                 footprintHeightM: footprint.metres().heightM
             )
             vehicleVisualsBySystemID[mavlinkSystemID] = GazeboSpawnedVehicleVisual(
@@ -234,6 +238,56 @@ final class GazeboService: ObservableObject {
             gazeboModelName: visual.modelName
         )
         fleetLink?.appendSimulationLog("Gazebo: removed vehicle proxy \(visual.modelName).")
+    }
+
+    /// Drops a leftover proxy model in gz (registry miss after a prior failed or partial spawn).
+    private func removeOrphanVehicleModelFromWorld(
+        worldName: String,
+        instanceIndex: Int,
+        modelName: String
+    ) async {
+        let live = await GazeboEntityFactoryClient.listWorldModelNames(instanceIndex: instanceIndex)
+        guard live.contains(modelName) else { return }
+        _ = await GazeboEntityFactoryClient.removeModel(
+            worldName: worldName,
+            instanceIndex: instanceIndex,
+            gazeboModelName: modelName
+        )
+        fleetLink?.appendSimulationLog("Gazebo: cleared orphan vehicle model \(modelName) before respawn.")
+    }
+
+    private func spawnVehicleProxyModelWithRetry(
+        worldName: String,
+        instanceIndex: Int,
+        written: GazeboVehicleModelSDFWriter.WrittenModel,
+        params: GazeboVehicleSpawnParams,
+        footprintHeightM: Double
+    ) async throws {
+        var lastError: Error?
+        for attempt in 1...2 {
+            if attempt > 1 {
+                await removeOrphanVehicleModelFromWorld(
+                    worldName: worldName,
+                    instanceIndex: instanceIndex,
+                    modelName: written.modelName
+                )
+            }
+            do {
+                try await GazeboEntityFactoryClient.createModel(
+                    worldName: worldName,
+                    instanceIndex: instanceIndex,
+                    sdfURL: written.sdfURL,
+                    modelName: written.modelName,
+                    pose: params.pose,
+                    footprintHeightM: footprintHeightM,
+                    modelAppearWaitMS: GazeboEntityFactoryClient.vehicleProxyModelAppearWaitMS
+                )
+                return
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError ?? GazeboEntityFactoryError.serviceFailed("Vehicle proxy spawn failed.")
     }
 
     /// Starts `gz sim` for a world file or catalogue package.

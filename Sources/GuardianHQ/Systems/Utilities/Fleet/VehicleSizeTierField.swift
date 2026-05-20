@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Shared size-tier picker + W×L×H cm hint (`VehicleClassSizeToDo.md` Phase 1).
+/// Shared size-tier picker + W×L×H cm hint (`ToDo/VehicleClassSizeToDo.md` Phase 1).
 struct VehicleSizeTierField: View {
     let vehicleClass: FleetVehicleType
     @Binding var tier: VehicleSizeTier

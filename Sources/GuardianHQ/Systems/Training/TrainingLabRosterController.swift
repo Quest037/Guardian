@@ -5,7 +5,7 @@ import SwiftUI
 @MainActor
 final class TrainingLabRosterController: ObservableObject {
     @Published private(set) var squads: [TrainingLabSquad] = []
-    /// Squad whose skill task is in focus for teach / promote (defaults to Alpha / first squad).
+    /// Squad in focus for teach / promote (defaults to Alpha / first squad).
     @Published var learningSquadID: UUID?
     /// Squad selected on the training map for formation edit (blue outline + drag).
     @Published var mapSelectedSquadID: UUID?
@@ -13,6 +13,7 @@ final class TrainingLabRosterController: ObservableObject {
     /// Bumps when squad roster links or zone anchors change so the Gazebo viewport refreshes formation slots.
     @Published private(set) var formationViewportTick = UUID()
 
+    private weak var lab: TrainingLabController?
     private weak var training: TrainingPanelController?
     private weak var playground: FormationsPlaygroundController?
     private weak var fleetLink: FleetLinkService?
@@ -75,11 +76,17 @@ final class TrainingLabRosterController: ObservableObject {
         missionControl: MissionControlStore,
         simulationPlatform: SimulationPlatform
     ) {
+        self.lab = lab
         training = lab.teaching
         playground = lab.formation
         self.fleetLink = fleetLink
         self.missionControl = missionControl
         self.simulationPlatform = simulationPlatform
+        lab.formation.onTrainingSimulatorLinkReady = { [weak self] vehicleID in
+            guard let self, let lab = self.lab else { return }
+            guard let entryID = self.entryID(forVehicleID: vehicleID) else { return }
+            await lab.positionVehicleAtStartSlot(roster: self, entryID: entryID)
+        }
         restorePersistedDraftIfNeeded()
     }
 
@@ -133,15 +140,6 @@ final class TrainingLabRosterController: ObservableObject {
             markFormationViewportDirty()
             return
         }
-    }
-
-    func updateTaskKind(squadID: UUID, taskKind: TrainingTaskKind) {
-        guard let index = squads.firstIndex(where: { $0.id == squadID }) else { return }
-        squads[index].taskKind = taskKind
-        if isLearningSquad(squadID) {
-            syncTrainingFromLearningSquad()
-        }
-        persistRoster()
     }
 
     func clampLearningSquadSelection() {
@@ -209,7 +207,6 @@ final class TrainingLabRosterController: ObservableObject {
             return
         }
         training.applyLearningSquadContext(
-            taskKind: squad.taskKind,
             vehicleClass: squad.primary.vehicleClass,
             vehicleSizeTier: squad.primary.vehicleSizeTier,
             primarySlot: squad.isSingleVehicle ? squad.primary.slotState : nil
@@ -233,12 +230,32 @@ final class TrainingLabRosterController: ObservableObject {
             vehicleSizeTier: sizeTier
         )
 
+        let (squad, squadIndex, entryIndex): (TrainingLabSquad, Int, Int)
+        if let squadID, let idx = squads.firstIndex(where: { $0.id == squadID }) {
+            squad = squads[idx]
+            squadIndex = idx
+            entryIndex = squad.wingmen.count + 1
+        } else {
+            squad = TrainingLabSquad(primary: entry)
+            squadIndex = squads.count
+            entryIndex = 0
+        }
+        let spawnBundle = training.spawnAlignmentForPendingEntry(
+            squad: squad,
+            squadIndex: squadIndex,
+            entryIndex: entryIndex,
+            learningSquadID: learningSquadID
+        )
+        let sitlDefaults = spawnBundle?.sitlDefaults ?? training.spawnDefaultsForMapSession
+        let gazeboPlacement = spawnBundle?.gazeboPlacement
+
         isBusy = true
         let slot = await playground.spawnTrainingLabSimulator(
             preset: preset,
             platform: simulationPlatform,
             sizeTier: sizeTier,
-            gazeboPlacement: training.trainingGazeboPlacementForSpawn(),
+            sitlSpawnDefaults: sitlDefaults,
+            gazeboPlacement: gazeboPlacement,
             missionControl: missionControl
         )
         isBusy = false
@@ -315,13 +332,22 @@ final class TrainingLabRosterController: ObservableObject {
 
         guard await training.ensureGazeboRunWorldIfAlive() else { return }
 
+        let entryIndex = location.isPrimary ? 0 : location.wingIndex + 1
+        let spawnBundle = training.spawnAlignmentForPendingEntry(
+            squad: location.squad,
+            squadIndex: location.squadIndex,
+            entryIndex: entryIndex,
+            learningSquadID: learningSquadID
+        )
+
         let replacement = await playground.replaceSlot(
             slotID: slotID,
             missionControl: missionControl,
             preset: location.entry.vehicleClass.simulationPreset,
             platform: simulationPlatform,
             sizeTier: location.entry.vehicleSizeTier,
-            gazeboPlacement: training.trainingGazeboPlacementForSpawn()
+            sitlSpawnDefaults: spawnBundle?.sitlDefaults,
+            gazeboPlacement: spawnBundle?.gazeboPlacement
         )
 
         guard let replacement else { return }
@@ -558,6 +584,18 @@ final class TrainingLabRosterController: ObservableObject {
         syncTrainingFromLearningSquad()
         persistRoster()
         markFormationViewportDirty()
+    }
+
+    func entryID(forVehicleID vehicleID: String) -> UUID? {
+        for squad in squads {
+            if squad.primary.slotState?.vehicleID == vehicleID {
+                return squad.primary.id
+            }
+            if let wing = squad.wingmen.first(where: { $0.slotState?.vehicleID == vehicleID }) {
+                return wing.id
+            }
+        }
+        return nil
     }
 
     func entryLocation(entryID: UUID) -> (squadIndex: Int, squad: TrainingLabSquad, isPrimary: Bool, wingIndex: Int, entry: TrainingLabRosterEntry)? {

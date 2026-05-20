@@ -2092,8 +2092,9 @@
       const FORMATION_HEADING_PICK_RADIUS_PX = 26;
       /** High-contrast ring on blue zone fill when a squad is selected. */
       const FORMATION_SELECTED_RING_COLOR = 0xffffff;
-      /** Draggable rim handle — faces where the primary points (convoy astern is behind). */
+      /** Solid diamond on the formation rim — distinct from hollow vehicle footprint rings. */
       const FORMATION_HEADING_HANDLE_COLOR = 0xfbbf24;
+      const FORMATION_HEADING_HANDLE_RADIUS_M = 0.52;
 
       let editorState = {
         mapHalfExtentM: MAP_GROUND_HALF_EXTENT_M,
@@ -2221,18 +2222,44 @@
         return best;
       }
 
-      function buildHeadingHandleMesh(T, cx, cy, planeZ) {
-        return buildSlotFootprintOutline(
-          T,
-          cx,
-          cy,
-          planeZ + 0.012,
-          '#fbbf24',
-          0,
-          0.45,
-          0.45,
-          false
-        );
+      function buildHeadingHandleMesh(T, cx, cy, planeZ, headingDeg) {
+        const BasicMaterial = guardianThree?.MeshBasicMaterial ?? T.MeshBasicMaterial;
+        if (typeof BasicMaterial !== 'function') return null;
+        const r = FORMATION_HEADING_HANDLE_RADIUS_M;
+        const h = (Number(headingDeg) || 0) * Math.PI / 180;
+        const sinH = Math.sin(h);
+        const cosH = Math.cos(h);
+        const mapXY = (forwardM, rightM) => {
+          const east = forwardM * sinH + rightM * cosH;
+          const north = forwardM * cosH - rightM * sinH;
+          return [east, north, 0];
+        };
+        const verts = [
+          ...mapXY(r, 0),
+          ...mapXY(0, r),
+          ...mapXY(-r, 0),
+          ...mapXY(0, -r),
+        ];
+        const idx = [0, 1, 2, 0, 2, 3];
+        const mat = new BasicMaterial({
+          color: FORMATION_HEADING_HANDLE_COLOR,
+          transparent: false,
+          opacity: 1,
+          depthTest: true,
+          depthWrite: false,
+          fog: false,
+          toneMapped: false,
+          side: T.DoubleSide ?? 2,
+          polygonOffset: true,
+          polygonOffsetFactor: -4,
+          polygonOffsetUnits: -4,
+        });
+        const mesh = buildSharedIndexedMesh(T, verts, idx, mat, OVERLAY_ORDER + 3);
+        if (mesh) {
+          mesh.position.set(Number(cx) || 0, Number(cy) || 0, planeZ + 0.014);
+          mesh.frustumCulled = false;
+        }
+        return mesh;
       }
 
       /** Classify pointer target so zone / obstacle / terrain keep gzweb orbit; only formation consumes. */
@@ -2593,7 +2620,7 @@
         }
         if (selectedSquad && phaseData.slots.length) {
           const rim = formationHeadingRimXY(phaseData);
-          const handle = buildHeadingHandleMesh(T, rim.x, rim.y, planeZ);
+          const handle = buildHeadingHandleMesh(T, rim.x, rim.y, planeZ, phaseData.headingDeg);
           if (handle) {
             handle.userData.guardianFormationHeadingHandle = {
               squadId: String(squad.id),

@@ -1,8 +1,8 @@
 # CesiumJS map integration — product & architecture brief
 
-Design reference for adding a **3D operational map** to Guardian alongside the existing **2D Leaflet** stack. Use this document to derive a future implementation tracker (`TODO.md` / dedicated `*ToDo.md`) — it is **not** a shipping checklist.
+Design reference for adding a **3D operational map** to Guardian alongside the existing **2D Leaflet** stack. Use this document to derive a future implementation tracker (`ToDo/TODO.md` / dedicated `*ToDo.md`) — it is **not** a shipping checklist.
 
-**Related:** `TODO.md` → **Map System**, **Live Drive**; `README_FULL.md` → **Live Leaflet map — bridge coalescing**; `SquadFollow&Formation.md` (convoy geometry, streamed setpoints); `MissionGeofence` (altitude bands).
+**Related:** `ToDo/TODO.md` → **Map System**, **Live Drive**; `README_FULL.md` → **Live Leaflet map — bridge coalescing**; `ToDo/SquadFollow&Formation.md` (convoy geometry, streamed setpoints); `MissionGeofence` (altitude bands).
 
 **External anchor:** Defense / emergency COP pattern with Cesium terrain + mission layers — e.g. [XRF Connects and Integrates Missions with Cesium](https://cesium.com/blog/2026/04/14/xrf-connects-and-integrates-missions-with-cesium/) (terrain base, org-specific 3D Tiles on top, SaaS vs self-hosted ion).
 
@@ -125,7 +125,7 @@ Not mutually exclusive — pick per deployment profile.
 **Inputs (Guardian-owned polylines):**
 
 - Primary **uploaded mission** path / next leg waypoints.
-- **Convoy** centerline + **lateral buffer** (wingmen offset from primary — see `SquadFollow&Formation.md`).
+- **Convoy** centerline + **lateral buffer** (wingmen offset from primary — see `ToDo/SquadFollow&Formation.md`).
 - Optional **rolling lookahead** from live primary position (e.g. next 1–5 km).
 
 **Mechanism (Cesium):** Densify polyline → batch `Cartographic` positions → `sampleTerrainMostDetailed(terrainProvider, batch)` in idle/worker time with throttled concurrency. Same terrain provider used for rendering.
@@ -193,7 +193,7 @@ Minimum parity with Leaflet operational maps before defaulting 3D on:
 
 ## Suggested implementation phases (for future todos)
 
-Use these as **epic boundaries** when splitting `TODO.md` — order matters.
+Use these as **epic boundaries** when splitting `ToDo/TODO.md` — order matters.
 
 ### Phase 0 — Spike (evaluate)
 

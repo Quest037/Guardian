@@ -11,8 +11,8 @@ git history. The todo file is for **what is still pending**.
 
 This applies to every todo / tracker file in the repo, including but not limited to:
 
-- `TODO.md`
-- any `*ToDo.md` / `*_TODO.md` / similar tracker the user adds in the future
+- `ToDo/TODO.md` (main backlog)
+- any `ToDo/*ToDo.md`, `ToDo/*_TODO.md`, or similar tracker under **`ToDo/`** (see `todo-folder.mdc`)
 
 ## When a task is complete
 

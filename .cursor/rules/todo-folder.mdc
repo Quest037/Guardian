@@ -1,0 +1,26 @@
+---
+description: Place new engineering trackers and todo lists under ToDo/
+alwaysApply: true
+---
+
+# Todo / tracker file placement
+
+## Where files go
+
+- **New** engineering trackers, subsystem checklists, and `*ToDo.md` / `*_ToDo/TODO.md` files belong under **`ToDo/`** at the repo root — not loose at repo root.
+- **Main backlog:** `ToDo/TODO.md` (index of systems + cross-links to focused trackers).
+- **Deferred product ideas:** `NEXTVERSION.md` stays at repo root (`next-version-capture.mdc`).
+
+## Naming
+
+- Subsystem trackers: `SomethingToDo.md` or `Something&AreaToDo.md` (match existing style).
+- Add a one-line entry to `ToDo/README.md` when introducing a new tracker file.
+
+## Cross-links
+
+- From code comments, `README.md`, `AGENTS.md`, or other repo-root docs: use the full path, e.g. `ToDo/ToDo/TrainingGazeboSimulationToDo.md`.
+- From another file **inside** `ToDo/`: same-folder links may use the basename only (`ToDo/TrainingGazeboSimulationToDo.md`).
+
+## Hygiene
+
+When a tracker item is **done**, follow `todo-list-hygiene.mdc` (migrate retained locks to `README_FULL.md`, delete the bullet — do not leave `[x]` closures in tracker files).

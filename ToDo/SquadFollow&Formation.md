@@ -2,7 +2,7 @@
 
 Actionable tracker for **wingman follow** and **formation control** in Mission Control runs. Squad **lifecycle** (per-primary cycles, stagger, rollup, operator complete/abort) lives in **`MRESquadsToDo.md`**. This file covers **how wingmen move** relative to the primary and what MRE must own.
 
-Related: **`TODO.md`** → **Pathfinding & geofence avoidance** (shared router; § **P.1** exclusion approach → MRE recovery; primary AUTO + all OFFBOARD/GUIDED motion); Mission Control → Squads / Planner formations; **`README_FULL.md`** → Mission task authoring, reserve swap geometry.
+Related: **`ToDo/TODO.md`** → **Pathfinding & geofence avoidance** (shared router; § **P.1** exclusion approach → MRE recovery; primary AUTO + all OFFBOARD/GUIDED motion); Mission Control → Squads / Planner formations; **`README_FULL.md`** → Mission task authoring, reserve swap geometry.
 
 ---
 
@@ -39,7 +39,7 @@ Related: **`TODO.md`** → **Pathfinding & geofence avoidance** (shared router; 
 1. **`MRESquadsToDo.md`** — per-squad primary lifecycle and MAVLink cycle boundaries on **primary only** (scheduling / MC-R items shipped there) — wingman follow must respect squad cycle keys and not block sibling squads.
 2. This file **§ v1** — wingman pipeline on top of stable primary squads (shipped).
 3. **`MRESquadsToDo.md`** promotion / release RoE — uses mode switches defined in v1.
-4. **`TODO.md` → Pathfinding & geofence avoidance** — shared Guardian router (exclusions as obstacles; skirt inside inclusion) + **§ P.1** exclusion approach reporting and role-specific MRE recovery. **Blocks** meaningful geofence behaviour for primary AUTO and all OFFBOARD/GUIDED motion (wingmen, park/reposition, end-policy moves).
+4. **`ToDo/TODO.md` → Pathfinding & geofence avoidance** — shared Guardian router (exclusions as obstacles; skirt inside inclusion) + **§ P.1** exclusion approach reporting and role-specific MRE recovery. **Blocks** meaningful geofence behaviour for primary AUTO and all OFFBOARD/GUIDED motion (wingmen, park/reposition, end-policy moves).
 5. This file **§ v2 — Convoy trail** — trail motion model **on top of** pathfinding (approach legs route around exclusions; trail arc-length is how wingmen lag the primary, not how they avoid fences).
 6. This file **§ v2 — Formations** — additional shapes, live formation change, tactical offsets (can parallelize after pathfinding; trail still recommended before polyline handoff in cluttered maps).
 7. This file **§ v3 — Road network routing** — task **domain classification** (open vs road-following); snap routes to OSM roads when appropriate; **UGV and UAV** (mixed squads, overwatch). Extends § P router; does not replace open-field skirt.
@@ -131,7 +131,7 @@ Do not block v1 on these. **Pathfinding (§ P)** is the shared foundation; **con
 | **Park / reposition / between-cycles** | Direct goto where used | Same router API |
 | **Convoy trail approach** | Heading-astern / chord through holes | Trail targets sampled along **routed** path to join route |
 
-**Checklist (canonical — do not duplicate in `TODO.md`):**
+**Checklist (canonical — do not duplicate in `ToDo/TODO.md`):**
 
 - [ ] **Guardian 2D pathfinding system (proper v1 — not incremental patches):** One shared router under Global Utilities / Mission Control — free-space or corridor/medial nodes (not fence-offset vertices); single clearance model on every leg (A* + string-pull, optional corner smoothing); deterministic unit tests (hole between start and goal, nested exclusion inside inclusion, multi-hole); **no illegal straight-chord fallbacks** when routing fails; MC-R map overlay matches execution geometry. **Reverted (2026-05):** experimental ``GuardianGeofenceRouter`` removed from tree; v1 convoy uses direct AUTO after assembly + upload until this ships. Consumers (staged): mission compile/upload leg repair; OFFBOARD launch→WP1; policy move+park / RTL / reposition; wingman formation streams; reserve swap join pose.
 - [ ] **Launch→WP1 OFFBOARD leg (deferred):** After pathfinding v1, convoy squads may again run routed OFFBOARD to first waypoint before AUTO; until then primary starts AUTO after assembly + mission upload (``launchPrimaryMissionAfterConvoyAssembly``).
@@ -163,7 +163,7 @@ Do not block v1 on these. **Pathfinding (§ P)** is the shared foundation; **con
 - [ ] **Primary handler:** Pause or hold primary mission authority as needed; pathfind **current pose → rejoin point** on mission spine (inside inclusion, outside exclusions); re-upload mission segment or switch to streamed legs when § M ships — v2 may be **upload patch** only while primary stays AUTO.
 - [ ] **Wingman handler:** Do not change wingman mission authority; pathfind **current pose → current formation target** from `MissionRunSquadFollowSubsystem` (convoy / trail phase); continue streaming setpoints along the legal path; replan when primary or target moves.
 - [ ] **Coordination:** If primary is recovering, wingmen still target formation relative to **live** primary pose — wingman detour must not chord through the same exclusion; primary recovery takes precedence for squad pause policy (document: freeze wingmen vs allow skirt-only).
-- [ ] **FC params (safety net only):** Document recommended `FENCE_ACTION` (or stack equivalent) so FC does not fight MRE; Guardian owns detour geometry — see `TODO.md` FC breach params bullet.
+- [ ] **FC params (safety net only):** Document recommended `FENCE_ACTION` (or stack equivalent) so FC does not fight MRE; Guardian owns detour geometry — see `ToDo/TODO.md` FC breach params bullet.
 - [ ] **Tests:** Unit — predicted violation emits event; router goals differ for primary rejoin vs wingman-to-slot. SIM — primary stalls at exclusion → MRE detour → mission advances; wingman chord blocked → reports → skirts while primary on-route.
 - [ ] **Operator:** MC-R / mission log shows exclusion recovery in progress; optional prompt when recovery exhausts retries (reuse squad follow prompt patterns).
 
@@ -242,7 +242,7 @@ Do not block v2. **§ R** extends the § P router with a **road graph** and **ta
 - [ ] **Convoy trail / wingmen (§ T):** Trail arc-length and convoy slots measured along **routed** track, not author chord.
 - [ ] **Mixed squad overwatch:** UAV offsets from routed UGV centerline (lateral, along-track, altitude band); pathfound UAV reposition to overwatch slots uses open-field or “air corridor” policy — document in README.
 
-**Checklist (implementation also tracked in `TODO.md` → Pathfinding — road layer):**
+**Checklist (implementation also tracked in `ToDo/TODO.md` → Pathfinding — road layer):**
 
 - [ ] Unit tests: classify synthetic polylines (on-road vs cross-country); snap A→B around block; exclusion blocking a street triggers skirt or reroute.
 - [ ] SIM smoke: UGV squad on suburban task — track follows streets; UAV wingmen hold offset over routed path, not through exclusion.
@@ -321,7 +321,7 @@ Do not block v2. **§ R** extends the § P router with a **road graph** and **ta
 
 ## Out of scope for this tracker
 
-- Permanent squad delay / bench squad (`MRESquadsToDo.md` §7, `TODO.md` Squads).
+- Permanent squad delay / bench squad (`MRESquadsToDo.md` §7, `ToDo/TODO.md` Squads).
 - MRE “re-sync squads if drift” (`MRESquadsToDo.md` §7) — may share follow subsystem later.
-- Full Paladin autonomous promotion without operator RoE — follows Rules of Engagement wiring in `TODO.md`.
-- **Pathfinding implementation source tree** — tracked in `TODO.md` (Utilities / Mission Control planner); this file defines **squad-follow consumption** only.
+- Full Paladin autonomous promotion without operator RoE — follows Rules of Engagement wiring in `ToDo/TODO.md`.
+- **Pathfinding implementation source tree** — tracked in `ToDo/TODO.md` (Utilities / Mission Control planner); this file defines **squad-follow consumption** only.

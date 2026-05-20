@@ -51,4 +51,4 @@ GUARDIAN_ROS2_SKIP_NAV2=1 make ros2-runtime
 ## Related
 
 - `Resources/Ros2VehicleBridge/README_AUTONOMY.md` — planner routing (v1 stubs)
-- `TODO.md` — Vehicles System → autonomy integration backlog
+- `ToDo/TODO.md` — Vehicles System → autonomy integration backlog

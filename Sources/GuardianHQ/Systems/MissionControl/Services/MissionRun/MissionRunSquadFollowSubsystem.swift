@@ -1,6 +1,6 @@
 import Foundation
 
-/// Wingman **convoy** follow — heading-astern assembly, optional **Guardian Router** launch→WP1 approach, then path-polyline slots after the primary reaches WP1 (`SquadFollow&Formation.md` §C / §P).
+/// Wingman **convoy** follow — heading-astern assembly, optional **Guardian Router** launch→WP1 approach, then path-polyline slots after the primary reaches WP1 (`ToDo/SquadFollow&Formation.md` §C / §P).
 @MainActor
 final class MissionRunSquadFollowSubsystem {
 
@@ -196,13 +196,18 @@ final class MissionRunSquadFollowSubsystem {
             primaryAssignmentID: squad.primaryAssignment.id,
             mission: environment?.template
         )
+        let rosterFootprints = MissionSquadFormationFootprintSpacing.rosterEntries(
+            primary: squad.primaryRosterDevice,
+            wingmanDevices: squad.wingmanBindings.map(\.rosterDevice)
+        )
         let spacing = resolvedSquadConvoySpacing(
             primaryAssignmentID: squad.primaryAssignment.id,
             task: task,
             primaryGranularClass: squad.primaryRosterDevice.vehicleClass,
             formation: formation,
             spacing: shape,
-            mission: environment?.template
+            mission: environment?.template,
+            rosterEntries: rosterFootprints
         )
         return bindings.enumerated().map { ordinal, binding in
             let slot = MissionControlSquadConvoyFormationUtilities.desiredFormationSlot(
@@ -1800,7 +1805,8 @@ final class MissionRunSquadFollowSubsystem {
         primaryGranularClass: FleetVehicleType?,
         formation: MissionSquadFormationKind,
         spacing: MissionSquadFormationSpacing,
-        mission: Mission?
+        mission: Mission?,
+        rosterEntries: [(vehicleClass: FleetVehicleType, tier: VehicleSizeTier)] = []
     ) -> MissionSquadConvoySpacing {
         if let brain = brainSquadTuning(primaryAssignmentID: primaryAssignmentID, mission: mission),
            let convoySpacing = brain.convoySpacing {
@@ -1810,7 +1816,8 @@ final class MissionRunSquadFollowSubsystem {
             taskPattern: task.pattern,
             primaryGranularClass: primaryGranularClass,
             spacing: spacing,
-            formation: formation
+            formation: formation,
+            rosterEntries: rosterEntries
         )
     }
 
@@ -1857,13 +1864,24 @@ final class MissionRunSquadFollowSubsystem {
         }()
         let formation = resolvedSquadFormation(primaryAssignmentID: primaryAssignmentID, mission: mission)
         let shape = resolvedSquadFormationSpacing(primaryAssignmentID: primaryAssignmentID, mission: mission)
+        let wingmanDevices = wingmanAssignmentIDs.compactMap { assignmentID -> RosterDevice? in
+            guard let row = environment.assignments.first(where: { $0.id == assignmentID }),
+                  let device = rosterByID[row.rosterDeviceId]
+            else { return nil }
+            return device
+        }
+        let rosterFootprints = MissionSquadFormationFootprintSpacing.rosterEntries(
+            primary: primaryDevice,
+            wingmanDevices: wingmanDevices
+        )
         let spacing = resolvedSquadConvoySpacing(
             primaryAssignmentID: primaryAssignmentID,
             task: task,
             primaryGranularClass: primaryDevice?.vehicleClass ?? wingmanClass,
             formation: formation,
             spacing: shape,
-            mission: mission
+            mission: mission,
+            rosterEntries: rosterFootprints
         )
         var ordinal = 0
         var out: [WingmanFollowTarget] = []

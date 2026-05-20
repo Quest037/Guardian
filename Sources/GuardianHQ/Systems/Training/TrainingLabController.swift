@@ -2,11 +2,12 @@ import Combine
 import Foundation
 import SwiftUI
 
-/// Unified Training lab controller — teaching session + formation follow (merged façade).
+/// Unified Training lab controller — one product surface; teaching and formation follow are implementation façades (squad of 1 for teach, wingmen for multi-vehicle formation).
 @MainActor
 final class TrainingLabController: ObservableObject {
     let teaching: TrainingPanelController
     let formation: FormationsPlaygroundController
+    let run: TrainingLabRunOrchestrator
 
     private weak var roster: TrainingLabRosterController?
     private var cancellables = Set<AnyCancellable>()
@@ -14,8 +15,11 @@ final class TrainingLabController: ObservableObject {
     init() {
         teaching = TrainingPanelController()
         formation = FormationsPlaygroundController()
+        run = TrainingLabRunOrchestrator()
         forwardObjectWillChange(from: teaching)
         forwardObjectWillChange(from: formation)
+        forwardObjectWillChange(from: run)
+        run.bind(lab: self)
     }
 
     func attach(
@@ -46,40 +50,83 @@ final class TrainingLabController: ObservableObject {
             guard let self, let roster = self.roster else { return }
             Task { await self.resetMap(roster: roster) }
         }
+        teaching.onMapEnvironmentSelected = { [weak self] in
+            self?.refreshFormationMapSessionGeodeticOrigin()
+        }
+        refreshFormationMapSessionGeodeticOrigin()
+    }
+
+    func refreshFormationMapSessionGeodeticOrigin() {
+        formation.applyMapSessionSpawnDefaults(teaching.mapSessionGeodeticOrigin())
     }
 
     func bindRoster(_ roster: TrainingLabRosterController) {
         self.roster = roster
     }
 
-    func mapSessionContext(roster: TrainingLabRosterController) -> TrainingLabMapSessionContext? {
+    func mapSessionContext(
+        roster: TrainingLabRosterController,
+        log: TrainingLabMapSessionDiagnostics.LogHandler? = nil
+    ) -> TrainingLabMapSessionContext? {
         guard let fleetLink = teaching.fleetLinkForMapSession,
               let sitl = teaching.sitlForMapSession
         else { return nil }
         let learningSquad = roster.learningSquad
+        let environment = teaching.selectedEnvironment
+        let spawnDefaults = teaching.spawnDefaultsForMapSession
+        let mapGeodeticOrigin = environment.map {
+            TrainingLabMapSessionLifecycle.mapGeodeticOrigin(
+                environment: $0,
+                spawnDefaults: spawnDefaults
+            )
+        } ?? spawnDefaults
+        let zonesConfigured = environment?.manifest.hasConfiguredStartAndEndZones == true
         let singleVehicleStart: TrainingTaskPose? =
-            learningSquad?.isSingleVehicle == true ? teaching.taskLayout?.start : nil
+            (!zonesConfigured && learningSquad?.isSingleVehicle == true)
+            ? teaching.taskLayout?.start
+            : nil
         return TrainingLabMapSessionContext(
             fleetLink: fleetLink,
             sitl: sitl,
             gazebo: teaching.gazeboForMapSession,
-            spawnDefaults: teaching.spawnDefaultsForMapSession,
+            spawnDefaults: spawnDefaults,
+            mapGeodeticOrigin: mapGeodeticOrigin,
             simulationPlatform: teaching.simulationPlatformForMapSession,
             activeGazeboWorldID: teaching.activeGazeboWorldID,
-            environment: teaching.selectedEnvironment,
+            environment: environment,
             squads: roster.squads,
             learningSquadID: roster.learningSquadID ?? roster.squads.first?.id,
-            learningSquadSingleVehicleStart: singleVehicleStart
+            learningSquadSingleVehicleStart: singleVehicleStart,
+            log: log
         )
     }
 
-    func resetMap(roster: TrainingLabRosterController) async {
+    /// Teleport one roster vehicle to its start formation slot (after spawn or map edit).
+    func positionVehicleAtStartSlot(roster: TrainingLabRosterController, entryID: UUID) async {
         guard let context = mapSessionContext(roster: roster) else { return }
+        await TrainingLabMapSessionLifecycle.positionVehicleAtStart(entryID: entryID, context: context)
+    }
+
+    func resetMap(
+        roster: TrainingLabRosterController,
+        runLog: TrainingLabMapSessionDiagnostics.LogHandler? = nil
+    ) async {
+        guard let context = mapSessionContext(roster: roster, log: runLog) else {
+            runLog?("[Map] resetMap: no map session (fleet/sitl missing).")
+            return
+        }
         await TrainingLabMapSessionLifecycle.resetMap(context: context)
     }
 
-    func buildMap(roster: TrainingLabRosterController) async {
-        guard let context = mapSessionContext(roster: roster) else { return }
+    func buildMap(
+        roster: TrainingLabRosterController,
+        runLog: TrainingLabMapSessionDiagnostics.LogHandler? = nil
+    ) async {
+        teaching.reconcileActiveGazeboRunWorldIfNeeded()
+        guard let context = mapSessionContext(roster: roster, log: runLog) else {
+            runLog?("[Map] buildMap: no map session (fleet/sitl missing).")
+            return
+        }
         await TrainingLabMapSessionLifecycle.buildMap(context: context)
     }
 
@@ -97,6 +144,33 @@ final class TrainingLabController: ObservableObject {
 
     func stopActiveFormationSession() async {
         await formation.stopActiveFormationSession()
+    }
+
+    /// Leaving the Training lab sidebar section: end an active transit run or reset the map session,
+    /// stop fleet control streams, persist roster + map selection, and keep the app-wide Gazebo run world warm.
+    func leaveLab(roster: TrainingLabRosterController) async {
+        if run.isSessionActive {
+            await run.stop(roster: roster)
+        } else {
+            await resetMap(roster: roster)
+            await stopActiveFormationSession()
+        }
+        await stopRosterControlStreams(roster: roster)
+        teaching.cancelTeaching()
+        teaching.leavePanel()
+        formation.leavePanel()
+        roster.refreshSlotStatesFromFleet(stripFailedLinks: false)
+        roster.persistRoster()
+        teaching.persistEnvironmentSelection()
+    }
+
+    private func stopRosterControlStreams(roster: TrainingLabRosterController) async {
+        guard let fleetLink = teaching.fleetLinkForMapSession else { return }
+        for entry in roster.squads.flatMap(\.allEntries) {
+            guard let vehicleID = entry.vehicleID else { continue }
+            await fleetLink.stopFormationFollowStream(vehicleID: vehicleID)
+            await fleetLink.stopTrainingControlStream(vehicleID: vehicleID)
+        }
     }
 
     private func forwardObjectWillChange(from object: some ObservableObject) {

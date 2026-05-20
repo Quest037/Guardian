@@ -16,13 +16,18 @@ enum GazeboEntityFactoryError: LocalizedError, Equatable {
 
 /// Harmonic `gz service` calls for `/world/<name>/create` and `/remove/blocking`.
 enum GazeboEntityFactoryClient {
+  /// Poll budget after async create ack (vehicle proxies on a busy sim often need >8s).
+  static let defaultModelAppearWaitMS = 8_000
+  static let vehicleProxyModelAppearWaitMS = 18_000
+
   static func createModel(
     worldName: String,
     instanceIndex: Int,
     sdfURL: URL,
     modelName: String,
     pose: TrainingEnvironmentPose,
-    footprintHeightM: Double
+    footprintHeightM: Double,
+    modelAppearWaitMS: Int = defaultModelAppearWaitMS
   ) async throws {
     guard let gz = GazeboLocator.gzExecutablePath() else {
       throw GazeboEntityFactoryError.missingGzBinary
@@ -63,12 +68,15 @@ enum GazeboEntityFactoryClient {
     let appeared = await waitForModelName(
       modelName,
       instanceIndex: instanceIndex,
-      timeoutMS: 8000,
+      timeoutMS: modelAppearWaitMS,
       pollIntervalMS: 200
     )
     guard appeared else {
+      let live = await listWorldModelNames(instanceIndex: instanceIndex)
+      let sample = live.prefix(8).joined(separator: ", ")
+      let suffix = sample.isEmpty ? "no models listed" : "models on world: \(sample)\(live.count > 8 ? ", …" : "")"
       throw GazeboEntityFactoryError.serviceFailed(
-        "Model \(modelName) did not appear in Gazebo after create (world \(worldName))."
+        "Model \(modelName) did not appear in Gazebo after create (world \(worldName); \(suffix))."
       )
     }
   }

@@ -106,9 +106,6 @@ struct TrainingLabVehiclesPanelContent: View {
                         .foregroundStyle(GuardianSemanticColors.infoForeground)
                 }
             }
-            Text(squad.taskKind.displayTitle)
-                .font(GuardianTypography.font(.denseCaption10Regular))
-                .foregroundStyle(theme.textSecondary)
 
             if let slot = squad.primary.slotState {
                 simulatorCard(

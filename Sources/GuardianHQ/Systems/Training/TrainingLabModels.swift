@@ -10,6 +10,11 @@ enum TrainingLabPanelTab: String, CaseIterable, Identifiable, Sendable {
 
     var id: String { rawValue }
 
+    /// Drawers available while a transit run is active (map changes require **Stop** first).
+    static var runningSessionTabs: [TrainingLabPanelTab] {
+        allCases.filter { $0 != .map }
+    }
+
     var drawerTitle: String {
         switch self {
         case .map: return "Training map"
@@ -57,7 +62,7 @@ enum TrainingLabKeyboardShortcuts {
         [
             "Return — Run (idle, when roster is ready)",
             "Escape — Stop session (running, when no drawer is open)",
-            "⌘1–⌘4 — Map / Vehicles / Training / Logs (rail or drawer)",
+            "⌘1–⌘4 — Map / Vehicles / Training / Logs (idle rail; running drawers omit Map)",
         ]
     }
 }

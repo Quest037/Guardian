@@ -113,4 +113,72 @@ final class MissionSquadFormationGeometryTests: XCTestCase {
         XCTAssertEqual(viaUtilities.lat, direct.lat, accuracy: 0.0000001)
         XCTAssertEqual(viaUtilities.lon, direct.lon, accuracy: 0.0000001)
     }
+
+    func test_ugv_default_convoy_tight_uses_field_baseline_not_three_metre_sim() {
+        let tight = MissionSquadConvoySpacingPolicy.resolvedSpacing(
+            taskPattern: .convoy,
+            primaryGranularClass: .ugvWheeled,
+            spacing: .tight,
+            formation: .convoy,
+            rosterEntries: [(.ugvWheeled, .medium)]
+        )
+        XCTAssertEqual(tight.alongTrackMetersPerOrdinal, 8, accuracy: 0.01)
+        XCTAssertGreaterThan(tight.alongTrackMetersPerOrdinal, 3)
+    }
+
+    func test_staggeredConvoy_tight_ugv_slots_do_not_overlap() {
+        let spacing = MissionSquadConvoySpacingPolicy.resolvedSpacing(
+            taskPattern: .convoy,
+            primaryGranularClass: .ugvWheeled,
+            spacing: .tight,
+            formation: .staggeredConvoy,
+            rosterEntries: [(.ugvWheeled, .medium), (.ugvWheeled, .medium), (.ugvWheeled, .medium)]
+        )
+        let anchor = TrainingLabZoneFormationAnchor(centerXM: 0, centerYM: 0, headingDeg: 0)
+        var squad = TrainingLabSquad(
+            primary: TrainingLabRosterEntry(vehicleClass: .ugvWheeled),
+            wingmen: [
+                TrainingLabRosterEntry(vehicleClass: .ugvWheeled),
+                TrainingLabRosterEntry(vehicleClass: .ugvWheeled),
+            ],
+            formationPolicy: TrainingLabSquadFormationPolicy(startFormation: .staggeredConvoy, startSpacing: .tight)
+        )
+        let layout = TrainingLabFormationSlotGeometry.groupLayout(
+            squad: squad,
+            squadIndex: 0,
+            phase: .start,
+            anchor: anchor
+        )
+        for i in layout.slots.indices {
+            for j in (i + 1)..<layout.slots.count {
+                XCTAssertFalse(
+                    TrainingLabFormationSlotGeometry.slotsOverlap(layout.slots[i], layout.slots[j]),
+                    "slots \(i) and \(j) overlap"
+                )
+            }
+        }
+    }
+
+    func test_arrowhead_tight_ugv_row1_slots_do_not_overlap() {
+        let anchor = TrainingLabZoneFormationAnchor(centerXM: 0, centerYM: 0, headingDeg: 0)
+        let squad = TrainingLabSquad(
+            primary: TrainingLabRosterEntry(vehicleClass: .ugvWheeled),
+            wingmen: [
+                TrainingLabRosterEntry(vehicleClass: .ugvWheeled),
+                TrainingLabRosterEntry(vehicleClass: .ugvWheeled),
+            ],
+            formationPolicy: TrainingLabSquadFormationPolicy(startFormation: .arrowhead, startSpacing: .tight)
+        )
+        let layout = TrainingLabFormationSlotGeometry.groupLayout(
+            squad: squad,
+            squadIndex: 0,
+            phase: .start,
+            anchor: anchor
+        )
+        for i in layout.slots.indices {
+            for j in (i + 1)..<layout.slots.count {
+                XCTAssertFalse(TrainingLabFormationSlotGeometry.slotsOverlap(layout.slots[i], layout.slots[j]))
+            }
+        }
+    }
 }

@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class TrainingEnvironmentObstacleTests: XCTestCase {
     func test_newDraftManifest_hasNoDefaultObstacles() {

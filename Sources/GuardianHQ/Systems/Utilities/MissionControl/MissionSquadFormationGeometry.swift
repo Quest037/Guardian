@@ -14,6 +14,15 @@ enum MissionSquadFormationGeometry {
         static let minLateralLaneMeters: Double = 1.5
     }
 
+    /// Arrowhead rows widen per row index; lane spacing also respects ``MissionSquadConvoySpacing/lateralLaneMeters``.
+    private enum ArrowheadShapeTuning {
+        static let lateralAlongFraction: Double = 0.92
+    }
+
+    private enum StaggeredConvoyTuning {
+        static let lateralAlongFraction: Double = 0.58
+    }
+
     struct BodyOffsetMeters: Equatable, Sendable {
         /// Metres along primary heading; negative = astern.
         let forwardM: Double
@@ -96,7 +105,11 @@ enum MissionSquadFormationGeometry {
             return 0
         case .staggeredConvoy:
             let sign: Double = wingmanOrdinal % 2 == 0 ? 1.0 : -1.0
-            return sign * max(spacing.lateralLaneMeters, spacing.alongTrackMetersPerOrdinal * 0.35)
+            let laneM = max(
+                spacing.lateralLaneMeters,
+                spacing.alongTrackMetersPerOrdinal * StaggeredConvoyTuning.lateralAlongFraction
+            )
+            return sign * laneM
         case .chevron:
             let placement = chevronRowPlacement(wingmanOrdinal: wingmanOrdinal)
             return formationRowLateralMeters(
@@ -185,7 +198,8 @@ enum MissionSquadFormationGeometry {
         let rowScale = Double(row)
         switch formation {
         case .arrowhead:
-            return max(along * 0.42 * rowScale, 1.0)
+            let laneFromAlong = along * ArrowheadShapeTuning.lateralAlongFraction * rowScale
+            return max(laneFromAlong, spacing.lateralLaneMeters * rowScale)
         case .chevron:
             return max(
                 along * ChevronShapeTuning.lateralLaneAlongScale * rowScale,

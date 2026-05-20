@@ -28,7 +28,8 @@ enum GazeboVehicleModelSDFWriter {
       modelName: safeName,
       footprint: footprint,
       universalClass: params.vehicleClass.universalClass,
-      meshFilePath: meshPath
+      meshFilePath: meshPath,
+      materialRGBA: materialRGBA(for: params)
     )
     try xml.write(to: sdfURL, atomically: true, encoding: .utf8)
     return WrittenModel(modelName: safeName, sdfURL: sdfURL, usesCustomMesh: usesMesh)
@@ -54,11 +55,21 @@ enum GazeboVehicleModelSDFWriter {
     return nil
   }
 
+  private static func materialRGBA(for params: GazeboVehicleSpawnParams) -> GazeboUniversalClassVisualStyle.RGBA {
+    if let hex = params.squadColorHex?.trimmingCharacters(in: .whitespacesAndNewlines),
+       !hex.isEmpty,
+       let rgba = TrainingLabSquadFormationPalette.rgba(fromHex: hex) {
+      return rgba
+    }
+    return GazeboUniversalClassVisualStyle.rgba(for: params.vehicleClass.universalClass)
+  }
+
   static func modelSDFXML(
     modelName: String,
     footprint: VehicleFootprint,
     universalClass: UniversalVehicleClass,
-    meshFilePath: String?
+    meshFilePath: String?,
+    materialRGBA: GazeboUniversalClassVisualStyle.RGBA? = nil
   ) -> String {
     let metres = footprint.metres()
     let w = formatM(metres.widthM)
@@ -71,10 +82,10 @@ enum GazeboVehicleModelSDFWriter {
                   </box>
     """
 
+    let color = materialRGBA ?? GazeboUniversalClassVisualStyle.rgba(for: universalClass)
     let visuals: String
     if let meshFilePath {
       let uri = "file://\(meshFilePath)"
-      let color = GazeboUniversalClassVisualStyle.rgba(for: universalClass)
       visuals = """
           <visual name="visual_mesh">
             <geometry>
@@ -90,7 +101,6 @@ enum GazeboVehicleModelSDFWriter {
           </visual>
       """
     } else {
-      let color = GazeboUniversalClassVisualStyle.rgba(for: universalClass)
       visuals = """
           <visual name="visual">
             <geometry>

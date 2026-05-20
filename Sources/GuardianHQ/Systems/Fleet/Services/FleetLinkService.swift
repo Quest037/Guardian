@@ -1109,8 +1109,20 @@ final class FleetLinkService: ObservableObject {
         )
     }
 
+    /// Clears deferred spawn pose so a later ``applySimState`` (e.g. formation slot) is not overwritten by the SITL handshake.
+    func clearPendingSpawnSimState(forVehicleID vehicleID: String) {
+        sessionsByVehicleID[vehicleID]?.pendingSpawnSimState = nil
+    }
+
     private func awaitSetSimStateFloatBestEffort(vehicleID: String, name: String, value: Float, logTag: String) async {
         guard let session = sessionsByVehicleID[vehicleID] else { return }
+        guard session.hasSeenMavlinkSessionConnected else {
+            appendVehicleLog(
+                "applySimState param skipped [\(logTag)] \(name): MAVLink not connected yet.",
+                vehicleID: vehicleID
+            )
+            return
+        }
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             session.drone.param.setParamFloat(name: name, value: value)
                 .subscribe(on: fleetLinkMavsdkBlockingRpcBox.scheduler)

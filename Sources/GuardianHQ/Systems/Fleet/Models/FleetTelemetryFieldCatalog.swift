@@ -11,7 +11,7 @@ import Foundation
 ///    under the synthetic ``Group/other`` chip via `unknownFields(in:)` so the Mirror-dump
 ///    completeness benefit of the old raw view is preserved without exploding the curated UI.
 ///
-/// **Catalogue is v1.** Per `TODO.md` it needs a content pass to tighten labels, formatters, and
+/// **Catalogue is v1.** Per `ToDo/TODO.md` it needs a content pass to tighten labels, formatters, and
 /// per-system mappings. Adding a new field to ``FleetHubVehicleTelemetry`` does **not** require
 /// a catalog change for the app to keep compiling — uncatalogued fields gracefully appear under
 /// "Other".

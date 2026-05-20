@@ -4,7 +4,7 @@ Goal: when an operator **creates a new world** in World Builder, they pick **map
 
 **Supersedes:** `gazebo_procedural_terrain_v1_cursor_prompt.md` (ChatGPT draft — reference only; do not treat size tables or HTTP API as product truth).
 
-**Cross-links:** `TrainingGazeboSimulationToDo.md`; `README_FULL.md` → **Gazebo training simulation**; `WorldBuilderView.swift` / `WorldBuilderController.swift`; `TrainingEnvironmentFloorSize.swift`; `TrainingEnvironmentSceneType.swift`; `TrainingEnvironmentAuthoring.swift`; `TrainingEnvironmentWorldSDF.swift`; `GazeboService.swift`.
+**Cross-links:** `ToDo/TrainingGazeboSimulationToDo.md`; `README_FULL.md` → **Gazebo training simulation**; `WorldBuilderView.swift` / `WorldBuilderController.swift`; `TrainingEnvironmentFloorSize.swift`; `TrainingEnvironmentSceneType.swift`; `TrainingEnvironmentAuthoring.swift`; `TrainingEnvironmentWorldSDF.swift`; `GazeboService.swift`.
 
 **Out of scope (v1):** caves, overhangs, mesh terrain, DEM import, manual sculpting UI, runtime terrain deformation, HTTP/REST services, terrain editor in **Edit** drawer (new-world authoring only for param UI).
 
@@ -167,7 +167,7 @@ Load `terrain/metadata.json` + heightmap from package root for app-side queries 
 
 ## Phase 7 — Nav2 / ROS (deferred)
 
-Track under `TrainingGazeboSimulationToDo.md` Phase 7; depends on terrain metadata.
+Track under `ToDo/TrainingGazeboSimulationToDo.md` Phase 7; depends on terrain metadata.
 
 - [ ] Export slope-derived static occupancy PGM + YAML from `TerrainQuery` for Nav2 (optional v1.5).
 - [ ] Optional ROS service for height query on fleet sidecar (not required for Builder ship).

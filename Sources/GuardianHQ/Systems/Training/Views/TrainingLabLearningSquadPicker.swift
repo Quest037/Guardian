@@ -36,6 +36,6 @@ struct TrainingLabLearningSquadPicker: View {
             .pickerStyle(.menu)
         }
         .disabled(controlsLocked)
-        .help("Squad whose skill task is in focus for teach and promote. Other squads keep their own tasks.")
+        .help("Squad used for teach and promote. Vehicle class follows this squad's primary.")
     }
 }

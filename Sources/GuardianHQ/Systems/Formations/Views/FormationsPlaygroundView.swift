@@ -32,7 +32,7 @@ struct TrainingLabPanelView: View {
     }
 
     private var isSessionRunning: Bool {
-        lab.teaching.phase == .teaching || lab.formation.phase == .following
+        lab.run.isSessionActive
     }
 
     private var mapIsSelected: Bool {
@@ -112,8 +112,7 @@ struct TrainingLabPanelView: View {
         }
         .onDisappear {
             appDrawer.dismiss()
-            lab.teaching.leavePanel()
-            lab.formation.leavePanel()
+            Task { await lab.leaveLab(roster: roster) }
         }
         .onChange(of: isSessionRunning) { running in
             if running {
@@ -800,12 +799,20 @@ struct TrainingLabPanelView: View {
             startSession()
         }
         .disabled(!canStartSession)
+        .help(runButtonHelp)
         .keyboardShortcut(TrainingLabKeyboardShortcuts.run)
+    }
+
+    private var runButtonHelp: String {
+        if canStartSession {
+            return "Start transit run for all linked squads (Return)."
+        }
+        return runStartBlockedSummary(forToast: false)
     }
 
     private var trainingLabDrawerTriggers: some View {
         HStack(spacing: GuardianSpacing.xs) {
-            ForEach(TrainingLabPanelTab.allCases) { tab in
+            ForEach(TrainingLabPanelTab.runningSessionTabs) { tab in
                 subBarIconButton(
                     systemImage: tab.systemImage,
                     accessibilityLabel: tab.rawValue,
@@ -895,7 +902,7 @@ struct TrainingLabPanelView: View {
     private var trainingLabKeyboardShortcutButtons: some View {
         Group {
             if isSessionRunning {
-                ForEach(TrainingLabPanelTab.allCases) { tab in
+                ForEach(TrainingLabPanelTab.runningSessionTabs) { tab in
                     Button(tab.drawerTitle) {
                         presentTrainingLabDrawer(tab)
                     }
@@ -931,6 +938,10 @@ struct TrainingLabPanelView: View {
     }
 
     private func presentTrainingLabDrawer(_ tab: TrainingLabPanelTab) {
+        if isSessionRunning, tab == .map {
+            toastCenter.show("Stop the run before changing the map.", style: .info, duration: 2.5)
+            return
+        }
         if tab == .vehicles, !mapIsSelected {
             toastCenter.show("Choose a training map first.", style: .info, duration: 2.5)
             return
@@ -987,45 +998,69 @@ struct TrainingLabPanelView: View {
     }
 
     private func startSession() {
-        guard canStartSession else { return }
-        guard let manifest = lab.teaching.selectedEnvironment?.manifest else { return }
-        let zones = WorldBuilderZoneManifestSupport.zones(from: manifest)
-        roster.ensureZoneFormationAnchors(zones: zones)
-        let staging = TrainingLabFormationSlotStaging.validate(
-            squads: roster.squads,
-            zones: zones,
-            mapHalfExtentM: trainingGroundHalfExtentM
-        )
-        guard staging.isReady else {
-            toastCenter.show(staging.operatorMessage, style: .warning, duration: 5)
+        guard canStartSession else {
+            let summary = runStartBlockedSummary(forToast: true)
+            lab.teaching.logMap("transit run: start blocked — \(summary)")
+            toastCenter.show(summary, style: .warning, duration: 3.5)
             return
         }
+        guard let manifest = lab.teaching.selectedEnvironment?.manifest else {
+            lab.teaching.logMap("transit run: start blocked — map manifest missing")
+            toastCenter.show("Choose a training map first.", style: .warning, duration: 2.5)
+            return
+        }
+        let zones = WorldBuilderZoneManifestSupport.zones(from: manifest)
+        idleRailTab = .logs
+        lab.teaching.logMap("transit run: Run tapped — starting session")
         Task {
-            await lab.buildMap(roster: roster)
-            roster.syncTrainingFromLearningSquad()
-            if roster.learningSquadUsesFormation {
-                idleRailTab = .logs
-                lab.applyFormationPolicyForRun(from: roster)
-                await lab.applyFormationControl()
-                syncMapContent()
-            } else {
-                lab.teaching.startAutonomousTeaching()
-                idleRailTab = .logs
-            }
+            await lab.run.start(
+                roster: roster,
+                zones: zones,
+                mapHalfExtentM: trainingGroundHalfExtentM
+            )
+            syncMapContent()
         }
     }
 
+    /// Why **Run** is disabled, or a short affirmative help string when enabled.
+    private func runStartBlockedSummary(forToast: Bool) -> String {
+        guard mapIsSelected else {
+            return "Choose a training map first."
+        }
+        let slots = roster.allSlotStates
+        guard !slots.isEmpty else {
+            return "Add at least one vehicle to a formation slot."
+        }
+        var parts: [String] = []
+        for (index, slot) in slots.enumerated() {
+            let label = slot.vehicleID.map { id in
+                id.count > 8 ? String(id.prefix(8)) + "…" : id
+            } ?? "slot \(index + 1)"
+            if !slot.linkReady {
+                parts.append("\(label): waiting for simulator link")
+            } else if slot.preflightPassed != true {
+                let preflight = slot.preflightPassed == false ? "preflight failed" : "preflight pending"
+                parts.append("\(label): \(preflight)")
+            }
+        }
+        if parts.isEmpty {
+            return forToast
+                ? "Roster is not ready to run."
+                : "Start transit run for all linked squads (Return)."
+        }
+        let joined = parts.joined(separator: "; ")
+        return forToast ? "Run blocked — \(joined)" : "Run blocked — \(joined)"
+    }
+
     private func stopSessionAndReset() {
-        lab.teaching.cancelTeaching()
         Task {
-            await lab.stopActiveFormationSession()
-            await lab.resetMap(roster: roster)
+            await lab.run.stop(roster: roster)
+            syncMapContent()
         }
     }
 
     private var trainingLabPanel: some View {
-        Color.clear
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        TrainingLabRunPanelContent(run: lab.run)
     }
 
     private var logsLabPanel: some View {
@@ -1042,17 +1077,29 @@ struct TrainingLabPanelView: View {
                             .textSelection(.enabled)
                     }
                 }
+                if !lab.run.logLines.isEmpty {
+                    Text("Transit run")
+                        .font(GuardianTypography.font(.subsectionTitleSemibold))
+                        .foregroundStyle(theme.textPrimary)
+                        .padding(.top, lab.teaching.logLines.isEmpty ? 0 : GuardianSpacing.sm)
+                    ForEach(lab.run.logLines) { line in
+                        Text(transitRunLogLineText(line))
+                            .font(GuardianTypography.font(.denseFootnoteRegular))
+                            .foregroundStyle(theme.textSecondary)
+                            .textSelection(.enabled)
+                    }
+                }
                 if !lab.formation.logLines.isEmpty {
                     Text("Formation")
                         .font(GuardianTypography.font(.subsectionTitleSemibold))
                         .foregroundStyle(theme.textPrimary)
-                        .padding(.top, lab.teaching.logLines.isEmpty ? 0 : GuardianSpacing.sm)
+                        .padding(.top, (lab.teaching.logLines.isEmpty && lab.run.logLines.isEmpty) ? 0 : GuardianSpacing.sm)
                     ForEach(lab.formation.logLines) { line in
                         formationLogRow(line)
                     }
                 }
-                if lab.teaching.logLines.isEmpty && lab.formation.logLines.isEmpty {
-                    Text("Logs appear here during spawn, teaching, and formation runs.")
+                if lab.teaching.logLines.isEmpty, lab.run.logLines.isEmpty, lab.formation.logLines.isEmpty {
+                    Text("Logs appear here during spawn and transit runs.")
                         .font(GuardianTypography.font(.denseFootnoteRegular))
                         .foregroundStyle(theme.textTertiary)
                 }
@@ -1060,6 +1107,11 @@ struct TrainingLabPanelView: View {
             .padding(GuardianSpacing.md)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private func transitRunLogLineText(_ line: TrainingPanelLogLine) -> String {
+        let time = line.timestamp.formatted(date: .omitted, time: .standard)
+        return "\(time)  \(line.message)"
     }
 
     private func formationLogRow(_ line: FormationsPlaygroundLogLine) -> some View {

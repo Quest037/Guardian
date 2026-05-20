@@ -116,7 +116,7 @@ struct RootView: View {
             if !sim {
                 sitlService.stopAll()
                 if appProduct.includesGazeboSimulation {
-                    gazeboService.stopAll(purpose: .run)
+                    Task { await gazeboService.stopAllEmbeddedViewportWorldsCompletely() }
                 }
                 if selection == .training {
                     selection = appProduct.defaultAppSection

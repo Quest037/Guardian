@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class MissionCardThumbnailSubsystemTests: XCTestCase {
     func test_style_foregroundIndex_inRange() {

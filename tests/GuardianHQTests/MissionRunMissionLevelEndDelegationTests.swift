@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Mission-level complete / abort entry points delegate to per-task scheduling APIs with task-state priority rules.
 @MainActor

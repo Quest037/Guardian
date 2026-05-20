@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GuardianBrainPackBuilderSquadProfileTests: XCTestCase {
     func test_squadProfile_encodes_formation_metadata() throws {

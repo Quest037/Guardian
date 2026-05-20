@@ -1,7 +1,7 @@
 import SwiftUI
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 @MainActor
 final class GuardianPulsingSkeletonBlocksTests: XCTestCase {

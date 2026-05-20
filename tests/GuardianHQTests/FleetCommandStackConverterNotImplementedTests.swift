@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage B0 `.notImplemented` failure-path coverage. The catalogue surfaces
 /// `.notImplemented` translations to recipes as `.error(.notImplemented)` with the

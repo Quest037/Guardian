@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class MissionPointMissionControlLiveMapFilterTests: XCTestCase {
     func test_filteredForMissionControlLiveMap_noTaskFocus_returnsAll() {

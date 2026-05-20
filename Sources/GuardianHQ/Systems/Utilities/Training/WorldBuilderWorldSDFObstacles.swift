@@ -2,7 +2,7 @@ import Foundation
 
 /// Reads Guardian obstacle model entries embedded in a training `world.sdf`.
 enum WorldBuilderWorldSDFObstacles {
-    private static let modelNamePattern = "<model\\s+name=[\"'](guardian_obstacle_[^\"']+)[\"']"
+    private static let modelNamePattern = "<model\\s+name=[\"'](guardian_obstacle_[^\"']+)[\"']\""
 
     /// Per-obstacle model names in `world.sdf` (excludes the baked Training aggregate).
     static func obstacleModelNames(inWorldSDF worldURL: URL) -> Set<String> {

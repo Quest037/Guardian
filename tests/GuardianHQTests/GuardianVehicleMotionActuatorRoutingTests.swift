@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GuardianVehicleMotionActuatorRoutingTests: XCTestCase {
     func test_px4_ugv_usesThrottleSteering() {

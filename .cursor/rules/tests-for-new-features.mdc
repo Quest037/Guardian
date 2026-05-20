@@ -1,11 +1,11 @@
 ---
-description: Add XCTest coverage for new features in the GuardianHQTests target as part of the same coherent pass
+description: Add XCTest coverage for new features in the GuardianCoreTests target as part of the same coherent pass
 alwaysApply: true
 ---
 
 # Add Tests For New Features
 
-When introducing or substantially extending a feature in this repo, add **XCTest coverage** for it in `Tests/GuardianHQTests/` as part of the **same coherent pass** as the feature work, not as a follow-up.
+When introducing or substantially extending a feature in this repo, add **XCTest coverage** for it in `Tests/GuardianHQTests/` (SwiftPM target **`GuardianCoreTests`**) as part of the **same coherent pass** as the feature work, not as a follow-up.
 
 ## What counts as a "new feature"
 
@@ -36,7 +36,7 @@ When introducing or substantially extending a feature in this repo, add **XCTest
 
 - One `XCTestCase` subclass per logical surface, named `<Type>Tests.swift`.
 - Use `@MainActor final class` for tests that touch `@MainActor` singletons (e.g. `FleetCommandsCatalogue.shared`).
-- Use `@testable import GuardianHQ` so internal symbols are visible.
+- Use `@testable import GuardianCore` so internal symbols are visible.
 - Prefer many small `test_<thing>_<condition>` methods over a few omnibus tests — readable failure output beats compact source.
 
 ## Workflow

@@ -13,12 +13,12 @@ Guardian is a native macOS operator console built with SwiftUI.
 
 ### Two-app SwiftPM products (Training / Mission)
 
-Shared code lives in the **`GuardianHQ` library** target. Three macOS executables ship from one repo:
+Shared code lives in the **`GuardianCore`** library target (`Sources/GuardianHQ/`). Import **`GuardianCore`** in app and test targets (`import GuardianCore`). Training-only assets (`GazeboRuntime`, `GazeboWeb`, `TrainingEnvironments`) ship in **`GuardianTrainingSimulationResources`** — linked by **Guardian Training** and the **GuardianHQ** monolith, not by **Guardian Mission**. Three macOS executables ship from one repo:
 
 | SwiftPM product | Role |
 | --- | --- |
 | **`GuardianHQ`** | Full monolith during cutover (Training + Mission surfaces) — implemented by `GuardianHQRun` |
-| **`GuardianMission`** | Operations app — Missions, Mission Control, Live Drive, Garage; **no** Training tab |
+| **`GuardianMission`** | Operations app — Missions, Mission Control, Live Drive, Garage; **no** Training tab; **no** Training simulation resource target |
 | **`GuardianTraining`** | Lab app — Training + Formation; **no** Missions / Mission Control / Live Drive **nav panels** |
 
 **`GuardianAppProduct`** (`Sources/GuardianHQ/App/GuardianAppProduct.swift`) locks per-executable shell behaviour:
@@ -31,9 +31,24 @@ Shared code lives in the **`GuardianHQ` library** target. Three macOS executable
 - **Default panel:** All executables open on **Dashboard** (no product-specific default section).
 - **Bundle display name:** Each executable embeds its own `MainBundle-Info.plist` (`CFBundleDisplayName` = Guardian Mission / Guardian Training) so system prompts (e.g. Local Network) do not truncate the SwiftPM binary name `GuardianTraining` → `GuardianTrainin`.
 
-**`.app` bundles:** `scripts/package-macos-app.sh [debug\|release] [GuardianHQ\|GuardianMission\|GuardianTraining]` → `build/Guardian Mission.app`, etc. **Guardian Mission** builds omit `GazeboRuntime`, `GazeboWeb`, and `TrainingEnvironments` from the embedded resource bundle (Training / HQ retain them).
+**`.app` bundles:** `scripts/package-macos-app.sh [debug\|release] [GuardianHQ\|GuardianMission\|GuardianTraining]` → `build/Guardian Mission.app`, etc. **Guardian Mission** copies only `GuardianCore_GuardianCore.bundle`; Training / HQ also embed `GuardianTrainingSimulationResources_GuardianTrainingSimulationResources.bundle` next to the executable.
 
-Tracker: `AppTrainingMissionSplitToDo.md` (`GuardianCore` extraction + SwiftPM resource split still open).
+**Tests:** `swift test` runs **`GuardianCoreTests`** (`Tests/GuardianHQTests/`), linking `GuardianTrainingSimulationResources` so Gazebo / environment tests resolve bundled assets.
+
+### Training ↔ Mission cutover — manual smoke (operator)
+
+Run on a Mac with SITL stacks available (`make build-with-sitl` or equivalent). Use **Guardian Training** and **Guardian Mission** executables (or packaged `.app` builds).
+
+| Step | App | Check |
+| --- | --- | --- |
+| 1 | Training | Teach a skill → **Promote** → **Export brain pack** (note `brain_id` + version **v1**). |
+| 2 | Training | Promote again (or edit) → **Export new version…** → version **v2** in catalogue. |
+| 3 | Mission | **Settings → Brains** → import **v1** and **v2**; confirm both appear. |
+| 4 | Mission | **Pin as default** the **v2** pack for a task kind + vehicle class used in the smoke mission. |
+| 5 | Mission | MCS → SIM mission with that task/class → **Start Run** → MC-R: primary runs **OFFBOARD** brain segments (not raw MAVLink mission upload for that path). |
+| 6 | Mission | Mission with **2× UGV** in a squad → convoy / formation: **Nav2** squad planner path active (run log `squadPlannerBackendChosen` or wingman follow per README). |
+
+Deferred brain / planner work: `NEXTVERSION.md` → **2026-05-19 — Brain pack & MRE follow-up**.
 
 ### Guardian Brain Pack (`.guardianbrain`)
 
@@ -48,7 +63,7 @@ Portable JSON autonomy export (format version **1**). Code: `Sources/GuardianHQ/
 | **Run binding** | `MissionRunEnvironment.brainBindings` seeded from pins at `MissionControlStore.createRun`; MCS **Setup → Rules → Autonomy brains** overrides catalogue version per task kind + vehicle class before Start Run |
 | **MC-R chrome** | Task triage strip lists run brains; roster tiles show brain caption per vehicle class when bound |
 | **Log export** | Copy/save mission log prepends a JSON `# Guardian brain bindings` block (`brain_id`, `brain_version`, `format_version`, task/vehicle tags) |
-| **MRE segment dispatch** | Non-convoy primaries with segment brains run `FleetLinkService/executeTrainingSegment` at task start (skips MAVLink upload); convoy + planner-only packs still open |
+| **MRE segment dispatch** | Non-convoy primaries with segment brains run `FleetLinkService/executeTrainingSegment` at task start (skips MAVLink upload); convoy uses MAVLink / formation paths; planner-only packs use synthesized open-loop segments (ROS `navigate_to_pose` not wired) |
 | **Training auto-export** | Skill tab toggle **Auto-export brain pack on promote** → catalogue + **pin as default** for that task/class |
 | **Formation squad_profile** | Formation mode brain export embeds formation kind, shape, spacing, and sim count in `squad_profile` |
 | **Planner hints export** | Training brain export embeds `planner_hints` (Nav2 or Aerostack2 JSON overlay, layout, path source, environment id, inferred `max_speed_m_s`) |
@@ -80,7 +95,11 @@ A **brain** is one logical catalogue identity (`brain_id`) whose skills accumula
 
 **Transfer rule:** Skills, segments, `planner_hints`, and `squad_profile` in the pack are portable. **`gazebo_environment_id`** must not gate Mission import or run binding — operators may train in world A and run the same brain version in open-field or geofenced MC-R SIM without re-exporting for a map id.
 
-**Packaged Mission app:** `scripts/package-macos-app.sh GuardianMission` strips `GazeboRuntime`, `GazeboWeb`, and `TrainingEnvironments` from the copied SwiftPM resource bundle (Training / HQ bundles retain them). Runtime code already gates Gazebo UI and orphan blitz via ``GuardianAppProduct/includesGazeboSimulation``.
+**Packaged Mission app:** `scripts/package-macos-app.sh GuardianMission` does not embed the Training simulation resource bundle. Runtime code gates Gazebo UI and orphan blitz via ``GuardianAppProduct/includesGazeboSimulation``.
+
+**MCS brain bindings:** Run envelope pins/overrides are keyed by **task kind + vehicle class** (not per mission-task row). MCS **Setup → Rules → Autonomy brains** documents that keying.
+
+**Open product questions (deferred):** pack signing / trust model; mid-run brain switch policy; one brain per task vs per vehicle in MCS; Aerostack2 UAV execution maturity; Paladin reading brain version from run envelope — see `NEXTVERSION.md` → **2026-05-19 — Brain pack & MRE follow-up**.
 
 ## Build and run
 
@@ -141,9 +160,9 @@ Guardian allocates a **random UDP ingress port** and **MAVLink system id** per b
 
 **Environment packages:** `Resources/TrainingEnvironments/<id>/manifest.json` + `world.sdf` (bundled); operator copies under `Application Support/Guardian/training/environments/<id>/`. Catalogue: ``TrainingEnvironmentCatalogue``; anchors in ENU metres (`TrainingEnvironmentPose`). Default bundled id: `guardian-open-field`.
 
-**Session purposes:** ``GazeboSessionPurpose`` — `.build` / `.preview` (World Builder; Simulate off; **headless server + websocket + in-panel gzweb**; **no vehicles** — terrain, obstacles, and zones only) and `.run` (Training / Formation; Simulate on; full `gz sim` until Training viewport lands; **vehicle proxy blocks** via ``GazeboService/spawnVehicleProxy``). ``GazeboService/spawnWorld(purpose:package:…)`` is only called from orchestrators, never at app launch.
+**Session purposes:** ``GazeboSessionPurpose`` — `.build` / `.preview` (World Builder; Simulate off; **headless server + websocket + in-panel gzweb**; **no vehicles** — terrain, obstacles, and zones only) and `.run` (Training / Formation; Simulate on; full `gz sim` until Training viewport lands; **vehicle proxy blocks** via ``GazeboService/spawnVehicleProxy``). ``GazeboService/spawnWorld(purpose:package:…)`` is only called from orchestrators, never at app launch. **Map switch / close:** call ``GazeboService/stopAllEmbeddedViewportWorldsCompletely()`` so the prior headless `gz sim` + websocket bridge exit before the next world loads (shared instance 0 / port 9002); partial `terminate()` alone left merged scenes in gzweb.
 
-**World Builder 3D panel:** ``GazeboWebViewportView`` loads ``Resources/GazeboWeb/guardian_viewer.html`` (``gzweb`` ``SceneManager`` over ``ws://127.0.0.1:<port>``). All JS deps are rolled into ``Resources/GazeboWeb/dist/gzweb.bundle.mjs`` (single offline ESM; no CDN or import map). Regenerate with ``make gzweb-viewer`` or ``./scripts/fetch_gzweb_viewer.sh`` after gzweb version bumps. ``gz sim -s`` and the gz-launch websocket bridge share ``GZ_PARTITION`` and ``GZ_IP=127.0.0.1`` so Harmonic discovery stays on loopback (avoids macOS multicast *No route to host* between processes). Guardian waits for sim *Publishing scene information* before starting the websocket bridge.
+**World Builder 3D panel:** ``GazeboWebViewportView`` loads ``Resources/GazeboWeb/guardian_viewer.html`` (``gzweb`` ``SceneManager`` over ``ws://127.0.0.1:<port>``). All JS deps are rolled into ``Resources/GazeboWeb/dist/gzweb.bundle.mjs`` (single offline ESM; no CDN or import map). Regenerate with ``make gzweb-viewer`` or ``./scripts/fetch_gzweb_viewer.sh`` after gzweb version bumps. ``gz sim -s`` and the gz-launch websocket bridge share ``GZ_PARTITION`` and ``GZ_IP=127.0.0.1`` so Harmonic discovery stays on loopback (avoids macOS multicast *No route to host* between processes). Guardian waits for sim *Publishing scene information* before starting the websocket bridge. **Floor presets** (`manifest.floorSize` → ``TrainingEnvironmentFloorSize``): micro 100 m, **mini 500 m**, small 1 km², medium, large. **Orbit closest zoom** (`OrbitControls.minDistance`, metres from target): **1** on micro, **50** on all other sizes — `orbitMinDistance` on the viewer URL (Training Formation viewport uses the same rule)).
 
 **Runtime layout:** `GazeboRuntime/bin/gz`, `lib/`, `share/`, stamps `.guardian_gazebo_runtime_built` / `.guardian_gz_sim_version`.
 
@@ -151,7 +170,7 @@ Guardian allocates a **random UDP ingress port** and **MAVLink system id** per b
 
 **Gazebo vehicle proxies (v1):** When a built-in SITL spawns with ``GazeboVehiclePlacement`` in a **Training or Formation `.run`** session (built environment + `defaultSpawn`), ``GazeboService/spawnVehicleProxy`` inserts a **coloured box** via Harmonic `gz service` (`/world/<name>/create`). Macro colours: **UAV** yellow, **UGV** blue, **USV** red, **UUV** pink. Optional ``customMeshURI`` on placement (or future sim params) uses a mesh when the path is readable; otherwise the sized box is used. Removed when the SITL stops or the world exits.
 
-**Training open-field floor (map base square):** ``TrainingEnvironmentWorldSDF/writeOpenFieldWorld`` (new maps + bundled `guardian-open-field`) emits `open_field_floor` as a **4 m**-deep static block (`openFieldFloorDepthM`; top face at z = 0) with **top** `#ffffff` and **bottom** `#fbffce` (two 2 m half-thickness visuals). Existing user worlds keep their on-disk `world.sdf` until re-saved from World Builder.
+**Training open-field floor (map base square):** ``TrainingEnvironmentWorldSDF/writeOpenFieldWorld`` (new maps + bundled `guardian-open-field`) emits `open_field_floor` as a **10 m**-deep static block (`openFieldFloorDepthM`; top face at z = 0) with **top** `#ffffff` and **bottom** `#fbffce` (two 5 m half-thickness visuals). Existing user worlds keep their on-disk `world.sdf` until re-saved from World Builder.
 
 **Process launcher:** ``GazeboService`` + ``GazeboLaunchRecipe`` + ``GazeboProcessRunner`` (mirror SITL). `.run` sessions require **Simulate**; `.build` / `.preview` do not. Turning Simulate off stops `.run` worlds only. Logs under `NSTemporaryDirectory()/guardian-gazebo-runtime/…` and the simulation log strip.
 
@@ -162,6 +181,8 @@ Guardian allocates a **random UDP ingress port** and **MAVLink system id** per b
 **Packaging:** `scripts/package-macos-app.sh` copies the SwiftPM resource bundle (includes `GazeboRuntime` when staged). First run on a dev machine: `brew install osrf/simulation/gz-harmonic && make gazebo-runtime && swift build --product GuardianTraining`.
 
 Tracker: `TrainingGazeboSimulationToDo.md` (environment catalogue, viewport, PX4-in-world spawn — later phases).
+
+**Unified Training lab (shipped):** One surface replaces the old split Vehicle / Formation training tabs — ``TrainingLabPanelView`` in `FormationsPlaygroundView.swift` with ``TrainingLabController`` (teaching + formation façade), ``TrainingLabRosterController``, and ``TrainingLabRosterStore``. **Idle:** ~70% Gazebo viewport + rail tabs **Map**, **Vehicles**, **Training** (empty shell), **Logs**. **Running:** full-width viewport; sub-bar **Run** / **Stop** and drawer hosts (400 pt) for the same panels. **Map first:** Vehicles disabled until a built environment is selected and the viewport is ready. **Squads:** NATO callsigns (Alpha, Beta, …); per-squad ``taskKind`` and ``formationPolicy`` in the squad settings drawer; drag-and-drop roster editing; SITL spawns use ``SitlSpawnOwner/trainingRoster``. **Learning squad:** always a squad (may be one vehicle); sub-bar **Learning** picker when multiple squads (default **Alpha**); teach / promote follow the designated squad; formation run when that squad has wingmen, else autonomous teaching for a single-vehicle learning squad. **Run** requires all roster slots link-ready + preflight passed. Keyboard: Return → Run; Escape → Stop (macOS 14+); ⌘1–⌘4 → rail/drawer tabs (``TrainingLabKeyboardShortcuts``). **Run / Stop map session:** **Run** calls ``buildMap`` (teleport roster to start poses, spawn Gazebo vehicle proxies); **Stop** calls ``resetMap`` (stop streams, hold/disarm, teleport to starts, remove proxies). ``SitlSpawnOwner/trainingRoster`` does not auto-spawn proxies on vehicle add — only ``buildMap``. A dedicated **Training requirements** rail (forbidden axes, skill export chrome) is **not** shipped — task kind is per-squad in settings; teaching state lives in ``TrainingPanelController`` until that UX is designed.
 
 ## SITL command-catalogue smoke tests
 

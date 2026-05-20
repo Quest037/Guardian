@@ -21,23 +21,23 @@
       <specular>0.2 0.2 0.2 1</specular>
     </light>
 
-    <!-- Map-base square: floorSide × floorSide × 4 m (top face at z = 0): top #ffffff, bottom #fbffce. -->
+    <!-- Map-base square: floorSide × floorSide × 10 m (top face at z = 0): top #ffffff, bottom #fbffce. -->
     <model name="open_field_floor">
       <static>true</static>
-      <pose>0 0 -2 0 0 0</pose>
+      <pose>0 0 -5 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
             <box>
-              <size>1000 1000 4</size>
+              <size>1000 1000 10</size>
             </box>
           </geometry>
         </collision>
         <visual name="visual_bottom">
-          <pose>0 0 -3 0 0 0</pose>
+          <pose>0 0 -7.5 0 0 0</pose>
           <geometry>
             <box>
-              <size>1000 1000 2</size>
+              <size>1000 1000 5</size>
             </box>
           </geometry>
           <material>
@@ -47,10 +47,10 @@
           </material>
         </visual>
         <visual name="visual_top">
-          <pose>0 0 -1 0 0 0</pose>
+          <pose>0 0 -2.5 0 0 0</pose>
           <geometry>
             <box>
-              <size>1000 1000 2</size>
+              <size>1000 1000 5</size>
             </box>
           </geometry>
           <material>

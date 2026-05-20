@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class MissionControlSetupSimDragOverlayPolicyTests: XCTestCase {
     func test_shouldClearByTimeout_false_early() {

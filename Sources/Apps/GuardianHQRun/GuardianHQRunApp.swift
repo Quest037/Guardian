@@ -1,4 +1,4 @@
-import GuardianHQ
+import GuardianCore
 import SwiftUI
 
 /// Full monolith executable (Training + Mission surfaces) during cutover.

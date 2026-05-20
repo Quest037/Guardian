@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage F: plugin-owned fleet descriptors must match ``GuardianPluginManifest`` publish claims.
 @MainActor

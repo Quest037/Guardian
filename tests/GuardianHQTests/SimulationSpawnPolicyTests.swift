@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class SimulationSpawnPolicyTests: XCTestCase {
     func test_effectivePlatform_ugvPresets_forcePx4() {

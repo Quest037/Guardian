@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class MissionControlMissionEndWindDownControlVisibilityTests: XCTestCase {
     func test_squad_executing_shows_abort_and_complete() {

@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class TrainingSimulatorSessionStoreTests: XCTestCase {
     func test_saveAndLoad_roundTrip() throws {

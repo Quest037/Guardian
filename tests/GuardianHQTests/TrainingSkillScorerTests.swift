@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class TrainingSkillScorerTests: XCTestCase {
     func test_evaluate_success_atGoal() {

@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class MissionRunCompletionKindSimHomeRestorePolicyTests: XCTestCase {
     func test_qualifies_operatorCompletePaths_and_oneOff() {

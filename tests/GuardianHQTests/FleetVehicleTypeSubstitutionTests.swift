@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class FleetVehicleTypeSubstitutionTests: XCTestCase {
     func test_exactGranularType_equalKinds() {

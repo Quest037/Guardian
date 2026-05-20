@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// End-to-end SITL smoke coverage for the Layer 0 command catalogue and selected Layer 1 recipes
 /// (Pattern-A calibrations, arm probe, calibration-required composite, cancelRecipe cleanup).

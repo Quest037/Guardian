@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage B0 namespace-validation coverage. Stage A established the lexical / structural
 /// rules in ``FleetCommandName.isValidRawValue(_:)``; this test pins them.

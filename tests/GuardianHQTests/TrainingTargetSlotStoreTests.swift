@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class TrainingTargetSlotStoreTests: XCTestCase {
   func test_perEnvironmentRoundTrip() throws {

@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class TrainingPathOverlayDebugLineTests: XCTestCase {
     func test_path_with_geodesic_fallback_while_nav2_starting() {

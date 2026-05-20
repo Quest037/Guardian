@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class TrainingLabRosterStoreTests: XCTestCase {
     func test_roundTrip_squads_and_formation_policy() throws {

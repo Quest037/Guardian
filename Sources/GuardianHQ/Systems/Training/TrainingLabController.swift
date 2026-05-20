@@ -8,6 +8,7 @@ final class TrainingLabController: ObservableObject {
     let teaching: TrainingPanelController
     let formation: FormationsPlaygroundController
 
+    private weak var roster: TrainingLabRosterController?
     private var cancellables = Set<AnyCancellable>()
 
     init() {
@@ -41,6 +42,45 @@ final class TrainingLabController: ObservableObject {
             spawnDefaults: spawnDefaults,
             simulationPlatform: simulationPlatform
         )
+        teaching.onMapEnvironmentWillChange = { [weak self] in
+            guard let self, let roster = self.roster else { return }
+            Task { await self.resetMap(roster: roster) }
+        }
+    }
+
+    func bindRoster(_ roster: TrainingLabRosterController) {
+        self.roster = roster
+    }
+
+    func mapSessionContext(roster: TrainingLabRosterController) -> TrainingLabMapSessionContext? {
+        guard let fleetLink = teaching.fleetLinkForMapSession,
+              let sitl = teaching.sitlForMapSession
+        else { return nil }
+        let learningSquad = roster.learningSquad
+        let singleVehicleStart: TrainingTaskPose? =
+            learningSquad?.isSingleVehicle == true ? teaching.taskLayout?.start : nil
+        return TrainingLabMapSessionContext(
+            fleetLink: fleetLink,
+            sitl: sitl,
+            gazebo: teaching.gazeboForMapSession,
+            spawnDefaults: teaching.spawnDefaultsForMapSession,
+            simulationPlatform: teaching.simulationPlatformForMapSession,
+            activeGazeboWorldID: teaching.activeGazeboWorldID,
+            environment: teaching.selectedEnvironment,
+            squads: roster.squads,
+            learningSquadID: roster.learningSquadID ?? roster.squads.first?.id,
+            learningSquadSingleVehicleStart: singleVehicleStart
+        )
+    }
+
+    func resetMap(roster: TrainingLabRosterController) async {
+        guard let context = mapSessionContext(roster: roster) else { return }
+        await TrainingLabMapSessionLifecycle.resetMap(context: context)
+    }
+
+    func buildMap(roster: TrainingLabRosterController) async {
+        guard let context = mapSessionContext(roster: roster) else { return }
+        await TrainingLabMapSessionLifecycle.buildMap(context: context)
     }
 
     /// Apply the designated learning squad's formation policy before starting a multi-vehicle run.

@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 @MainActor
 final class Ros2BridgeStdoutParserNav2PlanTests: XCTestCase {

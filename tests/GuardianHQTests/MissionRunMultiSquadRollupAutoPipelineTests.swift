@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// ``MissionRunEnvironment/rollupMissionTaskStateFromSquadStates`` — multi-primary task rollup / auto-pipeline
 /// (``MRESquadsToDo.md`` — **Auto pipeline**).

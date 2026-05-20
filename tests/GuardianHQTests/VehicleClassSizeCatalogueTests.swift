@@ -1,7 +1,7 @@
 import CryptoKit
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class VehicleClassSizeCatalogueTests: XCTestCase {
     func test_matrix_source_hash_matches_generated_prefix() throws {

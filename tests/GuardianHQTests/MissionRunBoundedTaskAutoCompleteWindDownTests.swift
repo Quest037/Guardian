@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Finite repeating tasks used to rely on operator ``completeMissionTaskAfterCycle`` to seed pending graceful
 /// delivery; without it, ``planNextAutoCycleStartsForSquads`` could keep issuing MAVLink missions after the

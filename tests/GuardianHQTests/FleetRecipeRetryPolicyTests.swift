@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage B1 retry policy coverage. Pins the locked v1 defaults, the hard caps, the
 /// `relaxRetryCaps` behaviour at the registration layer (see

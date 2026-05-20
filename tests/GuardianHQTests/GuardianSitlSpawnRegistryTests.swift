@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GuardianSitlSpawnRegistryTests: XCTestCase {
     /// Pins orphan-blitz policy: only spawns registered at or after cold launch are protected from pgrep.

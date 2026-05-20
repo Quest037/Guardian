@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Fleet link keeps independent MAVSDK sessions per `sysid:n` (Training + Vehicles + Formation concurrently).
 @MainActor

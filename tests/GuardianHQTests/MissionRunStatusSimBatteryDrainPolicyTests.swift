@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class MissionRunStatusSimBatteryDrainPolicyTests: XCTestCase {
     func test_running_appliesMissionRunSimBatteryDrainFromOperatorSettings() {

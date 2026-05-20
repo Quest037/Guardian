@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage B1 coverage for the closed payload-predicate vocabulary used by `.data(...)`
 /// and `.success(payload:)` matchers. Pins:

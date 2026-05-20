@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage D item 2 coverage for the operator-prompt event type definitions:
 /// shape (init defaults), the closed verb / custom-options layering, the

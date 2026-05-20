@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage G — integration between ``FleetRecipeEscalationEvent`` / recipe escalation and the
 /// Stage D operator prompt channel: lift to ``OperatorPromptEvent``, ``OperatorPromptRouter/route``,

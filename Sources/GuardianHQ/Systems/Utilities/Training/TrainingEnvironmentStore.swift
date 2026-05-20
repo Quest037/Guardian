@@ -19,13 +19,10 @@ enum TrainingEnvironmentStore {
     }
 
     static func bundledEnvironmentsRootURL() -> URL? {
-        guard let res = Bundle.module.resourceURL else { return nil }
-        let root = res.appendingPathComponent("TrainingEnvironments", isDirectory: true)
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDir), isDir.boolValue else {
-            return nil
-        }
-        return root
+        GuardianBundledResourceLocator.subdirectoryURL(
+            "TrainingEnvironments",
+            in: GuardianBundledResourceLocator.trainingSimulationResourceBundles
+        )
     }
 
     static func packageDirectories(under root: URL) -> [URL] {

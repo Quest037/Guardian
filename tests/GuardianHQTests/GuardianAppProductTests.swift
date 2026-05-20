@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GuardianAppProductTests: XCTestCase {
     func test_missionProduct_excludesTrainingSection() {

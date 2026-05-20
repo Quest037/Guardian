@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class TrainingLabKeyboardShortcutsTests: XCTestCase {
     func test_panelTab_shortcuts_use_command_digits_one_through_four() {

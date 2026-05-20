@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class TrainingGazeboRunOrchestratorTests: XCTestCase {
   func test_spawnPlan_usesRunPurposeAndWorldPath() throws {

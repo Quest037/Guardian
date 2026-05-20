@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GuardianSitlMavlinkEndpointAllocatorTests: XCTestCase {
     func test_ingressPortRange_is_documented_guardian_band() {

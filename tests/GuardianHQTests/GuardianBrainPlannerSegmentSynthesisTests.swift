@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GuardianBrainPlannerSegmentSynthesisTests: XCTestCase {
     func test_segments_follows_path_with_forward_legs() {

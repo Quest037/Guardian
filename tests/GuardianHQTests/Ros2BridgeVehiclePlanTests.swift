@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class Ros2BridgeVehiclePlanTests: XCTestCase {
     func test_rosNamespace_instanceZero_empty() {

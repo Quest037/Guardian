@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class TrainingLabLearningSquadTests: XCTestCase {
     func test_clamp_defaults_to_alpha_when_unset() {

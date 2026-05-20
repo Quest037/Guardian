@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class WorldBuilderObstaclePersistenceTests: XCTestCase {
     func test_manifestAutosaveInterval_isSixtySeconds() {

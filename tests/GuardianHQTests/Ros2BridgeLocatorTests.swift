@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class Ros2BridgeLocatorTests: XCTestCase {
     func test_bashLaunchGuardianBridgeModule_uses_ros_python3_not_hardcoded_system_path() {

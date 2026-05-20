@@ -3,12 +3,11 @@
 Goal: **Guardian Training** is an autonomy lab with three cooperating surfaces:
 
 1. **Worlds (Builder)** — author, validate, and save training environments (Gazebo scenes + anchors). **No vehicles** in the Builder Gazebo viewport — world geometry only.
-2. **Training (Vehicle)** — pick a saved **built** environment, run skill teaching (``.run`` Gazebo world + PX4 SITL + sized vehicle proxy blocks).
-3. **Formation** — rehearse squads in a chosen environment (same **``.run``** + vehicle proxies as Training).
+2. **Training lab** — pick a saved **built** environment; squads + learning-squad teach or formation follow (``.run`` Gazebo world + PX4 SITL + sized vehicle proxy blocks). Replaces the old split Vehicle / Formation training tabs.
 
 **Today:** **Worlds** + World Builder with embedded 3D viewport (headless `gz sim -s` + websocket + `gzweb` in-panel). **Training lab** loads the same embedded stack for `.run` when a map is chosen (`TrainingLabPanelView`). Portable Gazebo bundle deferred.
 
-**Cross-links:** `README_FULL.md` → **Gazebo training simulation**; `AppTrainingMissionSplitToDo.md`.
+**Cross-links:** `README_FULL.md` → **Gazebo training simulation**; **Two-app SwiftPM products**.
 
 ---
 
@@ -23,7 +22,7 @@ Goal: **Guardian Training** is an autonomy lab with three cooperating surfaces:
 ## Phase 4 — Training: vehicle in environment
 
 - [x] **Embedded 3D viewport** — same stack as World Builder in Training lab (`GazeboSessionLaunchPolicy` + `TrainingLabPanelView`).
-- [ ] **`resetMap()`** — reposition vehicles in Gazebo, clear episode artifacts on idle map change (stub wired from map select).
+- [x] **`resetMap()` / `buildMap()`** — on **Stop**: hold/disarm all roster SITLs, ``applySimState`` to squad start poses, remove Gazebo vehicle proxies. On **Run**: teleport to starts, spawn proxies. Map change while idle also calls ``resetMap``. Proxies for ``.trainingRoster`` are lab-managed only (no auto-spawn on SITL add).
 - [ ] **PX4 pose in Gazebo** — align SITL spawn with environment `defaultSpawn` (bridge / model pose).
 - [ ] **Teaching loop** — metrics from sim truth (not map geodesic alone).
 - [ ] **Target slot in world** — edit goal in Gazebo or inspector when map is hidden.
@@ -51,7 +50,7 @@ Let operators **save the current lab setup as a named template** and **load it l
 
 **UI (deferred detail):** Save / Load / Duplicate / Delete from Training rail or sub-bar overflow; confirm on delete (`GuardianConfirmDanger`).
 
-**Cross-links:** `TrainingUnifiedPanelToDo.md` (unified lab); `VehicleClassSizeToDo.md` (tier in roster); session persistence item in Phase 2 there.
+**Cross-links:** `README_FULL.md` → **Unified Training lab**; `VehicleClassSizeToDo.md` (tier in roster); ``TrainingLabRosterStore`` (roster + learning squad persistence).
 
 ---
 
@@ -68,7 +67,7 @@ Place each squad’s **start** and **end** formation slot groups inside the worl
 - [ ] **Drag + rotate (Training Formation map parity)** — reuse the interaction model the old **Training Formation** Leaflet map used: drag the **formation group center** within the zone; drag a **heading** handle to rotate the slot layout. Implementation anchor: `GuardianFormationSlotGroupMapEdit` + `onFormationSlotGroupCenterMoved` / `onFormationSlotGroupHeadingMoved` (`FormationsPlaygroundView` / `OSMMapView`); port equivalent affordances to the **Gazebo** lab viewport when Formation/Training runs on the embedded 3D map.
 - [ ] **Policy-driven slot layout** — when the operator changes a squad’s **start/end formation policy** in the **settings drawer** (`TrainingLabSquad.formationPolicy` — formation shape + spacing), recompute and refresh the displayed slot positions/heading for that squad in the matching zone without requiring a manual re-place. Same policy → same geometry as `FormationsPlaygroundController` formation preview / `buildFormationSlotTargetMarkers` today.
 
-**Cross-links:** `TrainingUnifiedPanelToDo.md` (squad settings drawer, Run wiring); `WorldBuilderView` / zone manifest (`startZoneConfigured`, `endZoneConfigured`); `TrainingPanelController.buildTargetSlotMapEdit()` (existing slot-group edit helper).
+**Cross-links:** `README_FULL.md` → **Unified Training lab** (squad settings drawer, Run wiring); `WorldBuilderView` / zone manifest (`startZoneConfigured`, `endZoneConfigured`); `TrainingPanelController.buildTargetSlotMapEdit()` (existing slot-group edit helper).
 
 ---
 

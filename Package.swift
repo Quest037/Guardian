@@ -18,7 +18,7 @@ let package = Package(
         .macOS(.v13),
     ],
     products: [
-        .library(name: "GuardianHQ", targets: ["GuardianHQ"]),
+        .library(name: "GuardianCore", targets: ["GuardianCore"]),
         .executable(name: "GuardianHQ", targets: ["GuardianHQRun"]),
         .executable(name: "GuardianMission", targets: ["GuardianMission"]),
         .executable(name: "GuardianTraining", targets: ["GuardianTraining"]),
@@ -28,7 +28,17 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "GuardianHQ",
+            name: "GuardianTrainingSimulationResources",
+            path: "Sources/GuardianTrainingSimulationResources",
+            resources: [
+                .copy("../GuardianHQ/Resources/GazeboRuntime"),
+                .copy("../GuardianHQ/Resources/GazeboWeb/guardian_viewer.html"),
+                .copy("../GuardianHQ/Resources/GazeboWeb/dist"),
+                .copy("../GuardianHQ/Resources/TrainingEnvironments"),
+            ]
+        ),
+        .target(
+            name: "GuardianCore",
             dependencies: [
                 .product(name: "Mavsdk", package: "MAVSDK-Swift"),
             ],
@@ -37,6 +47,11 @@ let package = Package(
                 "Plugins/PLUGIN_FLEET_CONTRIBUTIONS.md",
                 "Plugins/Paladin/Paladin_README.md",
                 "MainBundle-Info.plist",
+                // Training-only trees (bundled in ``GuardianTrainingSimulationResources``).
+                // Xcode must not treat Gazebo Ogre `.metal` shaders as GuardianCore resources.
+                "Resources/GazeboRuntime",
+                "Resources/GazeboWeb",
+                "Resources/TrainingEnvironments",
             ],
             resources: [
                 .copy("Resources/AppIcon.icns"),
@@ -48,9 +63,6 @@ let package = Package(
                 .copy("Resources/SitlDeps"),
                 .copy("Resources/ArduPilotSitl"),
                 .copy("Resources/Px4SitlBundle"),
-                .copy("Resources/GazeboRuntime"),
-                .copy("Resources/GazeboWeb"),
-                .copy("Resources/TrainingEnvironments"),
                 .copy("Resources/Px4SitlMavlink"),
                 .copy("Resources/SimulationDevices"),
                 .copy("Resources/MissionBadge"),
@@ -76,7 +88,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "GuardianHQRun",
-            dependencies: ["GuardianHQ"],
+            dependencies: [
+                "GuardianCore",
+                "GuardianTrainingSimulationResources",
+            ],
             path: "Sources/Apps/GuardianHQRun",
             exclude: ["MainBundle-Info.plist"],
             linkerSettings: guardianExecutableLinkerSettings(
@@ -85,7 +100,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "GuardianMission",
-            dependencies: ["GuardianHQ"],
+            dependencies: ["GuardianCore"],
             path: "Sources/Apps/GuardianMission",
             exclude: ["MainBundle-Info.plist"],
             linkerSettings: guardianExecutableLinkerSettings(
@@ -94,7 +109,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "GuardianTraining",
-            dependencies: ["GuardianHQ"],
+            dependencies: [
+                "GuardianCore",
+                "GuardianTrainingSimulationResources",
+            ],
             path: "Sources/Apps/GuardianTraining",
             exclude: ["MainBundle-Info.plist"],
             linkerSettings: guardianExecutableLinkerSettings(
@@ -102,9 +120,10 @@ let package = Package(
             )
         ),
         .testTarget(
-            name: "GuardianHQTests",
+            name: "GuardianCoreTests",
             dependencies: [
-                "GuardianHQ",
+                "GuardianCore",
+                "GuardianTrainingSimulationResources",
                 .product(name: "Mavsdk", package: "MAVSDK-Swift"),
             ],
             path: "Tests/GuardianHQTests",

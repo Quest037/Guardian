@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class MissionRunReserveSwapOperatorCopyTests: XCTestCase {
     func test_reserveSwapPoolPick_message_is_short_confirm_not_manual() {

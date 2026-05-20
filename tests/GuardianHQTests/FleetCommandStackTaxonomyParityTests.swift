@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage G: raw failure strings normalise to the same ``FleetCommandErrorKind`` through both
 /// stack facades where both delegate to ``FleetCommandStackConverterShared`` — catches accidental

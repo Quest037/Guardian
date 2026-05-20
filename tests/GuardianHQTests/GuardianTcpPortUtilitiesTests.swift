@@ -1,6 +1,6 @@
 import Darwin
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GuardianTcpPortUtilitiesTests: XCTestCase {
     func test_isTcpPortBindable_falseWhenPortInUse() throws {

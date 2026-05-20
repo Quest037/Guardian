@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GazeboEntityFactoryClientTests: XCTestCase {
     func test_parseBooleanServiceResponse_blockingTrue() {

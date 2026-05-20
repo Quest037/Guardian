@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GuardianRos2OrphanBlitzTests: XCTestCase {
     func test_pgrepPatterns_includeGuardianRosAndBridgeMarkers() {

@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage B1 coverage for the escalation contract types: the closed top-level
 /// reason shape, the string-backed extensible kind namespaces, and the closed

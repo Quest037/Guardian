@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage B1 parameter-schema validation for recipes. Mirrors the Layer 0 tests
 /// (`FleetCommandParameterValidatorTests`) so the two validators stay in lockstep.

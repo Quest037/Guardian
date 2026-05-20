@@ -207,12 +207,11 @@ private struct MergedObstacleOBJBuilder {
         radius: Double,
         height: Double
     ) {
-        appendCylinderMesh(
+        appendPrism(
             center: center,
             yawRad: yawRad,
-            radius: radius,
-            extent: height,
-            horizontal: false
+            localPoints: cylinderProfile(radius: radius, height: height, horizontal: false),
+            capCenterIndices: (bottom: 0, top: 1)
         )
     }
 
@@ -222,57 +221,12 @@ private struct MergedObstacleOBJBuilder {
         radius: Double,
         length: Double
     ) {
-        appendCylinderMesh(
+        appendPrism(
             center: center,
             yawRad: yawRad,
-            radius: radius,
-            extent: length,
-            horizontal: true
+            localPoints: cylinderProfile(radius: radius, height: length, horizontal: true),
+            capCenterIndices: (bottom: 0, top: 1)
         )
-    }
-
-    private mutating func appendCylinderMesh(
-        center: (Double, Double, Double),
-        yawRad: Double,
-        radius: Double,
-        extent: Double,
-        horizontal: Bool
-    ) {
-        let segments = 16
-        let base = vertices.count
-        func localPoint(x: Double, y: Double, z: Double) -> (Double, Double, Double) {
-            if horizontal { return (-z, x, y) }
-            return (x, y, z)
-        }
-        vertices.append(transform(localPoint(x: 0, y: 0, z: -extent / 2), center: center, yawRad: yawRad))
-        for index in 0..<segments {
-            let angle = 2 * Double.pi * Double(index) / Double(segments)
-            let x = radius * cos(angle)
-            let y = radius * sin(angle)
-            vertices.append(
-                transform(localPoint(x: x, y: y, z: -extent / 2), center: center, yawRad: yawRad)
-            )
-        }
-        let topCenter = vertices.count
-        vertices.append(transform(localPoint(x: 0, y: 0, z: extent / 2), center: center, yawRad: yawRad))
-        for index in 0..<segments {
-            let angle = 2 * Double.pi * Double(index) / Double(segments)
-            let x = radius * cos(angle)
-            let y = radius * sin(angle)
-            vertices.append(
-                transform(localPoint(x: x, y: y, z: extent / 2), center: center, yawRad: yawRad)
-            )
-        }
-        for index in 0..<segments {
-            let b0 = base + 1 + index
-            let b1 = base + 1 + ((index + 1) % segments)
-            let t0 = topCenter + 1 + index
-            let t1 = topCenter + 1 + ((index + 1) % segments)
-            faces.append([base, b1, b0])
-            faces.append([topCenter, t0, t1])
-            faces.append([b0, b1, t1])
-            faces.append([b0, t1, t0])
-        }
     }
 
     private mutating func appendCone(
@@ -282,25 +236,26 @@ private struct MergedObstacleOBJBuilder {
         height: Double
     ) {
         let segments = 16
-        let base = vertices.count
-        vertices.append(transform((0, 0, -height / 2), center: center, yawRad: yawRad))
+        var locals: [(Double, Double, Double)] = [(0, 0, -height / 2)]
         for index in 0..<segments {
             let angle = 2 * Double.pi * Double(index) / Double(segments)
-            vertices.append(
-                transform(
-                    (radius * cos(angle), radius * sin(angle), -height / 2),
-                    center: center,
-                    yawRad: yawRad
-                )
-            )
+            locals.append((
+                radius * cos(angle),
+                radius * sin(angle),
+                -height / 2
+            ))
         }
-        let apex = vertices.count
-        vertices.append(transform((0, 0, height / 2), center: center, yawRad: yawRad))
+        locals.append((0, 0, height / 2))
+        let apex = locals.count
+        let base = vertices.count
+        for local in locals {
+            vertices.append(transform(local, center: center, yawRad: yawRad))
+        }
         for index in 0..<segments {
             let a = base + 1 + index
             let b = base + 1 + ((index + 1) % segments)
-            faces.append([base, b, a])
-            faces.append([a, b, apex])
+            faces.append([a, b, base + apex])
+            faces.append([b, a, base + 1])
         }
     }
 
@@ -352,6 +307,35 @@ private struct MergedObstacleOBJBuilder {
         appendPolyhedron(center: center, yawRad: yawRad, locals: locals, faces: tobleroneFaces())
     }
 
+    private mutating func appendPrism(
+        center: (Double, Double, Double),
+        yawRad: Double,
+        localPoints: [(center: (Double, Double, Double), ring: [(Double, Double, Double)])],
+        capCenterIndices: (bottom: Int, top: Int)
+    ) {
+        let base = vertices.count
+        var allLocals: [(Double, Double, Double)] = [localPoints[capCenterIndices.bottom].center]
+        allLocals.append(contentsOf: localPoints[capCenterIndices.bottom].ring)
+        allLocals.append(localPoints[capCenterIndices.top].center)
+        let topCenter = allLocals.count
+        allLocals.append(localPoints[capCenterIndices.top].center)
+        let topRingStart = topCenter + 1
+        allLocals.append(contentsOf: localPoints[capCenterIndices.top].ring)
+
+        for local in allLocals {
+            vertices.append(transform(local, center: center, yawRad: yawRad))
+        }
+        let segments = localPoints[capCenterIndices.bottom].ring.count
+        for index in 0..<segments {
+            let b0 = base + 1 + index
+            let b1 = base + 1 + ((index + 1) % segments)
+            let t0 = base + topRingStart + index
+            let t1 = base + topRingStart + ((index + 1) % segments)
+            faces.append([b0, b1, t1])
+            faces.append([b0, t1, t0])
+        }
+    }
+
     private mutating func appendPolyhedron(
         center: (Double, Double, Double),
         yawRad: Double,
@@ -365,6 +349,31 @@ private struct MergedObstacleOBJBuilder {
         for loop in faceLoops {
             faces.append(loop.map { base + $0 })
         }
+    }
+
+    private func cylinderProfile(
+        radius: Double,
+        height: Double,
+        horizontal: Bool
+    ) -> [(center: (Double, Double, Double), ring: [(Double, Double, Double)])] {
+        let segments = 16
+        var bottomRing: [(Double, Double, Double)] = []
+        var topRing: [(Double, Double, Double)] = []
+        for index in 0..<segments {
+            let angle = 2 * Double.pi * Double(index) / Double(segments)
+            let x = radius * cos(angle)
+            let y = radius * sin(angle)
+            if horizontal {
+                bottomRing.append((-height / 2, x, y))
+                topRing.append((height / 2, x, y))
+            } else {
+                bottomRing.append((x, y, -height / 2))
+                topRing.append((x, y, height / 2))
+            }
+        }
+        let bottomCenter = horizontal ? (-height / 2, 0.0, 0.0) : (0.0, 0.0, -height / 2)
+        let topCenter = horizontal ? (height / 2, 0.0, 0.0) : (0.0, 0.0, height / 2)
+        return [(bottomCenter, bottomRing), (topCenter, topRing)]
     }
 
     private func tobleroneVertices(

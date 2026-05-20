@@ -34,4 +34,23 @@ enum TrainingEnvironmentGeodesy {
     let lon = originLon + eastM / metresPerDegreeLon
     return RouteCoordinate(lat: lat, lon: lon)
   }
+
+  /// Inverse of ``taskPose(environmentPose:origin:)`` — ENU metres + yaw for Gazebo proxy placement.
+  static func environmentPose(
+    taskPose: TrainingTaskPose,
+    origin: SimSpawnDefaults
+  ) -> TrainingEnvironmentPose {
+    let latRad = origin.latitudeDeg * .pi / 180
+    let metresPerDegreeLat = 111_320.0
+    let metresPerDegreeLon = metresPerDegreeLat * max(0.01, cos(latRad))
+    let northM = (taskPose.latitudeDeg - origin.latitudeDeg) * metresPerDegreeLat
+    let eastM = (taskPose.longitudeDeg - origin.longitudeDeg) * metresPerDegreeLon
+    let zM = taskPose.absoluteAltitudeM - origin.altitudeM
+    return TrainingEnvironmentPose(
+      xM: eastM,
+      yM: northM,
+      zM: zM,
+      yawDeg: taskPose.headingDeg
+    )
+  }
 }

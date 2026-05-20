@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class WorldBuilderZoneModelsTests: XCTestCase {
     func test_manifest_zone_fields_roundTrip() throws {

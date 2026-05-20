@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage B1 coverage for `FleetRecipeBodyParser`: every structural rule the parser
 /// enforces, including the parse-time **1-level recipe composition depth** check

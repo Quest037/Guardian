@@ -33,8 +33,11 @@ enum GazeboLocator {
     static let bundleResourceName = "GazeboRuntime"
 
     static func bundleRootURL() -> URL? {
-        guard let res = Bundle.module.resourceURL else { return nil }
-        let root = res.appendingPathComponent(bundleResourceName, isDirectory: true)
+        guard let res = GuardianBundledResourceLocator.subdirectoryURL(
+            bundleResourceName,
+            in: GuardianBundledResourceLocator.trainingSimulationResourceBundles
+        ) else { return nil }
+        let root = res
         let gz = root.appendingPathComponent("bin/gz", isDirectory: false)
         guard FileManager.default.isExecutableFile(atPath: gz.path) else { return nil }
         return root
@@ -144,10 +147,8 @@ enum GazeboLocator {
 
     /// Default smoke world shipped in the resource bundle.
     static func bundledEmptyWorldURL() -> URL? {
-        guard let res = Bundle.module.resourceURL else { return nil }
-        let world = res
-            .appendingPathComponent(bundleResourceName, isDirectory: true)
-            .appendingPathComponent("worlds/guardian_empty.sdf", isDirectory: false)
+        guard let root = bundleRootURL() else { return nil }
+        let world = root.appendingPathComponent("worlds/guardian_empty.sdf", isDirectory: false)
         return FileManager.default.isReadableFile(atPath: world.path) ? world : nil
     }
 }

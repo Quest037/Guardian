@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage C loader-plumbing coverage for ``FleetRecipeBodyLoader``.
 ///

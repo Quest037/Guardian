@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage B0 stack-converter coverage. Walks the registered descriptors and confirms
 /// each known autopilot stack returns a defined ``FleetCommandStackTranslation`` for

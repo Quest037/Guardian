@@ -1,7 +1,7 @@
 import Combine
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 @MainActor
 final class GuardianMapModelApplyMapContentTests: XCTestCase {

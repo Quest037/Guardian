@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage B1 coverage for the DSL surface types: `FleetRecipeStepID`, `FleetRecipeStep`,
 /// `FleetRecipeControlOutcome`, and `FleetRecipeBody`. Codable round-trips + the

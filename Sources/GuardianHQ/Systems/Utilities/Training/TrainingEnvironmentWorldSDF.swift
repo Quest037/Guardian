@@ -5,7 +5,7 @@ enum TrainingEnvironmentWorldSDF {
     static let defaultWorldName = "guardian_open_field"
 
     /// Map-base square depth (m). Top face stays at z = 0; block extends downward.
-    static let openFieldFloorDepthM: Double = 4
+    static let openFieldFloorDepthM: Double = 10
 
     /// Open-field floor plate: top `#ffffff`, bottom `#fbffce` (static box, top face at z = 0).
     enum OpenFieldFloorColors {
@@ -27,6 +27,28 @@ enum TrainingEnvironmentWorldSDF {
               let range = Range(match.range(at: 1), in: xml)
         else { return nil }
         return String(xml[range])
+    }
+
+    /// Reads `open_field_floor` collision `<size>` X dimension (square floor side, metres).
+    static func parseOpenFieldFloorSideM(from worldURL: URL) -> Double? {
+        guard let raw = try? String(contentsOf: worldURL, encoding: .utf8) else { return nil }
+        return parseOpenFieldFloorSideM(fromSDFXML: raw)
+    }
+
+    static func parseOpenFieldFloorSideM(fromSDFXML xml: String) -> Double? {
+        let pattern =
+            #"<model\s+name\s*=\s*["']open_field_floor["'][\s\S]*?<collision[\s\S]*?<size>\s*([0-9.]+)\s+([0-9.]+)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: xml, range: NSRange(xml.startIndex..., in: xml)),
+              match.numberOfRanges > 2,
+              let xRange = Range(match.range(at: 1), in: xml),
+              let yRange = Range(match.range(at: 2), in: xml),
+              let x = Double(xml[xRange]),
+              let y = Double(xml[yRange]),
+              x > 0,
+              y > 0
+        else { return nil }
+        return max(x, y)
     }
 
     static func writeOpenFieldWorld(

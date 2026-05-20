@@ -103,30 +103,45 @@ final class TrainingEnvironmentObstacleTests: XCTestCase {
     }
 
     func test_clampFootZM_respectsLimits() {
+        let scene: TrainingEnvironmentSceneType = .flat
+        let floorSideM = 1000.0
+        let limits = WorldBuilderObstacleManifestSupport.footZLimitsM(
+            sceneType: scene,
+            floorSideM: floorSideM
+        )
         var record = TrainingEnvironmentObstacleRecord.defaults(for: .cube)
         record.usesAutoZ = false
         let halfHeight = record.verticalExtentsM().dz / 2
         WorldBuilderObstacleManifestSupport.setFootZM(3000, record: &record)
-        WorldBuilderObstacleManifestSupport.clampFootZM(&record)
-        XCTAssertEqual(
-            WorldBuilderObstacleManifestSupport.footZM(for: record),
-            WorldBuilderObstacleManifestSupport.footZMaxM,
-            accuracy: 0.001
+        WorldBuilderObstacleManifestSupport.clampFootZM(
+            &record,
+            sceneType: scene,
+            floorSideM: floorSideM
         )
-        XCTAssertEqual(record.centerZM, WorldBuilderObstacleManifestSupport.footZMaxM + halfHeight, accuracy: 0.001)
+        XCTAssertEqual(WorldBuilderObstacleManifestSupport.footZM(for: record), limits.max, accuracy: 0.001)
+        XCTAssertEqual(record.centerZM, limits.max + halfHeight, accuracy: 0.001)
         WorldBuilderObstacleManifestSupport.setFootZM(-800, record: &record)
-        WorldBuilderObstacleManifestSupport.clampFootZM(&record)
-        XCTAssertEqual(
-            WorldBuilderObstacleManifestSupport.footZM(for: record),
-            WorldBuilderObstacleManifestSupport.footZMinM,
-            accuracy: 0.001
+        WorldBuilderObstacleManifestSupport.clampFootZM(
+            &record,
+            sceneType: scene,
+            floorSideM: floorSideM
         )
+        XCTAssertEqual(WorldBuilderObstacleManifestSupport.footZM(for: record), limits.min, accuracy: 0.001)
+    }
+
+    func test_flatFootZLimits_matchMapBaseDepth() {
+        let limits = WorldBuilderObstacleManifestSupport.footZLimitsM(
+            sceneType: .flat,
+            floorSideM: 1000
+        )
+        XCTAssertEqual(limits.min, -TrainingEnvironmentWorldSDF.openFieldFloorDepthM, accuracy: 0.001)
+        XCTAssertEqual(limits.max, 0, accuracy: 0.001)
     }
 
     func test_resizePreservesManualFootZ() {
         var record = TrainingEnvironmentObstacleRecord.defaults(for: .cube)
         record.usesAutoZ = false
-        WorldBuilderObstacleManifestSupport.setFootZM(10, record: &record)
+        WorldBuilderObstacleManifestSupport.setFootZM(-2, record: &record)
         let footBefore = WorldBuilderObstacleManifestSupport.footZM(for: record)
         record.setEdgeM(6)
         WorldBuilderObstacleManifestSupport.normalizeRecord(

@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// ``MissionRunFleetDispatch`` + ``MissionRunIssuedCommand`` wiring for MRE fleet dispatch (catalogue + recipe).
 final class MissionRunFleetDispatchTests: XCTestCase {

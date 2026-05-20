@@ -12,6 +12,8 @@ struct GazeboRunningWorld: Identifiable, Equatable {
     let gazeboSDFWorldName: String
     /// Set when World Builder uses the embedded web viewport (`gz launch` websocket bridge).
     let websocketPort: Int?
+    /// Manifest `floorSize` token (e.g. `micro`) when this session started.
+    let floorSizeLabel: String?
     var isAlive: Bool
     var lastExitCode: Int32?
     let startedAt: Date
@@ -91,6 +93,30 @@ final class GazeboService: ObservableObject {
         URL(fileURLWithPath: path).standardizedFileURL.path
     }
 
+    /// Reuse an embedded gzweb session only when path, environment, and manifest `floorSize` match.
+    static func canReuseEmbeddedWorld(
+        existing: GazeboRunningWorld,
+        worldPath: String,
+        environmentID: String?,
+        floorSizeLabel: String?
+    ) -> Bool {
+        guard existing.isAlive else { return false }
+        if normalizedWorldFilePath(existing.worldPath) != normalizedWorldFilePath(worldPath) {
+            return false
+        }
+        if let environmentID, let rowEnv = existing.environmentID, rowEnv != environmentID {
+            return false
+        }
+        let requested = floorSizeLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let loaded = existing.floorSizeLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !requested.isEmpty, requested == loaded else { return false }
+        guard let sideM = TrainingEnvironmentWorldSDF.parseOpenFieldFloorSideM(from: URL(fileURLWithPath: worldPath)) else {
+            return false
+        }
+        let expected = TrainingEnvironmentFloorSize.resolved(from: requested).floorSideM
+        return abs(sideM - expected) < 0.001
+    }
+
     /// Inserts a class-coloured box (or optional custom mesh) for one built-in SITL into a **``.run``** world
     /// (Training / Formation). World Builder sessions do not call this — they author terrain/obstacles/zones only.
     @discardableResult
@@ -164,7 +190,8 @@ final class GazeboService: ObservableObject {
         purpose: GazeboSessionPurpose,
         worldURL: URL? = nil,
         environmentID: String? = nil,
-        package: TrainingEnvironmentPackage? = nil
+        package: TrainingEnvironmentPackage? = nil,
+        floorSizeLabel: String? = nil
     ) async -> UUID? {
         blockUntilColdLaunchBlitzFinishedIfNeeded()
 
@@ -196,11 +223,18 @@ final class GazeboService: ObservableObject {
             return nil
         }
 
+        let resolvedFloorSizeLabel = resolvedPackage?.manifest.floorSize ?? floorSizeLabel
+
         if GazeboSessionLaunchPolicy.usesEmbeddedWebViewport(for: purpose) {
             if let existingID = firstAliveRunWorldID(),
                isEmbeddedViewportLive(worldID: existingID),
                let existing = worlds.first(where: { $0.id == existingID }) {
-                if requestedEnvironmentID == nil || existing.environmentID == requestedEnvironmentID {
+                if Self.canReuseEmbeddedWorld(
+                    existing: existing,
+                    worldPath: world.path,
+                    environmentID: requestedEnvironmentID,
+                    floorSizeLabel: resolvedFloorSizeLabel
+                ) {
                     return existingID
                 }
             }
@@ -211,18 +245,24 @@ final class GazeboService: ObservableObject {
                     worldFilePath: builderPath
                 ),
                    let existing = worlds.first(where: { $0.id == existingID }) {
-                    if !isEmbeddedViewportLive(worldID: existingID) {
-                        await startEmbeddedWebBridge(
-                            worldID: existingID,
-                            instanceIndex: existing.instanceIndex,
-                            gazeboWorldName: existing.gazeboSDFWorldName
-                        )
+                    if Self.canReuseEmbeddedWorld(
+                        existing: existing,
+                        worldPath: world.path,
+                        environmentID: requestedEnvironmentID,
+                        floorSizeLabel: resolvedFloorSizeLabel
+                    ) {
+                        if !isEmbeddedViewportLive(worldID: existingID) {
+                            await startEmbeddedWebBridge(
+                                worldID: existingID,
+                                instanceIndex: existing.instanceIndex,
+                                gazeboWorldName: existing.gazeboSDFWorldName
+                            )
+                        }
+                        return existingID
                     }
-                    return existingID
                 }
             }
-            stopEmbeddedViewportWorlds()
-            try? await Task.sleep(nanoseconds: 400_000_000)
+            await stopEmbeddedViewportWorlds()
         }
 
         let aliveCount = worlds.filter(\.isAlive).count
@@ -296,6 +336,7 @@ final class GazeboService: ObservableObject {
             logDirectoryPath: spec.logDirectoryURL.path,
             gazeboSDFWorldName: sdfWorldName,
             websocketPort: nil,
+            floorSizeLabel: resolvedFloorSizeLabel,
             isAlive: true,
             lastExitCode: nil,
             startedAt: Date()
@@ -315,9 +356,7 @@ final class GazeboService: ObservableObject {
 
     /// Stops every alive embedded-viewport sim (World Builder preview/build and Training `.run`) and its websocket bridge.
     func stopAllPreviewAndBuildWorlds() {
-        let ids = worlds
-            .filter { $0.isAlive && GazeboSessionLaunchPolicy.usesEmbeddedWebViewport(for: $0.purpose) }
-            .map(\.id)
+        let ids = embeddedViewportWorldIDs()
         var ports: Set<Int> = [GazeboLaunchRecipe.websocketPort(forInstanceIndex: 0)]
         for id in ids {
             guard let row = worlds.first(where: { $0.id == id }) else { continue }
@@ -336,9 +375,16 @@ final class GazeboService: ObservableObject {
         GuardianGazeboOrphanBlitz.kickoffWhenAllWorldsStopped()
     }
 
-    /// One embedded sim at a time (shared websocket port + transport partition).
-    private func stopEmbeddedViewportWorlds() {
+    /// Stops embedded gzweb sessions, waits for sim + websocket exit, and reaps stale port listeners.
+    func stopAllEmbeddedViewportWorldsCompletely() async {
+        let worldIDs = embeddedViewportWorldIDs()
         stopAllPreviewAndBuildWorlds()
+        await waitForEmbeddedViewportTeardown(worldIDs: worldIDs)
+    }
+
+    /// One embedded sim at a time (shared websocket port + transport partition).
+    private func stopEmbeddedViewportWorlds() async {
+        await stopAllEmbeddedViewportWorldsCompletely()
     }
 
     func stopWorld(id: UUID) {
@@ -349,8 +395,59 @@ final class GazeboService: ObservableObject {
     func stopAll(purpose: GazeboSessionPurpose? = nil) {
         for row in worlds where row.isAlive {
             if let purpose, row.purpose != purpose { continue }
-            runners[row.id]?.stop()
+            stopWorld(id: row.id)
         }
+    }
+
+    private func embeddedViewportWorldIDs() -> [UUID] {
+        worlds
+            .filter { $0.isAlive && GazeboSessionLaunchPolicy.usesEmbeddedWebViewport(for: $0.purpose) }
+            .map(\.id)
+    }
+
+    private func waitForEmbeddedViewportTeardown(
+        worldIDs: [UUID],
+        timeout: TimeInterval = 8
+    ) async {
+        let ports: Set<Int> = {
+            var out: Set<Int> = [GazeboLaunchRecipe.websocketPort(forInstanceIndex: 0)]
+            for id in worldIDs {
+                guard let row = worlds.first(where: { $0.id == id }) else { continue }
+                out.insert(row.websocketPort ?? GazeboLaunchRecipe.websocketPort(forInstanceIndex: row.instanceIndex))
+            }
+            return out
+        }()
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let simRunning = worldIDs.contains { runners[$0]?.isRunning == true }
+            let wsRunning = worldIDs.contains { websocketRunners[$0]?.isRunning == true }
+            if !simRunning, !wsRunning { break }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+
+        for id in worldIDs {
+            _ = await runners[id]?.stopAndWait(timeout: max(0.5, timeout / Double(max(worldIDs.count, 1))))
+            _ = await websocketRunners[id]?.stopAndWait(timeout: max(0.5, timeout / Double(max(worldIDs.count, 1))))
+            runners[id] = nil
+            websocketRunners[id] = nil
+        }
+
+        for port in ports {
+            GuardianTcpPortUtilities.terminateListeners(on: port)
+            _ = await GuardianTcpPortUtilities.waitForTcpPortBindable(port: port, timeout: 2)
+        }
+
+        for id in worldIDs {
+            if let idx = worlds.firstIndex(where: { $0.id == id }) {
+                worlds[idx].isAlive = false
+            }
+            runners[id] = nil
+            websocketRunners[id] = nil
+            simSceneTrackers[id] = nil
+        }
+        embeddedViewport = nil
+        GuardianGazeboOrphanBlitz.kickoffWhenAllWorldsStopped()
     }
 
     func stopAllForApplicationQuit() {
@@ -569,6 +666,7 @@ final class GazeboService: ObservableObject {
             logDirectoryPath: row.logDirectoryPath,
             gazeboSDFWorldName: row.gazeboSDFWorldName,
             websocketPort: port,
+            floorSizeLabel: row.floorSizeLabel,
             isAlive: row.isAlive,
             lastExitCode: row.lastExitCode,
             startedAt: row.startedAt

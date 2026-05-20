@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage D item 4 coverage for ``ProcessPromptPolicy``: the entry catalogue,
 /// the resolve-time binding against an event's ``OperatorPromptTarget`` (entries

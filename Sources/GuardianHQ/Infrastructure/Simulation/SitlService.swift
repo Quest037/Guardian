@@ -493,7 +493,7 @@ final class SitlService: ObservableObject {
             let row = instances.first(where: { $0.id == id })!
             registerFleetLinkForInstance(row, link: link, defaults: defaults)
             scheduleInitialFleetLinkRegistration(sessionID: id, link: link, defaults: defaults)
-            if let gazeboPlacement {
+            if let gazeboPlacement, owner != .trainingRoster {
                 scheduleGazeboVehicleVisual(
                     mavlinkSystemID: mavlinkSystemID,
                     preset: preset,
@@ -602,7 +602,7 @@ final class SitlService: ObservableObject {
             let row = instances.first(where: { $0.id == id })!
             registerFleetLinkForInstance(row, link: link, defaults: defaults)
             scheduleInitialFleetLinkRegistration(sessionID: id, link: link, defaults: defaults)
-            if let gazeboPlacement {
+            if let gazeboPlacement, owner != .trainingRoster {
                 scheduleGazeboVehicleVisual(
                     mavlinkSystemID: mavlinkSystemID,
                     preset: preset,

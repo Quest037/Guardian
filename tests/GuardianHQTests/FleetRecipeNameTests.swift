@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage B1 namespace-validation coverage for the Layer 1 recipe identifier. Mirrors
 /// the Layer 0 test shape (`FleetCommandNameTests`) so the two namespaces stay in

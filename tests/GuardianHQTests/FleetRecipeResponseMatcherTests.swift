@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage B1 coverage for ``FleetRecipeResponseMatcher``: per-case match semantics
 /// against every `FleetCommandResponse` outcome shape, plus Codable round-trip for

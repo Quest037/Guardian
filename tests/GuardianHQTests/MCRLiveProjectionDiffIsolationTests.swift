@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Phase 10 / MC-R row contracts: equatable projections should **not** churn when unrelated MRE rows / tasks change (see ``README_FULL.md`` → **MC-R live UI row contracts**).
 @MainActor

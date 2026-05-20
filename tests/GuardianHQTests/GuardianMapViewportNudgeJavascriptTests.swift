@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GuardianMapViewportNudgeJavascriptTests: XCTestCase {
     func test_javascriptExpression_panRetainZoom() {

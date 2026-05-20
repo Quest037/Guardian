@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Pins ``FleetCommandStackConverterShared/translateMovePoint`` yaw semantics for
 /// ground/surface frames (bearing hub → target) vs airframes (caller yaw preserved).

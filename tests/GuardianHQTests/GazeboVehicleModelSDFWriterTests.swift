@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GazeboVehicleModelSDFWriterTests: XCTestCase {
     func test_box_sdf_uses_universal_class_colour() {

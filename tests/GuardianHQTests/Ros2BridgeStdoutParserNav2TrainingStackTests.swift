@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class Ros2BridgeStdoutParserNav2TrainingStackTests: XCTestCase {
     func test_parses_nav2_training_stack_ready() {

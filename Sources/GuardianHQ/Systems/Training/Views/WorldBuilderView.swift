@@ -48,6 +48,9 @@ struct WorldBuilderView: View {
             pushViewportZoneState()
             pushViewportObstacleState()
         }
+        .onChange(of: builder.draftManifest?.floorSize) { _ in
+            builder.floorSizeDidChange()
+        }
         .onChange(of: builder.openSceneToolPanel) { _ in
             pushViewportZoneState()
             pushViewportObstacleState()
@@ -248,8 +251,10 @@ struct WorldBuilderView: View {
                     accent: .danger,
                     surface: .outline,
                     action: {
-                        builder.stopGazeboSession()
-                        builder.loadDraftFromSelection()
+                        Task {
+                            await builder.stopGazeboSession()
+                            builder.loadDraftFromSelection()
+                        }
                     }
                 )
             }
@@ -403,6 +408,8 @@ struct WorldBuilderView: View {
         if builder.openSceneToolPanel == .obstacleEditor, builder.canEditScene {
             WorldBuilderObstacleToolBar(
                 record: builder.obstacleEditingBinding(),
+                footZMinM: builder.obstacleFootZLimitsM.min,
+                footZMaxM: builder.obstacleFootZLimitsM.max,
                 theme: theme,
                 isEditingPlaced: builder.obstacleSelectedID != nil,
                 obstacleCount: builder.obstaclesSnapshot.count,
@@ -454,6 +461,7 @@ struct WorldBuilderView: View {
                     obstacleCommandTick: viewportObstacles.tick,
                     showsCameraDebugHUD: fleetLink.isDebugEnabled,
                     groundHalfExtentM: builder.activeFloorHalfExtentM,
+                    orbitMinDistanceM: builder.activeOrbitMinDistanceM,
                     onZonesChanged: { zones, jsZoneFailed in
                         let swiftFailed = builder.applyZonesFromViewport(zones)
                         if jsZoneFailed || swiftFailed {
@@ -672,6 +680,14 @@ private struct WorldBuilderEnvironmentChooseCard: View {
         TrainingEnvironmentSceneType.resolved(from: package.manifest.sceneType)
     }
 
+    private var floorSize: TrainingEnvironmentFloorSize {
+        TrainingEnvironmentFloorSize.resolved(from: package.manifest.floorSize)
+    }
+
+    private var floorSizeBadgeLabel: String {
+        floorSize.rawValue.capitalized
+    }
+
     private var sourceLabel: String {
         package.source == .bundled ? "Bundled" : "Yours"
     }
@@ -702,6 +718,13 @@ private struct WorldBuilderEnvironmentChooseCard: View {
                             )
                             GuardianBadge(
                                 text: sceneType.displayName,
+                                accent: .neutral,
+                                paint: .light,
+                                size: .small,
+                                shape: .pill
+                            )
+                            GuardianBadge(
+                                text: floorSizeBadgeLabel,
                                 accent: .neutral,
                                 paint: .light,
                                 size: .small,
@@ -748,7 +771,7 @@ private struct WorldBuilderEnvironmentChooseCard: View {
     }
 
     private var accessibilitySummary: String {
-        var parts = [package.manifest.displayName, sourceLabel, sceneType.displayName]
+        var parts = [package.manifest.displayName, sourceLabel, sceneType.displayName, floorSizeBadgeLabel]
         if isSelected {
             parts.append("Selected")
         }

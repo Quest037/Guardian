@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage D item 3 coverage for the operator-prompt delivery-target catalogue:
 /// the closed enum shape, the contextual / broadcast / out-of-app / archive

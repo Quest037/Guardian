@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class TrainingSkillSearcherTests: XCTestCase {
     func test_candidates_reverseIntoSlot_respectsForbiddenForward() {

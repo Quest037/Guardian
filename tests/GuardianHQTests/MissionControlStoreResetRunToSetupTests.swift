@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 @MainActor
 final class MissionControlStoreResetRunToSetupTests: XCTestCase {

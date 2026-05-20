@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GuardianPx4SitlMavlinkOverlayTests: XCTestCase {
     func test_bundled_px4_rc_mavlink_honors_guardian_env() throws {

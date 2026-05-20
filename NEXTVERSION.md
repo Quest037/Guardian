@@ -59,3 +59,9 @@ Deferred product and engineering ideas for a future release. Entries are appende
 - **Idea:** Wingmen often stop tracking the primary convoy slot when the primary stays on **AUTO mission** with a steady heading for a long stretch; a turn wakes follow again, but wingmen may already be too far to catch up. **AUTO** does not let the primary slow for wingmen to close (acceptable for v1 — document operator expectation; optional future: convoy speed cap, follow re-engage pulse, or OFFBOARD catch-up leg before resuming mission).
 - **Context:** `MissionRunSquadFollowSubsystem`, convoy formation setpoints vs primary `AUTO_MISSION`, `SquadFollow&Formation.md`.
 - **Notes:** Distinct from GR wind-down / end-policy routing work.
+
+## 2026-05-19 — Brain pack & MRE follow-up
+
+- **Idea:** (1) **Planner-only packs** — wire ROS `navigate_to_pose` action client (v1 uses open-loop synthesized segments + Nav2 plan when bridge is up). (2) **Brain segment → MRE cycle** — confirm bounded / one-off tasks end correctly in SIM smoke beyond unit `missionCycleFinished` coverage. (3) **MCS bindings vs mission tasks** — optional per-row mission-task brain binding (today: pin keying by task kind + vehicle class only). (4) **Pack signing** — trust model for imported brains. (5) **Mid-run brain switch** policy (MCS-only vs never). (6) **One brain per task vs per vehicle** MCS implications. (7) **Aerostack2** UAV brain execution beyond segment-only paths. (8) **Paladin** reading brain version from run envelope for learn backlog.
+- **Context:** Shipped cutover in **README_FULL.md** → **Two-app SwiftPM products**, **Guardian Brain Pack**, **Training ↔ Mission cutover — manual smoke**. Code: `Sources/GuardianHQ/Systems/Utilities/BrainPack/`, `MissionRunBrainExecutionSubsystem`, MCS **Autonomy brains**.
+- **Notes:** Former tracker `AppTrainingMissionSplitToDo.md` retired 2026-05-19 after Phase 6 hygiene.

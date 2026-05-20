@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GuardianBrainSquadProfileResolutionTests: XCTestCase {
     func test_tuning_parses_formation_and_spacing_from_export_payload() throws {

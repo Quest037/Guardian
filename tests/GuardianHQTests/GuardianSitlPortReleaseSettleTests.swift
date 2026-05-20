@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GuardianSitlPortReleaseSettleTests: XCTestCase {
     func test_portReleaseSettleTimeout_defaults_to_two_point_five() {

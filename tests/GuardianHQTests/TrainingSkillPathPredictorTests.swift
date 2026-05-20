@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class TrainingSkillPathPredictorTests: XCTestCase {
     func test_reverseSegment_movesBehindStartAlongHeading() {

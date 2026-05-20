@@ -9,8 +9,7 @@
 
 ## Training
 
-- **Unified Training panel (Vehicle + Formation redesign):** `TrainingUnifiedPanelToDo.md` — full-width Gazebo; sub-bar drawers (map, vehicles, training, logs); squads + spawn roster.
-- **Training + Mission app split + brain export:** `AppTrainingMissionSplitToDo.md` — Phase 1 `GuardianCore` + SwiftPM Gazebo resource split; corners-cut planner-only / SIM smoke.
+- **Brain pack / MRE follow-up (deferred):** `NEXTVERSION.md` → **2026-05-19 — Brain pack & MRE follow-up** (planner-only ROS action client, bounded-task SIM smoke, MCS per-task binding).
 - **Gazebo 3D simulation (Training + Formation):** `TrainingGazeboSimulationToDo.md` — bundled Gazebo (or equivalent), training environment catalogue + authoring (obstacles, start/goal, terrain), single-vehicle Training then Formation squads / multi-squad; replaces Leaflet in those simulate tabs when shippable (Training app target).
 - **Gazebo embedded viewer — offline mode:** Regenerate `Resources/GazeboWeb/dist/gzweb.bundle.mjs` via `make gzweb-viewer` after gzweb bumps; commit the bundle so packaged apps need no network for the 3D panel.
 

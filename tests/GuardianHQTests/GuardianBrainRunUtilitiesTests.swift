@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GuardianBrainRunUtilitiesTests: XCTestCase {
     func test_structuredBrainExportHeader_includes_ids_and_versions() {

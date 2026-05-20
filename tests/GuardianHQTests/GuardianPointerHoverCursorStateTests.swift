@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Documents hover cursor push/pop balance for ``GuardianPointerHoverCursorModifier`` (logic kept inline in the modifier).
 final class GuardianPointerHoverCursorStateTests: XCTestCase {

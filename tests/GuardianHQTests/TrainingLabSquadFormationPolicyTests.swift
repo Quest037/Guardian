@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class TrainingLabSquadFormationPolicyTests: XCTestCase {
     func test_endFormationChoice_autoResolvesNil() {

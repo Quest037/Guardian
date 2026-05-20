@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GuardianBrainPackPlannerHintsTests: XCTestCase {
     func test_plannerHints_nav2_includes_overlay_json() {

@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Pins the horizontal-distance heuristic used by ``FleetLinkService`` for PX4 OFFBOARD move-point
 /// (see ``FleetLinkService`` / `px4MovePointOffboardArrivalM` in source) to hub ↔ target haversine metres.

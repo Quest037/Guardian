@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage B0 parameter-validation coverage. Pins the contract of
 /// ``FleetCommandParameterValidator`` so changes to the schema rules are intentional.

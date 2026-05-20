@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage B0 normalisation-heuristics coverage. Pins the failure-string classification
 /// rules in ``FleetCommandStackConverterShared`` and the ArduPilot PreArm shortcut so

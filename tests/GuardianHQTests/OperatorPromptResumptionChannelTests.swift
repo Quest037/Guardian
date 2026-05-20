@@ -1,6 +1,6 @@
 import Combine
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage D item 6 coverage for ``OperatorPromptResumptionChannel`` — the answer
 /// transport that carries operator picks back from delivery surfaces to the

@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class RosterDeviceVehicleSizeTests: XCTestCase {
     func test_decode_missing_vehicleSizeTier_defaults_to_medium() throws {

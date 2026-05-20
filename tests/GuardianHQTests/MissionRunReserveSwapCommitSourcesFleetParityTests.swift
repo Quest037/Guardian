@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Both floating pool and fixed template reserve swap-in commits under the **same** ``FleetLinkService`` + ``SitlService``
 /// attachment pattern used across mission-run reserve tests (``seedMissionRunTestLiveVehicle``).

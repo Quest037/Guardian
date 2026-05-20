@@ -162,10 +162,12 @@ struct TrainingEnvironmentObstacleRecord: Codable, Equatable, Identifiable, Send
             centerYM: 0,
             centerZM: 0,
             yawDeg: 0,
-            usesAutoZ: true,
+            usesAutoZ: false,
             axisOrientation: .vertical
         )
         record.applyDefaultParameters()
+        let dz = record.verticalExtentsM().dz
+        record.centerZM = dz / 2
         return record
     }
 
@@ -302,8 +304,31 @@ enum WorldBuilderObstacleManifestSupport {
     static let dimensionMinM = 0.25
     static let dimensionMaxM = 80.0
     /// Obstacle foot (lowest point) height (m) relative to map-base top (z = 0).
-    static let footZMinM = -500.0
-    static let footZMaxM = 2000.0
+    static func footZLimitsM(
+        sceneType: TrainingEnvironmentSceneType,
+        floorSideM: Double
+    ) -> (min: Double, max: Double) {
+        let depth = TrainingEnvironmentWorldSDF.openFieldFloorDepthM
+        switch sceneType {
+        case .flat:
+            // Map-base block spans z = −depth … 0 (top face at 0).
+            return (min: -depth, max: 0)
+        }
+    }
+
+    static func footZMinM(
+        sceneType: TrainingEnvironmentSceneType,
+        floorSideM: Double
+    ) -> Double {
+        footZLimitsM(sceneType: sceneType, floorSideM: floorSideM).min
+    }
+
+    static func footZMaxM(
+        sceneType: TrainingEnvironmentSceneType,
+        floorSideM: Double
+    ) -> Double {
+        footZLimitsM(sceneType: sceneType, floorSideM: floorSideM).max
+    }
 
     static func obstacles(from manifest: TrainingEnvironmentManifest) -> [TrainingEnvironmentObstacleRecord] {
         manifest.obstacles
@@ -319,7 +344,7 @@ enum WorldBuilderObstacleManifestSupport {
         if record.usesAutoZ {
             reclampAutoZ(&record, floorHalfM: floorHalfM, sceneType: sceneType)
         } else {
-            clampFootZM(&record)
+            clampFootZM(&record, sceneType: sceneType, floorSideM: floorHalfM * 2)
         }
         clampToFloor(&record, floorHalfM: floorHalfM)
     }
@@ -333,8 +358,13 @@ enum WorldBuilderObstacleManifestSupport {
         record.centerZM = footZM + ext.dz / 2
     }
 
-    static func clampFootZM(_ record: inout TrainingEnvironmentObstacleRecord) {
-        let clamped = min(footZMaxM, max(footZMinM, footZM(for: record)))
+    static func clampFootZM(
+        _ record: inout TrainingEnvironmentObstacleRecord,
+        sceneType: TrainingEnvironmentSceneType,
+        floorSideM: Double
+    ) {
+        let limits = footZLimitsM(sceneType: sceneType, floorSideM: floorSideM)
+        let clamped = min(limits.max, max(limits.min, footZM(for: record)))
         setFootZM(clamped, record: &record)
     }
 
@@ -347,7 +377,7 @@ enum WorldBuilderObstacleManifestSupport {
             if clamped[index].usesAutoZ {
                 reclampAutoZ(&clamped[index], floorHalfM: floorHalfM, sceneType: scene)
             } else {
-                clampFootZM(&clamped[index])
+                clampFootZM(&clamped[index], sceneType: scene, floorSideM: floorHalfM * 2)
             }
             clampToFloor(&clamped[index], floorHalfM: floorHalfM)
         }

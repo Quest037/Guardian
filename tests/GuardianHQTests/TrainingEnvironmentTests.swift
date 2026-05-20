@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class TrainingEnvironmentTests: XCTestCase {
     func test_manifest_roundTrip() throws {

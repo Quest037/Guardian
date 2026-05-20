@@ -1,6 +1,6 @@
 import Mavsdk
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class MissionGeofenceMavsdkGeofenceUtilitiesTests: XCTestCase {
 

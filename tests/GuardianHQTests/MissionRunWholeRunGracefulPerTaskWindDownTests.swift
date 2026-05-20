@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Whole-run “complete after cycle” arms one pending row per task; idle tasks (not in ``activeCycleTaskIDs``) should
 /// begin recovery wind-down immediately instead of waiting for other tasks’ autopilot cycles.

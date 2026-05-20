@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 @MainActor
 final class MissionRunFloatingReserveTargetedPoolSwapTests: XCTestCase {

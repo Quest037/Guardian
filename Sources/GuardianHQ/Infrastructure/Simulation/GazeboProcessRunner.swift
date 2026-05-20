@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 @MainActor
@@ -89,6 +90,24 @@ final class GazeboProcessRunner {
             return
         }
         proc.terminate()
+    }
+
+    /// SIGTERM then optional SIGKILL so the next embedded map does not share a stale Harmonic process.
+    @discardableResult
+    func stopAndWait(timeout: TimeInterval = 6) async -> Bool {
+        stop()
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if !isRunning { return true }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        if isRunning, let pid = processIdentifier {
+            kill(pid, SIGKILL)
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+        if !isRunning { return true }
+        teardownOnce(exitCode: process?.terminationStatus ?? -1)
+        return false
     }
 
     private func consume(pipe: inout String, chunk: String) {

@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage B0 descriptor-registration coverage. Pins that
 /// ``FleetCommandsCatalogueBootstrap`` enrolls every Stage A literal and that the call

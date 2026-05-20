@@ -57,20 +57,18 @@ cp "$ROOT/Packaging/GuardianHQ-App-Info.plist" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleName $APP_NAME" "$APP/Contents/Info.plist" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $APP_NAME" "$APP/Contents/Info.plist" 2>/dev/null || true
 
-# SwiftPM resource bundle must live next to the executable (Bundle.module).
-BUNDLE="$BIN_DIR/GuardianHQ_GuardianHQ.bundle"
-if [[ -d "$BUNDLE" ]]; then
-  rm -rf "$APP/Contents/MacOS/GuardianHQ_GuardianHQ.bundle"
-  cp -R "$BUNDLE" "$APP/Contents/MacOS/"
-  # Mission ops app: drop Training-only Gazebo assets (see README_FULL.md → Mission sim vs Training worlds).
-  if [[ "$PRODUCT" == "GuardianMission" ]]; then
-    MISSION_BUNDLE="$APP/Contents/MacOS/GuardianHQ_GuardianHQ.bundle"
-    for training_only in GazeboRuntime GazeboWeb TrainingEnvironments; do
-      if [[ -d "$MISSION_BUNDLE/$training_only" ]]; then
-        rm -rf "$MISSION_BUNDLE/$training_only"
-        echo "Trimmed $training_only from Mission resource bundle"
-      fi
-    done
+# SwiftPM resource bundles must live next to the executable (Bundle.module).
+CORE_BUNDLE="$BIN_DIR/GuardianCore_GuardianCore.bundle"
+if [[ -d "$CORE_BUNDLE" ]]; then
+  rm -rf "$APP/Contents/MacOS/GuardianCore_GuardianCore.bundle"
+  cp -R "$CORE_BUNDLE" "$APP/Contents/MacOS/"
+fi
+# Training / HQ monolith: Gazebo + environment packages live in a separate SPM target.
+if [[ "$PRODUCT" == "GuardianTraining" || "$PRODUCT" == "GuardianHQ" || "$PRODUCT" == "GuardianHQRun" ]]; then
+  TRAINING_BUNDLE="$BIN_DIR/GuardianTrainingSimulationResources_GuardianTrainingSimulationResources.bundle"
+  if [[ -d "$TRAINING_BUNDLE" ]]; then
+    rm -rf "$APP/Contents/MacOS/GuardianTrainingSimulationResources_GuardianTrainingSimulationResources.bundle"
+    cp -R "$TRAINING_BUNDLE" "$APP/Contents/MacOS/"
   fi
 fi
 

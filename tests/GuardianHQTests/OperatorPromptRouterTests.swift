@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// `@Sendable` probes for ``OperatorPromptRouter`` tests (avoid capturing `Self` from `XCTestCase`).
 private enum OperatorPromptRouterTestProbes {

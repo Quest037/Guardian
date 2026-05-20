@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class SetupStagingMapStructureIdentityTests: XCTestCase {
     private func chrome(_ tab: MissionControlSetupRostersSidebarTab = .tasks, point: UUID? = nil) -> MissionControlSetupRosterStagingMissionPointChrome {

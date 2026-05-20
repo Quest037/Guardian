@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class SitlSpawnOwnerTests: XCTestCase {
     func test_aliveInstances_filtersByOwnerAndAlive() {

@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage B1 registration coverage for ``FleetRecipesCatalogue``: name validation,
 /// idempotency, composition-depth enforcement, retry-cap enforcement (with the

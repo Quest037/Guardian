@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Autopilot “mission finished” was previously gated on **all** active tasks; these tests pin per-task completion.
 @MainActor

@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GuardianAutonomyPlannerRoutingTests: XCTestCase {
     func test_ugv_defaults_to_nav2() {

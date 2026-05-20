@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GuardianBrainPinDefaultsStoreTests: XCTestCase {
     func test_pinAndSeedRunBindings() throws {

@@ -148,6 +148,7 @@ struct TrainingLabPanelView: View {
                 missionControl: missionControl,
                 simulationPlatform: platform
             )
+            lab.bindRoster(roster)
         }
         .onChange(of: lab.formation.formation) { _ in
             guard usesFormationMapLayout else { return }
@@ -287,6 +288,7 @@ struct TrainingLabPanelView: View {
             missionControl: missionControl,
             simulationPlatform: generalSettings.defaultSimulationPlatform
         )
+        lab.bindRoster(roster)
         lab.teaching.syncFromFleetOnAppear(fleetLink: fleetLink)
         lab.teaching.loadPromotedSkill()
         lab.teaching.scheduleNav2PlanPathRefresh()
@@ -326,9 +328,17 @@ struct TrainingLabPanelView: View {
 
     // MARK: - Embedded Gazebo viewport (Training `.run`)
 
+    private var trainingFloorSize: TrainingEnvironmentFloorSize {
+        guard let pkg = lab.teaching.selectedEnvironment else { return .small }
+        return TrainingEnvironmentFloorSize.resolved(from: pkg.manifest.floorSize)
+    }
+
     private var trainingGroundHalfExtentM: Double {
-        guard let pkg = lab.teaching.selectedEnvironment else { return 500 }
-        return TrainingEnvironmentFloorSize.resolved(from: pkg.manifest.floorSize).floorSideM / 2
+        trainingFloorSize.floorSideM / 2
+    }
+
+    private var trainingOrbitMinDistanceM: Double {
+        trainingFloorSize.orbitMinDistanceM
     }
 
     private var isTrainingViewportCameraLive: Bool {
@@ -379,7 +389,8 @@ struct TrainingLabPanelView: View {
                         zoneBridge: viewportZones,
                         zoneCommandTick: viewportZones.tick,
                         showsCameraDebugHUD: fleetLink.isDebugEnabled,
-                        groundHalfExtentM: trainingGroundHalfExtentM
+                        groundHalfExtentM: trainingGroundHalfExtentM,
+                        orbitMinDistanceM: trainingOrbitMinDistanceM
                     )
                     .id(viewport.worldID)
                 } else {
@@ -781,17 +792,18 @@ struct TrainingLabPanelView: View {
 
     private func startSession() {
         guard canStartSession else { return }
-        roster.syncTrainingFromLearningSquad()
-        if roster.learningSquadUsesFormation {
-            Task {
+        Task {
+            await lab.buildMap(roster: roster)
+            roster.syncTrainingFromLearningSquad()
+            if roster.learningSquadUsesFormation {
                 idleRailTab = .logs
                 lab.applyFormationPolicyForRun(from: roster)
                 await lab.applyFormationControl()
                 syncMapContent()
+            } else {
+                lab.teaching.startAutonomousTeaching()
+                idleRailTab = .logs
             }
-        } else {
-            lab.teaching.startAutonomousTeaching()
-            idleRailTab = .logs
         }
     }
 
@@ -799,6 +811,7 @@ struct TrainingLabPanelView: View {
         lab.teaching.cancelTeaching()
         Task {
             await lab.stopActiveFormationSession()
+            await lab.resetMap(roster: roster)
         }
     }
 

@@ -4,6 +4,8 @@ import SwiftUI
 /// Binds to ``WorldBuilderController/obstaclePlacementDraft`` — same buffer used for placement and for syncing a selected model.
 struct WorldBuilderObstacleToolBar: View {
     @Binding var record: TrainingEnvironmentObstacleRecord
+    let footZMinM: Double
+    let footZMaxM: Double
     let theme: GuardianThemePalette
     let isEditingPlaced: Bool
     let obstacleCount: Int
@@ -17,8 +19,6 @@ struct WorldBuilderObstacleToolBar: View {
     private static let yawMinDeg = -180.0
     private static let yawMaxDeg = 180.0
     private static let yawStepDeg = 1.0
-    private static let footZMinM = WorldBuilderObstacleManifestSupport.footZMinM
-    private static let footZMaxM = WorldBuilderObstacleManifestSupport.footZMaxM
     private static let footZStepM = 0.25
     private static let numericFieldWidth: CGFloat = 88
 
@@ -165,12 +165,12 @@ struct WorldBuilderObstacleToolBar: View {
             "Foot Z (m)",
             value: footZBinding,
             step: Self.footZStepM,
-            min: Self.footZMinM,
-            max: Self.footZMaxM
+            min: footZMinM,
+            max: footZMaxM
         )
         .disabled(record.usesAutoZ)
         .opacity(record.usesAutoZ ? 0.55 : 1)
-        .help("Height of the model bottom above the map base (z = 0). −500 sinks into the ground; +2000 floats above.")
+        .help("Height of the model bottom relative to the map top (z = 0). The map block spans z = \(formatFootZHelp(footZMinM)) … 0 m.")
     }
 
     private var footZBinding: Binding<Double> {
@@ -178,10 +178,18 @@ struct WorldBuilderObstacleToolBar: View {
             get: { WorldBuilderObstacleManifestSupport.footZM(for: record) },
             set: { foot in
                 var updated = record
+                updated.usesAutoZ = false
                 WorldBuilderObstacleManifestSupport.setFootZM(foot, record: &updated)
                 record = updated
             }
         )
+    }
+
+    private func formatFootZHelp(_ metres: Double) -> String {
+        if metres == metres.rounded() && abs(metres) < 10_000 {
+            return String(format: "%.0f", metres)
+        }
+        return String(format: "%.2f", metres)
     }
 
     private var cubeEdgeBinding: Binding<Double> {

@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Regression: pursuit must declare velocity-body when reverse / 3-point runs on PX4 UGV.
 final class FormationFollowStreamPursuitModeTests: XCTestCase {

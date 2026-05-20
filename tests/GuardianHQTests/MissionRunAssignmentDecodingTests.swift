@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class MissionRunAssignmentDecodingTests: XCTestCase {
     /// Older persisted runs may include `simStartOverrideCoord`; it is no longer modeled and must not break decode.

@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class MCRRosterStripOrderedSlotTests: XCTestCase {
     func test_orderedSlot_identity_isAssignmentUUID() {

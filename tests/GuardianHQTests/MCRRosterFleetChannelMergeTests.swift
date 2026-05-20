@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class MCRRosterFleetChannelMergeTests: XCTestCase {
     func test_mergedWithFleetSlice_overridesFleetFacingSnapshotFields() {

@@ -20,6 +20,7 @@ struct GazeboWebViewportView: View {
     var obstacleCommandTick: UUID?
     var showsCameraDebugHUD: Bool = false
     var groundHalfExtentM: Double = 500
+    var orbitMinDistanceM: Double = 50
     var onZonesChanged: ((WorldBuilderZonesSnapshot, Bool) -> Void)?
     var onZoneEditRequest: ((WorldBuilderZoneKind) -> Void)?
     var onZoneDeleteRequest: ((WorldBuilderZoneKind) -> Void)?
@@ -44,6 +45,7 @@ struct GazeboWebViewportView: View {
                 obstacleCommandTick: obstacleCommandTick,
                 showsCameraDebugHUD: showsCameraDebugHUD,
                 groundHalfExtentM: groundHalfExtentM,
+                orbitMinDistanceM: orbitMinDistanceM,
                 onZonesChanged: onZonesChanged,
                 onZoneEditRequest: onZoneEditRequest,
                 onZoneDeleteRequest: onZoneDeleteRequest,
@@ -82,6 +84,7 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
     let obstacleCommandTick: UUID?
     let showsCameraDebugHUD: Bool
     let groundHalfExtentM: Double
+    let orbitMinDistanceM: Double
     let onZonesChanged: ((WorldBuilderZonesSnapshot, Bool) -> Void)?
     let onZoneEditRequest: ((WorldBuilderZoneKind) -> Void)?
     let onZoneDeleteRequest: ((WorldBuilderZoneKind) -> Void)?
@@ -120,11 +123,13 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
     func updateNSView(_ webView: WKWebView, context: Context) {
         if context.coordinator.loadedPort != websocketPort
             || context.coordinator.loadedWorldName != gazeboWorldName
-            || context.coordinator.loadedGroundHalf != groundHalfExtentM {
+            || context.coordinator.loadedGroundHalf != groundHalfExtentM
+            || context.coordinator.loadedOrbitMinDistance != orbitMinDistanceM {
             reload(webView: webView)
             context.coordinator.loadedPort = websocketPort
             context.coordinator.loadedWorldName = gazeboWorldName
             context.coordinator.loadedGroundHalf = groundHalfExtentM
+            context.coordinator.loadedOrbitMinDistance = orbitMinDistanceM
             context.coordinator.loadedCameraDebug = showsCameraDebugHUD
             context.coordinator.lastCameraTick = nil
             context.coordinator.lastZoneTick = nil
@@ -159,11 +164,7 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
     }
 
     private func reload(webView: WKWebView) {
-        guard let base = Bundle.module.url(
-            forResource: "guardian_viewer",
-            withExtension: "html",
-            subdirectory: "GazeboWeb"
-        ) else {
+        guard let base = GuardianBundledResourceLocator.gazeboWebViewerHTMLURL() else {
             let html = """
             <html><body style='background:#222;color:#ccc;font-family:-apple-system,sans-serif;padding:16px'>
             <p>Gazebo web viewer assets are missing from this build.</p>
@@ -177,12 +178,21 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
             URLQueryItem(name: "port", value: "\(websocketPort)"),
             URLQueryItem(name: "world", value: gazeboWorldName),
             URLQueryItem(name: "groundHalf", value: String(format: "%.3f", groundHalfExtentM)),
+            URLQueryItem(name: "orbitMinDistance", value: String(format: "%.2f", orbitMinDistanceM)),
         ]
         if showsCameraDebugHUD {
             components.queryItems?.append(URLQueryItem(name: "cameraDebug", value: "1"))
         }
         let query = components.url(relativeTo: base) ?? base
-        let gazeboWebRoot = base.deletingLastPathComponent()
+        let gazeboWebRoot =
+            GuardianBundledResourceLocator.trainingSimulationResourceBundles
+                .compactMap(\.resourceURL)
+                .first { url in
+                    FileManager.default.fileExists(
+                        atPath: url.appendingPathComponent("dist", isDirectory: true).path
+                    )
+                }
+            ?? base.deletingLastPathComponent()
         webView.loadFileURL(query, allowingReadAccessTo: gazeboWebRoot)
     }
 
@@ -244,6 +254,7 @@ private struct GazeboWebViewportRepresentable: NSViewRepresentable {
         var loadedPort: Int?
         var loadedWorldName: String?
         var loadedGroundHalf: Double?
+        var loadedOrbitMinDistance: Double?
         var loadedCameraDebug: Bool?
         var lastCameraTick: UUID?
         var lastZoneTick: UUID?

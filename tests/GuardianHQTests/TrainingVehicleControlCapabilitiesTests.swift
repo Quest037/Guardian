@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class TrainingVehicleControlCapabilitiesTests: XCTestCase {
     func test_ugv_supportsDiscreteDriveAndTurnAxes() {

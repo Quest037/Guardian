@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class OSMMapViewWKScriptPayloadBridgeTests: XCTestCase {
     func test_optionalString_nilAndNSNull() {

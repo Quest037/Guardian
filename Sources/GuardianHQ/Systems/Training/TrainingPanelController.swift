@@ -48,6 +48,15 @@ final class TrainingPanelController: ObservableObject {
     private var teachTask: Task<Void, Never>?
     private var nav2PlanTask: Task<Void, Never>?
 
+    /// Fired when the operator selects a different training environment (prior map reset).
+    var onMapEnvironmentWillChange: (() -> Void)?
+
+    var fleetLinkForMapSession: FleetLinkService? { fleetLink }
+    var sitlForMapSession: SitlService? { sitl }
+    var gazeboForMapSession: GazeboService? { gazebo }
+    var spawnDefaultsForMapSession: SimSpawnDefaults { spawnDefaults }
+    var simulationPlatformForMapSession: SimulationPlatform { simulationPlatform }
+
     private static let linkWaitTimeoutS: TimeInterval = 60
     private static let preflightSource = "training.panel.preflight"
     private static let resetSource = "training.panel.reset"
@@ -98,7 +107,7 @@ final class TrainingPanelController: ObservableObject {
             || TrainingEnvironmentCatalogue.package(id: id)?.manifest.hasConfiguredStartAndEndZones == true
         if !stillListed || !selectable {
             selectedEnvironmentID = nil
-            stopTrainingGazeboRunWorld()
+            Task { await stopTrainingGazeboRunWorld() }
         }
     }
 
@@ -132,7 +141,7 @@ final class TrainingPanelController: ObservableObject {
     func environmentSelectionDidChange() {
         persistEnvironmentSelection()
         if selectedEnvironmentID == nil {
-            stopTrainingGazeboRunWorld()
+            Task { await stopTrainingGazeboRunWorld() }
         }
         restoreTargetSlotForSelectedEnvironment()
         refreshTaskLayout()
@@ -157,17 +166,15 @@ final class TrainingPanelController: ObservableObject {
         }
 
         let priorID = selectedEnvironmentID
-        if let priorID, priorID != environmentID {
-            resetMap()
+        let switchingMap = priorID != nil && priorID != environmentID
+        if switchingMap {
+            await stopTrainingGazeboRunWorld()
+            onMapEnvironmentWillChange?()
         }
         selectedEnvironmentID = environmentID
         environmentSelectionDidChange()
         guard requiresGazeboRunWorld else { return }
         _ = await startTrainingGazeboRunWorldIfNeeded()
-    }
-
-    /// Idle map change hook — reset vehicles in Gazebo, episode state, etc. (extended in later passes).
-    func resetMap() {
     }
 
     func trainingTaskOrVehicleDidChange() {
@@ -765,7 +772,7 @@ final class TrainingPanelController: ObservableObject {
         guard let row = sitl.instances.first(where: {
             !before.contains($0.id) && $0.spawnOwner == .trainingRoster
         }) else {
-            stopTrainingGazeboRunWorld()
+            await stopTrainingGazeboRunWorld()
             endSpawnShellBusyState()
             statusText = sitl.lastError ?? "Spawn failed — check SITL logs."
             phase = .idle
@@ -791,7 +798,7 @@ final class TrainingPanelController: ObservableObject {
         teachTask?.cancel()
         teachTask = nil
         isBusy = false
-        stopTrainingGazeboRunWorld()
+        await stopTrainingGazeboRunWorld()
         await stopTrainingStreamAndTrackedSitl()
         statusText = "Spawn a simulator to begin training."
         phase = .idle
@@ -1092,7 +1099,7 @@ final class TrainingPanelController: ObservableObject {
         }
 
         if restartExisting {
-            stopTrainingGazeboRunWorld()
+            await stopTrainingGazeboRunWorld()
         } else if let worldID = activeGazeboWorldID, gazebo.isWorldAlive(id: worldID) {
             return true
         }
@@ -1119,19 +1126,11 @@ final class TrainingPanelController: ObservableObject {
         return GazeboVehiclePlacement(worldID: worldID, pose: pkg.manifest.defaultSpawn)
     }
 
-    private func stopTrainingGazeboRunWorld() {
-        guard let gazebo else {
-            activeGazeboWorldID = nil
-            gazeboWorldStatusText = nil
-            return
-        }
-        if let id = activeGazeboWorldID {
-            gazebo.stopWorld(id: id)
-        } else {
-            gazebo.stopAll(purpose: .run)
-        }
+    private func stopTrainingGazeboRunWorld() async {
         activeGazeboWorldID = nil
         gazeboWorldStatusText = nil
+        guard let gazebo else { return }
+        await gazebo.stopAllEmbeddedViewportWorldsCompletely()
     }
 
     /// Stops only this panel's training SITL and waits for UDP ports — does not touch formation sims.

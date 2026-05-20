@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Bootstrap coverage for the Layer 1 recipe catalogue. Mirrors the Layer 0
 /// bootstrap test shape. Subsystem entry points (calibration, errors, mission, move+park)

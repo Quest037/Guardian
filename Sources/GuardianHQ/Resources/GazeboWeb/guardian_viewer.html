@@ -72,6 +72,12 @@
     const MAP_GROUND_HALF_EXTENT_M = Number.isFinite(groundHalfParam) && groundHalfParam > 0
       ? groundHalfParam
       : 500;
+    const orbitMinParam = parseFloat(
+      params.get('orbitMinDistance') || params.get('orbitZoomInMax') || ''
+    );
+    const MAP_ORBIT_MIN_DISTANCE_M = Number.isFinite(orbitMinParam) && orbitMinParam > 0
+      ? orbitMinParam
+      : 50;
 
     /** Oblique 3D view direction (unit vector); distance is computed from floor size + viewport FOV. */
     const MAP_OBLIQUE_LOOK_AT = { x: 0, y: 0, z: 0 };
@@ -86,8 +92,7 @@
     const MAP_ORBIT_POLAR_MAX = Math.PI / 2 - 0.06;
     const MAP_FIT_MARGIN = 1.18;
     const MAP_OBLIQUE_UZ = Math.abs(MAP_OBLIQUE_DIRECTION.z);
-    /** Universal orbit zoom (metres); same on every map size — vehicles share scale, not map half-extent. */
-    const MAP_ORBIT_ZOOM_IN_MAX_M = 250;
+    /** Orbit zoom-out cap (metres). Closest approach is `MAP_ORBIT_MIN_DISTANCE_M` (`orbitMinDistance` query). */
     const MAP_ORBIT_ZOOM_OUT_MAX_M = 3000;
 
     /** Three.js namespace from gzweb bundle (CircleGeometry / RingGeometry for zone overlays). */
@@ -126,17 +131,17 @@
       return Math.max(fitH, fitW, 4);
     }
 
-    /** Center + manifest half-extent; footprint only refines XY center and floor Z. */
+    /** Map-base centre + top Z from `open_field_floor` when present; half-extent always from manifest (`groundHalf` query). */
     function mapBaseFrame(manager) {
       const half = MAP_GROUND_HALF_EXTENT_M;
       let cx = 0;
       let cy = 0;
       let cz = 0;
-      const footprint = manager ? resolveBaseFootprintAABB(manager) : null;
-      if (footprint?.valid) {
-        cx = (footprint.min.x + footprint.max.x) * 0.5;
-        cy = (footprint.min.y + footprint.max.y) * 0.5;
-        cz = footprint.max.z;
+      const floorFootprint = manager ? resolveOpenFieldFloorFootprint(manager) : null;
+      if (floorFootprint?.valid) {
+        cx = (floorFootprint.min.x + floorFootprint.max.x) * 0.5;
+        cy = (floorFootprint.min.y + floorFootprint.max.y) * 0.5;
+        cz = floorFootprint.max.z;
       }
       return { cx, cy, cz, half };
     }
@@ -147,14 +152,11 @@
       camera.updateProjectionMatrix();
     }
 
-    function clampOrbitDistanceM(distanceM) {
-      return Math.min(
-        MAP_ORBIT_ZOOM_OUT_MAX_M,
-        Math.max(MAP_ORBIT_ZOOM_IN_MAX_M, distanceM)
-      );
+    function clampOrbitFitDistanceM(distanceM) {
+      return Math.min(MAP_ORBIT_ZOOM_OUT_MAX_M, Math.max(4, distanceM));
     }
 
-    /** Interactive orbit zoom limits (fixed metres); presets use map half-extent separately. */
+    /** Interactive orbit limits (`minDistance` = closest the camera may orbit to the target). */
     function applyOrbitPolicyInteractive(controls) {
       controls.enabled = true;
       controls.enableRotate = true;
@@ -163,7 +165,7 @@
       controls.screenSpacePanning = false;
       controls.minPolarAngle = MAP_ORBIT_POLAR_MIN;
       controls.maxPolarAngle = MAP_ORBIT_POLAR_MAX;
-      controls.minDistance = MAP_ORBIT_ZOOM_IN_MAX_M;
+      controls.minDistance = MAP_ORBIT_MIN_DISTANCE_M;
       controls.maxDistance = MAP_ORBIT_ZOOM_OUT_MAX_M;
     }
 
@@ -182,11 +184,11 @@
       let fitDistanceM = perp;
       controls.target.set(cx, cy, cz);
       if (preset === 'birdseye') {
-        fitDistanceM = clampOrbitDistanceM(perp);
+        fitDistanceM = clampOrbitFitDistanceM(perp);
         camera.position.set(cx, cy, cz + fitDistanceM);
         camera.up.set(0, 1, 0);
       } else {
-        const slantRange = clampOrbitDistanceM(perp / Math.max(MAP_OBLIQUE_UZ, 0.2));
+        const slantRange = clampOrbitFitDistanceM(perp / Math.max(MAP_OBLIQUE_UZ, 0.2));
         fitDistanceM = slantRange;
         const u = MAP_OBLIQUE_DIRECTION;
         camera.position.set(cx + u.x * slantRange, cy + u.y * slantRange, cz + u.z * slantRange);
@@ -283,6 +285,21 @@
       const dx = Math.max(box.max.x - box.min.x, 0);
       const dy = Math.max(box.max.y - box.min.y, 0);
       return dx * dy;
+    }
+
+    /** `open_field_floor` model only — avoids treating a stale oversized mesh as the map bounds. */
+    function resolveOpenFieldFloorFootprint(manager) {
+      const models = typeof manager.getModels === 'function' ? manager.getModels() : [];
+      for (const modelMeta of models) {
+        const name = modelMeta.name || '';
+        if (name !== 'open_field_floor') continue;
+        const object3d = resolveSceneObjectForModel(manager, modelMeta);
+        if (!object3d) continue;
+        const box = emptyAABB();
+        unionAABBFromObject(object3d, box);
+        if (box.valid) return box;
+      }
+      return null;
     }
 
     /** Prefer named floor/ground models; otherwise the largest XY footprint in the scene. */
@@ -497,18 +514,8 @@
         };
       }
 
-      /** Map-base-square XY bounds from the scene floor model, or a centred manifest fallback. */
-      function resolveMapBaseSquareBounds(manager, fallbackHalfM) {
-        const footprint = manager ? resolveBaseFootprintAABB(manager) : null;
-        if (footprint?.valid) {
-          return {
-            valid: true,
-            minX: footprint.min.x,
-            maxX: footprint.max.x,
-            minY: footprint.min.y,
-            maxY: footprint.max.y,
-          };
-        }
+      /** Map-base-square XY bounds from manifest half-extent (`groundHalf` / Swift `floorSize` preset). */
+      function resolveMapBaseSquareBounds(_manager, fallbackHalfM) {
         const half = Number.isFinite(fallbackHalfM) && fallbackHalfM > 0
           ? fallbackHalfM
           : MAP_GROUND_HALF_EXTENT_M;
@@ -840,6 +847,12 @@
           if (node === skip || node.parent === skip) return;
           if (node.name === 'guardian_zone_overlay') return;
           if (node.name === 'grid') return;
+          let ancestor = node;
+          while (ancestor) {
+            const name = ancestor.name || '';
+            if (name === 'guardian_zone_overlay' || name.startsWith('guardian_zone_')) return;
+            ancestor = ancestor.parent;
+          }
           if (node.isMesh) out.push(node);
         });
       }
@@ -914,10 +927,9 @@
         group.name = `guardian_zone_${kind}`;
         group.renderOrder = OVERLAY_RENDER_ORDER;
 
-        const surface = sampleTerrain(scene2, record.centerXM, record.centerYM);
-        const planeZ = surface.z;
-        record.centerZM = planeZ - SURFACE_LIFT_M;
-        editorState.zones[kind] = record;
+        // Radius/shape rebuilds must not resample terrain — that ray can hit this zone's
+        // own overlay (or a sibling zone) and ratchet centerZM upward.
+        const planeZ = Number(record.centerZM) + SURFACE_LIFT_M;
 
         const cx = record.centerXM;
         const cy = record.centerYM;

@@ -33,6 +33,8 @@ final class WorldBuilderController: ObservableObject {
     private var draftWorldSourceURL: URL?
     /// Isolates unsaved draft `world.sdf` / `manifest.json` from bundled or saved user packages.
     private var builderDraftSessionID = UUID()
+    /// Manifest `floorSize` label last loaded into the live Gazebo sim (e.g. `micro`).
+    private var loadedGazeboFloorSizeLabel: String?
 
     /// When true, World Builder may add or edit objects in the 3D scene (build mode only).
     var canEditScene: Bool {
@@ -70,11 +72,28 @@ final class WorldBuilderController: ObservableObject {
         selectedPackageID != nil
     }
 
+    private var activeFloorSize: TrainingEnvironmentFloorSize {
+        let floorRaw = selectedPackage?.manifest.floorSize ?? draftManifest?.floorSize
+        return TrainingEnvironmentFloorSize.resolved(from: floorRaw)
+    }
+
     /// Half side length (m) of the open world's square floor for gzweb birdseye framing.
     var activeFloorHalfExtentM: Double {
-        let floorRaw = selectedPackage?.manifest.floorSize ?? draftManifest?.floorSize
-        let floor = TrainingEnvironmentFloorSize.resolved(from: floorRaw)
-        return floor.floorSideM / 2
+        activeFloorSize.floorSideM / 2
+    }
+
+    /// Closest orbit zoom (m) for the embedded gzweb viewport on this world's floor size.
+    var activeOrbitMinDistanceM: Double {
+        activeFloorSize.orbitMinDistanceM
+    }
+
+    /// Foot height limits (m) relative to map-base top (z = 0) for the obstacle toolbar.
+    var obstacleFootZLimitsM: (min: Double, max: Double) {
+        let scene = TrainingEnvironmentSceneType.resolved(from: draftManifest?.sceneType)
+        return WorldBuilderObstacleManifestSupport.footZLimitsM(
+            sceneType: scene,
+            floorSideM: activeFloorSize.floorSideM
+        )
     }
 
     var canEditManifestInDrawer: Bool {
@@ -464,7 +483,11 @@ final class WorldBuilderController: ObservableObject {
                     sceneType: scene
                 )
             } else {
-                WorldBuilderObstacleManifestSupport.clampFootZM(&clamped[index])
+                WorldBuilderObstacleManifestSupport.clampFootZM(
+                    &clamped[index],
+                    sceneType: scene,
+                    floorSideM: floorHalfM * 2
+                )
             }
         }
         clamped = Array(clamped.prefix(TrainingEnvironmentObstacleRecord.maxCount))
@@ -568,6 +591,7 @@ final class WorldBuilderController: ObservableObject {
         WorldBuilderObstacleManifestSupport.normalizeDimensions(&record)
         let floor = WorldBuilderZoneFloorRect.centeredSquare(halfExtentM: activeFloorHalfExtentM)
         guard WorldBuilderObstacleBoundsCheck.fitsOnFloor(record, floor: floor) else {
+            toastCenter?.show("Model does not fit on the map.", style: .warning)
             return
         }
         manifest.obstacles.append(record)
@@ -929,9 +953,13 @@ final class WorldBuilderController: ObservableObject {
 
     /// Clears the open world and stops all preview/build Gazebo sessions (sub-bar close control).
     func closeCurrentWorld() {
+        Task { await closeCurrentWorldAsync() }
+    }
+
+    private func closeCurrentWorldAsync() async {
         resetObstacleEditorState(closePanel: true)
         flushPendingWorldBuilderPersistence()
-        stopAllBuilderGazeboSessions()
+        await stopAllBuilderGazeboSessions()
         clearLiveObstacleRegistry()
         selectedPackageID = nil
         isEditingNewDraft = false
@@ -955,20 +983,25 @@ final class WorldBuilderController: ObservableObject {
     }
 
     func selectPackage(id: String) {
+        Task { await selectPackageAndPrepareViewport(id: id) }
+    }
+
+    private func selectPackageAndPrepareViewport(id: String) async {
         flushPendingWorldBuilderPersistence()
-        stopGazeboSession()
+        await stopGazeboSession()
+        loadedGazeboFloorSizeLabel = nil
         resetObstacleEditorState(closePanel: true)
         reloadCatalogue()
         selectedPackageID = id
         isEditingNewDraft = false
         sessionMode = .idle
         loadDraftFromSelection()
-        Task { await syncEmbeddedViewport() }
+        await syncEmbeddedViewport()
     }
 
     /// Prepares an unsaved world for the New drawer only — does not open Gazebo or the main viewport.
     func prepareNewDraftInDrawer() {
-        stopGazeboSession()
+        Task { await stopGazeboSession() }
         resetObstacleEditorState(closePanel: true)
         resetBuilderDraftSession()
         isEditingNewDraft = true
@@ -981,7 +1014,11 @@ final class WorldBuilderController: ObservableObject {
 
     func duplicateSelectedAsNewDraft() {
         guard let pkg = selectedPackage else { return }
-        stopGazeboSession()
+        Task { await duplicateSelectedAsNewDraftAsync(pkg: pkg) }
+    }
+
+    private func duplicateSelectedAsNewDraftAsync(pkg: TrainingEnvironmentPackage) async {
+        await stopGazeboSession()
         resetObstacleEditorState(closePanel: true)
         resetBuilderDraftSession()
         isEditingNewDraft = true
@@ -1021,14 +1058,15 @@ final class WorldBuilderController: ObservableObject {
     }
 
     func leavePanel() {
-        stopAllBuilderGazeboSessions()
+        Task { await stopAllBuilderGazeboSessions() }
     }
 
-    /// Stops every World Builder preview/build sim (not Training `.run` sessions).
-    func stopAllBuilderGazeboSessions() {
+    /// Stops every embedded Gazebo sim used by World Builder and waits for Harmonic processes to exit.
+    func stopAllBuilderGazeboSessions() async {
         flushPendingWorldBuilderPersistence()
-        gazebo?.stopAllPreviewAndBuildWorlds()
+        await gazebo?.stopAllEmbeddedViewportWorldsCompletely()
         activeGazeboWorldID = nil
+        loadedGazeboFloorSizeLabel = nil
         clearLiveObstacleRegistry()
         obstacleViewportPushTask?.cancel()
         obstacleManifestPersistTask?.cancel()
@@ -1036,8 +1074,8 @@ final class WorldBuilderController: ObservableObject {
         sessionMode = .idle
     }
 
-    func stopGazeboSession() {
-        stopAllBuilderGazeboSessions()
+    func stopGazeboSession() async {
+        await stopAllBuilderGazeboSessions()
     }
 
     /// Preview mode — same Gazebo session as build; UI/scene-edit gate only.
@@ -1123,7 +1161,7 @@ final class WorldBuilderController: ObservableObject {
         }
     }
 
-    /// One headless sim per open world; preview/build toggles do not respawn.
+    /// One headless sim per open world; preview/build toggles do not respawn unless the floor footprint changed.
     private func ensureBuilderGazeboRunning() async {
         if let inFlight = ensureBuilderGazeboInFlight {
             await inFlight.value
@@ -1131,8 +1169,10 @@ final class WorldBuilderController: ObservableObject {
         }
         let task = Task { @MainActor in
             defer { ensureBuilderGazeboInFlight = nil }
-            if let id = resolveActiveBuilderWorldID() {
-                activeGazeboWorldID = id
+            if builderEmbeddedSessionMatchesOpenWorld() {
+                if let id = resolveActiveBuilderWorldID() {
+                    activeGazeboWorldID = id
+                }
                 await syncBuilderLiveObstacleRegistryIfNeeded()
                 return
             }
@@ -1142,6 +1182,29 @@ final class WorldBuilderController: ObservableObject {
         await task.value
     }
 
+    /// Manifest floor size changed — drop the live sim so the next preview reloads `world.sdf`.
+    func floorSizeDidChange() {
+        loadedGazeboFloorSizeLabel = nil
+        if activeGazeboWorldID != nil {
+            Task { await stopGazeboSession() }
+        }
+    }
+
+    private func builderEmbeddedSessionMatchesOpenWorld() -> Bool {
+        guard let gazebo, let id = resolveActiveBuilderWorldID() else { return false }
+        guard gazebo.isEmbeddedViewportLive(worldID: id) || gazebo.isWorldAlive(id: id) else { return false }
+        guard let worldURL = draftWorldSourceURL ?? selectedPackage?.worldFileURL() else { return false }
+        guard let row = gazebo.worlds.first(where: { $0.id == id }) else { return false }
+        let expectedLabel = draftManifest?.floorSize.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !expectedLabel.isEmpty, loadedGazeboFloorSizeLabel == expectedLabel else { return false }
+        return GazeboService.canReuseEmbeddedWorld(
+            existing: row,
+            worldPath: worldURL.path,
+            environmentID: isEditingNewDraft ? nil : selectedPackageID,
+            floorSizeLabel: expectedLabel
+        )
+    }
+
     private func startGazebo() async {
         lastError = nil
         guard draftWorldSourceURL != nil || selectedPackage?.worldFileURL() != nil else {
@@ -1149,6 +1212,9 @@ final class WorldBuilderController: ObservableObject {
             return
         }
         guard let gazebo else { return }
+        if resolveActiveBuilderWorldID() != nil {
+            await stopGazeboSession()
+        }
         do {
             try persistBuilderSessionWorldSDFSync()
         } catch {
@@ -1163,12 +1229,15 @@ final class WorldBuilderController: ObservableObject {
         let id = await gazebo.spawnWorld(
             purpose: .preview,
             worldURL: worldURL,
-            environmentID: envID
+            environmentID: envID,
+            floorSizeLabel: draftManifest?.floorSize
         )
         activeGazeboWorldID = id
         if id != nil {
+            loadedGazeboFloorSizeLabel = draftManifest?.floorSize
             await syncManifestObstaclesToLiveSimIfNeeded()
         } else {
+            loadedGazeboFloorSizeLabel = nil
             clearLiveObstacleRegistry()
             lastError = gazebo.lastError
             statusText = lastError ?? "Gazebo did not start."

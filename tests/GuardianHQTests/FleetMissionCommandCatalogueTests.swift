@@ -1,6 +1,6 @@
 import Mavsdk
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Registration + translation coverage for the MAVSDK `Mission` plugin command family
 /// (`command.fleet.vehicle.do.mission.*`, `get.mission.*`, `cancel.mission.*`).

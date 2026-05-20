@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class TrainingLabSquadCallsignTests: XCTestCase {
     func test_primary_labels_follow_nato_alphabet() {

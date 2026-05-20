@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// ``resolvedFleetStreamVehicleID`` — live vs SITL disambiguation without requiring ``SitlService`` for live-only runs.
 @MainActor

@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 /// Stage C coverage for the errors subsystem registration entry point. First
 /// authored recipe is `recipe.fleet.errors.fix.calibrationrequired` — the first

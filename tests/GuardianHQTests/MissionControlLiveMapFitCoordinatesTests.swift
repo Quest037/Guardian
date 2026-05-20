@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class MissionControlLiveMapFitCoordinatesTests: XCTestCase {
     func test_isUsableWgs84ForMapFit_rejectsOriginAndNonFinite() {

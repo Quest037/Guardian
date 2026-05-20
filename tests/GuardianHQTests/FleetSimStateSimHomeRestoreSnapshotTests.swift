@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class FleetSimStateSimHomeRestoreSnapshotTests: XCTestCase {
     func test_simHomeRestoreSnapshotFromHub_nilWithoutLatLon() {

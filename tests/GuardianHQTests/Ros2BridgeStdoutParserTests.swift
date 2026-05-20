@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class Ros2BridgeStdoutParserTests: XCTestCase {
     func test_parse_connection_state() {

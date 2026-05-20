@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class GuardianGazeboOrphanBlitzTests: XCTestCase {
     func test_pgrepPatterns_includeGzLauncherAndRubySubcommands() {

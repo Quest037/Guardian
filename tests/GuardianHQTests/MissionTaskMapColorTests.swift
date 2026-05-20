@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class MissionTaskMapColorTests: XCTestCase {
     func test_hslCssToSRGBUnit_hueZero_matchesCssHsl08862() {

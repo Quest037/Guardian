@@ -1,5 +1,5 @@
 import XCTest
-@testable import GuardianHQ
+@testable import GuardianCore
 
 final class TrainingEnvironmentAuthoringTests: XCTestCase {
     func test_newDraftID_slugifiesDisplayName() {
@@ -44,9 +44,32 @@ final class TrainingEnvironmentAuthoringTests: XCTestCase {
 
     func test_floorSize_sideLengths() {
         XCTAssertEqual(TrainingEnvironmentFloorSize.micro.floorSideM, 100, accuracy: 0.001)
+        XCTAssertEqual(TrainingEnvironmentFloorSize.mini.floorSideM, 500, accuracy: 0.001)
         XCTAssertEqual(TrainingEnvironmentFloorSize.small.floorSideM, 1000, accuracy: 0.001)
         XCTAssertEqual(TrainingEnvironmentFloorSize.medium.floorSideM, 1000 * sqrt(2), accuracy: 0.001)
         XCTAssertEqual(TrainingEnvironmentFloorSize.large.floorSideM, 2000, accuracy: 0.001)
+    }
+
+    func test_floorSize_orbitMinDistance() {
+        XCTAssertEqual(TrainingEnvironmentFloorSize.micro.orbitMinDistanceM, 1, accuracy: 0.001)
+        XCTAssertEqual(TrainingEnvironmentFloorSize.mini.orbitMinDistanceM, 50, accuracy: 0.001)
+        XCTAssertEqual(TrainingEnvironmentFloorSize.small.orbitMinDistanceM, 50, accuracy: 0.001)
+    }
+
+    func test_parseOpenFieldFloorSideM_fromMicroWorld() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("guardian-micro-floor-\(UUID().uuidString).sdf")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try TrainingEnvironmentWorldSDF.writeOpenFieldWorld(to: url, floorSideM: 100)
+        XCTAssertEqual(TrainingEnvironmentWorldSDF.parseOpenFieldFloorSideM(from: url), 100, accuracy: 0.001)
+    }
+
+    func test_floorSizeLabel_resolvesMicroSideLength() {
+        XCTAssertEqual(
+            TrainingEnvironmentFloorSize.resolved(from: "micro").floorSideM,
+            100,
+            accuracy: 0.001
+        )
     }
 
     func test_writeOpenFieldWorld_embedsFloorSize() throws {
@@ -56,7 +79,7 @@ final class TrainingEnvironmentAuthoringTests: XCTestCase {
         try TrainingEnvironmentWorldSDF.writeOpenFieldWorld(to: url, floorSideM: 2000)
         let xml = try String(contentsOf: url, encoding: .utf8)
         XCTAssertTrue(xml.contains("<size>2000 2000 4</size>"))
-        XCTAssertEqual(TrainingEnvironmentWorldSDF.openFieldFloorDepthM, 4, accuracy: 0.001)
+        XCTAssertEqual(TrainingEnvironmentWorldSDF.openFieldFloorDepthM, 10, accuracy: 0.001)
         XCTAssertTrue(xml.contains("visual_top"))
         XCTAssertTrue(xml.contains("visual_bottom"))
         XCTAssertTrue(xml.contains(TrainingEnvironmentWorldSDF.OpenFieldFloorColors.topDiffuse))
